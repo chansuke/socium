@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::env;
+use std::io::{Error, ErrorKind};
+use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AgentMessageRequest {
@@ -55,6 +58,7 @@ impl Message {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
     Assistant,
@@ -63,20 +67,53 @@ pub enum Role {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model = "".to_string();
-    let max_tokens = 1000;
-    let message = Message::new(Role::User, "".to_string());
+    let api_key = env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| Error::new(ErrorKind::NotFound, "ANTHROPIC_API_KEY is not set"))?;
+    let anthropic_version =
+        env::var("ANTHROPIC_VERSION").unwrap_or_else(|_| "2023-06-01".to_string());
+    let model = env::var("MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
+    let max_tokens = env::var("MAX_TOKENS")
+        .unwrap_or_else(|_| "1000".to_string())
+        .parse::<u32>()
+        .map_err(|e| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("MAX_TOKENS must be an unsigned integer: {e}"),
+            )
+        })?;
+    let message = Message::new(Role::User, "Hello, World".to_string());
     let messages = vec![message];
     let message_request = AgentMessageRequest::new(model, max_tokens, messages);
-    let new_response: AgentMessageResponse = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let response = client
         .post("https://api.anthropic.com/v1/messages")
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", anthropic_version)
         .json(&message_request)
         .send()
-        .await?
-        .json()
         .await?;
-
-    println!("{new_response:#?}");
+    let status = response.status();
+    if !status.is_success() {
+        let error_body = response.text().await?;
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!("Anthropic API error {status}: {error_body}"),
+        )
+        .into());
+    }
+    let new_response: AgentMessageResponse = response.json().await?;
+    let message_text = new_response
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            Content::Text { text } => Some(text.as_str()),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    println!("\n{}", message_text);
 
     Ok(())
 }
