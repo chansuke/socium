@@ -1,0 +1,4 @@
+export ANTHROAPI_KEYAPI_KEY='your-api-key-here'
+export VERSION=''
+export MODEL=''
+export MAX_TOKENS=''
