@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::io::{Error, ErrorKind};
+use std::io::{self, BufRead, Error, ErrorKind, Write};
 use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,7 +81,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!("MAX_TOKENS must be an unsigned integer: {e}"),
             )
         })?;
-    let message = Message::new(Role::User, "Hello, World".to_string());
+
+    let Some(user_input) = parse_input(">> ")? else {
+        return Ok(());
+    };
+    let message = Message::new(Role::User, user_input);
     let messages = vec![message];
     let message_request = AgentMessageRequest::new(model, max_tokens, messages);
     let client = reqwest::Client::builder()
@@ -116,4 +120,99 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n{}", message_text);
 
     Ok(())
+}
+
+/// Prompts once-per-line until a non-empty input is entered.
+/// Returns `Ok(None)` on EOF (e.g. Ctrl-D), so callers can exit gracefully.
+pub fn parse_input(prompt: &str) -> io::Result<Option<String>> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let stderr = io::stderr();
+
+    let mut reader = stdin.lock();
+    let mut writer = stdout.lock();
+    let mut err_writer = stderr.lock();
+
+    parse_input_from(prompt, &mut reader, &mut writer, &mut err_writer)
+}
+
+fn parse_input_from<R, W, E>(
+    prompt: &str,
+    reader: &mut R,
+    writer: &mut W,
+    err_writer: &mut E,
+) -> io::Result<Option<String>>
+where
+    R: BufRead,
+    W: Write,
+    E: Write,
+{
+    let mut input = String::new();
+
+    loop {
+        write!(writer, "{prompt}")?;
+        writer.flush()?;
+
+        input.clear();
+        let bytes_read = reader.read_line(&mut input)?;
+        if bytes_read == 0 {
+            writeln!(writer)?;
+            return Ok(None);
+        }
+
+        if input.trim().is_empty() {
+            writeln!(err_writer, "Input cannot be empty. Please try again.")?;
+            continue;
+        }
+
+        return Ok(Some(input.trim_end().to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_input_from;
+    use std::io::Cursor;
+
+    #[test]
+    fn returns_trimmed_input() {
+        let mut reader = Cursor::new(b"hello\n");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let input = parse_input_from(">> ", &mut reader, &mut out, &mut err).unwrap();
+
+        assert_eq!(input, Some("hello".to_string()));
+        assert_eq!(String::from_utf8(out).unwrap(), ">> ");
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn prompts_again_on_empty_input() {
+        let mut reader = Cursor::new(b"\n  \nfinal input\n");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let input = parse_input_from(">> ", &mut reader, &mut out, &mut err).unwrap();
+
+        assert_eq!(input, Some("final input".to_string()));
+        assert_eq!(String::from_utf8(out).unwrap(), ">> >> >> ");
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "Input cannot be empty. Please try again.\nInput cannot be empty. Please try again.\n"
+        );
+    }
+
+    #[test]
+    fn returns_none_on_eof() {
+        let mut reader = Cursor::new(Vec::<u8>::new());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let input = parse_input_from(">> ", &mut reader, &mut out, &mut err).unwrap();
+
+        assert_eq!(input, None);
+        assert_eq!(String::from_utf8(out).unwrap(), ">> \n");
+        assert!(err.is_empty());
+    }
 }
