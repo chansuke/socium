@@ -1,13 +1,21 @@
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::env;
+use std::fs;
 use std::io::{self, BufRead, Error, ErrorKind, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-#[derive(Debug, Serialize, Deserialize)]
+const ANTHROPIC_MESSAGES_API: &str = "https://api.anthropic.com/v1/messages";
+const MAX_READ_FILE_BYTES: usize = 200 * 1024;
+
+#[derive(Debug, Serialize)]
 struct AgentMessageRequest {
     pub model: String,
     pub max_tokens: u32,
     pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDefinition>,
 }
 
 impl AgentMessageRequest {
@@ -16,53 +24,111 @@ impl AgentMessageRequest {
             model,
             max_tokens,
             messages,
+            tools: vec![read_file_tool()],
         }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct AgentMessageResponse {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub message_type: String,
-    pub role: Role,
-    pub content: Vec<Content>,
-    pub model: String,
-    pub stop_reason: String,
-    pub usage: Usage,
+    pub content: Vec<ContentBlock>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum Content {
-    #[serde(rename = "text")]
-    Text { text: String },
+#[derive(Debug, Serialize, Clone)]
+struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Usage {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Message {
-    pub role: Role,
-    pub content: String,
-}
-
-impl Message {
-    pub fn new(role: Role, content: String) -> Self {
-        Self { role, content }
+fn read_file_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "read_file".to_string(),
+        description: "Read a UTF-8 text file from the current workspace by relative path."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative path to a file in the workspace."
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+enum ContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+    },
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct Message {
+    pub role: Role,
+    pub content: MessageContent,
+}
+
+impl Message {
+    pub fn user_text(content: String) -> Self {
+        Self {
+            role: Role::User,
+            content: MessageContent::Text(content),
+        }
+    }
+
+    pub fn assistant_blocks(content: Vec<ContentBlock>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(content),
+        }
+    }
+
+    pub fn user_blocks(content: Vec<ContentBlock>) -> Self {
+        Self {
+            role: Role::User,
+            content: MessageContent::Blocks(content),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(untagged)]
+enum MessageContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
     Assistant,
     System,
+}
+
+#[derive(Debug, Clone)]
+struct ToolUseCall {
+    id: String,
+    name: String,
+    input: Value,
 }
 
 #[tokio::main]
@@ -85,41 +151,149 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(user_input) = parse_input(">> ")? else {
         return Ok(());
     };
-    let message = Message::new(Role::User, user_input);
-    let messages = vec![message];
-    let message_request = AgentMessageRequest::new(model, max_tokens, messages);
+
+    let mut messages = vec![Message::user_text(user_input)];
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
+
+    loop {
+        let message_request = AgentMessageRequest::new(model.clone(), max_tokens, messages.clone());
+        let response =
+            send_message(&client, &api_key, &anthropic_version, &message_request).await?;
+        let assistant_blocks = response.content;
+
+        let message_text = extract_text(&assistant_blocks);
+        if !message_text.is_empty() {
+            println!("{message_text}");
+        }
+
+        let tool_uses = extract_tool_uses(&assistant_blocks);
+        messages.push(Message::assistant_blocks(assistant_blocks));
+        if tool_uses.is_empty() {
+            break;
+        }
+
+        let workspace_root = env::current_dir()?;
+        let tool_results = tool_uses
+            .into_iter()
+            .map(|tool_use| run_tool_call(&workspace_root, tool_use))
+            .collect::<Vec<_>>();
+        messages.push(Message::user_blocks(tool_results));
+    }
+
+    Ok(())
+}
+
+async fn send_message(
+    client: &reqwest::Client,
+    api_key: &str,
+    anthropic_version: &str,
+    message_request: &AgentMessageRequest,
+) -> Result<AgentMessageResponse, Box<dyn std::error::Error>> {
     let response = client
-        .post("https://api.anthropic.com/v1/messages")
+        .post(ANTHROPIC_MESSAGES_API)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header("x-api-key", api_key)
         .header("anthropic-version", anthropic_version)
-        .json(&message_request)
+        .json(message_request)
         .send()
         .await?;
     let status = response.status();
     if !status.is_success() {
         let error_body = response.text().await?;
-        return Err(Error::new(
-            ErrorKind::Other,
-            format!("Anthropic API error {status}: {error_body}"),
-        )
-        .into());
+        return Err(Error::other(format!("Anthropic API error {status}: {error_body}")).into());
     }
-    let new_response: AgentMessageResponse = response.json().await?;
-    let message_text = new_response
-        .content
+    Ok(response.json().await?)
+}
+
+fn extract_text(blocks: &[ContentBlock]) -> String {
+    blocks
         .iter()
         .filter_map(|block| match block {
-            Content::Text { text } => Some(text.as_str()),
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    println!("\n{}", message_text);
+        .join("\n")
+}
 
-    Ok(())
+fn extract_tool_uses(blocks: &[ContentBlock]) -> Vec<ToolUseCall> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, input } => Some(ToolUseCall {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn run_tool_call(workspace_root: &Path, tool_use: ToolUseCall) -> ContentBlock {
+    let result = match tool_use.name.as_str() {
+        "read_file" => read_file_from_workspace(workspace_root, &tool_use.input),
+        other => Err(format!("Unsupported tool: {other}")),
+    };
+
+    match result {
+        Ok(content) => ContentBlock::ToolResult {
+            tool_use_id: tool_use.id,
+            content,
+            is_error: None,
+        },
+        Err(message) => ContentBlock::ToolResult {
+            tool_use_id: tool_use.id,
+            content: message,
+            is_error: Some(true),
+        },
+    }
+}
+
+fn read_file_from_workspace(workspace_root: &Path, input: &Value) -> Result<String, String> {
+    let path = input
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("read_file requires a string field: path")?;
+    let resolved_path = resolve_workspace_path(workspace_root, path)?;
+    let metadata = fs::metadata(&resolved_path)
+        .map_err(|e| format!("Failed to inspect file '{}': {e}", resolved_path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("Path is not a file: '{}'", resolved_path.display()));
+    }
+    if metadata.len() as usize > MAX_READ_FILE_BYTES {
+        return Err(format!(
+            "File too large: '{}' exceeds {} bytes",
+            resolved_path.display(),
+            MAX_READ_FILE_BYTES
+        ));
+    }
+    let bytes = fs::read(&resolved_path)
+        .map_err(|e| format!("Failed to read file '{}': {e}", resolved_path.display()))?;
+    let content = String::from_utf8_lossy(&bytes).to_string();
+    Ok(format!("Path: {}\n{}", resolved_path.display(), content))
+}
+
+fn resolve_workspace_path(workspace_root: &Path, requested_path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(requested_path);
+    let joined = if path.is_absolute() {
+        path
+    } else {
+        workspace_root.join(path)
+    };
+    let canonical = joined
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve path '{}': {e}", joined.display()))?;
+    if !canonical.starts_with(workspace_root) {
+        return Err(format!(
+            "Path '{}' is outside the workspace '{}'",
+            canonical.display(),
+            workspace_root.display()
+        ));
+    }
+    Ok(canonical)
 }
 
 /// Prompts once-per-line until a non-empty input is entered.
@@ -171,8 +345,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::parse_input_from;
+    use super::{MAX_READ_FILE_BYTES, parse_input_from, read_file_from_workspace};
+    use serde_json::json;
+    use std::fs;
     use std::io::Cursor;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn returns_trimmed_input() {
@@ -214,5 +392,61 @@ mod tests {
         assert_eq!(input, None);
         assert_eq!(String::from_utf8(out).unwrap(), ">> \n");
         assert!(err.is_empty());
+    }
+
+    #[test]
+    fn reads_file_from_workspace() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.join("note.txt");
+        fs::write(&file_path, "hello").unwrap();
+
+        let output = read_file_from_workspace(&workspace, &json!({"path": "note.txt"})).unwrap();
+
+        assert!(output.contains("Path:"));
+        assert!(output.contains("hello"));
+
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn rejects_path_outside_workspace() {
+        let workspace = make_temp_dir("workspace");
+        let outside = make_temp_dir("outside");
+        let file_path = outside.join("secret.txt");
+        fs::write(&file_path, "secret").unwrap();
+
+        let output = read_file_from_workspace(
+            &workspace,
+            &json!({"path": file_path.to_string_lossy().to_string()}),
+        );
+
+        assert!(output.is_err());
+
+        fs::remove_dir_all(workspace).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn rejects_too_large_file() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.join("large.txt");
+        let large = vec![b'a'; MAX_READ_FILE_BYTES + 1];
+        fs::write(&file_path, large).unwrap();
+
+        let output = read_file_from_workspace(&workspace, &json!({"path": "large.txt"}));
+
+        assert!(output.is_err());
+
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("socium_{prefix}_{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 }
