@@ -10,21 +10,25 @@ const ANTHROPIC_MESSAGES_API: &str = "https://api.anthropic.com/v1/messages";
 const MAX_READ_FILE_BYTES: usize = 200 * 1024;
 
 #[derive(Debug, Serialize)]
-struct AgentMessageRequest {
-    pub model: String,
+struct AgentMessageRequest<'a> {
+    pub model: &'a str,
     pub max_tokens: u32,
-    pub messages: Vec<Message>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<ToolDefinition>,
+    pub messages: &'a [Message],
+    pub tools: &'a [ToolDefinition],
 }
 
-impl AgentMessageRequest {
-    pub fn new(model: String, max_tokens: u32, messages: Vec<Message>) -> Self {
+impl<'a> AgentMessageRequest<'a> {
+    pub fn new(
+        model: &'a str,
+        max_tokens: u32,
+        messages: &'a [Message],
+        tools: &'a [ToolDefinition],
+    ) -> Self {
         Self {
             model,
             max_tokens,
             messages,
-            tools: vec![read_file_tool()],
+            tools,
         }
     }
 }
@@ -80,7 +84,7 @@ enum ContentBlock {
     },
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize)]
 struct Message {
     pub role: Role,
     pub content: MessageContent,
@@ -109,7 +113,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum MessageContent {
     Text(String),
@@ -122,13 +126,6 @@ pub enum Role {
     User,
     Assistant,
     System,
-}
-
-#[derive(Debug, Clone)]
-struct ToolUseCall {
-    id: String,
-    name: String,
-    input: Value,
 }
 
 #[tokio::main]
@@ -153,12 +150,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut messages = vec![Message::user_text(user_input)];
+    let tools = vec![read_file_tool()];
+    let workspace_root = env::current_dir()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
 
     loop {
-        let message_request = AgentMessageRequest::new(model.clone(), max_tokens, messages.clone());
+        let message_request = AgentMessageRequest::new(&model, max_tokens, &messages, &tools);
         let response =
             send_message(&client, &api_key, &anthropic_version, &message_request).await?;
         let assistant_blocks = response.content;
@@ -168,17 +167,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{message_text}");
         }
 
-        let tool_uses = extract_tool_uses(&assistant_blocks);
+        let tool_results = run_tool_calls(&workspace_root, &assistant_blocks);
         messages.push(Message::assistant_blocks(assistant_blocks));
-        if tool_uses.is_empty() {
+        if tool_results.is_empty() {
             break;
         }
-
-        let workspace_root = env::current_dir()?;
-        let tool_results = tool_uses
-            .into_iter()
-            .map(|tool_use| run_tool_call(&workspace_root, tool_use))
-            .collect::<Vec<_>>();
         messages.push(Message::user_blocks(tool_results));
     }
 
@@ -189,7 +182,7 @@ async fn send_message(
     client: &reqwest::Client,
     api_key: &str,
     anthropic_version: &str,
-    message_request: &AgentMessageRequest,
+    message_request: &AgentMessageRequest<'_>,
 ) -> Result<AgentMessageResponse, Box<dyn std::error::Error>> {
     let response = client
         .post(ANTHROPIC_MESSAGES_API)
@@ -218,34 +211,35 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-fn extract_tool_uses(blocks: &[ContentBlock]) -> Vec<ToolUseCall> {
+fn run_tool_calls(workspace_root: &Path, blocks: &[ContentBlock]) -> Vec<ContentBlock> {
     blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, name, input } => Some(ToolUseCall {
-                id: id.clone(),
-                name: name.clone(),
-                input: input.clone(),
-            }),
+            ContentBlock::ToolUse { id, name, input } => Some(run_tool_call(
+                workspace_root,
+                id,
+                name,
+                input,
+            )),
             _ => None,
         })
         .collect()
 }
 
-fn run_tool_call(workspace_root: &Path, tool_use: ToolUseCall) -> ContentBlock {
-    let result = match tool_use.name.as_str() {
-        "read_file" => read_file_from_workspace(workspace_root, &tool_use.input),
+fn run_tool_call(workspace_root: &Path, tool_use_id: &str, name: &str, input: &Value) -> ContentBlock {
+    let result = match name {
+        "read_file" => read_file_from_workspace(workspace_root, input),
         other => Err(format!("Unsupported tool: {other}")),
     };
 
     match result {
         Ok(content) => ContentBlock::ToolResult {
-            tool_use_id: tool_use.id,
+            tool_use_id: tool_use_id.to_string(),
             content,
             is_error: None,
         },
         Err(message) => ContentBlock::ToolResult {
-            tool_use_id: tool_use.id,
+            tool_use_id: tool_use_id.to_string(),
             content: message,
             is_error: Some(true),
         },
