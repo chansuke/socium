@@ -8,6 +8,7 @@ use std::time::Duration;
 
 const ANTHROPIC_MESSAGES_API: &str = "https://api.anthropic.com/v1/messages";
 const MAX_READ_FILE_BYTES: usize = 200 * 1024;
+const MAX_TOOL_ROUNDS: usize = 20;
 
 #[derive(Debug, Serialize)]
 struct AgentMessageRequest<'a> {
@@ -156,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    loop {
+    for _ in 0..MAX_TOOL_ROUNDS {
         let message_request = AgentMessageRequest::new(&model, max_tokens, &messages, &tools);
         let response =
             send_message(&client, &api_key, &anthropic_version, &message_request).await?;
@@ -175,7 +176,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         messages.push(Message::user_blocks(tool_results));
     }
 
-    Ok(())
+    Err(Error::other(format!(
+        "Tool execution exceeded maximum rounds ({MAX_TOOL_ROUNDS})"
+    ))
+    .into())
 }
 
 async fn send_message(
