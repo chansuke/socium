@@ -1,0 +1,8 @@
+name: Run cargo fmt
+description: Run rustfmt in check mode for all workspace crates
+runs:
+  using: composite
+  steps:
+    - name: Check formatting
+      shell: bash
+      run: cargo fmt --all --check
