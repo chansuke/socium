@@ -10,7 +10,7 @@
         f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
-      formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);
+      formatter = forAllSystems (pkgs: pkgs.nixfmt);
 
       packages = forAllSystems (pkgs:
         let
@@ -54,7 +54,7 @@
               pkgs.vim
               pkgs.openssl
               pkgs.pkg-config
-              pkgs.nixfmt-rfc-style
+              pkgs.nixfmt
             ] ++ lib.optionals pkgs.stdenv.isDarwin [
               pkgs.darwin.apple_sdk.frameworks.Security
               pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
