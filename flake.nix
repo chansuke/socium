@@ -51,6 +51,7 @@
               pkgs.clippy
               pkgs.rustfmt
               pkgs.rust-analyzer
+              pkgs.vim
               pkgs.openssl
               pkgs.pkg-config
               pkgs.nixfmt-rfc-style
