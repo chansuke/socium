@@ -5,4 +5,4 @@ runs:
   steps:
     - name: Check formatting
       shell: bash
-      run: cargo fmt --all --check
+      run: nix develop --command cargo fmt --all --check

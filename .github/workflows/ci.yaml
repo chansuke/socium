@@ -25,11 +25,6 @@ jobs:
       - name: Setup Nix
         uses: ./.github/actions/setup-nix
 
-      - name: Install stable toolchain
-        run: |
-          rustup toolchain install stable --profile minimal -c rustfmt -c clippy
-          rustup default stable
-
       - name: Verify formatting
         uses: ./.github/actions/run-fmt
 
@@ -38,3 +33,6 @@ jobs:
 
       - name: Run tests
         uses: ./.github/actions/run-test
+
+      - name: Build Nix package
+        run: nix build .#default

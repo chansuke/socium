@@ -5,4 +5,4 @@ runs:
   steps:
     - name: Run Clippy
       shell: bash
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: nix develop --command cargo clippy --all-targets --all-features -- -D warnings
