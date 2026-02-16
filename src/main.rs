@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Error, ErrorKind, Read, Write};
@@ -219,18 +219,20 @@ fn run_tool_calls(workspace_root: &Path, blocks: &[ContentBlock]) -> Vec<Content
     blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, name, input } => Some(run_tool_call(
-                workspace_root,
-                id,
-                name,
-                input,
-            )),
+            ContentBlock::ToolUse { id, name, input } => {
+                Some(run_tool_call(workspace_root, id, name, input))
+            }
             _ => None,
         })
         .collect()
 }
 
-fn run_tool_call(workspace_root: &Path, tool_use_id: &str, name: &str, input: &Value) -> ContentBlock {
+fn run_tool_call(
+    workspace_root: &Path,
+    tool_use_id: &str,
+    name: &str,
+    input: &Value,
+) -> ContentBlock {
     let result = match name {
         "read_file" => read_file_from_workspace(workspace_root, input),
         other => Err(format!("Unsupported tool: {other}")),
@@ -261,8 +263,8 @@ fn read_file_from_workspace(workspace_root: &Path, input: &Value) -> Result<Stri
     if !metadata.is_file() {
         return Err(format!("Path is not a file: '{}'", path));
     }
-    let mut file =
-        fs::File::open(&resolved_path).map_err(|e| format!("Failed to read file '{}': {e}", path))?;
+    let mut file = fs::File::open(&resolved_path)
+        .map_err(|e| format!("Failed to open file '{}': {e}", path))?;
     let mut bytes = Vec::new();
     let mut limited = Read::by_ref(&mut file).take((MAX_READ_FILE_BYTES + 1) as u64);
     limited
@@ -288,7 +290,10 @@ fn resolve_workspace_path(workspace_root: &Path, requested_path: &str) -> Result
     })?;
     let path = PathBuf::from(requested_path);
     if path.is_absolute() {
-        return Err(format!("Absolute paths are not allowed: '{}'", requested_path));
+        return Err(format!(
+            "Absolute paths are not allowed: '{}'",
+            requested_path
+        ));
     }
     let joined = workspace_canonical.join(path);
     let canonical = joined
@@ -354,8 +359,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ContentBlock, MAX_READ_FILE_BYTES, extract_text, parse_input_from, read_file_from_workspace,
-        resolve_workspace_path, run_tool_call, run_tool_calls,
+        extract_text, parse_input_from, read_file_from_workspace, resolve_workspace_path,
+        run_tool_call, run_tool_calls, ContentBlock, MAX_READ_FILE_BYTES,
     };
     use serde_json::json;
     use std::fs;
@@ -411,7 +416,8 @@ mod tests {
         let file_path = workspace.path().join("note.txt");
         fs::write(&file_path, "hello").unwrap();
 
-        let output = read_file_from_workspace(workspace.path(), &json!({"path": "note.txt"})).unwrap();
+        let output =
+            read_file_from_workspace(workspace.path(), &json!({"path": "note.txt"})).unwrap();
 
         assert!(output.contains("Path:"));
         assert!(output.contains("hello"));
@@ -544,7 +550,10 @@ mod tests {
         let outside = make_temp_dir("outside");
         let outside_file = outside.path().join("secret.txt");
         fs::write(&outside_file, "secret").unwrap();
-        let escape = format!("../{}/secret.txt", outside.path().file_name().unwrap().to_string_lossy());
+        let escape = format!(
+            "../{}/secret.txt",
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
 
         let result = resolve_workspace_path(workspace.path(), &escape);
 
@@ -560,8 +569,7 @@ mod tests {
         let file = dir.join("file.txt");
         fs::write(&file, "inside").unwrap();
 
-        let resolved =
-            resolve_workspace_path(workspace.path(), "dir/./../dir/file.txt").unwrap();
+        let resolved = resolve_workspace_path(workspace.path(), "dir/./../dir/file.txt").unwrap();
 
         assert_eq!(resolved, file.canonicalize().unwrap());
     }
@@ -585,7 +593,10 @@ mod tests {
         let result = resolve_workspace_path(workspace.path(), &inside_file.to_string_lossy());
 
         assert!(result.is_err());
-        assert!(result.err().unwrap().contains("Absolute paths are not allowed"));
+        assert!(result
+            .err()
+            .unwrap()
+            .contains("Absolute paths are not allowed"));
     }
 
     #[cfg(unix)]
