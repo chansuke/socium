@@ -355,12 +355,12 @@ where
 mod tests {
     use super::{
         ContentBlock, MAX_READ_FILE_BYTES, extract_text, parse_input_from, read_file_from_workspace,
-        run_tool_call, run_tool_calls,
+        resolve_workspace_path, run_tool_call, run_tool_calls,
     };
     use serde_json::json;
     use std::fs;
     use std::io::Cursor;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -408,47 +408,40 @@ mod tests {
     #[test]
     fn reads_file_from_workspace() {
         let workspace = make_temp_dir("workspace");
-        let file_path = workspace.join("note.txt");
+        let file_path = workspace.path().join("note.txt");
         fs::write(&file_path, "hello").unwrap();
 
-        let output = read_file_from_workspace(&workspace, &json!({"path": "note.txt"})).unwrap();
+        let output = read_file_from_workspace(workspace.path(), &json!({"path": "note.txt"})).unwrap();
 
         assert!(output.contains("Path:"));
         assert!(output.contains("hello"));
-
-        fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
     fn rejects_path_outside_workspace() {
         let workspace = make_temp_dir("workspace");
         let outside = make_temp_dir("outside");
-        let file_path = outside.join("secret.txt");
+        let file_path = outside.path().join("secret.txt");
         fs::write(&file_path, "secret").unwrap();
 
         let output = read_file_from_workspace(
-            &workspace,
+            workspace.path(),
             &json!({"path": file_path.to_string_lossy().to_string()}),
         );
 
         assert!(output.is_err());
-
-        fs::remove_dir_all(workspace).unwrap();
-        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
     fn rejects_too_large_file() {
         let workspace = make_temp_dir("workspace");
-        let file_path = workspace.join("large.txt");
+        let file_path = workspace.path().join("large.txt");
         let large = vec![b'a'; MAX_READ_FILE_BYTES + 1];
         fs::write(&file_path, large).unwrap();
 
-        let output = read_file_from_workspace(&workspace, &json!({"path": "large.txt"}));
+        let output = read_file_from_workspace(workspace.path(), &json!({"path": "large.txt"}));
 
         assert!(output.is_err());
-
-        fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
@@ -475,7 +468,7 @@ mod tests {
     #[test]
     fn run_tool_call_returns_error_for_unsupported_tool() {
         let workspace = make_temp_dir("workspace");
-        let result = run_tool_call(&workspace, "tool_1", "unknown_tool", &json!({}));
+        let result = run_tool_call(workspace.path(), "tool_1", "unknown_tool", &json!({}));
 
         match result {
             ContentBlock::ToolResult {
@@ -489,8 +482,6 @@ mod tests {
             }
             _ => panic!("expected tool_result"),
         }
-
-        fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
@@ -502,7 +493,7 @@ mod tests {
             input: json!({}),
         }];
 
-        let results = run_tool_calls(&workspace, &blocks);
+        let results = run_tool_calls(workspace.path(), &blocks);
 
         assert_eq!(results.len(), 1);
         match &results[0] {
@@ -517,17 +508,99 @@ mod tests {
             }
             _ => panic!("expected tool_result"),
         }
-
-        fs::remove_dir_all(workspace).unwrap();
     }
 
-    fn make_temp_dir(prefix: &str) -> PathBuf {
+    #[test]
+    fn resolve_rejects_relative_escape_path() {
+        let workspace = make_temp_dir("workspace");
+        let outside = make_temp_dir("outside");
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "secret").unwrap();
+        let escape = format!("../{}/secret.txt", outside.path().file_name().unwrap().to_string_lossy());
+
+        let result = resolve_workspace_path(workspace.path(), &escape);
+
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("outside the workspace"));
+    }
+
+    #[test]
+    fn resolve_accepts_dot_components_inside_workspace() {
+        let workspace = make_temp_dir("workspace");
+        let dir = workspace.path().join("dir");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("file.txt");
+        fs::write(&file, "inside").unwrap();
+
+        let resolved =
+            resolve_workspace_path(workspace.path(), "dir/./../dir/file.txt").unwrap();
+
+        assert_eq!(resolved, file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_fails_for_nonexistent_path() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = resolve_workspace_path(workspace.path(), "missing.txt");
+
+        assert!(result.is_err());
+        assert!(result.err().unwrap().starts_with("Failed to resolve path"));
+    }
+
+    #[test]
+    fn resolve_rejects_absolute_path() {
+        let workspace = make_temp_dir("workspace");
+        let inside_file = workspace.path().join("inside.txt");
+        fs::write(&inside_file, "inside").unwrap();
+
+        let result = resolve_workspace_path(workspace.path(), &inside_file.to_string_lossy());
+
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("Absolute paths are not allowed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_outside_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = make_temp_dir("workspace");
+        let outside = make_temp_dir("outside");
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "secret").unwrap();
+        let link = workspace.path().join("link.txt");
+        symlink(&outside_file, &link).unwrap();
+
+        let output = read_file_from_workspace(workspace.path(), &json!({"path": "link.txt"}));
+
+        assert!(output.is_err());
+        assert!(output.err().unwrap().contains("outside the workspace"));
+    }
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn make_temp_dir(prefix: &str) -> TempDir {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("socium_{prefix}_{nanos}"));
         fs::create_dir_all(&path).unwrap();
-        path
+        TempDir { path }
     }
 }
