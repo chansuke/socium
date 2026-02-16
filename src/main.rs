@@ -353,7 +353,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_READ_FILE_BYTES, parse_input_from, read_file_from_workspace};
+    use super::{
+        ContentBlock, MAX_READ_FILE_BYTES, extract_text, parse_input_from, read_file_from_workspace,
+        run_tool_call, run_tool_calls,
+    };
     use serde_json::json;
     use std::fs;
     use std::io::Cursor;
@@ -444,6 +447,76 @@ mod tests {
         let output = read_file_from_workspace(&workspace, &json!({"path": "large.txt"}));
 
         assert!(output.is_err());
+
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn extract_text_ignores_non_text_blocks() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "first".to_string(),
+            },
+            ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "read_file".to_string(),
+                input: json!({"path": "ignored.txt"}),
+            },
+            ContentBlock::Text {
+                text: "second".to_string(),
+            },
+        ];
+
+        let text = extract_text(&blocks);
+
+        assert_eq!(text, "first\nsecond");
+    }
+
+    #[test]
+    fn run_tool_call_returns_error_for_unsupported_tool() {
+        let workspace = make_temp_dir("workspace");
+        let result = run_tool_call(&workspace, "tool_1", "unknown_tool", &json!({}));
+
+        match result {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tool_1");
+                assert!(content.contains("Unsupported tool"));
+                assert_eq!(is_error, Some(true));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn run_tool_calls_returns_error_for_invalid_read_file_input() {
+        let workspace = make_temp_dir("workspace");
+        let blocks = vec![ContentBlock::ToolUse {
+            id: "tool_2".to_string(),
+            name: "read_file".to_string(),
+            input: json!({}),
+        }];
+
+        let results = run_tool_calls(&workspace, &blocks);
+
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tool_2");
+                assert!(content.contains("read_file requires a string field: path"));
+                assert_eq!(*is_error, Some(true));
+            }
+            _ => panic!("expected tool_result"),
+        }
 
         fs::remove_dir_all(workspace).unwrap();
     }
