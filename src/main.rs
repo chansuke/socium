@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Error, ErrorKind, Write};
+use std::io::{self, BufRead, Error, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -55,7 +55,7 @@ fn read_file_tool() -> ToolDefinition {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Relative path to a file in the workspace."
+                    "description": "Relative path to a file in the workspace. Absolute paths are not allowed."
                 }
             },
             "required": ["path"],
@@ -253,38 +253,48 @@ fn read_file_from_workspace(workspace_root: &Path, input: &Value) -> Result<Stri
         .ok_or("read_file requires a string field: path")?;
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
     let metadata = fs::metadata(&resolved_path)
-        .map_err(|e| format!("Failed to inspect file '{}': {e}", resolved_path.display()))?;
+        .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
     if !metadata.is_file() {
-        return Err(format!("Path is not a file: '{}'", resolved_path.display()));
+        return Err(format!("Path is not a file: '{}'", path));
     }
-    if metadata.len() as usize > MAX_READ_FILE_BYTES {
+    let mut file =
+        fs::File::open(&resolved_path).map_err(|e| format!("Failed to read file '{}': {e}", path))?;
+    let mut bytes = Vec::new();
+    let mut limited = Read::by_ref(&mut file).take((MAX_READ_FILE_BYTES + 1) as u64);
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Failed to read file '{}': {e}", path))?;
+    if bytes.len() > MAX_READ_FILE_BYTES {
         return Err(format!(
             "File too large: '{}' exceeds {} bytes",
-            resolved_path.display(),
-            MAX_READ_FILE_BYTES
+            path, MAX_READ_FILE_BYTES
         ));
     }
-    let bytes = fs::read(&resolved_path)
-        .map_err(|e| format!("Failed to read file '{}': {e}", resolved_path.display()))?;
-    let content = String::from_utf8_lossy(&bytes).to_string();
-    Ok(format!("Path: {}\n{}", resolved_path.display(), content))
+    let content =
+        String::from_utf8(bytes).map_err(|e| format!("File '{}' is not valid UTF-8: {e}", path))?;
+    Ok(format!("Path: {}\n{}", path, content))
 }
 
 fn resolve_workspace_path(workspace_root: &Path, requested_path: &str) -> Result<PathBuf, String> {
+    let workspace_canonical = workspace_root.canonicalize().map_err(|e| {
+        format!(
+            "Failed to resolve workspace root '{}': {e}",
+            workspace_root.display()
+        )
+    })?;
     let path = PathBuf::from(requested_path);
-    let joined = if path.is_absolute() {
-        path
-    } else {
-        workspace_root.join(path)
-    };
+    if path.is_absolute() {
+        return Err(format!("Absolute paths are not allowed: '{}'", requested_path));
+    }
+    let joined = workspace_canonical.join(path);
     let canonical = joined
         .canonicalize()
         .map_err(|e| format!("Failed to resolve path '{}': {e}", joined.display()))?;
-    if !canonical.starts_with(workspace_root) {
+    if !canonical.starts_with(&workspace_canonical) {
         return Err(format!(
             "Path '{}' is outside the workspace '{}'",
             canonical.display(),
-            workspace_root.display()
+            workspace_canonical.display()
         ));
     }
     Ok(canonical)
