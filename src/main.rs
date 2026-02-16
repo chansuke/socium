@@ -485,6 +485,34 @@ mod tests {
     }
 
     #[test]
+    fn run_tool_call_returns_success_for_read_file() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("ok.txt");
+        fs::write(&file_path, "ok").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_3",
+            "read_file",
+            &json!({"path": "ok.txt"}),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tool_3");
+                assert!(content.contains("Path: ok.txt"));
+                assert!(content.contains("ok"));
+                assert_eq!(is_error, None);
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
     fn run_tool_calls_returns_error_for_invalid_read_file_input() {
         let workspace = make_temp_dir("workspace");
         let blocks = vec![ContentBlock::ToolUse {
