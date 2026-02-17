@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Error, ErrorKind, Read, Write};
@@ -60,6 +60,25 @@ fn read_file_tool() -> ToolDefinition {
                 }
             },
             "required": ["path"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn list_file_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "list_files".to_string(),
+        description: "List files and directories at a given path. If no path is provided, lists files in the current directory."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Optional relative path to a file or directory in the workspace. Defaults to the current directory."
+                }
+            },
+            "required": [],
             "additionalProperties": false
         }),
     }
@@ -151,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut messages = vec![Message::user_text(user_input)];
-    let tools = vec![read_file_tool()];
+    let tools = vec![read_file_tool(), list_file_tool()];
     let workspace_root = env::current_dir()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -235,6 +254,7 @@ fn run_tool_call(
 ) -> ContentBlock {
     let result = match name {
         "read_file" => read_file_from_workspace(workspace_root, input),
+        "list_files" => list_files_from_workspace(workspace_root, input),
         other => Err(format!("Unsupported tool: {other}")),
     };
 
@@ -279,6 +299,54 @@ fn read_file_from_workspace(workspace_root: &Path, input: &Value) -> Result<Stri
     let content =
         String::from_utf8(bytes).map_err(|e| format!("File '{}' is not valid UTF-8: {e}", path))?;
     Ok(format!("Path: {}\n{}", path, content))
+}
+
+fn list_files_from_workspace(workspace_root: &Path, input: &Value) -> Result<String, String> {
+    let path = match input.get("path") {
+        None => ".",
+        Some(value) => value
+            .as_str()
+            .ok_or("list_files expects an optional string field: path")?,
+    };
+
+    let resolved_path = resolve_workspace_path(workspace_root, path)?;
+    let metadata = fs::metadata(&resolved_path)
+        .map_err(|e| format!("Failed to inspect path '{}': {e}", path))?;
+
+    if metadata.is_file() {
+        return Ok(format!("Path: {}\n[file] {}", path, path));
+    }
+
+    if !metadata.is_dir() {
+        return Err(format!("Path is neither a file nor directory: '{}'", path));
+    }
+
+    let mut entries = fs::read_dir(&resolved_path)
+        .map_err(|e| format!("Failed to list directory '{}': {e}", path))?
+        .map(|entry| {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {e}"))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|e| format!("Failed to inspect directory entry type: {e}"))?;
+            let mut name = entry.file_name().to_string_lossy().to_string();
+            let prefix = if file_type.is_dir() {
+                name.push('/');
+                "[dir]"
+            } else if file_type.is_symlink() {
+                "[lnk]"
+            } else {
+                "[file]"
+            };
+            Ok(format!("{prefix} {name}"))
+        })
+        .collect::<Result<Vec<String>, String>>()?;
+
+    entries.sort_unstable();
+    if entries.is_empty() {
+        return Ok(format!("Path: {}\n(empty)", path));
+    }
+
+    Ok(format!("Path: {}\n{}", path, entries.join("\n")))
 }
 
 fn resolve_workspace_path(workspace_root: &Path, requested_path: &str) -> Result<PathBuf, String> {
@@ -359,8 +427,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ContentBlock, MAX_READ_FILE_BYTES, extract_text, parse_input_from,
-        read_file_from_workspace, resolve_workspace_path, run_tool_call, run_tool_calls,
+        extract_text, list_files_from_workspace, parse_input_from, read_file_from_workspace,
+        resolve_workspace_path, run_tool_call, run_tool_calls, ContentBlock, MAX_READ_FILE_BYTES,
     };
     use serde_json::json;
     use std::fs;
@@ -448,6 +516,41 @@ mod tests {
         let output = read_file_from_workspace(workspace.path(), &json!({"path": "large.txt"}));
 
         assert!(output.is_err());
+    }
+
+    #[test]
+    fn lists_directory_from_workspace_with_default_path() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("a.txt"), "a").unwrap();
+        fs::create_dir(workspace.path().join("dir")).unwrap();
+
+        let output = list_files_from_workspace(workspace.path(), &json!({})).unwrap();
+
+        assert!(output.contains("Path: ."));
+        assert!(output.contains("[file] a.txt"));
+        assert!(output.contains("[dir] dir/"));
+    }
+
+    #[test]
+    fn run_tool_call_returns_success_for_list_files_without_path() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("one.txt"), "1").unwrap();
+
+        let result = run_tool_call(workspace.path(), "tool_4", "list_files", &json!({}));
+
+        match result {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tool_4");
+                assert!(content.contains("Path: ."));
+                assert!(content.contains("one.txt"));
+                assert_eq!(is_error, None);
+            }
+            _ => panic!("expected tool_result"),
+        }
     }
 
     #[test]
@@ -545,6 +648,32 @@ mod tests {
     }
 
     #[test]
+    fn run_tool_calls_returns_error_for_invalid_list_files_input() {
+        let workspace = make_temp_dir("workspace");
+        let blocks = vec![ContentBlock::ToolUse {
+            id: "tool_5".to_string(),
+            name: "list_files".to_string(),
+            input: json!({"path": 1}),
+        }];
+
+        let results = run_tool_calls(workspace.path(), &blocks);
+
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tool_5");
+                assert!(content.contains("list_files expects an optional string field: path"));
+                assert_eq!(*is_error, Some(true));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
     fn resolve_rejects_relative_escape_path() {
         let workspace = make_temp_dir("workspace");
         let outside = make_temp_dir("outside");
@@ -593,12 +722,10 @@ mod tests {
         let result = resolve_workspace_path(workspace.path(), &inside_file.to_string_lossy());
 
         assert!(result.is_err());
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .contains("Absolute paths are not allowed")
-        );
+        assert!(result
+            .err()
+            .unwrap()
+            .contains("Absolute paths are not allowed"));
     }
 
     #[cfg(unix)]
