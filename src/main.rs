@@ -307,8 +307,11 @@ fn read_file_from_workspace(workspace_root: &Path, input: &Value) -> Result<Stri
 }
 
 fn list_files_from_workspace(workspace_root: &Path, input: &Value) -> Result<String, String> {
-    let raw_path = match input.get("path") {
-        None | Some(Value::Null) => ".",
+    let input_object = input
+        .as_object()
+        .ok_or("list_files requires an object input")?;
+    let raw_path = match input_object.get("path") {
+        None => ".",
         Some(value) => value
             .as_str()
             .ok_or("list_files requires an optional string field: path")?,
@@ -732,6 +735,32 @@ mod tests {
             } => {
                 assert_eq!(tool_use_id, "tool_5");
                 assert!(content.contains("list_files requires an optional string field: path"));
+                assert_eq!(*is_error, Some(true));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn run_tool_calls_returns_error_for_non_object_list_files_input() {
+        let workspace = make_temp_dir("workspace");
+        let blocks = vec![ContentBlock::ToolUse {
+            id: "tool_6".to_string(),
+            name: "list_files".to_string(),
+            input: json!(["not", "an", "object"]),
+        }];
+
+        let results = run_tool_calls(workspace.path(), &blocks);
+
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tool_6");
+                assert!(content.contains("list_files requires an object input"));
                 assert_eq!(*is_error, Some(true));
             }
             _ => panic!("expected tool_result"),
