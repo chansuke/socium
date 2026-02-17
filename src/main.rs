@@ -65,7 +65,7 @@ fn read_file_tool() -> ToolDefinition {
     }
 }
 
-fn list_file_tool() -> ToolDefinition {
+fn list_files_tool() -> ToolDefinition {
     ToolDefinition {
         name: "list_files".to_string(),
         description: "List files and directories at a given path. If no path is provided, lists files in the current directory."
@@ -170,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut messages = vec![Message::user_text(user_input)];
-    let tools = vec![read_file_tool(), list_file_tool()];
+    let tools = vec![read_file_tool(), list_files_tool()];
     let workspace_root = env::current_dir()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
