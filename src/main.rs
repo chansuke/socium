@@ -9,6 +9,7 @@ use std::time::Duration;
 const ANTHROPIC_MESSAGES_API: &str = "https://api.anthropic.com/v1/messages";
 const MAX_READ_FILE_BYTES: usize = 200 * 1024;
 const MAX_TOOL_ROUNDS: usize = 20;
+const MAX_LIST_ENTRIES: usize = 1000;
 
 #[derive(Debug, Serialize)]
 struct AgentMessageRequest<'a> {
@@ -68,7 +69,7 @@ fn read_file_tool() -> ToolDefinition {
 fn list_files_tool() -> ToolDefinition {
     ToolDefinition {
         name: "list_files".to_string(),
-        description: "List files and directories at a given path. If no path is provided, lists files in the current directory."
+        description: "List files and directories at a given path. If no path is provided, lists files in the current directory. If a file path is given, confirms the file exists."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -78,7 +79,6 @@ fn list_files_tool() -> ToolDefinition {
                     "description": "Optional relative path to a file or directory in the workspace. Defaults to the current directory."
                 }
             },
-            "required": [],
             "additionalProperties": false
         }),
     }
@@ -176,7 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    let mut reached_max_rounds = true;
+    let mut finished = false;
     for _ in 0..MAX_TOOL_ROUNDS {
         let message_request = AgentMessageRequest::new(&model, max_tokens, &messages, &tools);
         let response =
@@ -191,14 +191,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tool_results = run_tool_calls(&workspace_root, &assistant_blocks);
         messages.push(Message::assistant_blocks(assistant_blocks));
         if tool_results.is_empty() {
-            reached_max_rounds = false;
+            finished = true;
             break;
         }
         messages.push(Message::user_blocks(tool_results));
     }
 
-    if reached_max_rounds {
-        eprintln!("Tool execution reached the maximum rounds ({MAX_TOOL_ROUNDS}). Stopping.");
+    if !finished {
         return Err(Error::other(format!(
             "Tool execution reached the maximum rounds ({MAX_TOOL_ROUNDS}) and may be incomplete"
         ))
@@ -308,12 +307,13 @@ fn read_file_from_workspace(workspace_root: &Path, input: &Value) -> Result<Stri
 }
 
 fn list_files_from_workspace(workspace_root: &Path, input: &Value) -> Result<String, String> {
-    let path = match input.get("path") {
-        None => ".",
+    let raw_path = match input.get("path") {
+        None | Some(Value::Null) => ".",
         Some(value) => value
             .as_str()
             .ok_or("list_files requires an optional string field: path")?,
     };
+    let path = if raw_path.is_empty() { "." } else { raw_path };
 
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
     let metadata = fs::metadata(&resolved_path)
@@ -331,28 +331,40 @@ fn list_files_from_workspace(workspace_root: &Path, input: &Value) -> Result<Str
         .map_err(|e| format!("Failed to list directory '{}': {e}", path))?
         .map(|entry| {
             let entry = entry.map_err(|e| format!("Failed to read directory entry: {e}"))?;
+            let name = entry.file_name().to_string_lossy().to_string();
             let file_type = entry
                 .file_type()
                 .map_err(|e| format!("Failed to inspect directory entry type: {e}"))?;
-            let mut name = entry.file_name().to_string_lossy().to_string();
-            let prefix = if file_type.is_dir() {
-                name.push('/');
-                "[dir]"
-            } else if file_type.is_symlink() {
-                "[lnk]"
+            let (prefix, display_name) = if file_type.is_symlink() {
+                ("[lnk]", name.clone())
+            } else if file_type.is_dir() {
+                ("[dir]", format!("{name}/"))
             } else {
-                "[file]"
+                ("[file]", name.clone())
             };
-            Ok(format!("{prefix} {name}"))
+            Ok((name, format!("{prefix} {display_name}")))
         })
-        .collect::<Result<Vec<String>, String>>()?;
+        .collect::<Result<Vec<(String, String)>, String>>()?;
 
-    entries.sort_unstable();
+    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
     if entries.is_empty() {
         return Ok(format!("Path: {}\n(empty)", path));
     }
 
-    Ok(format!("Path: {}\n{}", path, entries.join("\n")))
+    let total = entries.len();
+    let lines: Vec<String> = entries.into_iter().map(|(_, line)| line).collect();
+
+    if total > MAX_LIST_ENTRIES {
+        let truncated: Vec<&str> = lines.iter().take(MAX_LIST_ENTRIES).map(|s| s.as_str()).collect();
+        Ok(format!(
+            "Path: {}\n{}\n(truncated: showing {MAX_LIST_ENTRIES} of {total} entries)",
+            path,
+            truncated.join("\n")
+        ))
+    } else {
+        Ok(format!("Path: {}\n{}", path, lines.join("\n")))
+    }
 }
 
 fn resolve_workspace_path(workspace_root: &Path, requested_path: &str) -> Result<PathBuf, String> {
@@ -441,6 +453,7 @@ mod tests {
     use std::fs;
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -775,6 +788,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn list_files_marks_symlink_as_link() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("target.txt"), "target").unwrap();
+        symlink(workspace.path().join("target.txt"), workspace.path().join("link.txt")).unwrap();
+
+        let output = list_files_from_workspace(workspace.path(), &json!({})).unwrap();
+
+        assert!(output.contains("[lnk] link.txt"));
+        assert!(!output.contains("[file] link.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rejects_symlink_escape_outside_workspace() {
         use std::os::unix::fs::symlink;
 
@@ -807,12 +835,15 @@ mod tests {
         }
     }
 
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     fn make_temp_dir(prefix: &str) -> TempDir {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("socium_{prefix}_{nanos}"));
+        let count = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("socium_{prefix}_{nanos}_{count}"));
         fs::create_dir_all(&path).unwrap();
         TempDir { path }
     }
