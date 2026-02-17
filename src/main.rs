@@ -356,7 +356,11 @@ fn list_files_from_workspace(workspace_root: &Path, input: &Value) -> Result<Str
     let lines: Vec<String> = entries.into_iter().map(|(_, line)| line).collect();
 
     if total > MAX_LIST_ENTRIES {
-        let truncated: Vec<&str> = lines.iter().take(MAX_LIST_ENTRIES).map(|s| s.as_str()).collect();
+        let truncated: Vec<&str> = lines
+            .iter()
+            .take(MAX_LIST_ENTRIES)
+            .map(|s| s.as_str())
+            .collect();
         Ok(format!(
             "Path: {}\n{}\n(truncated: showing {MAX_LIST_ENTRIES} of {total} entries)",
             path,
@@ -793,7 +797,11 @@ mod tests {
 
         let workspace = make_temp_dir("workspace");
         fs::write(workspace.path().join("target.txt"), "target").unwrap();
-        symlink(workspace.path().join("target.txt"), workspace.path().join("link.txt")).unwrap();
+        symlink(
+            workspace.path().join("target.txt"),
+            workspace.path().join("link.txt"),
+        )
+        .unwrap();
 
         let output = list_files_from_workspace(workspace.path(), &json!({})).unwrap();
 
