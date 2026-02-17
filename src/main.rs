@@ -199,6 +199,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if reached_max_rounds {
         eprintln!("Tool execution reached the maximum rounds ({MAX_TOOL_ROUNDS}). Stopping.");
+        return Err(Error::other(format!(
+            "Tool execution reached the maximum rounds ({MAX_TOOL_ROUNDS}) and may be incomplete"
+        ))
+        .into());
     }
     Ok(())
 }
