@@ -9,6 +9,7 @@ use std::time::Duration;
 const ANTHROPIC_MESSAGES_API: &str = "https://api.anthropic.com/v1/messages";
 const MAX_READ_FILE_BYTES: usize = 200 * 1024;
 const MAX_TOOL_ROUNDS: usize = 20;
+const MAX_LIST_ENTRIES: usize = 1000;
 
 #[derive(Debug, Serialize)]
 struct AgentMessageRequest<'a> {
@@ -60,6 +61,24 @@ fn read_file_tool() -> ToolDefinition {
                 }
             },
             "required": ["path"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn list_files_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "list_files".to_string(),
+        description: "List files and directories at a given path. If no path is provided, lists files in the current directory. If a file path is given, confirms the file exists."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Optional relative path to a file or directory in the workspace. Defaults to the current directory."
+                }
+            },
             "additionalProperties": false
         }),
     }
@@ -151,12 +170,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut messages = vec![Message::user_text(user_input)];
-    let tools = vec![read_file_tool()];
+    let tools = vec![read_file_tool(), list_files_tool()];
     let workspace_root = env::current_dir()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
 
+    let mut finished = false;
     for _ in 0..MAX_TOOL_ROUNDS {
         let message_request = AgentMessageRequest::new(&model, max_tokens, &messages, &tools);
         let response =
@@ -171,15 +191,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tool_results = run_tool_calls(&workspace_root, &assistant_blocks);
         messages.push(Message::assistant_blocks(assistant_blocks));
         if tool_results.is_empty() {
+            finished = true;
             break;
         }
         messages.push(Message::user_blocks(tool_results));
     }
 
-    Err(Error::other(format!(
-        "Tool execution exceeded maximum rounds ({MAX_TOOL_ROUNDS})"
-    ))
-    .into())
+    if !finished {
+        return Err(Error::other(format!(
+            "Tool execution reached the maximum rounds ({MAX_TOOL_ROUNDS}) and may be incomplete"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 async fn send_message(
@@ -235,6 +259,7 @@ fn run_tool_call(
 ) -> ContentBlock {
     let result = match name {
         "read_file" => read_file_from_workspace(workspace_root, input),
+        "list_files" => list_files_from_workspace(workspace_root, input),
         other => Err(format!("Unsupported tool: {other}")),
     };
 
@@ -281,6 +306,79 @@ fn read_file_from_workspace(workspace_root: &Path, input: &Value) -> Result<Stri
     Ok(format!("Path: {}\n{}", path, content))
 }
 
+fn list_files_from_workspace(workspace_root: &Path, input: &Value) -> Result<String, String> {
+    let input_object = input
+        .as_object()
+        .ok_or("list_files requires an object input")?;
+    let raw_path = match input_object.get("path") {
+        None => ".",
+        Some(value) => value
+            .as_str()
+            .ok_or("list_files requires an optional string field: path")?,
+    };
+    let path = if raw_path.is_empty() { "." } else { raw_path };
+
+    let resolved_path = resolve_workspace_path(workspace_root, path)?;
+    let metadata = fs::metadata(&resolved_path)
+        .map_err(|e| format!("Failed to inspect path '{}': {e}", path))?;
+
+    if metadata.is_file() {
+        return Ok(format!("Path: {}\n[file]", path));
+    }
+
+    if !metadata.is_dir() {
+        return Err(format!("Path is neither a file nor directory: '{}'", path));
+    }
+
+    let read_dir = fs::read_dir(&resolved_path)
+        .map_err(|e| format!("Failed to list directory '{}': {e}", path))?;
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut has_more = false;
+
+    for entry_result in read_dir {
+        let entry = entry_result.map_err(|e| format!("Failed to read directory entry: {e}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect directory entry type: {e}"))?;
+        let (prefix, display_name) = if file_type.is_symlink() {
+            ("[lnk]", name.clone())
+        } else if file_type.is_dir() {
+            ("[dir]", format!("{name}/"))
+        } else {
+            ("[file]", name.clone())
+        };
+        entries.push((name, format!("{prefix} {display_name}")));
+
+        if entries.len() > MAX_LIST_ENTRIES {
+            has_more = true;
+            break;
+        }
+    }
+
+    if entries.is_empty() {
+        return Ok(format!("Path: {}\n(empty)", path));
+    }
+
+    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+    if has_more {
+        let lines: Vec<String> = entries
+            .iter()
+            .take(MAX_LIST_ENTRIES)
+            .map(|(_, line)| line.clone())
+            .collect();
+        Ok(format!(
+            "Path: {}\n{}\n(truncated: showing first {MAX_LIST_ENTRIES} entries; more entries omitted)",
+            path,
+            lines.join("\n")
+        ))
+    } else {
+        let lines: Vec<String> = entries.into_iter().map(|(_, line)| line).collect();
+        Ok(format!("Path: {}\n{}", path, lines.join("\n")))
+    }
+}
+
 fn resolve_workspace_path(workspace_root: &Path, requested_path: &str) -> Result<PathBuf, String> {
     let workspace_canonical = workspace_root.canonicalize().map_err(|e| {
         format!(
@@ -298,12 +396,11 @@ fn resolve_workspace_path(workspace_root: &Path, requested_path: &str) -> Result
     let joined = workspace_canonical.join(path);
     let canonical = joined
         .canonicalize()
-        .map_err(|e| format!("Failed to resolve path '{}': {e}", joined.display()))?;
+        .map_err(|e| format!("Failed to resolve path '{}': {e}", requested_path))?;
     if !canonical.starts_with(&workspace_canonical) {
         return Err(format!(
-            "Path '{}' is outside the workspace '{}'",
-            canonical.display(),
-            workspace_canonical.display()
+            "Path '{}' is outside the workspace",
+            requested_path
         ));
     }
     Ok(canonical)
@@ -359,13 +456,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ContentBlock, MAX_READ_FILE_BYTES, extract_text, parse_input_from,
-        read_file_from_workspace, resolve_workspace_path, run_tool_call, run_tool_calls,
+        ContentBlock, MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, extract_text,
+        list_files_from_workspace, parse_input_from, read_file_from_workspace,
+        resolve_workspace_path, run_tool_call, run_tool_calls,
     };
     use serde_json::json;
     use std::fs;
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -448,6 +547,77 @@ mod tests {
         let output = read_file_from_workspace(workspace.path(), &json!({"path": "large.txt"}));
 
         assert!(output.is_err());
+    }
+
+    #[test]
+    fn lists_directory_from_workspace_with_default_path() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("a.txt"), "a").unwrap();
+        fs::create_dir(workspace.path().join("dir")).unwrap();
+
+        let output = list_files_from_workspace(workspace.path(), &json!({})).unwrap();
+
+        assert!(output.contains("Path: ."));
+        assert!(output.contains("[file] a.txt"));
+        assert!(output.contains("[dir] dir/"));
+    }
+
+    #[test]
+    fn lists_specific_subdirectory_from_workspace() {
+        let workspace = make_temp_dir("workspace");
+        let subdir = workspace.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("inside.txt"), "inside").unwrap();
+
+        let output =
+            list_files_from_workspace(workspace.path(), &json!({"path": "subdir"})).unwrap();
+
+        assert!(output.contains("Path: subdir"));
+        assert!(output.contains("[file] inside.txt"));
+    }
+
+    #[test]
+    fn lists_file_path_from_workspace() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("one.txt"), "1").unwrap();
+
+        let output =
+            list_files_from_workspace(workspace.path(), &json!({"path": "one.txt"})).unwrap();
+
+        assert_eq!(output, "Path: one.txt\n[file]");
+    }
+
+    #[test]
+    fn lists_empty_directory_from_workspace() {
+        let workspace = make_temp_dir("workspace");
+        fs::create_dir(workspace.path().join("empty")).unwrap();
+
+        let output =
+            list_files_from_workspace(workspace.path(), &json!({"path": "empty"})).unwrap();
+
+        assert_eq!(output, "Path: empty\n(empty)");
+    }
+
+    #[test]
+    fn run_tool_call_returns_success_for_list_files_without_path() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("one.txt"), "1").unwrap();
+
+        let result = run_tool_call(workspace.path(), "tool_4", "list_files", &json!({}));
+
+        match result {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tool_4");
+                assert!(content.contains("Path: ."));
+                assert!(content.contains("one.txt"));
+                assert_eq!(is_error, None);
+            }
+            _ => panic!("expected tool_result"),
+        }
     }
 
     #[test]
@@ -545,6 +715,58 @@ mod tests {
     }
 
     #[test]
+    fn run_tool_calls_returns_error_for_invalid_list_files_input() {
+        let workspace = make_temp_dir("workspace");
+        let blocks = vec![ContentBlock::ToolUse {
+            id: "tool_5".to_string(),
+            name: "list_files".to_string(),
+            input: json!({"path": 1}),
+        }];
+
+        let results = run_tool_calls(workspace.path(), &blocks);
+
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tool_5");
+                assert!(content.contains("list_files requires an optional string field: path"));
+                assert_eq!(*is_error, Some(true));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn run_tool_calls_returns_error_for_non_object_list_files_input() {
+        let workspace = make_temp_dir("workspace");
+        let blocks = vec![ContentBlock::ToolUse {
+            id: "tool_6".to_string(),
+            name: "list_files".to_string(),
+            input: json!(["not", "an", "object"]),
+        }];
+
+        let results = run_tool_calls(workspace.path(), &blocks);
+
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tool_6");
+                assert!(content.contains("list_files requires an object input"));
+                assert_eq!(*is_error, Some(true));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
     fn resolve_rejects_relative_escape_path() {
         let workspace = make_temp_dir("workspace");
         let outside = make_temp_dir("outside");
@@ -603,6 +825,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn list_files_marks_symlink_as_link() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("target.txt"), "target").unwrap();
+        symlink(
+            workspace.path().join("target.txt"),
+            workspace.path().join("link.txt"),
+        )
+        .unwrap();
+
+        let output = list_files_from_workspace(workspace.path(), &json!({})).unwrap();
+
+        assert!(output.contains("[lnk] link.txt"));
+        assert!(!output.contains("[file] link.txt"));
+    }
+
+    #[test]
+    fn list_files_truncates_when_entries_exceed_limit() {
+        let workspace = make_temp_dir("workspace");
+        for i in 0..=MAX_LIST_ENTRIES {
+            fs::write(workspace.path().join(format!("f{i:04}.txt")), "x").unwrap();
+        }
+
+        let output = list_files_from_workspace(workspace.path(), &json!({})).unwrap();
+        let marker =
+            format!("(truncated: showing first {MAX_LIST_ENTRIES} entries; more entries omitted)");
+
+        assert!(output.contains(&marker));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rejects_symlink_escape_outside_workspace() {
         use std::os::unix::fs::symlink;
 
@@ -635,12 +890,15 @@ mod tests {
         }
     }
 
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     fn make_temp_dir(prefix: &str) -> TempDir {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("socium_{prefix}_{nanos}"));
+        let count = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("socium_{prefix}_{nanos}_{count}"));
         fs::create_dir_all(&path).unwrap();
         TempDir { path }
     }
