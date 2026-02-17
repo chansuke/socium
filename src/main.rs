@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Error, ErrorKind, Read, Write};
@@ -308,7 +308,7 @@ fn list_files_from_workspace(workspace_root: &Path, input: &Value) -> Result<Str
         None => ".",
         Some(value) => value
             .as_str()
-            .ok_or("list_files expects an optional string field: path")?,
+            .ok_or("list_files requires an optional string field: path")?,
     };
 
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
@@ -429,9 +429,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ContentBlock, MAX_READ_FILE_BYTES, extract_text, list_files_from_workspace,
-        parse_input_from, read_file_from_workspace, resolve_workspace_path, run_tool_call,
-        run_tool_calls,
+        extract_text, list_files_from_workspace, parse_input_from, read_file_from_workspace,
+        resolve_workspace_path, run_tool_call, run_tool_calls, ContentBlock, MAX_READ_FILE_BYTES,
     };
     use serde_json::json;
     use std::fs;
@@ -725,12 +724,10 @@ mod tests {
         let result = resolve_workspace_path(workspace.path(), &inside_file.to_string_lossy());
 
         assert!(result.is_err());
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .contains("Absolute paths are not allowed")
-        );
+        assert!(result
+            .err()
+            .unwrap()
+            .contains("Absolute paths are not allowed"));
     }
 
     #[cfg(unix)]
