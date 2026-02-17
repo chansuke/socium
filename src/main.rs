@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Error, ErrorKind, Read, Write};
@@ -176,6 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(30))
         .build()?;
 
+    let mut reached_max_rounds = true;
     for _ in 0..MAX_TOOL_ROUNDS {
         let message_request = AgentMessageRequest::new(&model, max_tokens, &messages, &tools);
         let response =
@@ -190,15 +191,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tool_results = run_tool_calls(&workspace_root, &assistant_blocks);
         messages.push(Message::assistant_blocks(assistant_blocks));
         if tool_results.is_empty() {
+            reached_max_rounds = false;
             break;
         }
         messages.push(Message::user_blocks(tool_results));
     }
 
-    Err(Error::other(format!(
-        "Tool execution exceeded maximum rounds ({MAX_TOOL_ROUNDS})"
-    ))
-    .into())
+    if reached_max_rounds {
+        eprintln!("Tool execution reached the maximum rounds ({MAX_TOOL_ROUNDS}). Stopping.");
+    }
+    Ok(())
 }
 
 async fn send_message(
@@ -427,8 +429,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_text, list_files_from_workspace, parse_input_from, read_file_from_workspace,
-        resolve_workspace_path, run_tool_call, run_tool_calls, ContentBlock, MAX_READ_FILE_BYTES,
+        ContentBlock, MAX_READ_FILE_BYTES, extract_text, list_files_from_workspace,
+        parse_input_from, read_file_from_workspace, resolve_workspace_path, run_tool_call,
+        run_tool_calls,
     };
     use serde_json::json;
     use std::fs;
@@ -722,10 +725,12 @@ mod tests {
         let result = resolve_workspace_path(workspace.path(), &inside_file.to_string_lossy());
 
         assert!(result.is_err());
-        assert!(result
-            .err()
-            .unwrap()
-            .contains("Absolute paths are not allowed"));
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .contains("Absolute paths are not allowed")
+        );
     }
 
     #[cfg(unix)]
