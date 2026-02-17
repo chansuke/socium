@@ -668,7 +668,7 @@ mod tests {
                 is_error,
             } => {
                 assert_eq!(tool_use_id, "tool_5");
-                assert!(content.contains("list_files expects an optional string field: path"));
+                assert!(content.contains("list_files requires an optional string field: path"));
                 assert_eq!(*is_error, Some(true));
             }
             _ => panic!("expected tool_result"),
