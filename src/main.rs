@@ -396,12 +396,11 @@ fn resolve_workspace_path(workspace_root: &Path, requested_path: &str) -> Result
     let joined = workspace_canonical.join(path);
     let canonical = joined
         .canonicalize()
-        .map_err(|e| format!("Failed to resolve path '{}': {e}", joined.display()))?;
+        .map_err(|e| format!("Failed to resolve path '{}': {e}", requested_path))?;
     if !canonical.starts_with(&workspace_canonical) {
         return Err(format!(
-            "Path '{}' is outside the workspace '{}'",
-            canonical.display(),
-            workspace_canonical.display()
+            "Path '{}' is outside the workspace",
+            requested_path
         ));
     }
     Ok(canonical)
@@ -457,9 +456,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ContentBlock, MAX_READ_FILE_BYTES, extract_text, list_files_from_workspace,
-        parse_input_from, read_file_from_workspace, resolve_workspace_path, run_tool_call,
-        run_tool_calls,
+        ContentBlock, MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, extract_text,
+        list_files_from_workspace, parse_input_from, read_file_from_workspace,
+        resolve_workspace_path, run_tool_call, run_tool_calls,
     };
     use serde_json::json;
     use std::fs;
@@ -841,6 +840,20 @@ mod tests {
 
         assert!(output.contains("[lnk] link.txt"));
         assert!(!output.contains("[file] link.txt"));
+    }
+
+    #[test]
+    fn list_files_truncates_when_entries_exceed_limit() {
+        let workspace = make_temp_dir("workspace");
+        for i in 0..=MAX_LIST_ENTRIES {
+            fs::write(workspace.path().join(format!("f{i:04}.txt")), "x").unwrap();
+        }
+
+        let output = list_files_from_workspace(workspace.path(), &json!({})).unwrap();
+        let marker =
+            format!("(truncated: showing first {MAX_LIST_ENTRIES} entries; more entries omitted)");
+
+        assert!(output.contains(&marker));
     }
 
     #[cfg(unix)]
