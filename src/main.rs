@@ -327,46 +327,51 @@ fn list_files_from_workspace(workspace_root: &Path, input: &Value) -> Result<Str
         return Err(format!("Path is neither a file nor directory: '{}'", path));
     }
 
-    let mut entries = fs::read_dir(&resolved_path)
-        .map_err(|e| format!("Failed to list directory '{}': {e}", path))?
-        .map(|entry| {
-            let entry = entry.map_err(|e| format!("Failed to read directory entry: {e}"))?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            let file_type = entry
-                .file_type()
-                .map_err(|e| format!("Failed to inspect directory entry type: {e}"))?;
-            let (prefix, display_name) = if file_type.is_symlink() {
-                ("[lnk]", name.clone())
-            } else if file_type.is_dir() {
-                ("[dir]", format!("{name}/"))
-            } else {
-                ("[file]", name.clone())
-            };
-            Ok((name, format!("{prefix} {display_name}")))
-        })
-        .collect::<Result<Vec<(String, String)>, String>>()?;
+    let read_dir = fs::read_dir(&resolved_path)
+        .map_err(|e| format!("Failed to list directory '{}': {e}", path))?;
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut has_more = false;
 
-    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    for entry_result in read_dir {
+        let entry = entry_result.map_err(|e| format!("Failed to read directory entry: {e}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect directory entry type: {e}"))?;
+        let (prefix, display_name) = if file_type.is_symlink() {
+            ("[lnk]", name.clone())
+        } else if file_type.is_dir() {
+            ("[dir]", format!("{name}/"))
+        } else {
+            ("[file]", name.clone())
+        };
+        entries.push((name, format!("{prefix} {display_name}")));
+
+        if entries.len() > MAX_LIST_ENTRIES {
+            has_more = true;
+            break;
+        }
+    }
 
     if entries.is_empty() {
         return Ok(format!("Path: {}\n(empty)", path));
     }
 
-    let total = entries.len();
-    let lines: Vec<String> = entries.into_iter().map(|(_, line)| line).collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
-    if total > MAX_LIST_ENTRIES {
-        let truncated: Vec<&str> = lines
+    if has_more {
+        let lines: Vec<String> = entries
             .iter()
             .take(MAX_LIST_ENTRIES)
-            .map(|s| s.as_str())
+            .map(|(_, line)| line.clone())
             .collect();
         Ok(format!(
-            "Path: {}\n{}\n(truncated: showing {MAX_LIST_ENTRIES} of {total} entries)",
+            "Path: {}\n{}\n(truncated: showing first {MAX_LIST_ENTRIES} entries; more entries omitted)",
             path,
-            truncated.join("\n")
+            lines.join("\n")
         ))
     } else {
+        let lines: Vec<String> = entries.into_iter().map(|(_, line)| line).collect();
         Ok(format!("Path: {}\n{}", path, lines.join("\n")))
     }
 }
