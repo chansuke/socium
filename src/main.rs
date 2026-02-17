@@ -316,7 +316,7 @@ fn list_files_from_workspace(workspace_root: &Path, input: &Value) -> Result<Str
         .map_err(|e| format!("Failed to inspect path '{}': {e}", path))?;
 
     if metadata.is_file() {
-        return Ok(format!("Path: {}\n[file] {}", path, path));
+        return Ok(format!("Path: {}\n[file]", path));
     }
 
     if !metadata.is_dir() {
@@ -531,6 +531,41 @@ mod tests {
         assert!(output.contains("Path: ."));
         assert!(output.contains("[file] a.txt"));
         assert!(output.contains("[dir] dir/"));
+    }
+
+    #[test]
+    fn lists_specific_subdirectory_from_workspace() {
+        let workspace = make_temp_dir("workspace");
+        let subdir = workspace.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("inside.txt"), "inside").unwrap();
+
+        let output =
+            list_files_from_workspace(workspace.path(), &json!({"path": "subdir"})).unwrap();
+
+        assert!(output.contains("Path: subdir"));
+        assert!(output.contains("[file] inside.txt"));
+    }
+
+    #[test]
+    fn lists_file_path_from_workspace() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("one.txt"), "1").unwrap();
+
+        let output =
+            list_files_from_workspace(workspace.path(), &json!({"path": "one.txt"})).unwrap();
+
+        assert_eq!(output, "Path: one.txt\n[file]");
+    }
+
+    #[test]
+    fn lists_empty_directory_from_workspace() {
+        let workspace = make_temp_dir("workspace");
+        fs::create_dir(workspace.path().join("empty")).unwrap();
+
+        let output = list_files_from_workspace(workspace.path(), &json!({"path": "empty"})).unwrap();
+
+        assert_eq!(output, "Path: empty\n(empty)");
     }
 
     #[test]
