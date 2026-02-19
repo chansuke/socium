@@ -5,6 +5,11 @@ use std::fs;
 use std::io::{self, BufRead, Error, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+#[cfg(unix)]
+use std::{
+    os::fd::{AsRawFd, RawFd},
+    str,
+};
 
 const ANTHROPIC_MESSAGES_API: &str = "https://api.anthropic.com/v1/messages";
 const MAX_READ_FILE_BYTES: usize = 200 * 1024;
@@ -18,6 +23,10 @@ const STATE_DIR_NAME: &str = ".socium";
 const CONVERSATION_STATE_FILE_NAME: &str = "conversation.json";
 const INPUT_HISTORY_FILE_NAME: &str = "input_history.json";
 const MAX_INPUT_HISTORY_ENTRIES: usize = 1_000;
+#[cfg(unix)]
+const ESCAPE_SEQUENCE_FIRST_BYTE_TIMEOUT_MS: i32 = 120;
+#[cfg(unix)]
+const ESCAPE_SEQUENCE_FOLLOWUP_TIMEOUT_MS: i32 = 120;
 
 #[derive(Debug, Serialize)]
 struct AgentMessageRequest<'a> {
@@ -999,10 +1008,30 @@ fn resolve_workspace_path_for_create(
     Ok(joined)
 }
 
-/// Prompts once-per-line until a non-empty input is entered.
-/// Returns `Ok(None)` on EOF (e.g. Ctrl-D), so callers can exit gracefully.
+/// Reads one prompt input and returns `Ok(None)` on EOF (e.g. Ctrl-D).
+///
+/// In TTY mode on Unix, this enables a simple line editor with Codex/Claude-like
+/// keybinds:
+/// - `Enter`: submit
+/// - `Shift+Option+Enter` / `Alt+Enter`: insert newline
+/// - `Ctrl+A` / `Ctrl+E`: move to line start/end
+/// - `Ctrl+B` / `Ctrl+F`, arrows: cursor movement
+/// - `Alt+B` / `Alt+F`: move by word
+/// - `Ctrl+U` / `Ctrl+K`: delete to start/end
+/// - `Up/Down` and `Ctrl+P/Ctrl+N`: input history
 fn parse_input(prompt: &str, input_session: &mut InputSession) -> io::Result<Option<String>> {
     let stdin = io::stdin();
+
+    #[cfg(unix)]
+    {
+        if is_tty(stdin.as_raw_fd()) {
+            return parse_input_interactive(prompt, input_session);
+        }
+        if let Ok(input) = parse_input_interactive_from_tty(prompt, input_session) {
+            return Ok(input);
+        }
+    }
+
     let stdout = io::stdout();
     let stderr = io::stderr();
     let mut reader = stdin.lock();
@@ -1027,6 +1056,9 @@ where
     E: Write,
 {
     let mut input = String::new();
+    let mut composed = String::new();
+    let esc = '\u{1b}';
+    const ESCAPED_ESC_SUFFIX: &str = "^[";
 
     loop {
         write!(writer, "{prompt}")?;
@@ -1035,16 +1067,648 @@ where
         input.clear();
         let bytes_read = reader.read_line(&mut input)?;
         if bytes_read == 0 {
+            if !composed.trim().is_empty() {
+                return Ok(Some(composed));
+            }
             writeln!(writer)?;
             return Ok(None);
         }
 
-        if input.trim().is_empty() {
-            writeln!(err_writer, "Input cannot be empty. Please try again.")?;
+        let line_without_newline = input.trim_end_matches(['\r', '\n']);
+        let (line, continues) = if let Some(stripped) = line_without_newline.strip_suffix(esc) {
+            (stripped, true)
+        } else if let Some(stripped) = line_without_newline.strip_suffix(ESCAPED_ESC_SUFFIX) {
+            // Some terminal/input-method combinations send Option+Enter as literal "^["
+            // followed by newline instead of a raw ESC byte.
+            (stripped, true)
+        } else {
+            (line_without_newline, false)
+        };
+        composed.push_str(line);
+
+        if continues {
+            composed.push('\n');
             continue;
         }
 
-        return Ok(Some(input.trim_end().to_owned()));
+        if composed.trim().is_empty() {
+            writeln!(err_writer, "Input cannot be empty. Please try again.")?;
+            composed.clear();
+            continue;
+        }
+
+        let normalized = std::mem::take(&mut composed).replace('\u{1b}', "");
+        return Ok(Some(normalized));
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+enum KeyPress {
+    Eof,
+    EnterCr,
+    EnterLf,
+    EscPrefix,
+    InsertNewline,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    WordLeft,
+    WordRight,
+    CtrlA,
+    CtrlB,
+    CtrlD,
+    CtrlE,
+    CtrlF,
+    CtrlK,
+    CtrlN,
+    CtrlP,
+    CtrlU,
+    Char(char),
+    Unknown,
+}
+
+#[cfg(unix)]
+#[derive(Default, Clone)]
+struct LineBuffer {
+    text: String,
+    cursor: usize,
+}
+
+#[cfg(unix)]
+impl LineBuffer {
+    fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+    }
+
+    fn set_text(&mut self, text: String) {
+        self.cursor = text.len();
+        self.text = text;
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        self.text.insert(self.cursor, ch);
+        self.cursor += ch.len_utf8();
+    }
+
+    fn move_left(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor = previous_char_boundary(&self.text, self.cursor);
+    }
+
+    fn move_right(&mut self) {
+        if self.cursor >= self.text.len() {
+            return;
+        }
+        self.cursor = next_char_boundary(&self.text, self.cursor);
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.cursor = self.text.len();
+    }
+
+    fn delete_left(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let previous = previous_char_boundary(&self.text, self.cursor);
+        self.text.drain(previous..self.cursor);
+        self.cursor = previous;
+    }
+
+    fn delete_right(&mut self) {
+        if self.cursor >= self.text.len() {
+            return;
+        }
+        let next = next_char_boundary(&self.text, self.cursor);
+        self.text.drain(self.cursor..next);
+    }
+
+    fn delete_to_start(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        self.text.drain(0..self.cursor);
+        self.cursor = 0;
+    }
+
+    fn delete_to_end(&mut self) {
+        self.text.truncate(self.cursor);
+    }
+
+    fn move_word_left(&mut self) {
+        let mut index = self.cursor;
+
+        while index > 0 {
+            let previous = previous_char_boundary(&self.text, index);
+            let ch = self.text[previous..index].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            index = previous;
+        }
+        while index > 0 {
+            let previous = previous_char_boundary(&self.text, index);
+            let ch = self.text[previous..index].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            index = previous;
+        }
+        self.cursor = index;
+    }
+
+    fn move_word_right(&mut self) {
+        let mut index = self.cursor;
+        let len = self.text.len();
+
+        while index < len {
+            let next = next_char_boundary(&self.text, index);
+            let ch = self.text[index..next].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            index = next;
+        }
+        while index < len {
+            let next = next_char_boundary(&self.text, index);
+            let ch = self.text[index..next].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            index = next;
+        }
+        self.cursor = index;
+    }
+}
+
+#[cfg(unix)]
+fn parse_input_interactive(
+    prompt: &str,
+    input_session: &mut InputSession,
+) -> io::Result<Option<String>> {
+    let stdin = io::stdin();
+    let fd = stdin.as_raw_fd();
+    let _raw_mode_guard = RawModeGuard::new(fd)?;
+    let mut reader = stdin.lock();
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+
+    parse_input_interactive_loop(prompt, input_session, &mut reader, &mut writer, fd)
+}
+
+#[cfg(unix)]
+fn parse_input_interactive_from_tty(
+    prompt: &str,
+    input_session: &mut InputSession,
+) -> io::Result<Option<String>> {
+    let mut tty = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")?;
+    let fd = tty.as_raw_fd();
+    let _raw_mode_guard = RawModeGuard::new(fd)?;
+    let mut reader = tty.try_clone()?;
+
+    parse_input_interactive_loop(prompt, input_session, &mut reader, &mut tty, fd)
+}
+
+#[cfg(unix)]
+fn parse_input_interactive_loop<R, W>(
+    prompt: &str,
+    input_session: &mut InputSession,
+    reader: &mut R,
+    writer: &mut W,
+    fd: RawFd,
+) -> io::Result<Option<String>>
+where
+    R: Read,
+    W: Write,
+{
+    let mut buffer = LineBuffer::default();
+    let mut previous_cursor_row = 0usize;
+    let mut history_index: Option<usize> = None;
+    let mut history_draft = String::new();
+    let mut ignore_next_enter_lf = false;
+    let mut pending_alt_prefix = false;
+    let mut ignore_next_enter_after_insert_newline = false;
+
+    previous_cursor_row = render_buffer(writer, prompt, &buffer, previous_cursor_row)?;
+
+    loop {
+        let mut key = read_key(reader, fd)?;
+        if pending_alt_prefix {
+            key = match key {
+                KeyPress::EnterCr | KeyPress::EnterLf => KeyPress::InsertNewline,
+                KeyPress::Char('b') | KeyPress::Char('B') => KeyPress::WordLeft,
+                KeyPress::Char('f') | KeyPress::Char('F') => KeyPress::WordRight,
+                KeyPress::Char('[') => read_escape_sequence_tail(reader, fd, b'[')?,
+                KeyPress::Char('O') => read_escape_sequence_tail(reader, fd, b'O')?,
+                other => other,
+            };
+            pending_alt_prefix = false;
+        }
+
+        if !matches!(key, KeyPress::EnterCr | KeyPress::EnterLf) {
+            ignore_next_enter_lf = false;
+        }
+
+        match key {
+            KeyPress::Eof => {
+                writeln!(writer, "\n")?;
+                writer.flush()?;
+                return Ok(None);
+            }
+            KeyPress::EscPrefix => {
+                pending_alt_prefix = true;
+                continue;
+            }
+            KeyPress::EnterCr | KeyPress::EnterLf if ignore_next_enter_after_insert_newline => {
+                ignore_next_enter_after_insert_newline = false;
+                continue;
+            }
+            KeyPress::EnterLf if ignore_next_enter_lf => {
+                ignore_next_enter_lf = false;
+            }
+            KeyPress::EnterCr | KeyPress::EnterLf => {
+                ignore_next_enter_lf = matches!(key, KeyPress::EnterCr);
+                if buffer.text.ends_with("^[") {
+                    buffer.text.truncate(buffer.text.len() - 2);
+                    buffer.cursor = buffer.text.len();
+                    buffer.insert_char('\n');
+                    previous_cursor_row =
+                        render_buffer(writer, prompt, &buffer, previous_cursor_row)?;
+                    continue;
+                }
+                if buffer.text.trim().is_empty() {
+                    writeln!(writer, "\nInput cannot be empty. Please try again.\n")?;
+                    buffer.clear();
+                    history_index = None;
+                    history_draft.clear();
+                    previous_cursor_row = 0;
+                } else {
+                    let submitted = buffer.text.replace('\u{1b}', "");
+                    writeln!(writer, "\n")?;
+                    writer.flush()?;
+                    input_session.record_entry(&submitted)?;
+                    return Ok(Some(submitted));
+                }
+            }
+            KeyPress::InsertNewline => {
+                ignore_next_enter_lf = false;
+                ignore_next_enter_after_insert_newline = true;
+                if history_index.is_some() {
+                    history_index = None;
+                    history_draft.clear();
+                }
+                buffer.insert_char('\n');
+            }
+            KeyPress::Backspace => {
+                if history_index.is_some() {
+                    history_index = None;
+                    history_draft.clear();
+                }
+                buffer.delete_left();
+            }
+            KeyPress::Delete => {
+                if history_index.is_some() {
+                    history_index = None;
+                    history_draft.clear();
+                }
+                // Some terminals only emit "Delete" for the key users expect as backspace.
+                // If the cursor is at EOL, treat it like backspace for practical behavior.
+                if buffer.cursor >= buffer.text.len() {
+                    buffer.delete_left();
+                } else {
+                    buffer.delete_right();
+                }
+            }
+            KeyPress::Left | KeyPress::CtrlB => buffer.move_left(),
+            KeyPress::Right | KeyPress::CtrlF => buffer.move_right(),
+            KeyPress::Home | KeyPress::CtrlA => buffer.move_home(),
+            KeyPress::End | KeyPress::CtrlE => buffer.move_end(),
+            KeyPress::WordLeft => buffer.move_word_left(),
+            KeyPress::WordRight => buffer.move_word_right(),
+            KeyPress::CtrlU => {
+                if history_index.is_some() {
+                    history_index = None;
+                    history_draft.clear();
+                }
+                buffer.delete_to_start();
+            }
+            KeyPress::CtrlK => {
+                if history_index.is_some() {
+                    history_index = None;
+                    history_draft.clear();
+                }
+                buffer.delete_to_end();
+            }
+            KeyPress::CtrlD => {
+                if buffer.text.is_empty() {
+                    writeln!(writer, "\n")?;
+                    writer.flush()?;
+                    return Ok(None);
+                }
+                if history_index.is_some() {
+                    history_index = None;
+                    history_draft.clear();
+                }
+                buffer.delete_right();
+            }
+            KeyPress::Up | KeyPress::CtrlP => {
+                if !input_session.entries.is_empty() {
+                    match history_index {
+                        None => {
+                            history_draft = buffer.text.clone();
+                            history_index = Some(input_session.entries.len() - 1);
+                        }
+                        Some(index) if index > 0 => {
+                            history_index = Some(index - 1);
+                        }
+                        _ => {}
+                    }
+                    if let Some(index) = history_index {
+                        buffer.set_text(input_session.entries[index].clone());
+                    }
+                }
+            }
+            KeyPress::Down | KeyPress::CtrlN => {
+                if let Some(index) = history_index {
+                    if index + 1 < input_session.entries.len() {
+                        let next = index + 1;
+                        history_index = Some(next);
+                        buffer.set_text(input_session.entries[next].clone());
+                    } else {
+                        history_index = None;
+                        buffer.set_text(history_draft.clone());
+                    }
+                }
+            }
+            KeyPress::Char(ch) => {
+                if history_index.is_some() {
+                    history_index = None;
+                    history_draft.clear();
+                }
+                buffer.insert_char(ch);
+            }
+            KeyPress::Unknown => {}
+        }
+
+        previous_cursor_row = render_buffer(writer, prompt, &buffer, previous_cursor_row)?;
+    }
+}
+
+#[cfg(unix)]
+fn previous_char_boundary(content: &str, index: usize) -> usize {
+    content[..index]
+        .char_indices()
+        .last()
+        .map(|(offset, _)| offset)
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn next_char_boundary(content: &str, index: usize) -> usize {
+    content[index..]
+        .char_indices()
+        .nth(1)
+        .map(|(offset, _)| index + offset)
+        .unwrap_or(content.len())
+}
+
+#[cfg(unix)]
+fn render_buffer<W: Write>(
+    writer: &mut W,
+    prompt: &str,
+    buffer: &LineBuffer,
+    previous_cursor_row: usize,
+) -> io::Result<usize> {
+    writeln!(writer, "\r")?;
+    if previous_cursor_row > 0 {
+        writeln!(writer, "\x1b[{}A", previous_cursor_row)?;
+    }
+    writeln!(writer, "\x1b[J")?;
+    writeln!(writer, "{prompt}{}", buffer.text)?;
+
+    let rendered = format!("{prompt}{}", buffer.text);
+    let rendered_to_cursor = format!("{prompt}{}", &buffer.text[..buffer.cursor]);
+    let (end_row, _) = display_cursor_position(&rendered);
+    let (cursor_row, cursor_col) = display_cursor_position(&rendered_to_cursor);
+
+    if end_row > cursor_row {
+        writeln!(writer, "\x1b[{}A", end_row - cursor_row)?;
+    }
+    writeln!(writer, "\r")?;
+    if cursor_col > 0 {
+        writeln!(writer, "\x1b[{}C", cursor_col)?;
+    }
+    writer.flush()?;
+
+    Ok(cursor_row)
+}
+
+#[cfg(unix)]
+fn display_cursor_position(content: &str) -> (usize, usize) {
+    let mut row = 0usize;
+    let mut col = 0usize;
+    for ch in content.chars() {
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (row, col)
+}
+
+#[cfg(unix)]
+fn read_key<R: Read>(reader: &mut R, fd: RawFd) -> io::Result<KeyPress> {
+    let mut first = [0u8; 1];
+    let bytes_read = reader.read(&mut first)?;
+    if bytes_read == 0 {
+        return Ok(KeyPress::Eof);
+    }
+
+    match first[0] {
+        b'\r' => Ok(KeyPress::EnterCr),
+        b'\n' => Ok(KeyPress::EnterLf),
+        0x7f | 0x08 => Ok(KeyPress::Backspace),
+        0x01 => Ok(KeyPress::CtrlA),
+        0x02 => Ok(KeyPress::CtrlB),
+        0x04 => Ok(KeyPress::CtrlD),
+        0x05 => Ok(KeyPress::CtrlE),
+        0x06 => Ok(KeyPress::CtrlF),
+        0x0b => Ok(KeyPress::CtrlK),
+        0x0e => Ok(KeyPress::CtrlN),
+        0x10 => Ok(KeyPress::CtrlP),
+        0x15 => Ok(KeyPress::CtrlU),
+        0x1b => parse_escape_sequence(reader, fd),
+        first_byte => decode_utf8_char(first_byte, reader),
+    }
+}
+
+#[cfg(unix)]
+fn decode_utf8_char<R: Read>(first_byte: u8, reader: &mut R) -> io::Result<KeyPress> {
+    let width = match first_byte {
+        0x00..=0x7f => 1,
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return Ok(KeyPress::Unknown),
+    };
+
+    let mut bytes = [0u8; 4];
+    bytes[0] = first_byte;
+    if width > 1 {
+        reader.read_exact(&mut bytes[1..width])?;
+    }
+
+    let decoded = str::from_utf8(&bytes[..width])
+        .ok()
+        .and_then(|value| value.chars().next())
+        .map(KeyPress::Char)
+        .unwrap_or(KeyPress::Unknown);
+    Ok(decoded)
+}
+
+#[cfg(unix)]
+fn parse_escape_sequence<R: Read>(reader: &mut R, fd: RawFd) -> io::Result<KeyPress> {
+    if !stdin_readable(fd, ESCAPE_SEQUENCE_FIRST_BYTE_TIMEOUT_MS)? {
+        return Ok(KeyPress::EscPrefix);
+    }
+
+    let mut first = [0u8; 1];
+    let bytes_read = reader.read(&mut first)?;
+    if bytes_read == 0 {
+        return Ok(KeyPress::EscPrefix);
+    }
+
+    read_escape_sequence_tail(reader, fd, first[0])
+}
+
+#[cfg(unix)]
+fn read_escape_sequence_tail<R: Read>(
+    reader: &mut R,
+    fd: RawFd,
+    first_byte: u8,
+) -> io::Result<KeyPress> {
+    let mut sequence = Vec::with_capacity(16);
+    sequence.push(first_byte);
+    while sequence.len() < 16 && stdin_readable(fd, ESCAPE_SEQUENCE_FOLLOWUP_TIMEOUT_MS)? {
+        let mut next = [0u8; 1];
+        let bytes_read = reader.read(&mut next)?;
+        if bytes_read == 0 {
+            break;
+        }
+        sequence.push(next[0]);
+    }
+    Ok(map_escape_sequence(sequence.as_slice()))
+}
+
+#[cfg(unix)]
+fn map_escape_sequence(sequence: &[u8]) -> KeyPress {
+    match sequence {
+        [b'\r'] | [b'\n'] | [b'\r', b'\n'] | [b'\n', b'\r'] => KeyPress::InsertNewline,
+        // CSI-u keyboard protocol: Enter and modified Enter
+        [b'[', b'1', b'3', b'u'] => KeyPress::EnterLf,
+        [b'[', b'1', b'3', b';', b'2', b'u']
+        | [b'[', b'1', b'3', b';', b'3', b'u']
+        | [b'[', b'1', b'3', b';', b'4', b'u']
+        | [b'[', b'1', b'3', b';', b'5', b'u']
+        | [b'[', b'1', b'3', b';', b'6', b'u']
+        | [b'[', b'1', b'3', b';', b'7', b'u']
+        | [b'[', b'1', b'3', b';', b'8', b'u'] => KeyPress::InsertNewline,
+        // xterm modifyOtherKeys for Enter with modifiers
+        [b'[', b'2', b'7', b';', b'2', b';', b'1', b'3', b'~']
+        | [b'[', b'2', b'7', b';', b'3', b';', b'1', b'3', b'~']
+        | [b'[', b'2', b'7', b';', b'4', b';', b'1', b'3', b'~']
+        | [b'[', b'2', b'7', b';', b'5', b';', b'1', b'3', b'~']
+        | [b'[', b'2', b'7', b';', b'6', b';', b'1', b'3', b'~']
+        | [b'[', b'2', b'7', b';', b'7', b';', b'1', b'3', b'~']
+        | [b'[', b'2', b'7', b';', b'8', b';', b'1', b'3', b'~'] => KeyPress::InsertNewline,
+        [0x7f] | [0x08] => KeyPress::Backspace,
+        [b'b'] | [b'B'] => KeyPress::WordLeft,
+        [b'f'] | [b'F'] => KeyPress::WordRight,
+        [b'[', b'A'] => KeyPress::Up,
+        [b'[', b'B'] => KeyPress::Down,
+        [b'[', b'C'] => KeyPress::Right,
+        [b'[', b'D'] => KeyPress::Left,
+        [b'[', b'H'] | [b'O', b'H'] | [b'[', b'1', b'~'] | [b'[', b'7', b'~'] => KeyPress::Home,
+        [b'[', b'F'] | [b'O', b'F'] | [b'[', b'4', b'~'] | [b'[', b'8', b'~'] => KeyPress::End,
+        [b'[', b'3', b'~']
+        | [b'[', b'3', b';', b'2', b'~']
+        | [b'[', b'3', b';', b'3', b'~']
+        | [b'[', b'3', b';', b'5', b'~'] => KeyPress::Delete,
+        [b'[', b'1', b';', b'3', b'D'] | [b'[', b'1', b';', b'5', b'D'] => KeyPress::WordLeft,
+        [b'[', b'1', b';', b'3', b'C'] | [b'[', b'1', b';', b'5', b'C'] => KeyPress::WordRight,
+        _ => KeyPress::Unknown,
+    }
+}
+
+#[cfg(unix)]
+fn stdin_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let status = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+    if status < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(status > 0 && (poll_fd.revents & libc::POLLIN) != 0)
+}
+
+#[cfg(unix)]
+fn is_tty(fd: RawFd) -> bool {
+    unsafe { libc::isatty(fd) == 1 }
+}
+
+#[cfg(unix)]
+struct RawModeGuard {
+    fd: RawFd,
+    original: libc::termios,
+}
+
+#[cfg(unix)]
+impl RawModeGuard {
+    fn new(fd: RawFd) -> io::Result<Self> {
+        let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+        if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut raw = original;
+        raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+        raw.c_iflag &= !(libc::IXON | libc::ICRNL);
+        raw.c_cc[libc::VMIN] = 1;
+        raw.c_cc[libc::VTIME] = 0;
+
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(Self { fd, original })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.original) };
     }
 }
 
@@ -1103,6 +1767,54 @@ mod tests {
         assert_eq!(input, None);
         assert_eq!(String::from_utf8(out).unwrap(), ">> \n");
         assert!(err.is_empty());
+    }
+
+    #[test]
+    fn supports_multiline_input_when_line_ends_with_escape() {
+        let mut reader = Cursor::new(b"first line\x1b\nsecond line\n");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let input = parse_input_from(">> ", &mut reader, &mut out, &mut err).unwrap();
+
+        assert_eq!(input, Some("first line\nsecond line".to_string()));
+        assert_eq!(String::from_utf8(out).unwrap(), ">> >> ");
+        assert!(err.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maps_ctrl_shift_enter_escape_sequence_to_insert_newline() {
+        let key = super::map_escape_sequence(b"[13;6u");
+        assert!(matches!(key, super::KeyPress::InsertNewline));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maps_xterm_modify_other_keys_enter_to_insert_newline() {
+        let key = super::map_escape_sequence(b"[27;6;13~");
+        assert!(matches!(key, super::KeyPress::InsertNewline));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maps_crlf_escape_sequence_to_insert_newline() {
+        let key = super::map_escape_sequence(b"\r\n");
+        assert!(matches!(key, super::KeyPress::InsertNewline));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maps_arrow_right_escape_sequence() {
+        let key = super::map_escape_sequence(b"[C");
+        assert!(matches!(key, super::KeyPress::Right));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maps_arrow_left_escape_sequence() {
+        let key = super::map_escape_sequence(b"[D");
+        assert!(matches!(key, super::KeyPress::Left));
     }
 
     #[test]
