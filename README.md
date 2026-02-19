@@ -1,3 +1,3 @@
 # socium
 
-A minimum AI agent with multiple platform
+A minimal AI agent for multiple platforms
