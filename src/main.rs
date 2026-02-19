@@ -1284,7 +1284,6 @@ where
     let mut history_draft = String::new();
     let mut ignore_next_enter_lf = false;
     let mut pending_alt_prefix = false;
-    let mut ignore_next_enter_after_insert_newline = false;
 
     previous_cursor_row = render_buffer(writer, prompt, &buffer, previous_cursor_row)?;
 
@@ -1316,10 +1315,6 @@ where
                 pending_alt_prefix = true;
                 continue;
             }
-            KeyPress::EnterCr | KeyPress::EnterLf if ignore_next_enter_after_insert_newline => {
-                ignore_next_enter_after_insert_newline = false;
-                continue;
-            }
             KeyPress::EnterLf if ignore_next_enter_lf => {
                 ignore_next_enter_lf = false;
             }
@@ -1349,7 +1344,6 @@ where
             }
             KeyPress::InsertNewline => {
                 ignore_next_enter_lf = false;
-                ignore_next_enter_after_insert_newline = true;
                 if history_index.is_some() {
                     history_index = None;
                     history_draft.clear();
