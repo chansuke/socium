@@ -768,17 +768,30 @@ fn resolve_workspace_path_for_create(
         ));
     }
     let joined = workspace_canonical.join(path);
-    if joined.exists() {
-        let canonical = joined
-            .canonicalize()
-            .map_err(|e| format!("Failed to resolve path '{}': {e}", requested_path))?;
-        if !canonical.starts_with(&workspace_canonical) {
-            return Err(format!(
-                "Path '{}' is outside the workspace",
-                requested_path
-            ));
+    match fs::symlink_metadata(&joined) {
+        Ok(metadata) => {
+            let canonical = match joined.canonicalize() {
+                Ok(path) => path,
+                Err(e) if metadata.file_type().is_symlink() && e.kind() == ErrorKind::NotFound => {
+                    return Err(format!(
+                        "Path '{}' points to a dangling symlink",
+                        requested_path
+                    ));
+                }
+                Err(e) => return Err(format!("Failed to resolve path '{}': {e}", requested_path)),
+            };
+            if !canonical.starts_with(&workspace_canonical) {
+                return Err(format!(
+                    "Path '{}' is outside the workspace",
+                    requested_path
+                ));
+            }
+            return Ok(canonical);
         }
-        return Ok(canonical);
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!("Failed to inspect path '{}': {e}", requested_path));
+        }
     }
 
     let parent = joined.parent().ok_or_else(|| {
@@ -1506,6 +1519,23 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("outside the workspace"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_for_create_rejects_dangling_symlink_path() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = make_temp_dir("workspace");
+        let outside = make_temp_dir("outside");
+        let missing_target = outside.path().join("missing.txt");
+        let link = workspace.path().join("link.txt");
+        symlink(&missing_target, &link).unwrap();
+
+        let result = resolve_workspace_path_for_create(workspace.path(), "link.txt");
+
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("dangling symlink"));
     }
 
     #[cfg(unix)]
