@@ -270,21 +270,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         })?;
 
-    let Some(user_input) = parse_input(">> ", &mut input_session)? else {
-        return Ok(());
-    };
-
-    messages.push(Message::user_text(user_input));
     let tools = vec![read_file_tool(), list_files_tool(), text_editor_tool()];
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
 
+    loop {
+        let Some(user_input) = parse_input(">> ", &mut input_session)? else {
+            break;
+        };
+
+        match user_input.trim() {
+            "/exit" | "/quit" => break,
+            "/clear" => {
+                messages.clear();
+                save_json_file(
+                    &conversation_path,
+                    &ConversationState {
+                        messages: messages.clone(),
+                    },
+                )?;
+                println!("Conversation cleared.");
+                continue;
+            }
+            _ => {}
+        }
+
+        messages.push(Message::user_text(user_input));
+        run_agent_turn(
+            &client,
+            &api_key,
+            &anthropic_version,
+            &model,
+            max_tokens,
+            &tools,
+            &workspace_root,
+            &mut messages,
+        )
+        .await?;
+        save_json_file(
+            &conversation_path,
+            &ConversationState {
+                messages: messages.clone(),
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_turn(
+    client: &reqwest::Client,
+    api_key: &str,
+    anthropic_version: &str,
+    model: &str,
+    max_tokens: u32,
+    tools: &[ToolDefinition],
+    workspace_root: &Path,
+    messages: &mut Vec<Message>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut finished = false;
     for _ in 0..MAX_TOOL_ROUNDS {
-        let message_request = AgentMessageRequest::new(&model, max_tokens, &messages, &tools);
-        let response =
-            send_message(&client, &api_key, &anthropic_version, &message_request).await?;
+        let message_request = AgentMessageRequest::new(model, max_tokens, messages, tools);
+        let response = send_message(client, api_key, anthropic_version, &message_request).await?;
         let assistant_blocks = response.content;
 
         let message_text = extract_text(&assistant_blocks);
@@ -292,7 +341,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{message_text}");
         }
 
-        let tool_results = run_tool_calls(&workspace_root, &assistant_blocks);
+        let tool_results = run_tool_calls(workspace_root, &assistant_blocks);
         messages.push(Message::assistant_blocks(assistant_blocks));
         if tool_results.is_empty() {
             finished = true;
@@ -307,14 +356,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .into());
     }
-
-    save_json_file(
-        &conversation_path,
-        &ConversationState {
-            messages: messages.clone(),
-        },
-    )?;
-
     Ok(())
 }
 
