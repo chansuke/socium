@@ -16,6 +16,8 @@ const MAX_TEXT_EDITOR_VIEW_CHARACTERS: usize = 50_000;
 const MAX_TEXT_EDITOR_VIEW_READ_BYTES: usize = 4 * 1024 * 1024;
 const STATE_DIR_NAME: &str = ".socium";
 const CONVERSATION_STATE_FILE_NAME: &str = "conversation.json";
+const INPUT_HISTORY_FILE_NAME: &str = "input_history.json";
+const MAX_INPUT_HISTORY_ENTRIES: usize = 1_000;
 
 #[derive(Debug, Serialize)]
 struct AgentMessageRequest<'a> {
@@ -183,6 +185,49 @@ struct ConversationState {
     messages: Vec<Message>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct InputHistoryState {
+    entries: Vec<String>,
+}
+
+struct InputSession {
+    history_path: PathBuf,
+    entries: Vec<String>,
+}
+
+impl InputSession {
+    fn load(history_path: PathBuf) -> io::Result<Self> {
+        let state = load_json_file::<InputHistoryState>(&history_path)?;
+        Ok(Self {
+            history_path,
+            entries: state.entries,
+        })
+    }
+
+    fn record_entry(&mut self, entry: &str) -> io::Result<()> {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        if self.entries.last().is_some_and(|last| last == entry) {
+            return Ok(());
+        }
+
+        self.entries.push(entry.to_string());
+        if self.entries.len() > MAX_INPUT_HISTORY_ENTRIES {
+            let overflow = self.entries.len() - MAX_INPUT_HISTORY_ENTRIES;
+            self.entries.drain(0..overflow);
+        }
+
+        save_json_file(
+            &self.history_path,
+            &InputHistoryState {
+                entries: self.entries.clone(),
+            },
+        )
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace_root = env::current_dir()?;
@@ -197,6 +242,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 conversation_path.display()
             );
             Vec::new()
+        }
+    };
+    let mut input_session = match InputSession::load(state_dir.join(INPUT_HISTORY_FILE_NAME)) {
+        Ok(session) => session,
+        Err(err) => {
+            eprintln!("Failed to load input history: {err}. Starting with empty input history.");
+            InputSession {
+                history_path: state_dir.join(INPUT_HISTORY_FILE_NAME),
+                entries: Vec::new(),
+            }
         }
     };
 
@@ -215,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         })?;
 
-    let Some(user_input) = parse_input(">> ")? else {
+    let Some(user_input) = parse_input(">> ", &mut input_session)? else {
         return Ok(());
     };
 
@@ -905,16 +960,18 @@ fn resolve_workspace_path_for_create(
 
 /// Prompts once-per-line until a non-empty input is entered.
 /// Returns `Ok(None)` on EOF (e.g. Ctrl-D), so callers can exit gracefully.
-pub fn parse_input(prompt: &str) -> io::Result<Option<String>> {
+fn parse_input(prompt: &str, input_session: &mut InputSession) -> io::Result<Option<String>> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let stderr = io::stderr();
-
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
     let mut err_writer = stderr.lock();
-
-    parse_input_from(prompt, &mut reader, &mut writer, &mut err_writer)
+    let input = parse_input_from(prompt, &mut reader, &mut writer, &mut err_writer)?;
+    if let Some(entry) = input.as_deref() {
+        input_session.record_entry(entry)?;
+    }
+    Ok(input)
 }
 
 fn parse_input_from<R, W, E>(
