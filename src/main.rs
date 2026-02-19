@@ -339,7 +339,7 @@ fn text_editor_view(
         return Err(format!("Path is neither a file nor directory: '{}'", path));
     }
 
-    let content = read_utf8_file_with_limit(&resolved_path, path, MAX_READ_FILE_BYTES)?;
+    let content = read_utf8_file(&resolved_path, path)?;
     let selected_content = apply_view_range(&content, input.get("view_range"))?;
     let (display_content, truncated) =
         truncate_by_characters(&selected_content, MAX_TEXT_EDITOR_VIEW_CHARACTERS);
@@ -505,8 +505,7 @@ fn apply_view_range(content: &str, view_range: Option<&Value>) -> Result<String,
         return Err("text_editor view_range end must be -1 or >= start".to_string());
     }
 
-    let lines: Vec<&str> = content.lines().collect();
-    let line_count = lines.len() as i64;
+    let line_count = count_lines(content) as i64;
     if line_count == 0 {
         if start == 1 {
             return Ok(String::new());
@@ -524,7 +523,27 @@ fn apply_view_range(content: &str, view_range: Option<&Value>) -> Result<String,
     } else {
         std::cmp::min(end, line_count)
     };
-    Ok(lines[(start as usize - 1)..last as usize].join("\n"))
+    let start_line = start as usize;
+    let end_line = last as usize;
+
+    let start_offset = line_start_offset(content, start_line).ok_or_else(|| {
+        format!(
+            "text_editor view_range start {} is out of range (file has {} lines)",
+            start, line_count
+        )
+    })?;
+    let end_offset = if end_line as i64 == line_count {
+        content.len()
+    } else {
+        line_start_offset(content, end_line + 1).ok_or_else(|| {
+            format!(
+                "text_editor view_range end {} is out of range (file has {} lines)",
+                end_line, line_count
+            )
+        })?
+    };
+
+    Ok(content[start_offset..end_offset].to_string())
 }
 
 fn truncate_by_characters(content: &str, max_characters: usize) -> (String, bool) {
@@ -567,6 +586,32 @@ fn byte_index_after_line(content: &str, line: usize) -> Option<usize> {
         return Some(content.len());
     }
     None
+}
+
+fn line_start_offset(content: &str, line: usize) -> Option<usize> {
+    if line == 0 {
+        return None;
+    }
+    if line == 1 {
+        return Some(0);
+    }
+
+    let mut current_line = 1usize;
+    for (index, byte) in content.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            current_line += 1;
+            if current_line == line {
+                return Some(index + 1);
+            }
+        }
+    }
+    None
+}
+
+fn read_utf8_file(path: &Path, display_path: &str) -> Result<String, String> {
+    let bytes =
+        fs::read(path).map_err(|e| format!("Failed to read file '{}': {e}", display_path))?;
+    String::from_utf8(bytes).map_err(|e| format!("File '{}' is not valid UTF-8: {e}", display_path))
 }
 
 fn read_utf8_file_with_limit(
@@ -1061,6 +1106,57 @@ mod tests {
                 assert!(content.contains("Path: edit.txt"));
                 assert!(content.contains("second\nthird"));
                 assert_eq!(is_error, None);
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_view_range_preserves_line_endings() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("crlf.txt");
+        fs::write(&file_path, b"line1\r\nline2\r\nline3\r\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_view_crlf",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({"command": "view", "path": "crlf.txt", "view_range": [2, 2]}),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert_eq!(content, "Path: crlf.txt\nline2\r\n");
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_view_large_file_is_truncated_instead_of_rejected() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("large-view.txt");
+        let large = vec![b'a'; MAX_READ_FILE_BYTES + 1];
+        fs::write(&file_path, large).unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_view_large",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({"command": "view", "path": "large-view.txt"}),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Path: large-view.txt"));
+                assert!(content.contains("(truncated: showing first"));
+                assert!(!content.contains("File too large"));
             }
             _ => panic!("expected tool_result"),
         }
