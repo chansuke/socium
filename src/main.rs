@@ -12,6 +12,7 @@ const MAX_TOOL_ROUNDS: usize = 20;
 const MAX_LIST_ENTRIES: usize = 1000;
 const TEXT_EDITOR_TOOL_NAME: &str = "str_replace_based_edit_tool";
 const MAX_TEXT_EDITOR_VIEW_CHARACTERS: usize = 50_000;
+const MAX_TEXT_EDITOR_VIEW_READ_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 struct AgentMessageRequest<'a> {
@@ -339,7 +340,7 @@ fn text_editor_view(
         return Err(format!("Path is neither a file nor directory: '{}'", path));
     }
 
-    let content = read_utf8_file(&resolved_path, path)?;
+    let content = read_utf8_file_with_limit(&resolved_path, path, MAX_TEXT_EDITOR_VIEW_READ_BYTES)?;
     let selected_content = apply_view_range(&content, input.get("view_range"))?;
     let (display_content, truncated) =
         truncate_by_characters(&selected_content, MAX_TEXT_EDITOR_VIEW_CHARACTERS);
@@ -608,12 +609,6 @@ fn line_start_offset(content: &str, line: usize) -> Option<usize> {
     None
 }
 
-fn read_utf8_file(path: &Path, display_path: &str) -> Result<String, String> {
-    let bytes =
-        fs::read(path).map_err(|e| format!("Failed to read file '{}': {e}", display_path))?;
-    String::from_utf8(bytes).map_err(|e| format!("File '{}' is not valid UTF-8: {e}", display_path))
-}
-
 fn read_utf8_file_with_limit(
     path: &Path,
     display_path: &str,
@@ -865,9 +860,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ContentBlock, MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, TEXT_EDITOR_TOOL_NAME, extract_text,
-        list_files_from_workspace, parse_input_from, read_file_from_workspace,
-        resolve_workspace_path, resolve_workspace_path_for_create, run_tool_call, run_tool_calls,
+        ContentBlock, MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES,
+        TEXT_EDITOR_TOOL_NAME, extract_text, list_files_from_workspace, parse_input_from,
+        read_file_from_workspace, resolve_workspace_path, resolve_workspace_path_for_create,
+        run_tool_call, run_tool_calls,
     };
     use serde_json::json;
     use std::fs;
@@ -1170,6 +1166,32 @@ mod tests {
                 assert!(content.contains("Path: large-view.txt"));
                 assert!(content.contains("(truncated: showing first"));
                 assert!(!content.contains("File too large"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_view_rejects_extremely_large_file() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("too-large-view.txt");
+        let huge = vec![b'a'; MAX_TEXT_EDITOR_VIEW_READ_BYTES + 1];
+        fs::write(&file_path, huge).unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_view_too_large",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({"command": "view", "path": "too-large-view.txt"}),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("File too large"));
+                assert!(content.contains("too-large-view.txt"));
             }
             _ => panic!("expected tool_result"),
         }
