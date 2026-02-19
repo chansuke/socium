@@ -1027,9 +1027,6 @@ fn parse_input(prompt: &str, input_session: &mut InputSession) -> io::Result<Opt
         if is_tty(stdin.as_raw_fd()) {
             return parse_input_interactive(prompt, input_session);
         }
-        if let Ok(input) = parse_input_interactive_from_tty(prompt, input_session) {
-            return Ok(input);
-        }
     }
 
     let stdout = io::stdout();
@@ -1267,22 +1264,6 @@ fn parse_input_interactive(
     let mut writer = stdout.lock();
 
     parse_input_interactive_loop(prompt, input_session, &mut reader, &mut writer, fd)
-}
-
-#[cfg(unix)]
-fn parse_input_interactive_from_tty(
-    prompt: &str,
-    input_session: &mut InputSession,
-) -> io::Result<Option<String>> {
-    let mut tty = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")?;
-    let fd = tty.as_raw_fd();
-    let _raw_mode_guard = RawModeGuard::new(fd)?;
-    let mut reader = tty.try_clone()?;
-
-    parse_input_interactive_loop(prompt, input_session, &mut reader, &mut tty, fd)
 }
 
 #[cfg(unix)]
