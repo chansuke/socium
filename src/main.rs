@@ -23,6 +23,7 @@ const STATE_DIR_NAME: &str = ".socium";
 const CONVERSATION_STATE_FILE_NAME: &str = "conversation.json";
 const INPUT_HISTORY_FILE_NAME: &str = "input_history.json";
 const MAX_INPUT_HISTORY_ENTRIES: usize = 1_000;
+const MAX_PERSISTED_MESSAGES: usize = 2_000;
 #[cfg(unix)]
 const ESCAPE_SEQUENCE_FIRST_BYTE_TIMEOUT_MS: i32 = 120;
 #[cfg(unix)]
@@ -199,6 +200,16 @@ struct InputHistoryState {
     entries: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct InputHistoryStateRef<'a> {
+    entries: &'a [String],
+}
+
+#[derive(Debug, Serialize)]
+struct ConversationStateRef<'a> {
+    messages: &'a [Message],
+}
+
 struct InputSession {
     history_path: PathBuf,
     entries: Vec<String>,
@@ -230,8 +241,8 @@ impl InputSession {
 
         save_json_file(
             &self.history_path,
-            &InputHistoryState {
-                entries: self.entries.clone(),
+            &InputHistoryStateRef {
+                entries: &self.entries,
             },
         )
     }
@@ -244,7 +255,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conversation_path = state_dir.join(CONVERSATION_STATE_FILE_NAME);
 
     let mut messages = match load_json_file::<ConversationState>(&conversation_path) {
-        Ok(state) => state.messages,
+        Ok(state) => {
+            let mut messages = state.messages;
+            if messages.len() > MAX_PERSISTED_MESSAGES {
+                let overflow = messages.len() - MAX_PERSISTED_MESSAGES;
+                messages.drain(0..overflow);
+                eprintln!(
+                    "Persisted conversation exceeded {} messages and was truncated.",
+                    MAX_PERSISTED_MESSAGES
+                );
+            }
+            messages
+        }
         Err(err) => {
             eprintln!(
                 "Failed to load persisted conversation '{}': {err}. Starting with an empty conversation.",
@@ -289,16 +311,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         };
 
-        match user_input.trim() {
+        let command = user_input
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match command.as_str() {
             "/exit" | "/quit" => break,
             "/clear" => {
                 messages.clear();
-                save_json_file(
+                if let Err(err) = save_json_file(
                     &conversation_path,
-                    &ConversationState {
-                        messages: messages.clone(),
+                    &ConversationStateRef {
+                        messages: &messages,
                     },
-                )?;
+                ) {
+                    eprintln!("Warning: failed to persist cleared conversation state: {err}");
+                }
                 println!("Conversation cleared.");
                 continue;
             }
@@ -317,12 +346,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut messages,
         )
         .await?;
-        save_json_file(
+        if let Err(err) = save_json_file(
             &conversation_path,
-            &ConversationState {
-                messages: messages.clone(),
+            &ConversationStateRef {
+                messages: &messages,
             },
-        )?;
+        ) {
+            eprintln!("Warning: failed to persist conversation state: {err}");
+        }
     }
 
     Ok(())
@@ -1035,8 +1066,10 @@ fn parse_input(prompt: &str, input_session: &mut InputSession) -> io::Result<Opt
     let mut writer = stdout.lock();
     let mut err_writer = stderr.lock();
     let input = parse_input_from(prompt, &mut reader, &mut writer, &mut err_writer)?;
-    if let Some(entry) = input.as_deref() {
-        input_session.record_entry(entry)?;
+    if let Some(entry) = input.as_deref()
+        && let Err(err) = input_session.record_entry(entry)
+    {
+        eprintln!("Warning: failed to persist input history: {err}");
     }
     Ok(input)
 }
@@ -1338,7 +1371,9 @@ where
                     let submitted = buffer.text.replace('\u{1b}', "");
                     writeln!(writer, "\n")?;
                     writer.flush()?;
-                    input_session.record_entry(&submitted)?;
+                    if let Err(err) = input_session.record_entry(&submitted) {
+                        eprintln!("Warning: failed to persist input history: {err}");
+                    }
                     return Ok(Some(submitted));
                 }
             }
@@ -1478,7 +1513,12 @@ fn render_buffer<W: Write>(
     write!(writer, "{prompt}{}", buffer.text)?;
 
     let rendered = format!("{prompt}{}", buffer.text);
-    let rendered_to_cursor = format!("{prompt}{}", &buffer.text[..buffer.cursor]);
+    let mut safe_cursor = buffer.cursor.min(buffer.text.len());
+    while safe_cursor > 0 && !buffer.text.is_char_boundary(safe_cursor) {
+        safe_cursor -= 1;
+    }
+    debug_assert!(buffer.text.is_char_boundary(safe_cursor));
+    let rendered_to_cursor = format!("{prompt}{}", &buffer.text[..safe_cursor]);
     let (end_row, _) = display_cursor_position(&rendered);
     let (cursor_row, cursor_col) = display_cursor_position(&rendered_to_cursor);
 
@@ -1531,12 +1571,12 @@ fn read_key<R: Read>(reader: &mut R, fd: RawFd) -> io::Result<KeyPress> {
         0x10 => Ok(KeyPress::CtrlP),
         0x15 => Ok(KeyPress::CtrlU),
         0x1b => parse_escape_sequence(reader, fd),
-        first_byte => decode_utf8_char(first_byte, reader),
+        first_byte => decode_utf8_char(first_byte, reader, fd),
     }
 }
 
 #[cfg(unix)]
-fn decode_utf8_char<R: Read>(first_byte: u8, reader: &mut R) -> io::Result<KeyPress> {
+fn decode_utf8_char<R: Read>(first_byte: u8, reader: &mut R, fd: RawFd) -> io::Result<KeyPress> {
     let width = match first_byte {
         0x00..=0x7f => 1,
         0xc2..=0xdf => 2,
@@ -1548,7 +1588,17 @@ fn decode_utf8_char<R: Read>(first_byte: u8, reader: &mut R) -> io::Result<KeyPr
     let mut bytes = [0u8; 4];
     bytes[0] = first_byte;
     if width > 1 {
-        reader.read_exact(&mut bytes[1..width])?;
+        for slot in bytes.iter_mut().take(width).skip(1) {
+            let Some(byte) =
+                read_byte_with_timeout(reader, fd, ESCAPE_SEQUENCE_FOLLOWUP_TIMEOUT_MS)?
+            else {
+                return Ok(KeyPress::Unknown);
+            };
+            if (byte & 0b1100_0000) != 0b1000_0000 {
+                return Ok(KeyPress::Unknown);
+            }
+            *slot = byte;
+        }
     }
 
     let decoded = str::from_utf8(&bytes[..width])
@@ -1557,6 +1607,23 @@ fn decode_utf8_char<R: Read>(first_byte: u8, reader: &mut R) -> io::Result<KeyPr
         .map(KeyPress::Char)
         .unwrap_or(KeyPress::Unknown);
     Ok(decoded)
+}
+
+#[cfg(unix)]
+fn read_byte_with_timeout<R: Read>(
+    reader: &mut R,
+    fd: RawFd,
+    timeout_ms: i32,
+) -> io::Result<Option<u8>> {
+    if !stdin_readable(fd, timeout_ms)? {
+        return Ok(None);
+    }
+    let mut byte = [0u8; 1];
+    let bytes_read = reader.read(&mut byte)?;
+    if bytes_read == 0 {
+        return Ok(None);
+    }
+    Ok(Some(byte[0]))
 }
 
 #[cfg(unix)]
@@ -1715,10 +1782,11 @@ impl Drop for RawModeGuard {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContentBlock, MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES,
-        TEXT_EDITOR_TOOL_NAME, extract_text, list_files_from_workspace, parse_input_from,
-        read_file_from_workspace, resolve_workspace_path, resolve_workspace_path_for_create,
-        run_tool_call, run_tool_calls,
+        ContentBlock, InputHistoryState, InputSession, MAX_INPUT_HISTORY_ENTRIES, MAX_LIST_ENTRIES,
+        MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES, TEXT_EDITOR_TOOL_NAME, extract_text,
+        list_files_from_workspace, load_json_file, parse_input_from, read_file_from_workspace,
+        resolve_workspace_path, resolve_workspace_path_for_create, run_tool_call, run_tool_calls,
+        save_json_file,
     };
     use serde_json::json;
     use std::fs;
@@ -1780,6 +1848,98 @@ mod tests {
         assert_eq!(input, Some("first line\nsecond line".to_string()));
         assert_eq!(String::from_utf8(out).unwrap(), ">> >> ");
         assert!(err.is_empty());
+    }
+
+    #[test]
+    fn input_session_record_entry_ignores_empty_and_whitespace() {
+        let temp = make_temp_dir("input-history-empty");
+        let history_path = temp.path().join("history.json");
+        let mut session = InputSession {
+            history_path: history_path.clone(),
+            entries: Vec::new(),
+        };
+
+        session.record_entry("").unwrap();
+        session.record_entry("   ").unwrap();
+
+        assert!(session.entries.is_empty());
+        assert!(!history_path.exists());
+    }
+
+    #[test]
+    fn input_session_record_entry_skips_duplicate_consecutive() {
+        let temp = make_temp_dir("input-history-dup");
+        let history_path = temp.path().join("history.json");
+        let mut session = InputSession {
+            history_path: history_path.clone(),
+            entries: vec!["same".to_string()],
+        };
+
+        session.record_entry("same").unwrap();
+
+        assert_eq!(session.entries, vec!["same".to_string()]);
+        assert!(!history_path.exists());
+    }
+
+    #[test]
+    fn input_session_record_entry_trims_to_max_entries() {
+        let temp = make_temp_dir("input-history-limit");
+        let history_path = temp.path().join("history.json");
+        let mut entries = Vec::with_capacity(MAX_INPUT_HISTORY_ENTRIES);
+        for i in 0..MAX_INPUT_HISTORY_ENTRIES {
+            entries.push(format!("entry-{i}"));
+        }
+        let mut session = InputSession {
+            history_path: history_path.clone(),
+            entries,
+        };
+
+        session.record_entry("entry-extra").unwrap();
+
+        assert_eq!(session.entries.len(), MAX_INPUT_HISTORY_ENTRIES);
+        assert_eq!(session.entries.first().unwrap(), "entry-1");
+        assert_eq!(session.entries.last().unwrap(), "entry-extra");
+
+        let state = load_json_file::<InputHistoryState>(&history_path).unwrap();
+        assert_eq!(state.entries, session.entries);
+    }
+
+    #[test]
+    fn load_json_file_returns_default_for_missing_file() {
+        let temp = make_temp_dir("json-default");
+        let missing = temp.path().join("missing.json");
+
+        let state = load_json_file::<InputHistoryState>(&missing).unwrap();
+
+        assert!(state.entries.is_empty());
+    }
+
+    #[test]
+    fn load_json_file_reports_invalid_data() {
+        let temp = make_temp_dir("json-invalid");
+        let path = temp.path().join("invalid.json");
+        fs::write(&path, "{ not-valid-json }").unwrap();
+
+        let err = load_json_file::<InputHistoryState>(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("Invalid JSON"));
+        assert!(err.to_string().contains("invalid.json"));
+    }
+
+    #[test]
+    fn save_json_file_creates_parent_directory_and_round_trips() {
+        let temp = make_temp_dir("json-save");
+        let path = temp.path().join("nested/state/history.json");
+        let state = InputHistoryState {
+            entries: vec!["one".to_string(), "two".to_string()],
+        };
+
+        save_json_file(&path, &state).unwrap();
+
+        assert!(path.exists());
+        let loaded = load_json_file::<InputHistoryState>(&path).unwrap();
+        assert_eq!(loaded.entries, state.entries);
     }
 
     #[cfg(unix)]
