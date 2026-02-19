@@ -316,10 +316,9 @@ fn text_editor_from_workspace(workspace_root: &Path, input: &Value) -> Result<St
         "str_replace" => text_editor_str_replace(workspace_root, input_object),
         "create" => text_editor_create(workspace_root, input_object),
         "insert" => text_editor_insert(workspace_root, input_object),
-        "undo_edit" => Err(
-            "undo_edit is not supported by text_editor_20250728 (Claude 4 tool version)"
-                .to_string(),
-        ),
+        "undo_edit" => {
+            Err("undo_edit is not supported by this text editor implementation".to_string())
+        }
         other => Err(format!("Unsupported text editor command: {other}")),
     }
 }
@@ -408,6 +407,10 @@ fn text_editor_create(
             path
         ));
     }
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directories for '{}': {e}", path))?;
+    }
     fs::write(&target_path, file_text)
         .map_err(|e| format!("Failed to create file '{}': {e}", path))?;
     Ok(format!("Path: {}\nCreated file", path))
@@ -423,10 +426,7 @@ fn text_editor_insert(
         return Err("text_editor insert insert_line must be >= 0".to_string());
     }
 
-    let insert_text = match input.get("insert_text").and_then(Value::as_str) {
-        Some(value) => value,
-        None => require_string_field(input, "new_str", "text_editor insert insert_text")?,
-    };
+    let insert_text = require_string_field(input, "insert_text", "text_editor insert insert_text")?;
 
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
     let metadata = fs::metadata(&resolved_path)
@@ -501,6 +501,9 @@ fn apply_view_range(content: &str, view_range: Option<&Value>) -> Result<String,
         .ok_or("text_editor view_range end must be an integer")?;
     if start < 1 {
         return Err("text_editor view_range start must be >= 1".to_string());
+    }
+    if end < -1 || end == 0 {
+        return Err("text_editor view_range end must be -1 or a positive integer".to_string());
     }
     if end != -1 && end < start {
         return Err("text_editor view_range end must be -1 or >= start".to_string());
@@ -789,19 +792,47 @@ fn resolve_workspace_path_for_create(
         }
     }
 
-    let parent = joined.parent().ok_or_else(|| {
+    let mut canonical_ancestor: Option<PathBuf> = None;
+    for ancestor in joined.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                let canonical = match ancestor.canonicalize() {
+                    Ok(path) => path,
+                    Err(e)
+                        if metadata.file_type().is_symlink() && e.kind() == ErrorKind::NotFound =>
+                    {
+                        return Err(format!(
+                            "Path '{}' includes a dangling symlink in an ancestor",
+                            requested_path
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "Failed to resolve parent directory for '{}': {e}",
+                            requested_path
+                        ));
+                    }
+                };
+                canonical_ancestor = Some(canonical);
+                break;
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(format!(
+                    "Failed to inspect parent directory for '{}': {e}",
+                    requested_path
+                ));
+            }
+        }
+    }
+
+    let canonical_ancestor = canonical_ancestor.ok_or_else(|| {
         format!(
             "Failed to resolve parent directory for path '{}'",
             requested_path
         )
     })?;
-    let canonical_parent = parent.canonicalize().map_err(|e| {
-        format!(
-            "Failed to resolve parent directory for '{}': {e}",
-            requested_path
-        )
-    })?;
-    if !canonical_parent.starts_with(&workspace_canonical) {
+    if !canonical_ancestor.starts_with(&workspace_canonical) {
         return Err(format!(
             "Path '{}' is outside the workspace",
             requested_path
@@ -1121,6 +1152,29 @@ mod tests {
     }
 
     #[test]
+    fn text_editor_view_rejects_invalid_negative_end_line() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("edit.txt"), "first\nsecond\nthird\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_view_neg_end",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({"command": "view", "path": "edit.txt", "view_range": [1, -2]}),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("end must be -1 or a positive integer"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
     fn text_editor_view_range_preserves_line_endings() {
         let workspace = make_temp_dir("workspace");
         let file_path = workspace.path().join("crlf.txt");
@@ -1275,6 +1329,29 @@ mod tests {
     }
 
     #[test]
+    fn text_editor_create_creates_missing_parent_directories() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_create_nested",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "create",
+                "path": "newdir/inner/new.txt",
+                "file_text": "created"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            _ => panic!("expected tool_result"),
+        }
+        let content = fs::read_to_string(workspace.path().join("newdir/inner/new.txt")).unwrap();
+        assert_eq!(content, "created");
+    }
+
+    #[test]
     fn text_editor_create_rejects_existing_path() {
         let workspace = make_temp_dir("workspace");
         fs::write(workspace.path().join("exists.txt"), "keep").unwrap();
@@ -1350,6 +1427,34 @@ mod tests {
             } => {
                 assert!(content.contains("out of range"));
                 assert_eq!(is_error, Some(true));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_insert_requires_insert_text_field() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("insert.txt"), "a\nb").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_insert_missing_text",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "insert",
+                "path": "insert.txt",
+                "insert_line": 1,
+                "new_str": "X\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("requires a string field: insert_text"));
             }
             _ => panic!("expected tool_result"),
         }
@@ -1519,13 +1624,12 @@ mod tests {
     #[test]
     fn resolve_for_create_accepts_missing_file_in_workspace() {
         let workspace = make_temp_dir("workspace");
-        let subdir = workspace.path().join("newdir");
-        fs::create_dir_all(&subdir).unwrap();
 
         let resolved =
-            resolve_workspace_path_for_create(workspace.path(), "newdir/missing.txt").unwrap();
+            resolve_workspace_path_for_create(workspace.path(), "newdir/nested/missing.txt")
+                .unwrap();
 
-        assert_eq!(resolved, workspace.path().join("newdir/missing.txt"));
+        assert_eq!(resolved, workspace.path().join("newdir/nested/missing.txt"));
     }
 
     #[test]
