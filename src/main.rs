@@ -1476,12 +1476,12 @@ fn render_buffer<W: Write>(
     buffer: &LineBuffer,
     previous_cursor_row: usize,
 ) -> io::Result<usize> {
-    writeln!(writer, "\r")?;
+    write!(writer, "\r")?;
     if previous_cursor_row > 0 {
-        writeln!(writer, "\x1b[{}A", previous_cursor_row)?;
+        write!(writer, "\x1b[{}A", previous_cursor_row)?;
     }
-    writeln!(writer, "\x1b[J")?;
-    writeln!(writer, "{prompt}{}", buffer.text)?;
+    write!(writer, "\x1b[J")?;
+    write!(writer, "{prompt}{}", buffer.text)?;
 
     let rendered = format!("{prompt}{}", buffer.text);
     let rendered_to_cursor = format!("{prompt}{}", &buffer.text[..buffer.cursor]);
@@ -1489,11 +1489,11 @@ fn render_buffer<W: Write>(
     let (cursor_row, cursor_col) = display_cursor_position(&rendered_to_cursor);
 
     if end_row > cursor_row {
-        writeln!(writer, "\x1b[{}A", end_row - cursor_row)?;
+        write!(writer, "\x1b[{}A", end_row - cursor_row)?;
     }
-    writeln!(writer, "\r")?;
+    write!(writer, "\r")?;
     if cursor_col > 0 {
-        writeln!(writer, "\x1b[{}C", cursor_col)?;
+        write!(writer, "\x1b[{}C", cursor_col)?;
     }
     writer.flush()?;
 
