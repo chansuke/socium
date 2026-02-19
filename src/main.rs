@@ -10,6 +10,10 @@ const ANTHROPIC_MESSAGES_API: &str = "https://api.anthropic.com/v1/messages";
 const MAX_READ_FILE_BYTES: usize = 200 * 1024;
 const MAX_TOOL_ROUNDS: usize = 20;
 const MAX_LIST_ENTRIES: usize = 1000;
+const TEXT_EDITOR_TOOL_NAME: &str = "str_replace_based_edit_tool";
+// Keep this aligned with Anthropic text editor tool output limits.
+const MAX_TEXT_EDITOR_VIEW_CHARACTERS: usize = 50_000;
+const MAX_TEXT_EDITOR_VIEW_READ_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 struct AgentMessageRequest<'a> {
@@ -41,14 +45,30 @@ struct AgentMessageResponse {
 }
 
 #[derive(Debug, Serialize, Clone)]
-struct ToolDefinition {
+#[serde(untagged)]
+enum ToolDefinition {
+    Custom(CustomToolDefinition),
+    AnthropicTextEditor(AnthropicTextEditorToolDefinition),
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CustomToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
 }
 
+#[derive(Debug, Serialize, Clone)]
+struct AnthropicTextEditorToolDefinition {
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_characters: Option<usize>,
+}
+
 fn read_file_tool() -> ToolDefinition {
-    ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
         name: "read_file".to_string(),
         description: "Read a UTF-8 text file from the current workspace by relative path."
             .to_string(),
@@ -63,11 +83,11 @@ fn read_file_tool() -> ToolDefinition {
             "required": ["path"],
             "additionalProperties": false
         }),
-    }
+    })
 }
 
 fn list_files_tool() -> ToolDefinition {
-    ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
         name: "list_files".to_string(),
         description: "List files and directories at a given path. If no path is provided, lists files in the current directory. If a file path is given, confirms the file exists."
             .to_string(),
@@ -81,7 +101,15 @@ fn list_files_tool() -> ToolDefinition {
             },
             "additionalProperties": false
         }),
-    }
+    })
+}
+
+fn text_editor_tool() -> ToolDefinition {
+    ToolDefinition::AnthropicTextEditor(AnthropicTextEditorToolDefinition {
+        tool_type: "text_editor_20250728".to_string(),
+        name: TEXT_EDITOR_TOOL_NAME.to_string(),
+        max_characters: Some(MAX_TEXT_EDITOR_VIEW_CHARACTERS),
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -170,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut messages = vec![Message::user_text(user_input)];
-    let tools = vec![read_file_tool(), list_files_tool()];
+    let tools = vec![read_file_tool(), list_files_tool(), text_editor_tool()];
     let workspace_root = env::current_dir()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -260,6 +288,7 @@ fn run_tool_call(
     let result = match name {
         "read_file" => read_file_from_workspace(workspace_root, input),
         "list_files" => list_files_from_workspace(workspace_root, input),
+        TEXT_EDITOR_TOOL_NAME => text_editor_from_workspace(workspace_root, input),
         other => Err(format!("Unsupported tool: {other}")),
     };
 
@@ -277,6 +306,334 @@ fn run_tool_call(
     }
 }
 
+fn text_editor_from_workspace(workspace_root: &Path, input: &Value) -> Result<String, String> {
+    let input_object = input
+        .as_object()
+        .ok_or("text_editor tool requires an object input")?;
+    let command = require_string_field(input_object, "command", "text_editor command")?;
+
+    match command {
+        "view" => text_editor_view(workspace_root, input_object),
+        "str_replace" => text_editor_str_replace(workspace_root, input_object),
+        "create" => text_editor_create(workspace_root, input_object),
+        "insert" => text_editor_insert(workspace_root, input_object),
+        "undo_edit" => {
+            Err("undo_edit is not supported by this text editor implementation".to_string())
+        }
+        other => Err(format!("Unsupported text editor command: {other}")),
+    }
+}
+
+fn text_editor_view(
+    workspace_root: &Path,
+    input: &serde_json::Map<String, Value>,
+) -> Result<String, String> {
+    let path = require_string_field(input, "path", "text_editor view path")?;
+    let resolved_path = resolve_workspace_path(workspace_root, path)?;
+    let metadata = fs::metadata(&resolved_path)
+        .map_err(|e| format!("Failed to inspect path '{}': {e}", path))?;
+
+    if metadata.is_dir() {
+        return list_files_from_workspace(workspace_root, &json!({ "path": path }));
+    }
+    if !metadata.is_file() {
+        return Err(format!("Path is neither a file nor directory: '{}'", path));
+    }
+
+    let content = read_utf8_file_with_limit(&resolved_path, path, MAX_TEXT_EDITOR_VIEW_READ_BYTES)?;
+    let selected_content = apply_view_range(&content, input.get("view_range"))?;
+    let (display_content, truncated) =
+        truncate_by_characters(&selected_content, MAX_TEXT_EDITOR_VIEW_CHARACTERS);
+
+    if truncated {
+        Ok(format!(
+            "Path: {}\n{}\n(truncated: showing first {} characters)",
+            path, display_content, MAX_TEXT_EDITOR_VIEW_CHARACTERS
+        ))
+    } else {
+        Ok(format!("Path: {}\n{}", path, display_content))
+    }
+}
+
+fn text_editor_str_replace(
+    workspace_root: &Path,
+    input: &serde_json::Map<String, Value>,
+) -> Result<String, String> {
+    let path = require_string_field(input, "path", "text_editor str_replace path")?;
+    let old_str = require_string_field(input, "old_str", "text_editor str_replace old_str")?;
+    let new_str = require_string_field(input, "new_str", "text_editor str_replace new_str")?;
+    if old_str.is_empty() {
+        return Err("text_editor str_replace old_str cannot be empty".to_string());
+    }
+
+    let resolved_path = resolve_workspace_path(workspace_root, path)?;
+    let metadata = fs::metadata(&resolved_path)
+        .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
+    if !metadata.is_file() {
+        return Err(format!("Path is not a file: '{}'", path));
+    }
+
+    let content = read_utf8_file_with_limit(&resolved_path, path, MAX_READ_FILE_BYTES)?;
+    let matches = content.match_indices(old_str).count();
+    if matches == 0 {
+        return Err(format!(
+            "No matches found for old_str in file '{}'; replacement not applied",
+            path
+        ));
+    }
+    if matches > 1 {
+        return Err(format!(
+            "Multiple matches found for old_str in file '{}'; provide a more specific old_str",
+            path
+        ));
+    }
+
+    let updated = content.replacen(old_str, new_str, 1);
+    fs::write(&resolved_path, updated)
+        .map_err(|e| format!("Failed to write file '{}': {e}", path))?;
+    Ok(format!("Path: {}\nReplaced 1 occurrence", path))
+}
+
+fn text_editor_create(
+    workspace_root: &Path,
+    input: &serde_json::Map<String, Value>,
+) -> Result<String, String> {
+    let path = require_string_field(input, "path", "text_editor create path")?;
+    let file_text = require_string_field(input, "file_text", "text_editor create file_text")?;
+    let target_path = resolve_workspace_path_for_create(workspace_root, path)?;
+
+    if target_path.exists() {
+        return Err(format!(
+            "Cannot create file '{}': path already exists",
+            path
+        ));
+    }
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directories for '{}': {e}", path))?;
+    }
+    fs::write(&target_path, file_text)
+        .map_err(|e| format!("Failed to create file '{}': {e}", path))?;
+    Ok(format!("Path: {}\nCreated file", path))
+}
+
+fn text_editor_insert(
+    workspace_root: &Path,
+    input: &serde_json::Map<String, Value>,
+) -> Result<String, String> {
+    let path = require_string_field(input, "path", "text_editor insert path")?;
+    let insert_line = require_i64_field(input, "insert_line", "text_editor insert insert_line")?;
+    if insert_line < 0 {
+        return Err("text_editor insert insert_line must be >= 0".to_string());
+    }
+
+    let insert_text = require_string_field(input, "insert_text", "text_editor insert insert_text")?;
+
+    let resolved_path = resolve_workspace_path(workspace_root, path)?;
+    let metadata = fs::metadata(&resolved_path)
+        .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
+    if !metadata.is_file() {
+        return Err(format!("Path is not a file: '{}'", path));
+    }
+
+    let content = read_utf8_file_with_limit(&resolved_path, path, MAX_READ_FILE_BYTES)?;
+    let line_count = count_lines(&content);
+    let line = insert_line as usize;
+    if line > line_count {
+        return Err(format!(
+            "insert_line {} is out of range for '{}' (file has {} lines)",
+            line, path, line_count
+        ));
+    }
+
+    let insert_at = byte_index_after_line(&content, line).ok_or_else(|| {
+        format!(
+            "Failed to compute insertion point for line {} in '{}'",
+            line, path
+        )
+    })?;
+    let mut updated = String::with_capacity(content.len() + insert_text.len());
+    updated.push_str(&content[..insert_at]);
+    updated.push_str(insert_text);
+    updated.push_str(&content[insert_at..]);
+
+    fs::write(&resolved_path, updated)
+        .map_err(|e| format!("Failed to write file '{}': {e}", path))?;
+    Ok(format!("Path: {}\nInserted text after line {}", path, line))
+}
+
+fn require_string_field<'a>(
+    input: &'a serde_json::Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> Result<&'a str, String> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{context} requires a string field: {field}"))
+}
+
+fn require_i64_field(
+    input: &serde_json::Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> Result<i64, String> {
+    input
+        .get(field)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("{context} requires an integer field: {field}"))
+}
+
+fn apply_view_range(content: &str, view_range: Option<&Value>) -> Result<String, String> {
+    let Some(view_range) = view_range else {
+        return Ok(content.to_string());
+    };
+    let range = view_range
+        .as_array()
+        .ok_or("text_editor view_range must be an array: [start_line, end_line]")?;
+    if range.len() != 2 {
+        return Err("text_editor view_range must contain exactly two integers".to_string());
+    }
+    let start = range[0]
+        .as_i64()
+        .ok_or("text_editor view_range start must be an integer")?;
+    let end = range[1]
+        .as_i64()
+        .ok_or("text_editor view_range end must be an integer")?;
+    if start < 1 {
+        return Err("text_editor view_range start must be >= 1".to_string());
+    }
+    if end < -1 || end == 0 {
+        return Err("text_editor view_range end must be -1 or a positive integer".to_string());
+    }
+    if end != -1 && end < start {
+        return Err("text_editor view_range end must be -1 or >= start".to_string());
+    }
+
+    let line_count = count_lines(content) as i64;
+    if line_count == 0 {
+        if start == 1 {
+            return Ok(String::new());
+        }
+        return Err("text_editor view_range start is out of range for an empty file".to_string());
+    }
+    if start > line_count {
+        return Err(format!(
+            "text_editor view_range start {} is out of range (file has {} lines)",
+            start, line_count
+        ));
+    }
+    let last = if end == -1 {
+        line_count
+    } else {
+        std::cmp::min(end, line_count)
+    };
+    let start_line = start as usize;
+    let end_line = last as usize;
+
+    let start_offset = line_start_offset(content, start_line).ok_or_else(|| {
+        format!(
+            "text_editor view_range start {} is out of range (file has {} lines)",
+            start, line_count
+        )
+    })?;
+    let end_offset = if end_line as i64 == line_count {
+        content.len()
+    } else {
+        line_start_offset(content, end_line + 1).ok_or_else(|| {
+            format!(
+                "text_editor view_range end {} is out of range (file has {} lines)",
+                end_line, line_count
+            )
+        })?
+    };
+
+    Ok(content[start_offset..end_offset].to_string())
+}
+
+fn truncate_by_characters(content: &str, max_characters: usize) -> (String, bool) {
+    if max_characters == 0 {
+        return (String::new(), !content.is_empty());
+    }
+
+    let mut end = 0usize;
+    for (count, (index, ch)) in content.char_indices().enumerate() {
+        if count == max_characters {
+            return (content[..end].to_string(), true);
+        }
+        end = index + ch.len_utf8();
+    }
+    (content.to_string(), false)
+}
+
+fn count_lines(content: &str) -> usize {
+    if content.is_empty() {
+        0
+    } else {
+        content.lines().count()
+    }
+}
+
+fn byte_index_after_line(content: &str, line: usize) -> Option<usize> {
+    if line == 0 {
+        return Some(0);
+    }
+    let mut seen = 0usize;
+    for (index, ch) in content.char_indices() {
+        if ch == '\n' {
+            seen += 1;
+            if seen == line {
+                return Some(index + 1);
+            }
+        }
+    }
+    if line == count_lines(content) {
+        return Some(content.len());
+    }
+    None
+}
+
+fn line_start_offset(content: &str, line: usize) -> Option<usize> {
+    if line == 0 {
+        return None;
+    }
+    if line == 1 {
+        return Some(0);
+    }
+
+    let mut current_line = 1usize;
+    for (index, byte) in content.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            current_line += 1;
+            if current_line == line {
+                return Some(index + 1);
+            }
+        }
+    }
+    None
+}
+
+fn read_utf8_file_with_limit(
+    path: &Path,
+    display_path: &str,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("Failed to open file '{}': {e}", display_path))?;
+    let mut bytes = Vec::new();
+    let mut limited = Read::by_ref(&mut file).take((max_bytes + 1) as u64);
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Failed to read file '{}': {e}", display_path))?;
+    if bytes.len() > max_bytes {
+        return Err(format!(
+            "File too large: '{}' exceeds {} bytes",
+            display_path, max_bytes
+        ));
+    }
+    String::from_utf8(bytes).map_err(|e| format!("File '{}' is not valid UTF-8: {e}", display_path))
+}
+
 fn read_file_from_workspace(workspace_root: &Path, input: &Value) -> Result<String, String> {
     let path = input
         .get("path")
@@ -288,21 +645,7 @@ fn read_file_from_workspace(workspace_root: &Path, input: &Value) -> Result<Stri
     if !metadata.is_file() {
         return Err(format!("Path is not a file: '{}'", path));
     }
-    let mut file = fs::File::open(&resolved_path)
-        .map_err(|e| format!("Failed to open file '{}': {e}", path))?;
-    let mut bytes = Vec::new();
-    let mut limited = Read::by_ref(&mut file).take((MAX_READ_FILE_BYTES + 1) as u64);
-    limited
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("Failed to read file '{}': {e}", path))?;
-    if bytes.len() > MAX_READ_FILE_BYTES {
-        return Err(format!(
-            "File too large: '{}' exceeds {} bytes",
-            path, MAX_READ_FILE_BYTES
-        ));
-    }
-    let content =
-        String::from_utf8(bytes).map_err(|e| format!("File '{}' is not valid UTF-8: {e}", path))?;
+    let content = read_utf8_file_with_limit(&resolved_path, path, MAX_READ_FILE_BYTES)?;
     Ok(format!("Path: {}\n{}", path, content))
 }
 
@@ -406,6 +749,99 @@ fn resolve_workspace_path(workspace_root: &Path, requested_path: &str) -> Result
     Ok(canonical)
 }
 
+fn resolve_workspace_path_for_create(
+    workspace_root: &Path,
+    requested_path: &str,
+) -> Result<PathBuf, String> {
+    let workspace_canonical = workspace_root.canonicalize().map_err(|e| {
+        format!(
+            "Failed to resolve workspace root '{}': {e}",
+            workspace_root.display()
+        )
+    })?;
+    let path = PathBuf::from(requested_path);
+    if path.is_absolute() {
+        return Err(format!(
+            "Absolute paths are not allowed: '{}'",
+            requested_path
+        ));
+    }
+    let joined = workspace_canonical.join(path);
+    match fs::symlink_metadata(&joined) {
+        Ok(metadata) => {
+            let canonical = match joined.canonicalize() {
+                Ok(path) => path,
+                Err(e) if metadata.file_type().is_symlink() && e.kind() == ErrorKind::NotFound => {
+                    return Err(format!(
+                        "Path '{}' points to a dangling symlink",
+                        requested_path
+                    ));
+                }
+                Err(e) => return Err(format!("Failed to resolve path '{}': {e}", requested_path)),
+            };
+            if !canonical.starts_with(&workspace_canonical) {
+                return Err(format!(
+                    "Path '{}' is outside the workspace",
+                    requested_path
+                ));
+            }
+            return Ok(canonical);
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!("Failed to inspect path '{}': {e}", requested_path));
+        }
+    }
+
+    let mut canonical_ancestor: Option<PathBuf> = None;
+    for ancestor in joined.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                let canonical = match ancestor.canonicalize() {
+                    Ok(path) => path,
+                    Err(e)
+                        if metadata.file_type().is_symlink() && e.kind() == ErrorKind::NotFound =>
+                    {
+                        return Err(format!(
+                            "Path '{}' includes a dangling symlink in an ancestor",
+                            requested_path
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "Failed to resolve parent directory for '{}': {e}",
+                            requested_path
+                        ));
+                    }
+                };
+                canonical_ancestor = Some(canonical);
+                break;
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(format!(
+                    "Failed to inspect parent directory for '{}': {e}",
+                    requested_path
+                ));
+            }
+        }
+    }
+
+    let canonical_ancestor = canonical_ancestor.ok_or_else(|| {
+        format!(
+            "Failed to resolve parent directory for path '{}'",
+            requested_path
+        )
+    })?;
+    if !canonical_ancestor.starts_with(&workspace_canonical) {
+        return Err(format!(
+            "Path '{}' is outside the workspace",
+            requested_path
+        ));
+    }
+    Ok(joined)
+}
+
 /// Prompts once-per-line until a non-empty input is entered.
 /// Returns `Ok(None)` on EOF (e.g. Ctrl-D), so callers can exit gracefully.
 pub fn parse_input(prompt: &str) -> io::Result<Option<String>> {
@@ -456,9 +892,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ContentBlock, MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, extract_text,
-        list_files_from_workspace, parse_input_from, read_file_from_workspace,
-        resolve_workspace_path, run_tool_call, run_tool_calls,
+        ContentBlock, MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES,
+        TEXT_EDITOR_TOOL_NAME, extract_text, list_files_from_workspace, parse_input_from,
+        read_file_from_workspace, resolve_workspace_path, resolve_workspace_path_for_create,
+        run_tool_call, run_tool_calls,
     };
     use serde_json::json;
     use std::fs;
@@ -689,6 +1126,368 @@ mod tests {
     }
 
     #[test]
+    fn run_tool_call_returns_success_for_text_editor_view() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("edit.txt"), "first\nsecond\nthird\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_1",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({"command": "view", "path": "edit.txt", "view_range": [2, -1]}),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tool_te_1");
+                assert!(content.contains("Path: edit.txt"));
+                assert!(content.contains("second\nthird"));
+                assert_eq!(is_error, None);
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_view_rejects_invalid_negative_end_line() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("edit.txt"), "first\nsecond\nthird\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_view_neg_end",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({"command": "view", "path": "edit.txt", "view_range": [1, -2]}),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("end must be -1 or a positive integer"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_view_range_preserves_line_endings() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("crlf.txt");
+        fs::write(&file_path, b"line1\r\nline2\r\nline3\r\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_view_crlf",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({"command": "view", "path": "crlf.txt", "view_range": [2, 2]}),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert_eq!(content, "Path: crlf.txt\nline2\r\n");
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_view_large_file_is_truncated_instead_of_rejected() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("large-view.txt");
+        let large = vec![b'a'; MAX_READ_FILE_BYTES + 1];
+        fs::write(&file_path, large).unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_view_large",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({"command": "view", "path": "large-view.txt"}),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Path: large-view.txt"));
+                assert!(content.contains("(truncated: showing first"));
+                assert!(!content.contains("File too large"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_view_rejects_extremely_large_file() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("too-large-view.txt");
+        let huge = vec![b'a'; MAX_TEXT_EDITOR_VIEW_READ_BYTES + 1];
+        fs::write(&file_path, huge).unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_view_too_large",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({"command": "view", "path": "too-large-view.txt"}),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("File too large"));
+                assert!(content.contains("too-large-view.txt"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_str_replace_updates_file() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("replace.txt");
+        fs::write(&file_path, "hello old world").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_2",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "str_replace",
+                "path": "replace.txt",
+                "old_str": "old",
+                "new_str": "new"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            _ => panic!("expected tool_result"),
+        }
+        let updated = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(updated, "hello new world");
+    }
+
+    #[test]
+    fn text_editor_str_replace_rejects_multiple_matches() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("replace.txt"), "dup\ndup\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_3",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "str_replace",
+                "path": "replace.txt",
+                "old_str": "dup",
+                "new_str": "x"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(content.contains("Multiple matches found"));
+                assert_eq!(is_error, Some(true));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_create_creates_new_file() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_4",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "create",
+                "path": "new.txt",
+                "file_text": "created"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            _ => panic!("expected tool_result"),
+        }
+        let content = fs::read_to_string(workspace.path().join("new.txt")).unwrap();
+        assert_eq!(content, "created");
+    }
+
+    #[test]
+    fn text_editor_create_creates_missing_parent_directories() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_create_nested",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "create",
+                "path": "newdir/inner/new.txt",
+                "file_text": "created"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            _ => panic!("expected tool_result"),
+        }
+        let content = fs::read_to_string(workspace.path().join("newdir/inner/new.txt")).unwrap();
+        assert_eq!(content, "created");
+    }
+
+    #[test]
+    fn text_editor_create_rejects_existing_path() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("exists.txt"), "keep").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_5",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "create",
+                "path": "exists.txt",
+                "file_text": "overwrite"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(content.contains("already exists"));
+                assert_eq!(is_error, Some(true));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_insert_inserts_after_line() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("insert.txt");
+        fs::write(&file_path, "a\nb").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_6",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "insert",
+                "path": "insert.txt",
+                "insert_line": 1,
+                "insert_text": "X\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            _ => panic!("expected tool_result"),
+        }
+        let updated = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(updated, "a\nX\nb");
+    }
+
+    #[test]
+    fn text_editor_insert_rejects_out_of_range_line() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("insert.txt"), "a\nb").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_7",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "insert",
+                "path": "insert.txt",
+                "insert_line": 3,
+                "insert_text": "X\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(content.contains("out of range"));
+                assert_eq!(is_error, Some(true));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_insert_requires_insert_text_field() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("insert.txt"), "a\nb").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_insert_missing_text",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "insert",
+                "path": "insert.txt",
+                "insert_line": 1,
+                "new_str": "X\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("requires a string field: insert_text"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn text_editor_undo_edit_returns_error() {
+        let workspace = make_temp_dir("workspace");
+        fs::write(workspace.path().join("undo.txt"), "x").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_te_8",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "undo_edit",
+                "path": "undo.txt"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(content.contains("undo_edit is not supported"));
+                assert_eq!(is_error, Some(true));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
     fn run_tool_calls_returns_error_for_invalid_read_file_input() {
         let workspace = make_temp_dir("workspace");
         let blocks = vec![ContentBlock::ToolUse {
@@ -821,6 +1620,49 @@ mod tests {
                 .unwrap()
                 .contains("Absolute paths are not allowed")
         );
+    }
+
+    #[test]
+    fn resolve_for_create_accepts_missing_file_in_workspace() {
+        let workspace = make_temp_dir("workspace");
+
+        let resolved =
+            resolve_workspace_path_for_create(workspace.path(), "newdir/nested/missing.txt")
+                .unwrap();
+
+        assert_eq!(resolved, workspace.path().join("newdir/nested/missing.txt"));
+    }
+
+    #[test]
+    fn resolve_for_create_rejects_escape_path() {
+        let workspace = make_temp_dir("workspace");
+        let outside = make_temp_dir("outside");
+        let escape = format!(
+            "../{}/x.txt",
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
+
+        let result = resolve_workspace_path_for_create(workspace.path(), &escape);
+
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("outside the workspace"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_for_create_rejects_dangling_symlink_path() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = make_temp_dir("workspace");
+        let outside = make_temp_dir("outside");
+        let missing_target = outside.path().join("missing.txt");
+        let link = workspace.path().join("link.txt");
+        symlink(&missing_target, &link).unwrap();
+
+        let result = resolve_workspace_path_for_create(workspace.path(), "link.txt");
+
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("dangling symlink"));
     }
 
     #[cfg(unix)]
