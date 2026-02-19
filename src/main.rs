@@ -14,6 +14,8 @@ const TEXT_EDITOR_TOOL_NAME: &str = "str_replace_based_edit_tool";
 // Keep this aligned with Anthropic text editor tool output limits.
 const MAX_TEXT_EDITOR_VIEW_CHARACTERS: usize = 50_000;
 const MAX_TEXT_EDITOR_VIEW_READ_BYTES: usize = 4 * 1024 * 1024;
+const STATE_DIR_NAME: &str = ".socium";
+const CONVERSATION_STATE_FILE_NAME: &str = "conversation.json";
 
 #[derive(Debug, Serialize)]
 struct AgentMessageRequest<'a> {
@@ -132,7 +134,7 @@ enum ContentBlock {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Message {
     pub role: Role,
     pub content: MessageContent,
@@ -161,7 +163,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 enum MessageContent {
     Text(String),
@@ -176,8 +178,28 @@ pub enum Role {
     System,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct ConversationState {
+    messages: Vec<Message>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let workspace_root = env::current_dir()?;
+    let state_dir = workspace_root.join(STATE_DIR_NAME);
+    let conversation_path = state_dir.join(CONVERSATION_STATE_FILE_NAME);
+
+    let mut messages = match load_json_file::<ConversationState>(&conversation_path) {
+        Ok(state) => state.messages,
+        Err(err) => {
+            eprintln!(
+                "Failed to load persisted conversation '{}': {err}. Starting with an empty conversation.",
+                conversation_path.display()
+            );
+            Vec::new()
+        }
+    };
+
     let api_key = env::var("ANTHROPIC_API_KEY")
         .map_err(|_| Error::new(ErrorKind::NotFound, "ANTHROPIC_API_KEY is not set"))?;
     let anthropic_version =
@@ -197,9 +219,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
-    let mut messages = vec![Message::user_text(user_input)];
+    messages.push(Message::user_text(user_input));
     let tools = vec![read_file_tool(), list_files_tool(), text_editor_tool()];
-    let workspace_root = env::current_dir()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
@@ -231,7 +252,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .into());
     }
+
+    save_json_file(
+        &conversation_path,
+        &ConversationState {
+            messages: messages.clone(),
+        },
+    )?;
+
     Ok(())
+}
+
+fn load_json_file<T>(path: &Path) -> io::Result<T>
+where
+    T: for<'de> Deserialize<'de> + Default,
+{
+    match fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content).map_err(|err| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("Invalid JSON in '{}': {err}", path.display()),
+            )
+        }),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(T::default()),
+        Err(err) => Err(err),
+    }
+}
+
+fn save_json_file<T>(path: &Path, value: &T) -> io::Result<()>
+where
+    T: Serialize,
+{
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let serialized = serde_json::to_string_pretty(value).map_err(|err| {
+        Error::other(format!(
+            "Failed to serialize JSON '{}': {err}",
+            path.display()
+        ))
+    })?;
+    fs::write(path, serialized)
 }
 
 async fn send_message(
