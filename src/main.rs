@@ -11,6 +11,7 @@ const MAX_READ_FILE_BYTES: usize = 200 * 1024;
 const MAX_TOOL_ROUNDS: usize = 20;
 const MAX_LIST_ENTRIES: usize = 1000;
 const TEXT_EDITOR_TOOL_NAME: &str = "str_replace_based_edit_tool";
+// Keep this aligned with Anthropic text editor tool output limits.
 const MAX_TEXT_EDITOR_VIEW_CHARACTERS: usize = 50_000;
 const MAX_TEXT_EDITOR_VIEW_READ_BYTES: usize = 4 * 1024 * 1024;
 
