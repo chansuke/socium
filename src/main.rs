@@ -1262,7 +1262,7 @@ fn parse_input_interactive(
     let stdin = io::stdin();
     let fd = stdin.as_raw_fd();
     let _raw_mode_guard = RawModeGuard::new(fd)?;
-    let mut reader = stdin.lock();
+    let mut reader = RawFdReader(fd);
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
@@ -1675,6 +1675,31 @@ fn stdin_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
 #[cfg(unix)]
 fn is_tty(fd: RawFd) -> bool {
     unsafe { libc::isatty(fd) == 1 }
+}
+
+/// Unbuffered reader that reads directly from a raw file descriptor.
+///
+/// Unlike `StdinLock` (which wraps a `BufReader`), this reader issues a
+/// `read(2)` syscall for each `Read::read` call. This is critical for the
+/// escape-sequence parser: we rely on `poll(2)` to detect whether more bytes
+/// are pending in the kernel buffer. A buffered reader can silently drain the
+/// kernel buffer into user-space, causing `poll` to report "no data" even
+/// though bytes are still available in the `BufReader` – which makes
+/// multi-byte escape sequences (e.g. arrow keys: ESC [ A) appear as
+/// individual characters.
+#[cfg(unix)]
+struct RawFdReader(RawFd);
+
+#[cfg(unix)]
+impl Read for RawFdReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = unsafe { libc::read(self.0, buf.as_mut_ptr().cast(), buf.len()) };
+        if n < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(n as usize)
+        }
+    }
 }
 
 #[cfg(unix)]
