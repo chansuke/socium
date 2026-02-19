@@ -1,3 +1,6 @@
+pub mod constants;
+
+use crate::constants::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::env;
@@ -10,24 +13,6 @@ use std::{
     os::fd::{AsRawFd, RawFd},
     str,
 };
-
-const ANTHROPIC_MESSAGES_API: &str = "https://api.anthropic.com/v1/messages";
-const MAX_READ_FILE_BYTES: usize = 200 * 1024;
-const MAX_TOOL_ROUNDS: usize = 20;
-const MAX_LIST_ENTRIES: usize = 1000;
-const TEXT_EDITOR_TOOL_NAME: &str = "str_replace_based_edit_tool";
-// Keep this aligned with Anthropic text editor tool output limits.
-const MAX_TEXT_EDITOR_VIEW_CHARACTERS: usize = 50_000;
-const MAX_TEXT_EDITOR_VIEW_READ_BYTES: usize = 4 * 1024 * 1024;
-const STATE_DIR_NAME: &str = ".socium";
-const CONVERSATION_STATE_FILE_NAME: &str = "conversation.json";
-const INPUT_HISTORY_FILE_NAME: &str = "input_history.json";
-const MAX_INPUT_HISTORY_ENTRIES: usize = 1_000;
-const MAX_PERSISTED_MESSAGES: usize = 2_000;
-#[cfg(unix)]
-const ESCAPE_SEQUENCE_FIRST_BYTE_TIMEOUT_MS: i32 = 120;
-#[cfg(unix)]
-const ESCAPE_SEQUENCE_FOLLOWUP_TIMEOUT_MS: i32 = 120;
 
 #[derive(Debug, Serialize)]
 struct AgentMessageRequest<'a> {
@@ -1543,10 +1528,36 @@ fn display_cursor_position(content: &str) -> (usize, usize) {
             row += 1;
             col = 0;
         } else {
-            col += 1;
+            col += char_display_width(ch);
         }
     }
     (row, col)
+}
+
+#[cfg(unix)]
+fn char_display_width(ch: char) -> usize {
+    if ch.is_control() {
+        return 0;
+    }
+    if matches!(
+        ch,
+        '\u{1100}'..='\u{115F}'
+            | '\u{2329}'..='\u{232A}'
+            | '\u{2E80}'..='\u{A4CF}'
+            | '\u{AC00}'..='\u{D7A3}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FE10}'..='\u{FE19}'
+            | '\u{FE30}'..='\u{FE6F}'
+            | '\u{FF00}'..='\u{FF60}'
+            | '\u{FFE0}'..='\u{FFE6}'
+            | '\u{1F300}'..='\u{1FAFF}'
+            | '\u{20000}'..='\u{2FFFD}'
+            | '\u{30000}'..='\u{3FFFD}'
+    ) {
+        2
+    } else {
+        1
+    }
 }
 
 #[cfg(unix)]
@@ -1696,6 +1707,14 @@ fn map_escape_sequence(sequence: &[u8]) -> KeyPress {
         | [b'[', b'3', b';', b'5', b'~'] => KeyPress::Delete,
         [b'[', b'1', b';', b'3', b'D'] | [b'[', b'1', b';', b'5', b'D'] => KeyPress::WordLeft,
         [b'[', b'1', b';', b'3', b'C'] | [b'[', b'1', b';', b'5', b'C'] => KeyPress::WordRight,
+        [b'O', b'A'] => KeyPress::Up,
+        [b'O', b'B'] => KeyPress::Down,
+        [b'O', b'C'] => KeyPress::Right,
+        [b'O', b'D'] => KeyPress::Left,
+        [b'[', .., b'A'] => KeyPress::Up,
+        [b'[', .., b'B'] => KeyPress::Down,
+        [b'[', .., b'C'] => KeyPress::Right,
+        [b'[', .., b'D'] => KeyPress::Left,
         _ => KeyPress::Unknown,
     }
 }
@@ -1975,6 +1994,28 @@ mod tests {
     fn maps_arrow_left_escape_sequence() {
         let key = super::map_escape_sequence(b"[D");
         assert!(matches!(key, super::KeyPress::Left));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maps_application_cursor_left_escape_sequence() {
+        let key = super::map_escape_sequence(b"OD");
+        assert!(matches!(key, super::KeyPress::Left));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maps_modified_arrow_left_escape_sequence() {
+        let key = super::map_escape_sequence(b"[1;2D");
+        assert!(matches!(key, super::KeyPress::Left));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn display_cursor_position_counts_full_width_characters() {
+        let (row, col) = super::display_cursor_position("あい");
+        assert_eq!(row, 0);
+        assert_eq!(col, 4);
     }
 
     #[test]
