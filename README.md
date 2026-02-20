@@ -1,3 +1,3 @@
 # socium
 
-A tiny coding agent
+A minimal AI agent for multiple platforms
