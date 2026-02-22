@@ -57,19 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let provider = ProviderKind::from_env()?;
-    if provider != ProviderKind::Anthropic {
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("Provider '{provider}' is not implemented yet. Currently available: anthropic"),
-        )
-        .into());
-    }
+    let provider_config = provider.config_from_env()?;
     let provider_capabilities = provider.capabilities();
-
-    let api_key = env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| Error::new(ErrorKind::NotFound, "ANTHROPIC_API_KEY is not set"))?;
-    let anthropic_version =
-        env::var("ANTHROPIC_VERSION").unwrap_or_else(|_| "2023-06-01".to_string());
     let model = env::var("MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
     let max_tokens = env::var("MAX_TOKENS")
         .unwrap_or_else(|_| "1000".to_string())
@@ -117,9 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         messages.push(Message::user_text(user_input));
         run_agent_turn(
+            provider,
             &client,
-            &api_key,
-            &anthropic_version,
+            &provider_config,
             &model,
             max_tokens,
             provider_capabilities.supports_tools,

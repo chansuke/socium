@@ -1,6 +1,7 @@
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message};
 use crate::constants::MAX_TOOL_ROUNDS;
 use crate::providers;
+use crate::providers::{ProviderConfig, ProviderKind};
 use crate::tools::ToolDefinition;
 use crate::tools::runtime::run_tool_calls;
 use std::io::Error;
@@ -8,9 +9,9 @@ use std::path::Path;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_agent_turn(
+    provider: ProviderKind,
     client: &reqwest::Client,
-    api_key: &str,
-    anthropic_version: &str,
+    provider_config: &ProviderConfig,
     model: &str,
     max_tokens: u32,
     supports_tools: bool,
@@ -22,13 +23,8 @@ pub(crate) async fn run_agent_turn(
     let max_rounds = if supports_tools { MAX_TOOL_ROUNDS } else { 1 };
     for _ in 0..max_rounds {
         let message_request = AgentMessageRequest::new(model, max_tokens, messages, tools);
-        let response = providers::anthropic::send_message(
-            client,
-            api_key,
-            anthropic_version,
-            &message_request,
-        )
-        .await?;
+        let response =
+            providers::send_message(provider, client, provider_config, &message_request).await?;
         let assistant_blocks = response.content;
 
         let message_text = extract_text(&assistant_blocks);
