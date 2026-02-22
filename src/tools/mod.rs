@@ -73,3 +73,7 @@ pub fn text_editor_tool() -> ToolDefinition {
         max_characters: Some(MAX_TEXT_EDITOR_VIEW_CHARACTERS),
     })
 }
+
+pub fn default_tools() -> Vec<ToolDefinition> {
+    vec![read_file_tool(), list_files_tool(), text_editor_tool()]
+}

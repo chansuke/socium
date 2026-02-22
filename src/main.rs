@@ -1,123 +1,21 @@
+pub mod agent;
 pub mod constants;
 pub mod providers;
 pub mod repl;
 pub mod tools;
 
+use crate::agent::state::{
+    ConversationState, ConversationStateRef, load_json_file, save_json_file,
+};
+use crate::agent::turn::run_agent_turn;
+use crate::agent::types::Message;
 use crate::constants::*;
 use crate::providers::ProviderKind;
 use crate::repl::{InputSession, parse_input};
-use crate::tools::runtime::run_tool_calls;
-use crate::tools::{ToolDefinition, list_files_tool, read_file_tool, text_editor_tool};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use crate::tools::default_tools;
 use std::env;
-use std::fs;
-use std::io::{self, Error, ErrorKind};
-use std::path::Path;
+use std::io::{Error, ErrorKind};
 use std::time::Duration;
-
-#[derive(Debug, Serialize)]
-struct AgentMessageRequest<'a> {
-    pub model: &'a str,
-    pub max_tokens: u32,
-    pub messages: &'a [Message],
-    pub tools: &'a [ToolDefinition],
-}
-
-impl<'a> AgentMessageRequest<'a> {
-    pub fn new(
-        model: &'a str,
-        max_tokens: u32,
-        messages: &'a [Message],
-        tools: &'a [ToolDefinition],
-    ) -> Self {
-        Self {
-            model,
-            max_tokens,
-            messages,
-            tools,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct AgentMessageResponse {
-    pub content: Vec<ContentBlock>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(tag = "type")]
-enum ContentBlock {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "tool_use")]
-    ToolUse {
-        id: String,
-        name: String,
-        input: Value,
-    },
-    #[serde(rename = "tool_result")]
-    ToolResult {
-        tool_use_id: String,
-        content: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        is_error: Option<bool>,
-    },
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct Message {
-    pub role: Role,
-    pub content: MessageContent,
-}
-
-impl Message {
-    pub fn user_text(content: String) -> Self {
-        Self {
-            role: Role::User,
-            content: MessageContent::Text(content),
-        }
-    }
-
-    pub fn assistant_blocks(content: Vec<ContentBlock>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: MessageContent::Blocks(content),
-        }
-    }
-
-    pub fn user_blocks(content: Vec<ContentBlock>) -> Self {
-        Self {
-            role: Role::User,
-            content: MessageContent::Blocks(content),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(untagged)]
-enum MessageContent {
-    Text(String),
-    Blocks(Vec<ContentBlock>),
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    User,
-    Assistant,
-    System,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct ConversationState {
-    messages: Vec<Message>,
-}
-
-#[derive(Debug, Serialize)]
-struct ConversationStateRef<'a> {
-    messages: &'a [Message],
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -159,19 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let provider = ProviderKind::from_env()?;
-    if provider != ProviderKind::Anthropic {
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("Provider '{provider}' is not implemented yet. Currently available: anthropic"),
-        )
-        .into());
-    }
+    let provider_config = provider.config_from_env()?;
     let provider_capabilities = provider.capabilities();
-
-    let api_key = env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| Error::new(ErrorKind::NotFound, "ANTHROPIC_API_KEY is not set"))?;
-    let anthropic_version =
-        env::var("ANTHROPIC_VERSION").unwrap_or_else(|_| "2023-06-01".to_string());
     let model = env::var("MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
     let max_tokens = env::var("MAX_TOKENS")
         .unwrap_or_else(|_| "1000".to_string())
@@ -183,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         })?;
 
-    let tools = vec![read_file_tool(), list_files_tool(), text_editor_tool()];
+    let tools = default_tools();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
@@ -219,9 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         messages.push(Message::user_text(user_input));
         run_agent_turn(
+            provider,
             &client,
-            &api_key,
-            &anthropic_version,
+            &provider_config,
             &model,
             max_tokens,
             provider_capabilities.supports_tools,
@@ -243,108 +130,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_agent_turn(
-    client: &reqwest::Client,
-    api_key: &str,
-    anthropic_version: &str,
-    model: &str,
-    max_tokens: u32,
-    supports_tools: bool,
-    tools: &[ToolDefinition],
-    workspace_root: &Path,
-    messages: &mut Vec<Message>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut finished = false;
-    let max_rounds = if supports_tools { MAX_TOOL_ROUNDS } else { 1 };
-    for _ in 0..max_rounds {
-        let message_request = AgentMessageRequest::new(model, max_tokens, messages, tools);
-        let response = providers::anthropic::send_message(
-            client,
-            api_key,
-            anthropic_version,
-            &message_request,
-        )
-        .await?;
-        let assistant_blocks = response.content;
-
-        let message_text = extract_text(&assistant_blocks);
-        if !message_text.is_empty() {
-            println!("{message_text}");
-        }
-
-        let tool_results = if supports_tools {
-            run_tool_calls(workspace_root, &assistant_blocks)
-        } else {
-            Vec::new()
-        };
-        messages.push(Message::assistant_blocks(assistant_blocks));
-        if !supports_tools {
-            finished = true;
-            break;
-        }
-        if tool_results.is_empty() {
-            finished = true;
-            break;
-        }
-        messages.push(Message::user_blocks(tool_results));
-    }
-
-    if !finished {
-        return Err(Error::other(format!(
-            "Tool execution reached the maximum rounds ({MAX_TOOL_ROUNDS}) and may be incomplete"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-pub(crate) fn load_json_file<T>(path: &Path) -> io::Result<T>
-where
-    T: for<'de> Deserialize<'de> + Default,
-{
-    match fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).map_err(|err| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("Invalid JSON in '{}': {err}", path.display()),
-            )
-        }),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(T::default()),
-        Err(err) => Err(err),
-    }
-}
-
-pub(crate) fn save_json_file<T>(path: &Path, value: &T) -> io::Result<()>
-where
-    T: Serialize,
-{
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let serialized = serde_json::to_string_pretty(value).map_err(|err| {
-        Error::other(format!(
-            "Failed to serialize JSON '{}': {err}",
-            path.display()
-        ))
-    })?;
-    fs::write(path, serialized)
-}
-
-fn extract_text(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ContentBlock, extract_text, load_json_file, save_json_file};
+    use crate::agent::state::{load_json_file, save_json_file};
+    use crate::agent::turn::extract_text;
+    use crate::agent::types::ContentBlock;
     use crate::constants::{
         MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES,
         TEXT_EDITOR_TOOL_NAME,

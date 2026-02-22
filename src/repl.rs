@@ -1,5 +1,5 @@
+use crate::agent::state::{load_json_file, save_json_file};
 use crate::constants::*;
-use crate::{load_json_file, save_json_file};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
