@@ -4,28 +4,18 @@ pub mod providers;
 pub mod repl;
 pub mod tools;
 
+use crate::agent::state::{
+    ConversationState, ConversationStateRef, load_json_file, save_json_file,
+};
 use crate::agent::turn::run_agent_turn;
 use crate::agent::types::Message;
 use crate::constants::*;
 use crate::providers::ProviderKind;
 use crate::repl::{InputSession, parse_input};
 use crate::tools::{list_files_tool, read_file_tool, text_editor_tool};
-use serde::{Deserialize, Serialize};
 use std::env;
-use std::fs;
-use std::io::{self, Error, ErrorKind};
-use std::path::Path;
+use std::io::{Error, ErrorKind};
 use std::time::Duration;
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct ConversationState {
-    messages: Vec<Message>,
-}
-
-#[derive(Debug, Serialize)]
-struct ConversationStateRef<'a> {
-    messages: &'a [Message],
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -151,41 +141,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub(crate) fn load_json_file<T>(path: &Path) -> io::Result<T>
-where
-    T: for<'de> Deserialize<'de> + Default,
-{
-    match fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).map_err(|err| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("Invalid JSON in '{}': {err}", path.display()),
-            )
-        }),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(T::default()),
-        Err(err) => Err(err),
-    }
-}
-
-pub(crate) fn save_json_file<T>(path: &Path, value: &T) -> io::Result<()>
-where
-    T: Serialize,
-{
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let serialized = serde_json::to_string_pretty(value).map_err(|err| {
-        Error::other(format!(
-            "Failed to serialize JSON '{}': {err}",
-            path.display()
-        ))
-    })?;
-    fs::write(path, serialized)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{load_json_file, save_json_file};
+    use crate::agent::state::{load_json_file, save_json_file};
     use crate::agent::turn::extract_text;
     use crate::agent::types::ContentBlock;
     use crate::constants::{
