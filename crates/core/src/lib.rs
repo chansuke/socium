@@ -71,7 +71,7 @@ pub async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
 
     let tools = default_tools();
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(90))
         .build()?;
 
     loop {
