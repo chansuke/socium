@@ -1,4 +1,4 @@
-use crate::ContentBlock;
+use crate::agent::types::ContentBlock;
 use crate::constants::*;
 use serde_json::{Value, json};
 use std::fs;

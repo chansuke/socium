@@ -5,110 +5,17 @@ pub mod repl;
 pub mod tools;
 
 use crate::agent::turn::run_agent_turn;
+use crate::agent::types::Message;
 use crate::constants::*;
 use crate::providers::ProviderKind;
 use crate::repl::{InputSession, parse_input};
-use crate::tools::{ToolDefinition, list_files_tool, read_file_tool, text_editor_tool};
+use crate::tools::{list_files_tool, read_file_tool, text_editor_tool};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::env;
 use std::fs;
 use std::io::{self, Error, ErrorKind};
 use std::path::Path;
 use std::time::Duration;
-
-#[derive(Debug, Serialize)]
-struct AgentMessageRequest<'a> {
-    pub model: &'a str,
-    pub max_tokens: u32,
-    pub messages: &'a [Message],
-    pub tools: &'a [ToolDefinition],
-}
-
-impl<'a> AgentMessageRequest<'a> {
-    pub fn new(
-        model: &'a str,
-        max_tokens: u32,
-        messages: &'a [Message],
-        tools: &'a [ToolDefinition],
-    ) -> Self {
-        Self {
-            model,
-            max_tokens,
-            messages,
-            tools,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct AgentMessageResponse {
-    pub content: Vec<ContentBlock>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(tag = "type")]
-enum ContentBlock {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "tool_use")]
-    ToolUse {
-        id: String,
-        name: String,
-        input: Value,
-    },
-    #[serde(rename = "tool_result")]
-    ToolResult {
-        tool_use_id: String,
-        content: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        is_error: Option<bool>,
-    },
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct Message {
-    pub role: Role,
-    pub content: MessageContent,
-}
-
-impl Message {
-    pub fn user_text(content: String) -> Self {
-        Self {
-            role: Role::User,
-            content: MessageContent::Text(content),
-        }
-    }
-
-    pub fn assistant_blocks(content: Vec<ContentBlock>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: MessageContent::Blocks(content),
-        }
-    }
-
-    pub fn user_blocks(content: Vec<ContentBlock>) -> Self {
-        Self {
-            role: Role::User,
-            content: MessageContent::Blocks(content),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(untagged)]
-enum MessageContent {
-    Text(String),
-    Blocks(Vec<ContentBlock>),
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    User,
-    Assistant,
-    System,
-}
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct ConversationState {
@@ -278,8 +185,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ContentBlock, load_json_file, save_json_file};
+    use super::{load_json_file, save_json_file};
     use crate::agent::turn::extract_text;
+    use crate::agent::types::ContentBlock;
     use crate::constants::{
         MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES,
         TEXT_EDITOR_TOOL_NAME,

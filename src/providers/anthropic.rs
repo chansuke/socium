@@ -1,5 +1,5 @@
+use crate::agent::types::{AgentMessageRequest, AgentMessageResponse};
 use crate::constants::ANTHROPIC_MESSAGES_API;
-use crate::{AgentMessageRequest, AgentMessageResponse};
 
 use super::ProviderCapabilities;
 
