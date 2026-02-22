@@ -17,8 +17,7 @@ use std::env;
 use std::io::{Error, ErrorKind};
 use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let workspace_root = env::current_dir()?;
     let state_dir = workspace_root.join(STATE_DIR_NAME);
     let conversation_path = state_dir.join(CONVERSATION_STATE_FILE_NAME);
