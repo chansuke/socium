@@ -1,12 +1,13 @@
+pub mod agent;
 pub mod constants;
 pub mod providers;
 pub mod repl;
 pub mod tools;
 
+use crate::agent::turn::run_agent_turn;
 use crate::constants::*;
 use crate::providers::ProviderKind;
 use crate::repl::{InputSession, parse_input};
-use crate::tools::runtime::run_tool_calls;
 use crate::tools::{ToolDefinition, list_files_tool, read_file_tool, text_editor_tool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -243,62 +244,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_agent_turn(
-    client: &reqwest::Client,
-    api_key: &str,
-    anthropic_version: &str,
-    model: &str,
-    max_tokens: u32,
-    supports_tools: bool,
-    tools: &[ToolDefinition],
-    workspace_root: &Path,
-    messages: &mut Vec<Message>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut finished = false;
-    let max_rounds = if supports_tools { MAX_TOOL_ROUNDS } else { 1 };
-    for _ in 0..max_rounds {
-        let message_request = AgentMessageRequest::new(model, max_tokens, messages, tools);
-        let response = providers::anthropic::send_message(
-            client,
-            api_key,
-            anthropic_version,
-            &message_request,
-        )
-        .await?;
-        let assistant_blocks = response.content;
-
-        let message_text = extract_text(&assistant_blocks);
-        if !message_text.is_empty() {
-            println!("{message_text}");
-        }
-
-        let tool_results = if supports_tools {
-            run_tool_calls(workspace_root, &assistant_blocks)
-        } else {
-            Vec::new()
-        };
-        messages.push(Message::assistant_blocks(assistant_blocks));
-        if !supports_tools {
-            finished = true;
-            break;
-        }
-        if tool_results.is_empty() {
-            finished = true;
-            break;
-        }
-        messages.push(Message::user_blocks(tool_results));
-    }
-
-    if !finished {
-        return Err(Error::other(format!(
-            "Tool execution reached the maximum rounds ({MAX_TOOL_ROUNDS}) and may be incomplete"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
 pub(crate) fn load_json_file<T>(path: &Path) -> io::Result<T>
 where
     T: for<'de> Deserialize<'de> + Default,
@@ -331,20 +276,10 @@ where
     fs::write(path, serialized)
 }
 
-fn extract_text(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ContentBlock, extract_text, load_json_file, save_json_file};
+    use super::{ContentBlock, load_json_file, save_json_file};
+    use crate::agent::turn::extract_text;
     use crate::constants::{
         MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES,
         TEXT_EDITOR_TOOL_NAME,
