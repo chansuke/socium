@@ -8,10 +8,4 @@ pub const MAX_TEXT_EDITOR_VIEW_CHARACTERS: usize = 50_000;
 pub const MAX_TEXT_EDITOR_VIEW_READ_BYTES: usize = 4 * 1024 * 1024;
 pub const STATE_DIR_NAME: &str = ".socium";
 pub const CONVERSATION_STATE_FILE_NAME: &str = "conversation.json";
-pub const INPUT_HISTORY_FILE_NAME: &str = "input_history.json";
-pub const MAX_INPUT_HISTORY_ENTRIES: usize = 1_000;
 pub const MAX_PERSISTED_MESSAGES: usize = 2_000;
-#[cfg(unix)]
-pub const ESCAPE_SEQUENCE_FIRST_BYTE_TIMEOUT_MS: i32 = 120;
-#[cfg(unix)]
-pub const ESCAPE_SEQUENCE_FOLLOWUP_TIMEOUT_MS: i32 = 120;
