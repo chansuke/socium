@@ -12,7 +12,7 @@ use crate::agent::types::Message;
 use crate::constants::*;
 use crate::providers::ProviderKind;
 use crate::repl::{InputSession, parse_input};
-use crate::tools::{list_files_tool, read_file_tool, text_editor_tool};
+use crate::tools::default_tools;
 use std::env;
 use std::io::{Error, ErrorKind};
 use std::time::Duration;
@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         })?;
 
-    let tools = vec![read_file_tool(), list_files_tool(), text_editor_tool()];
+    let tools = default_tools();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
