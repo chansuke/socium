@@ -18,8 +18,9 @@ pub(crate) async fn run_agent_turn(
     tools: &[ToolDefinition],
     workspace_root: &Path,
     messages: &mut Vec<Message>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut finished = false;
+    let mut assistant_text_chunks = Vec::new();
     let max_rounds = if supports_tools { MAX_TOOL_ROUNDS } else { 1 };
     for _ in 0..max_rounds {
         let message_request = AgentMessageRequest::new(model, max_tokens, messages, tools);
@@ -29,7 +30,7 @@ pub(crate) async fn run_agent_turn(
 
         let message_text = extract_text(&assistant_blocks);
         if !message_text.is_empty() {
-            println!("{message_text}");
+            assistant_text_chunks.push(message_text);
         }
 
         let tool_results = if supports_tools {
@@ -55,7 +56,7 @@ pub(crate) async fn run_agent_turn(
         ))
         .into());
     }
-    Ok(())
+    Ok(assistant_text_chunks)
 }
 
 pub(crate) fn extract_text(blocks: &[ContentBlock]) -> String {

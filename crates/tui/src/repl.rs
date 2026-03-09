@@ -1,13 +1,50 @@
-use crate::agent::state::{load_json_file, save_json_file};
-use crate::constants::*;
 use serde::{Deserialize, Serialize};
-use std::io::{self, BufRead, Read, Write};
-use std::path::PathBuf;
+use std::fs;
+use std::io::{self, BufRead, Error, ErrorKind, Read, Write};
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::{
     os::fd::{AsRawFd, RawFd},
     str,
 };
+
+const MAX_INPUT_HISTORY_ENTRIES: usize = 1_000;
+#[cfg(unix)]
+const ESCAPE_SEQUENCE_FIRST_BYTE_TIMEOUT_MS: i32 = 120;
+#[cfg(unix)]
+const ESCAPE_SEQUENCE_FOLLOWUP_TIMEOUT_MS: i32 = 120;
+
+fn load_json_file<T>(path: &Path) -> io::Result<T>
+where
+    T: for<'de> Deserialize<'de> + Default,
+{
+    match fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content).map_err(|err| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("Invalid JSON in '{}': {err}", path.display()),
+            )
+        }),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(T::default()),
+        Err(err) => Err(err),
+    }
+}
+
+fn save_json_file<T>(path: &Path, value: &T) -> io::Result<()>
+where
+    T: Serialize,
+{
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let serialized = serde_json::to_string_pretty(value).map_err(|err| {
+        Error::other(format!(
+            "Failed to serialize JSON '{}': {err}",
+            path.display()
+        ))
+    })?;
+    fs::write(path, serialized)
+}
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub(crate) struct InputHistoryState {
@@ -834,7 +871,6 @@ impl Drop for RawModeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load_json_file;
     use std::fs;
     use std::io::Cursor;
     use std::path::{Path, PathBuf};

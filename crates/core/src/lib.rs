@@ -1,7 +1,6 @@
 pub mod agent;
 pub mod constants;
 pub mod providers;
-pub mod repl;
 pub mod tools;
 
 use crate::agent::state::{
@@ -10,124 +9,129 @@ use crate::agent::state::{
 use crate::agent::turn::run_agent_turn;
 use crate::agent::types::Message;
 use crate::constants::*;
-use crate::providers::ProviderKind;
-use crate::repl::{InputSession, parse_input};
-use crate::tools::default_tools;
+use crate::providers::{ProviderConfig, ProviderKind};
+use crate::tools::{ToolDefinition, default_tools};
 use std::env;
 use std::io::{Error, ErrorKind};
+use std::path::PathBuf;
 use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let workspace_root = env::current_dir()?;
-    let state_dir = workspace_root.join(STATE_DIR_NAME);
-    let conversation_path = state_dir.join(CONVERSATION_STATE_FILE_NAME);
+pub struct AgentReply {
+    pub text: String,
+}
 
-    let mut messages = match load_json_file::<ConversationState>(&conversation_path) {
-        Ok(state) => {
-            let mut messages = state.messages;
-            if messages.len() > MAX_PERSISTED_MESSAGES {
-                let overflow = messages.len() - MAX_PERSISTED_MESSAGES;
-                messages.drain(0..overflow);
-                eprintln!(
-                    "Persisted conversation exceeded {} messages and was truncated.",
-                    MAX_PERSISTED_MESSAGES
-                );
-            }
-            messages
-        }
-        Err(err) => {
-            eprintln!(
-                "Failed to load persisted conversation '{}': {err}. Starting with an empty conversation.",
-                conversation_path.display()
-            );
-            Vec::new()
-        }
-    };
+pub struct AgentService {
+    workspace_root: PathBuf,
+    conversation_path: PathBuf,
+    messages: Vec<Message>,
+    provider: ProviderKind,
+    provider_config: ProviderConfig,
+    supports_tools: bool,
+    model: String,
+    max_tokens: u32,
+    tools: Vec<ToolDefinition>,
+    client: reqwest::Client,
+}
 
-    let mut input_session = match InputSession::load(state_dir.join(INPUT_HISTORY_FILE_NAME)) {
-        Ok(session) => session,
-        Err(err) => {
-            eprintln!("Failed to load input history: {err}. Starting with empty input history.");
-            InputSession {
-                history_path: state_dir.join(INPUT_HISTORY_FILE_NAME),
-                entries: Vec::new(),
-            }
-        }
-    };
-
-    let provider = ProviderKind::from_env()?;
-    let provider_config = provider.config_from_env()?;
-    let provider_capabilities = provider.capabilities();
-    let model = env::var("MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
-    let max_tokens = env::var("MAX_TOKENS")
-        .unwrap_or_else(|_| "1000".to_string())
-        .parse::<u32>()
-        .map_err(|e| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                format!("MAX_TOKENS must be an unsigned integer: {e}"),
-            )
-        })?;
-
-    let tools = default_tools();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
-
-    loop {
-        let Some(user_input) = parse_input(">> ", &mut input_session)? else {
-            break;
-        };
-
-        let command = user_input
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-
-        match command.as_str() {
-            "/exit" | "/quit" => break,
-            "/clear" => {
-                messages.clear();
-                if let Err(err) = save_json_file(
-                    &conversation_path,
-                    &ConversationStateRef {
-                        messages: &messages,
-                    },
-                ) {
-                    eprintln!("Warning: failed to persist cleared conversation state: {err}");
-                }
-                println!("Conversation cleared.");
-                continue;
-            }
-            _ => {}
-        }
-
-        messages.push(Message::user_text(user_input));
-        run_agent_turn(
-            provider,
-            &client,
-            &provider_config,
-            &model,
-            max_tokens,
-            provider_capabilities.supports_tools,
-            &tools,
-            &workspace_root,
-            &mut messages,
-        )
-        .await?;
-        if let Err(err) = save_json_file(
-            &conversation_path,
-            &ConversationStateRef {
-                messages: &messages,
-            },
-        ) {
-            eprintln!("Warning: failed to persist conversation state: {err}");
-        }
+impl AgentService {
+    pub fn from_current_dir() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_env(env::current_dir()?)
     }
 
-    Ok(())
+    pub fn from_env(workspace_root: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        let conversation_path = workspace_root
+            .join(STATE_DIR_NAME)
+            .join(CONVERSATION_STATE_FILE_NAME);
+
+        let messages = match load_json_file::<ConversationState>(&conversation_path) {
+            Ok(state) => {
+                let mut messages = state.messages;
+                if messages.len() > MAX_PERSISTED_MESSAGES {
+                    let overflow = messages.len() - MAX_PERSISTED_MESSAGES;
+                    messages.drain(0..overflow);
+                    eprintln!(
+                        "Persisted conversation exceeded {} messages and was truncated.",
+                        MAX_PERSISTED_MESSAGES
+                    );
+                }
+                messages
+            }
+            Err(err) => {
+                eprintln!(
+                    "Failed to load persisted conversation '{}': {err}. Starting with an empty conversation.",
+                    conversation_path.display()
+                );
+                Vec::new()
+            }
+        };
+
+        let provider = ProviderKind::from_env()?;
+        let provider_config = provider.config_from_env()?;
+        let model = env::var("MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
+        let max_tokens = env::var("MAX_TOKENS")
+            .unwrap_or_else(|_| "1000".to_string())
+            .parse::<u32>()
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("MAX_TOKENS must be an unsigned integer: {e}"),
+                )
+            })?;
+        let tools = default_tools();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(90))
+            .build()?;
+
+        Ok(Self {
+            workspace_root,
+            conversation_path,
+            messages,
+            provider,
+            provider_config,
+            supports_tools: provider.capabilities().supports_tools,
+            model,
+            max_tokens,
+            tools,
+            client,
+        })
+    }
+
+    pub fn clear(&mut self) -> std::io::Result<()> {
+        self.messages.clear();
+        self.persist_messages()
+    }
+
+    pub async fn submit(
+        &mut self,
+        user_input: String,
+    ) -> Result<AgentReply, Box<dyn std::error::Error>> {
+        self.messages.push(Message::user_text(user_input));
+        let assistant_chunks = run_agent_turn(
+            self.provider,
+            &self.client,
+            &self.provider_config,
+            &self.model,
+            self.max_tokens,
+            self.supports_tools,
+            &self.tools,
+            &self.workspace_root,
+            &mut self.messages,
+        )
+        .await?;
+        self.persist_messages()?;
+        Ok(AgentReply {
+            text: assistant_chunks.join("\n"),
+        })
+    }
+
+    fn persist_messages(&self) -> std::io::Result<()> {
+        save_json_file(
+            &self.conversation_path,
+            &ConversationStateRef {
+                messages: &self.messages,
+            },
+        )
+    }
 }
 
 #[cfg(test)]
@@ -139,16 +143,21 @@ mod tests {
         MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES,
         TEXT_EDITOR_TOOL_NAME,
     };
-    use crate::repl::InputHistoryState;
     use crate::tools::runtime::{
         list_files_from_workspace, read_file_from_workspace, resolve_workspace_path,
         resolve_workspace_path_for_create, run_tool_call, run_tool_calls,
     };
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(Debug, Serialize, Deserialize, Default)]
+    struct InputHistoryState {
+        entries: Vec<String>,
+    }
 
     #[test]
     fn load_json_file_returns_default_for_missing_file() {
