@@ -140,8 +140,8 @@ mod tests {
     use crate::agent::turn::extract_text;
     use crate::agent::types::ContentBlock;
     use crate::constants::{
-        MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES,
-        TEXT_EDITOR_TOOL_NAME,
+        MAX_COMMAND_TIMEOUT_MS, MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES,
+        MAX_TEXT_EDITOR_VIEW_READ_BYTES, TEXT_EDITOR_TOOL_NAME,
     };
     use crate::tools::runtime::{
         list_files_from_workspace, read_file_from_workspace, resolve_workspace_path,
@@ -947,6 +947,196 @@ mod tests {
             format!("(truncated: showing first {MAX_LIST_ENTRIES} entries; more entries omitted)");
 
         assert!(output.contains(&marker));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_runs_safe_command_in_requested_cwd() {
+        let workspace = make_temp_dir("workspace");
+        let nested = workspace.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_cmd_pwd",
+            "run_command",
+            &json!({
+                "command": ["pwd"],
+                "cwd": "nested"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Command: pwd"));
+                assert!(content.contains("Cwd: nested"));
+                assert!(content.contains("Permission: safe-read-only"));
+                assert!(content.contains("Exit code: 0"));
+                assert!(content.contains(nested.to_string_lossy().as_ref()));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_requires_workspace_write_approval_and_runs_after_approval() {
+        let workspace = make_temp_dir("workspace");
+
+        let rejected = run_tool_call(
+            workspace.path(),
+            "tool_cmd_touch_denied",
+            "run_command",
+            &json!({
+                "command": ["touch", "created.txt"]
+            }),
+        );
+
+        match rejected {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("requires workspace-write approval"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+        assert!(!workspace.path().join("created.txt").exists());
+
+        let approved = run_tool_call(
+            workspace.path(),
+            "tool_cmd_touch_ok",
+            "run_command",
+            &json!({
+                "command": ["touch", "created.txt"],
+                "approval": "workspace-write"
+            }),
+        );
+
+        match approved {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Permission: workspace-write"));
+                assert!(content.contains("Exit code: 0"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+        assert!(workspace.path().join("created.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_rejects_destructive_command_without_destructive_approval() {
+        let workspace = make_temp_dir("workspace");
+        let target = workspace.path().join("victim.txt");
+        fs::write(&target, "keep").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_cmd_rm",
+            "run_command",
+            &json!({
+                "command": ["rm", "victim.txt"],
+                "approval": "workspace-write"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("requires destructive approval"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+        assert!(target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_captures_stderr_and_non_zero_exit_code() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_cmd_sh_exit",
+            "run_command",
+            &json!({
+                "command": ["sh", "-c", "printf 'out'; printf 'err' >&2; exit 7"],
+                "approval": "workspace-write"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("Exit code: 7"));
+                assert!(content.contains("Stdout:\nout"));
+                assert!(content.contains("Stderr:\nerr"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_times_out() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_cmd_timeout",
+            "run_command",
+            &json!({
+                "command": ["sh", "-c", "sleep 1"],
+                "approval": "workspace-write",
+                "timeout_ms": 10
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("Timed out: true"));
+                assert!(content.contains("Timeout: 10 ms"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn run_command_rejects_timeout_above_limit() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_cmd_timeout_limit",
+            "run_command",
+            &json!({
+                "command": ["pwd"],
+                "timeout_ms": MAX_COMMAND_TIMEOUT_MS + 1
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("timeout_ms must be between"));
+            }
+            _ => panic!("expected tool_result"),
+        }
     }
 
     #[cfg(unix)]

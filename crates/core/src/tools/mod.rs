@@ -1,8 +1,8 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::constants::MAX_TEXT_EDITOR_VIEW_CHARACTERS;
 use crate::constants::TEXT_EDITOR_TOOL_NAME;
+use crate::constants::{MAX_COMMAND_TIMEOUT_MS, MAX_TEXT_EDITOR_VIEW_CHARACTERS};
 
 pub mod runtime;
 
@@ -66,6 +66,42 @@ pub fn list_files_tool() -> ToolDefinition {
     })
 }
 
+pub fn run_command_tool() -> ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
+        name: "run_command".to_string(),
+        description: "Run a workspace command for search, build, test, lint, or local execution. Commands are passed as an array of executable plus arguments, not as a shell string. The runtime classifies commands as safe-read-only, workspace-write, or destructive and may require the approval field to match the required permission level."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "array",
+                    "description": "Executable followed by arguments, each as a separate string.",
+                    "items": {
+                        "type": "string"
+                    },
+                    "minItems": 1
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Optional relative working directory inside the workspace. Defaults to the workspace root."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": format!("Optional timeout in milliseconds. Must be between 1 and {MAX_COMMAND_TIMEOUT_MS}.")
+                },
+                "approval": {
+                    "type": "string",
+                    "description": "Optional approval granted by the user when the runtime requires it.",
+                    "enum": ["workspace-write", "destructive"]
+                }
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        }),
+    })
+}
+
 pub fn text_editor_tool() -> ToolDefinition {
     ToolDefinition::AnthropicTextEditor(AnthropicTextEditorToolDefinition {
         tool_type: "text_editor_20250728".to_string(),
@@ -75,5 +111,10 @@ pub fn text_editor_tool() -> ToolDefinition {
 }
 
 pub fn default_tools() -> Vec<ToolDefinition> {
-    vec![read_file_tool(), list_files_tool(), text_editor_tool()]
+    vec![
+        read_file_tool(),
+        list_files_tool(),
+        run_command_tool(),
+        text_editor_tool(),
+    ]
 }

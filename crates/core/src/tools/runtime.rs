@@ -4,6 +4,9 @@ use serde_json::{Value, json};
 use std::fs;
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub(crate) fn run_tool_calls(workspace_root: &Path, blocks: &[ContentBlock]) -> Vec<ContentBlock> {
     blocks
@@ -26,6 +29,7 @@ pub(crate) fn run_tool_call(
     let result = match name {
         "read_file" => read_file_from_workspace(workspace_root, input),
         "list_files" => list_files_from_workspace(workspace_root, input),
+        "run_command" => run_command_from_workspace(workspace_root, input),
         TEXT_EDITOR_TOOL_NAME => text_editor_from_workspace(workspace_root, input),
         other => Err(format!("Unsupported tool: {other}")),
     };
@@ -42,6 +46,300 @@ pub(crate) fn run_tool_call(
             is_error: Some(true),
         },
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum CommandApproval {
+    None,
+    WorkspaceWrite,
+    Destructive,
+}
+
+impl CommandApproval {
+    fn parse(input: Option<&str>) -> Result<Self, String> {
+        match input {
+            None => Ok(Self::None),
+            Some("workspace-write") => Ok(Self::WorkspaceWrite),
+            Some("destructive") => Ok(Self::Destructive),
+            Some(other) => Err(format!(
+                "run_command approval must be either 'workspace-write' or 'destructive', got '{other}'"
+            )),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::Destructive => "destructive",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum CommandPermission {
+    SafeReadOnly,
+    WorkspaceWrite,
+    Destructive,
+}
+
+impl CommandPermission {
+    fn label(self) -> &'static str {
+        match self {
+            Self::SafeReadOnly => "safe-read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::Destructive => "destructive",
+        }
+    }
+
+    fn required_approval(self) -> CommandApproval {
+        match self {
+            Self::SafeReadOnly => CommandApproval::None,
+            Self::WorkspaceWrite => CommandApproval::WorkspaceWrite,
+            Self::Destructive => CommandApproval::Destructive,
+        }
+    }
+}
+
+struct CommandExecution {
+    permission: CommandPermission,
+    command_display: String,
+    cwd_display: String,
+    timeout_ms: u64,
+    timed_out: bool,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+pub(crate) fn run_command_from_workspace(
+    workspace_root: &Path,
+    input: &Value,
+) -> Result<String, String> {
+    let input_object = input
+        .as_object()
+        .ok_or("run_command requires an object input")?;
+    let command = require_string_array_field(input_object, "command", "run_command")?;
+    let cwd = optional_string_field(input_object, "cwd", "run_command cwd")?.unwrap_or(".");
+    let timeout_ms = optional_timeout_ms(input_object)?;
+    let approval = CommandApproval::parse(optional_string_field(
+        input_object,
+        "approval",
+        "run_command approval",
+    )?)?;
+    let permission = classify_command(&command);
+    let required_approval = permission.required_approval();
+
+    if approval < required_approval {
+        return Err(format!(
+            "Command '{}' is classified as {} and requires {} approval. Rerun with approval set to '{}'.",
+            display_command(&command),
+            permission.label(),
+            required_approval.label(),
+            required_approval.label()
+        ));
+    }
+
+    let resolved_cwd = resolve_workspace_command_cwd(workspace_root, cwd)?;
+    let execution = execute_command(&command, &resolved_cwd, cwd, timeout_ms, permission)?;
+
+    let output = format_command_execution(&execution);
+    if execution.timed_out || execution.exit_code.unwrap_or_default() != 0 {
+        Err(output)
+    } else {
+        Ok(output)
+    }
+}
+
+fn execute_command(
+    command: &[String],
+    cwd: &Path,
+    cwd_display: &str,
+    timeout_ms: u64,
+    permission: CommandPermission,
+) -> Result<CommandExecution, String> {
+    let program = command
+        .first()
+        .ok_or("run_command command must contain at least one element")?;
+    let args = &command[1..];
+
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "Failed to spawn command '{}': {e}",
+                display_command(command)
+            )
+        })?;
+
+    let timeout = Duration::from_millis(timeout_ms);
+    let start = Instant::now();
+    let mut timed_out = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    timed_out = true;
+                    child.kill().map_err(|e| {
+                        format!(
+                            "Failed to terminate timed out command '{}': {e}",
+                            display_command(command)
+                        )
+                    })?;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Failed while waiting for command '{}': {e}",
+                    display_command(command)
+                ));
+            }
+        }
+    }
+
+    let output = child.wait_with_output().map_err(|e| {
+        format!(
+            "Failed to collect output for command '{}': {e}",
+            display_command(command)
+        )
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    Ok(CommandExecution {
+        permission,
+        command_display: display_command(command),
+        cwd_display: cwd_display.to_string(),
+        timeout_ms,
+        timed_out,
+        exit_code: output.status.code(),
+        stdout,
+        stderr,
+    })
+}
+
+fn format_command_execution(execution: &CommandExecution) -> String {
+    let stdout = format_command_stream(&execution.stdout);
+    let stderr = format_command_stream(&execution.stderr);
+    let exit_code = match execution.exit_code {
+        Some(code) => code.to_string(),
+        None => "terminated".to_string(),
+    };
+
+    format!(
+        "Command: {}\nCwd: {}\nPermission: {}\nTimeout: {} ms\nTimed out: {}\nExit code: {}\nStdout:\n{}\nStderr:\n{}",
+        execution.command_display,
+        execution.cwd_display,
+        execution.permission.label(),
+        execution.timeout_ms,
+        execution.timed_out,
+        exit_code,
+        stdout,
+        stderr
+    )
+}
+
+fn format_command_stream(stream: &str) -> String {
+    if stream.is_empty() {
+        return "(empty)".to_string();
+    }
+
+    let (truncated, was_truncated) = truncate_by_characters(stream, MAX_COMMAND_OUTPUT_CHARACTERS);
+    if was_truncated {
+        format!(
+            "{truncated}\n(truncated: showing first {} characters)",
+            MAX_COMMAND_OUTPUT_CHARACTERS
+        )
+    } else {
+        truncated
+    }
+}
+
+fn classify_command(command: &[String]) -> CommandPermission {
+    let Some(program) = command.first() else {
+        return CommandPermission::Destructive;
+    };
+    let program_name = Path::new(program)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program.as_str());
+    let first_arg = command.get(1).map(String::as_str).unwrap_or_default();
+
+    if is_destructive_command(program_name, first_arg) {
+        CommandPermission::Destructive
+    } else if is_safe_read_only_command(program_name, first_arg) {
+        CommandPermission::SafeReadOnly
+    } else {
+        CommandPermission::WorkspaceWrite
+    }
+}
+
+fn is_safe_read_only_command(program: &str, first_arg: &str) -> bool {
+    matches!(
+        program,
+        "cat"
+            | "echo"
+            | "env"
+            | "find"
+            | "git"
+            | "grep"
+            | "head"
+            | "ls"
+            | "pwd"
+            | "rg"
+            | "sed"
+            | "sort"
+            | "stat"
+            | "tail"
+            | "uname"
+            | "wc"
+            | "which"
+    ) && (program != "git"
+        || matches!(
+            first_arg,
+            "branch" | "diff" | "log" | "rev-parse" | "show" | "status"
+        ))
+}
+
+fn is_destructive_command(program: &str, first_arg: &str) -> bool {
+    matches!(
+        program,
+        "chmod" | "chown" | "dd" | "fdisk" | "mkfs" | "mv" | "rm" | "rmdir"
+    ) || (program == "git"
+        && matches!(
+            first_arg,
+            "checkout"
+                | "cherry-pick"
+                | "clean"
+                | "merge"
+                | "rebase"
+                | "reset"
+                | "restore"
+                | "revert"
+                | "switch"
+        ))
+}
+
+fn display_command(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|part| {
+            if part.is_empty() || part.chars().any(char::is_whitespace) {
+                format!("{part:?}")
+            } else {
+                part.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn text_editor_from_workspace(
@@ -214,6 +512,46 @@ pub(crate) fn require_string_field<'a>(
         .ok_or_else(|| format!("{context} requires a string field: {field}"))
 }
 
+pub(crate) fn optional_string_field<'a>(
+    input: &'a serde_json::Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> Result<Option<&'a str>, String> {
+    match input.get(field) {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| format!("{context} requires a string field: {field}")),
+    }
+}
+
+pub(crate) fn require_string_array_field(
+    input: &serde_json::Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> Result<Vec<String>, String> {
+    let values = input
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context} requires an array field: {field}"))?;
+    if values.is_empty() {
+        return Err(format!(
+            "{context} requires a non-empty array field: {field}"
+        ));
+    }
+
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| format!("{context} requires string array items in field: {field}"))
+        })
+        .collect()
+}
+
 pub(crate) fn require_i64_field(
     input: &serde_json::Map<String, Value>,
     field: &str,
@@ -223,6 +561,21 @@ pub(crate) fn require_i64_field(
         .get(field)
         .and_then(Value::as_i64)
         .ok_or_else(|| format!("{context} requires an integer field: {field}"))
+}
+
+fn optional_timeout_ms(input: &serde_json::Map<String, Value>) -> Result<u64, String> {
+    let Some(timeout_ms) = input.get("timeout_ms") else {
+        return Ok(DEFAULT_COMMAND_TIMEOUT_MS);
+    };
+    let timeout_ms = timeout_ms
+        .as_u64()
+        .ok_or("run_command timeout_ms requires an integer field: timeout_ms")?;
+    if !(1..=MAX_COMMAND_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(format!(
+            "run_command timeout_ms must be between 1 and {MAX_COMMAND_TIMEOUT_MS}"
+        ));
+    }
+    Ok(timeout_ms)
 }
 
 pub(crate) fn apply_view_range(
@@ -470,6 +823,22 @@ pub(crate) fn list_files_from_workspace(
         let lines: Vec<String> = entries.into_iter().map(|(_, line)| line).collect();
         Ok(format!("Path: {}\n{}", path, lines.join("\n")))
     }
+}
+
+pub(crate) fn resolve_workspace_command_cwd(
+    workspace_root: &Path,
+    requested_path: &str,
+) -> Result<PathBuf, String> {
+    let resolved = resolve_workspace_path(workspace_root, requested_path)?;
+    let metadata = fs::metadata(&resolved)
+        .map_err(|e| format!("Failed to inspect command cwd '{}': {e}", requested_path))?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "run_command cwd is not a directory: '{}'",
+            requested_path
+        ));
+    }
+    Ok(resolved)
 }
 
 pub(crate) fn resolve_workspace_path(
