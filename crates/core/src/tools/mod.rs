@@ -2,7 +2,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::constants::TEXT_EDITOR_TOOL_NAME;
-use crate::constants::{MAX_COMMAND_TIMEOUT_MS, MAX_TEXT_EDITOR_VIEW_CHARACTERS};
+use crate::constants::{
+    MAX_COMMAND_TIMEOUT_MS, MAX_SEARCH_RESULTS, MAX_TEXT_EDITOR_VIEW_CHARACTERS,
+};
 
 pub mod runtime;
 
@@ -51,7 +53,7 @@ pub fn read_file_tool() -> ToolDefinition {
 pub fn list_files_tool() -> ToolDefinition {
     ToolDefinition::Custom(CustomToolDefinition {
         name: "list_files".to_string(),
-        description: "List files and directories at a given path. If no path is provided, lists files in the current directory. If a file path is given, confirms the file exists."
+        description: "List files and directories at a given path. Supports optional recursive traversal and file glob filtering for repo navigation."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -59,8 +61,74 @@ pub fn list_files_tool() -> ToolDefinition {
                 "path": {
                     "type": "string",
                     "description": "Optional relative path to a file or directory in the workspace. Defaults to the current directory."
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": "If true, recursively lists matching files beneath the path."
+                },
+                "glob": {
+                    "type": "string",
+                    "description": "Optional glob filter such as '*.rs' or 'src/**/*.ts'. Applies to file paths relative to the requested path."
                 }
             },
+            "additionalProperties": false
+        }),
+    })
+}
+
+pub fn search_text_tool() -> ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
+        name: "search_text".to_string(),
+        description: "Search repository text using ripgrep and return line-addressable matches in the form path:line:text."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Text or regex pattern to search for."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional relative file or directory path to limit the search scope."
+                },
+                "glob": {
+                    "type": "string",
+                    "description": "Optional ripgrep glob filter such as '*.rs'."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": format!("Optional max number of matches to return. Must be between 1 and {MAX_SEARCH_RESULTS}.")
+                }
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        }),
+    })
+}
+
+pub fn find_symbol_tool() -> ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
+        name: "find_symbol".to_string(),
+        description: "Find declaration-like Rust symbol references for quick navigation. Returns line-addressable matches in the form path:line:text."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Rust symbol name to search for."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional relative file or directory path to limit the search scope."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": format!("Optional max number of matches to return. Must be between 1 and {MAX_SEARCH_RESULTS}.")
+                }
+            },
+            "required": ["symbol"],
             "additionalProperties": false
         }),
     })
@@ -114,6 +182,8 @@ pub fn default_tools() -> Vec<ToolDefinition> {
     vec![
         read_file_tool(),
         list_files_tool(),
+        search_text_tool(),
+        find_symbol_tool(),
         run_command_tool(),
         text_editor_tool(),
     ]

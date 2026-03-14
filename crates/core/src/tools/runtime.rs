@@ -29,6 +29,8 @@ pub(crate) fn run_tool_call(
     let result = match name {
         "read_file" => read_file_from_workspace(workspace_root, input),
         "list_files" => list_files_from_workspace(workspace_root, input),
+        "search_text" => search_text_from_workspace(workspace_root, input),
+        "find_symbol" => find_symbol_in_workspace(workspace_root, input),
         "run_command" => run_command_from_workspace(workspace_root, input),
         TEXT_EDITOR_TOOL_NAME => text_editor_from_workspace(workspace_root, input),
         other => Err(format!("Unsupported tool: {other}")),
@@ -110,6 +112,12 @@ struct CommandExecution {
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
+}
+
+struct SearchMatch {
+    path: String,
+    line_number: usize,
+    text: String,
 }
 
 pub(crate) fn run_command_from_workspace(
@@ -261,6 +269,227 @@ fn format_command_stream(stream: &str) -> String {
     } else {
         truncated
     }
+}
+
+pub(crate) fn search_text_from_workspace(
+    workspace_root: &Path,
+    input: &Value,
+) -> Result<String, String> {
+    let input_object = input
+        .as_object()
+        .ok_or("search_text requires an object input")?;
+    let pattern = require_string_field(input_object, "pattern", "search_text")?;
+    let path = optional_string_field(input_object, "path", "search_text path")?.unwrap_or(".");
+    let glob = optional_string_field(input_object, "glob", "search_text glob")?;
+    let max_results = optional_bounded_usize_field(
+        input_object,
+        "max_results",
+        "search_text",
+        DEFAULT_SEARCH_RESULTS,
+        MAX_SEARCH_RESULTS,
+    )?;
+    let resolved_path = resolve_workspace_path(workspace_root, path)?;
+
+    let mut args = vec![
+        "--line-number".to_string(),
+        "--with-filename".to_string(),
+        "--color".to_string(),
+        "never".to_string(),
+        "--no-heading".to_string(),
+        "--smart-case".to_string(),
+    ];
+    if let Some(glob) = glob {
+        args.push("--glob".to_string());
+        args.push(glob.to_string());
+    }
+    args.push(pattern.to_string());
+    args.push(resolved_path.to_string_lossy().into_owned());
+
+    let output = Command::new("rg")
+        .args(&args)
+        .current_dir(workspace_root)
+        .output()
+        .map_err(|e| format!("Failed to run ripgrep for search_text: {e}"))?;
+    let matches = parse_rg_matches(workspace_root, &output.stdout)?;
+    let formatted = format_search_results("Pattern", pattern, path, glob, max_results, matches);
+
+    match output.status.code() {
+        Some(0) | Some(1) => Ok(formatted),
+        Some(code) => Err(format!(
+            "search_text failed with exit code {code}\n{formatted}"
+        )),
+        None => Err(format!("search_text terminated unexpectedly\n{formatted}")),
+    }
+}
+
+pub(crate) fn find_symbol_in_workspace(
+    workspace_root: &Path,
+    input: &Value,
+) -> Result<String, String> {
+    let input_object = input
+        .as_object()
+        .ok_or("find_symbol requires an object input")?;
+    let symbol = require_string_field(input_object, "symbol", "find_symbol")?;
+    let path = optional_string_field(input_object, "path", "find_symbol path")?.unwrap_or(".");
+    let max_results = optional_bounded_usize_field(
+        input_object,
+        "max_results",
+        "find_symbol",
+        DEFAULT_SEARCH_RESULTS,
+        MAX_SEARCH_RESULTS,
+    )?;
+    let resolved_path = resolve_workspace_path(workspace_root, path)?;
+
+    let output = Command::new("rg")
+        .args([
+            "--line-number",
+            "--with-filename",
+            "--color",
+            "never",
+            "--no-heading",
+            "--fixed-strings",
+            "--glob",
+            "*.rs",
+            symbol,
+            resolved_path.to_string_lossy().as_ref(),
+        ])
+        .current_dir(workspace_root)
+        .output()
+        .map_err(|e| format!("Failed to run ripgrep for find_symbol: {e}"))?;
+    let matches = parse_rg_matches(workspace_root, &output.stdout)?
+        .into_iter()
+        .filter(|entry| looks_like_rust_symbol_declaration(&entry.text, symbol))
+        .collect::<Vec<_>>();
+    let formatted =
+        format_search_results("Symbol", symbol, path, Some("*.rs"), max_results, matches);
+
+    match output.status.code() {
+        Some(0) | Some(1) => Ok(formatted),
+        Some(code) => Err(format!(
+            "find_symbol failed with exit code {code}\n{formatted}"
+        )),
+        None => Err(format!("find_symbol terminated unexpectedly\n{formatted}")),
+    }
+}
+
+fn parse_rg_matches(workspace_root: &Path, stdout: &[u8]) -> Result<Vec<SearchMatch>, String> {
+    let text = String::from_utf8(stdout.to_vec())
+        .map_err(|e| format!("ripgrep returned non UTF-8 output: {e}"))?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| parse_rg_match_line(workspace_root, line))
+        .collect()
+}
+
+fn parse_rg_match_line(workspace_root: &Path, line: &str) -> Result<SearchMatch, String> {
+    let mut parts = line.splitn(3, ':');
+    let raw_path = parts
+        .next()
+        .ok_or_else(|| format!("Invalid ripgrep output line: '{line}'"))?;
+    let raw_line_number = parts
+        .next()
+        .ok_or_else(|| format!("Invalid ripgrep output line: '{line}'"))?;
+    let text = parts
+        .next()
+        .ok_or_else(|| format!("Invalid ripgrep output line: '{line}'"))?;
+    let line_number = raw_line_number
+        .parse::<usize>()
+        .map_err(|e| format!("Invalid ripgrep line number '{raw_line_number}': {e}"))?;
+    let path = normalize_match_path(workspace_root, raw_path);
+
+    Ok(SearchMatch {
+        path,
+        line_number,
+        text: text.to_string(),
+    })
+}
+
+fn normalize_match_path(workspace_root: &Path, raw_path: &str) -> String {
+    let path = Path::new(raw_path);
+    if path.is_absolute() {
+        path.strip_prefix(workspace_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    } else {
+        raw_path.replace('\\', "/")
+    }
+}
+
+fn format_search_results(
+    label: &str,
+    query: &str,
+    path: &str,
+    glob: Option<&str>,
+    max_results: usize,
+    matches: Vec<SearchMatch>,
+) -> String {
+    let total = matches.len();
+    let truncated = total > max_results;
+    let mut lines = Vec::new();
+    lines.push(format!("{label}: {query}"));
+    lines.push(format!("Path: {path}"));
+    if let Some(glob) = glob {
+        lines.push(format!("Glob: {glob}"));
+    }
+
+    if total == 0 {
+        lines.push("(no matches)".to_string());
+        return lines.join("\n");
+    }
+
+    lines.extend(
+        matches
+            .into_iter()
+            .take(max_results)
+            .map(|entry| format!("{}:{}:{}", entry.path, entry.line_number, entry.text)),
+    );
+    if truncated {
+        lines.push(format!(
+            "(truncated: showing first {max_results} matches; more matches omitted)"
+        ));
+    }
+    lines.join("\n")
+}
+
+fn looks_like_rust_symbol_declaration(line: &str, symbol: &str) -> bool {
+    let trimmed = line.trim_start();
+    let declaration_keywords = [
+        "fn", "struct", "enum", "trait", "type", "mod", "const", "static",
+    ];
+    if trimmed.starts_with("impl ") {
+        return contains_symbol_token(trimmed, symbol);
+    }
+
+    declaration_keywords.iter().any(|keyword| {
+        let token = format!("{keyword} {symbol}");
+        trimmed.contains(&token) && contains_symbol_token(trimmed, symbol)
+    })
+}
+
+fn contains_symbol_token(line: &str, symbol: &str) -> bool {
+    let bytes = line.as_bytes();
+    let symbol_bytes = symbol.as_bytes();
+    if symbol_bytes.is_empty() || bytes.len() < symbol_bytes.len() {
+        return false;
+    }
+
+    for start in 0..=bytes.len() - symbol_bytes.len() {
+        if &bytes[start..start + symbol_bytes.len()] != symbol_bytes {
+            continue;
+        }
+        let before_ok = start == 0 || !is_symbol_char(bytes[start - 1] as char);
+        let end = start + symbol_bytes.len();
+        let after_ok = end == bytes.len() || !is_symbol_char(bytes[end] as char);
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_symbol_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn classify_command(command: &[String]) -> CommandPermission {
@@ -526,6 +755,43 @@ pub(crate) fn optional_string_field<'a>(
     }
 }
 
+fn optional_bool_field(
+    input: &serde_json::Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> Result<Option<bool>, String> {
+    match input.get(field) {
+        None => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| format!("{context} requires a boolean field: {field}")),
+    }
+}
+
+fn optional_bounded_usize_field(
+    input: &serde_json::Map<String, Value>,
+    field: &str,
+    context: &str,
+    default: usize,
+    max: usize,
+) -> Result<usize, String> {
+    let Some(value) = input.get(field) else {
+        return Ok(default);
+    };
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| format!("{context} requires an integer field: {field}"))?;
+    let parsed = usize::try_from(raw)
+        .map_err(|_| format!("{context} field '{field}' is too large for this platform"))?;
+    if !(1..=max).contains(&parsed) {
+        return Err(format!(
+            "{context} field '{field}' must be between 1 and {max}"
+        ));
+    }
+    Ok(parsed)
+}
+
 pub(crate) fn require_string_array_field(
     input: &serde_json::Map<String, Value>,
     field: &str,
@@ -763,12 +1029,24 @@ pub(crate) fn list_files_from_workspace(
             .ok_or("list_files requires an optional string field: path")?,
     };
     let path = if raw_path.is_empty() { "." } else { raw_path };
+    let recursive =
+        optional_bool_field(input_object, "recursive", "list_files recursive")?.unwrap_or(false);
+    let glob = optional_string_field(input_object, "glob", "list_files glob")?;
 
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
     let metadata = fs::metadata(&resolved_path)
         .map_err(|e| format!("Failed to inspect path '{}': {e}", path))?;
 
     if metadata.is_file() {
+        if let Some(glob) = glob {
+            let file_name = Path::new(path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| format!("Failed to inspect file name for '{}'", path))?;
+            if !glob_matches(glob, file_name) {
+                return Ok(format!("Path: {path}\nGlob: {glob}\n(empty)"));
+            }
+        }
         return Ok(format!("Path: {}\n[file]", path));
     }
 
@@ -776,10 +1054,22 @@ pub(crate) fn list_files_from_workspace(
         return Err(format!("Path is neither a file nor directory: '{}'", path));
     }
 
-    let read_dir = fs::read_dir(&resolved_path)
-        .map_err(|e| format!("Failed to list directory '{}': {e}", path))?;
-    let mut entries: Vec<(String, String)> = Vec::new();
-    let mut has_more = false;
+    let entries = if recursive || glob.is_some() {
+        collect_filtered_file_entries(&resolved_path, glob, recursive)?
+    } else {
+        collect_directory_entries(&resolved_path)?
+    };
+    format_list_file_entries(path, glob, recursive, entries)
+}
+
+fn collect_directory_entries(resolved_path: &Path) -> Result<Vec<(String, String)>, String> {
+    let read_dir = fs::read_dir(resolved_path).map_err(|e| {
+        format!(
+            "Failed to list directory '{}': {e}",
+            resolved_path.display()
+        )
+    })?;
+    let mut entries = Vec::new();
 
     for entry_result in read_dir {
         let entry = entry_result.map_err(|e| format!("Failed to read directory entry: {e}"))?;
@@ -787,41 +1077,140 @@ pub(crate) fn list_files_from_workspace(
         let file_type = entry
             .file_type()
             .map_err(|e| format!("Failed to inspect directory entry type: {e}"))?;
-        let (prefix, display_name) = if file_type.is_symlink() {
-            ("[lnk]", name.clone())
+        let (sort_key, line) = if file_type.is_symlink() {
+            (name.clone(), format!("[lnk] {name}"))
         } else if file_type.is_dir() {
-            ("[dir]", format!("{name}/"))
+            (name.clone(), format!("[dir] {name}/"))
         } else {
-            ("[file]", name.clone())
+            (name.clone(), format!("[file] {name}"))
         };
-        entries.push((name, format!("{prefix} {display_name}")));
+        entries.push((sort_key, line));
+    }
 
-        if entries.len() > MAX_LIST_ENTRIES {
-            has_more = true;
-            break;
+    Ok(entries)
+}
+
+fn collect_filtered_file_entries(
+    resolved_path: &Path,
+    glob: Option<&str>,
+    recursive: bool,
+) -> Result<Vec<(String, String)>, String> {
+    let mut entries = Vec::new();
+    collect_filtered_file_entries_inner(
+        resolved_path,
+        resolved_path,
+        glob,
+        recursive,
+        &mut entries,
+    )?;
+    Ok(entries)
+}
+
+fn collect_filtered_file_entries_inner(
+    root: &Path,
+    current: &Path,
+    glob: Option<&str>,
+    recursive: bool,
+    entries: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    let read_dir = fs::read_dir(current)
+        .map_err(|e| format!("Failed to list directory '{}': {e}", current.display()))?;
+
+    for entry_result in read_dir {
+        let entry = entry_result.map_err(|e| format!("Failed to read directory entry: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect directory entry type: {e}"))?;
+        let path = entry.path();
+        if file_type.is_dir() {
+            if recursive {
+                collect_filtered_file_entries_inner(root, &path, glob, recursive, entries)?;
+            }
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|e| format!("Failed to normalize path '{}': {e}", path.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let matches = glob.is_none_or(|pattern| {
+            glob_matches(pattern, &relative)
+                || Path::new(&relative)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|file_name| glob_matches(pattern, file_name))
+        });
+        if matches {
+            entries.push((relative.clone(), format!("[file] {relative}")));
         }
     }
 
+    Ok(())
+}
+
+fn format_list_file_entries(
+    path: &str,
+    glob: Option<&str>,
+    recursive: bool,
+    mut entries: Vec<(String, String)>,
+) -> Result<String, String> {
     if entries.is_empty() {
-        return Ok(format!("Path: {}\n(empty)", path));
+        let mut lines = vec![format!("Path: {path}")];
+        if let Some(glob) = glob {
+            lines.push(format!("Glob: {glob}"));
+        }
+        if recursive {
+            lines.push("Recursive: true".to_string());
+        }
+        lines.push("(empty)".to_string());
+        return Ok(lines.join("\n"));
     }
 
     entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-
+    let has_more = entries.len() > MAX_LIST_ENTRIES;
+    let lines = entries
+        .into_iter()
+        .take(MAX_LIST_ENTRIES)
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>();
+    let mut output = vec![format!("Path: {path}")];
+    if let Some(glob) = glob {
+        output.push(format!("Glob: {glob}"));
+    }
+    if recursive {
+        output.push("Recursive: true".to_string());
+    }
+    output.push(lines.join("\n"));
     if has_more {
-        let lines: Vec<String> = entries
-            .iter()
-            .take(MAX_LIST_ENTRIES)
-            .map(|(_, line)| line.clone())
-            .collect();
-        Ok(format!(
-            "Path: {}\n{}\n(truncated: showing first {MAX_LIST_ENTRIES} entries; more entries omitted)",
-            path,
-            lines.join("\n")
-        ))
-    } else {
-        let lines: Vec<String> = entries.into_iter().map(|(_, line)| line).collect();
-        Ok(format!("Path: {}\n{}", path, lines.join("\n")))
+        output.push(format!(
+            "(truncated: showing first {MAX_LIST_ENTRIES} entries; more entries omitted)"
+        ));
+    }
+    Ok(output.join("\n"))
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    glob_match_bytes(pattern.as_bytes(), value.as_bytes())
+}
+
+fn glob_match_bytes(pattern: &[u8], value: &[u8]) -> bool {
+    if pattern.is_empty() {
+        return value.is_empty();
+    }
+
+    match pattern[0] {
+        b'*' => {
+            glob_match_bytes(&pattern[1..], value)
+                || (!value.is_empty() && glob_match_bytes(pattern, &value[1..]))
+        }
+        b'?' => !value.is_empty() && glob_match_bytes(&pattern[1..], &value[1..]),
+        byte => {
+            !value.is_empty() && byte == value[0] && glob_match_bytes(&pattern[1..], &value[1..])
+        }
     }
 }
 

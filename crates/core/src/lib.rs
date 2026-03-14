@@ -144,8 +144,9 @@ mod tests {
         MAX_TEXT_EDITOR_VIEW_READ_BYTES, TEXT_EDITOR_TOOL_NAME,
     };
     use crate::tools::runtime::{
-        list_files_from_workspace, read_file_from_workspace, resolve_workspace_path,
-        resolve_workspace_path_for_create, run_tool_call, run_tool_calls,
+        find_symbol_in_workspace, list_files_from_workspace, read_file_from_workspace,
+        resolve_workspace_path, resolve_workspace_path_for_create, run_tool_call, run_tool_calls,
+        search_text_from_workspace,
     };
     use serde::{Deserialize, Serialize};
     use serde_json::json;
@@ -284,6 +285,119 @@ mod tests {
             list_files_from_workspace(workspace.path(), &json!({"path": "empty"})).unwrap();
 
         assert_eq!(output, "Path: empty\n(empty)");
+    }
+
+    #[test]
+    fn search_text_returns_line_addressable_matches() {
+        let workspace = make_temp_dir("workspace");
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::write(
+            workspace.path().join("src/lib.rs"),
+            "pub fn alpha() {}\nlet needle = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("src/other.rs"),
+            "const NEEDLE: &str = \"needle\";\n",
+        )
+        .unwrap();
+
+        let output = search_text_from_workspace(
+            workspace.path(),
+            &json!({
+                "pattern": "needle",
+                "path": "src"
+            }),
+        )
+        .unwrap();
+
+        assert!(output.contains("Pattern: needle"));
+        assert!(output.contains("Path: src"));
+        assert!(output.contains("src/lib.rs:2:let needle = 1;"));
+        assert!(output.contains("src/other.rs:1:const NEEDLE: &str = \"needle\";"));
+    }
+
+    #[test]
+    fn search_text_respects_glob_and_max_results() {
+        let workspace = make_temp_dir("workspace");
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::write(workspace.path().join("src/a.rs"), "needle\n").unwrap();
+        fs::write(workspace.path().join("src/b.rs"), "needle\n").unwrap();
+        fs::write(workspace.path().join("src/c.txt"), "needle\n").unwrap();
+
+        let output = search_text_from_workspace(
+            workspace.path(),
+            &json!({
+                "pattern": "needle",
+                "glob": "*.rs",
+                "max_results": 1
+            }),
+        )
+        .unwrap();
+
+        assert!(output.contains("Glob: *.rs"));
+        assert!(output.contains("src/a.rs:1:needle") || output.contains("src/b.rs:1:needle"));
+        assert!(!output.contains("src/c.txt"));
+        assert!(output.contains("(truncated: showing first 1 matches; more matches omitted)"));
+    }
+
+    #[test]
+    fn list_files_supports_recursive_glob_filtering() {
+        let workspace = make_temp_dir("workspace");
+        fs::create_dir_all(workspace.path().join("src/nested")).unwrap();
+        fs::write(workspace.path().join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+        fs::write(
+            workspace.path().join("src/nested/mod.rs"),
+            "pub mod nested;\n",
+        )
+        .unwrap();
+        fs::write(workspace.path().join("src/nested/readme.txt"), "note\n").unwrap();
+
+        let output = list_files_from_workspace(
+            workspace.path(),
+            &json!({
+                "path": "src",
+                "recursive": true,
+                "glob": "*.rs"
+            }),
+        )
+        .unwrap();
+
+        assert!(output.contains("Path: src"));
+        assert!(output.contains("Glob: *.rs"));
+        assert!(output.contains("Recursive: true"));
+        assert!(output.contains("[file] lib.rs"));
+        assert!(output.contains("[file] nested/mod.rs"));
+        assert!(!output.contains("readme.txt"));
+    }
+
+    #[test]
+    fn find_symbol_returns_rust_declaration_matches() {
+        let workspace = make_temp_dir("workspace");
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::write(
+            workspace.path().join("src/lib.rs"),
+            "pub struct Widget;\nfn helper() {}\nimpl Widget { pub fn build() -> Self { Self } }\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("src/other.rs"),
+            "pub enum WidgetState { Ready }\n",
+        )
+        .unwrap();
+
+        let output = find_symbol_in_workspace(
+            workspace.path(),
+            &json!({
+                "symbol": "Widget"
+            }),
+        )
+        .unwrap();
+
+        assert!(output.contains("Symbol: Widget"));
+        assert!(output.contains("src/lib.rs:1:pub struct Widget;"));
+        assert!(output.contains("src/lib.rs:3:impl Widget { pub fn build() -> Self { Self } }"));
+        assert!(!output.contains("WidgetState"));
     }
 
     #[test]
