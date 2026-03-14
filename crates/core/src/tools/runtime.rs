@@ -30,6 +30,7 @@ pub(crate) fn run_tool_call(
         "read_file" => read_file_from_workspace(workspace_root, input),
         "list_files" => list_files_from_workspace(workspace_root, input),
         "search_text" => search_text_from_workspace(workspace_root, input),
+        "apply_patch" => apply_patch_from_workspace(workspace_root, input),
         "find_symbol" => find_symbol_in_workspace(workspace_root, input),
         "run_command" => run_command_from_workspace(workspace_root, input),
         TEXT_EDITOR_TOOL_NAME => text_editor_from_workspace(workspace_root, input),
@@ -118,6 +119,17 @@ struct SearchMatch {
     path: String,
     line_number: usize,
     text: String,
+}
+
+enum PatchAction {
+    Add { path: String, content: String },
+    Delete { path: String },
+    Update { path: String, hunks: Vec<PatchHunk> },
+}
+
+struct PatchHunk {
+    old_lines: Vec<String>,
+    new_lines: Vec<String>,
 }
 
 pub(crate) fn run_command_from_workspace(
@@ -370,6 +382,233 @@ pub(crate) fn find_symbol_in_workspace(
         )),
         None => Err(format!("find_symbol terminated unexpectedly\n{formatted}")),
     }
+}
+
+pub(crate) fn apply_patch_from_workspace(
+    workspace_root: &Path,
+    input: &Value,
+) -> Result<String, String> {
+    let input_object = input
+        .as_object()
+        .ok_or("apply_patch requires an object input")?;
+    let patch = require_string_field(input_object, "patch", "apply_patch")?;
+    let actions = parse_patch_actions(patch)?;
+    let mut results = Vec::new();
+
+    for action in actions {
+        match action {
+            PatchAction::Add { path, content } => {
+                let target_path = resolve_workspace_path_for_create(workspace_root, &path)?;
+                if target_path.exists() {
+                    return Err(format!("Cannot add file '{}': path already exists", path));
+                }
+                if let Some(parent) = target_path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        format!("Failed to create parent directories for '{}': {e}", path)
+                    })?;
+                }
+                fs::write(&target_path, content)
+                    .map_err(|e| format!("Failed to write new file '{}': {e}", path))?;
+                results.push(format!("Added file: {path}"));
+            }
+            PatchAction::Delete { path } => {
+                let target_path = resolve_workspace_path(workspace_root, &path)?;
+                let metadata = fs::metadata(&target_path)
+                    .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
+                if !metadata.is_file() {
+                    return Err(format!("Path is not a file: '{}'", path));
+                }
+                fs::remove_file(&target_path)
+                    .map_err(|e| format!("Failed to delete file '{}': {e}", path))?;
+                results.push(format!("Deleted file: {path}"));
+            }
+            PatchAction::Update { path, hunks } => {
+                let target_path = resolve_workspace_path(workspace_root, &path)?;
+                let metadata = fs::metadata(&target_path)
+                    .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
+                if !metadata.is_file() {
+                    return Err(format!("Path is not a file: '{}'", path));
+                }
+                let content = read_utf8_file_with_limit(&target_path, &path, MAX_READ_FILE_BYTES)?;
+                let updated = apply_patch_hunks_to_text(&content, &path, &hunks)?;
+                fs::write(&target_path, updated)
+                    .map_err(|e| format!("Failed to write updated file '{}': {e}", path))?;
+                results.push(format!("Updated file: {path}"));
+            }
+        }
+    }
+
+    Ok(results.join("\n"))
+}
+
+fn parse_patch_actions(patch: &str) -> Result<Vec<PatchAction>, String> {
+    let lines = patch.lines().collect::<Vec<_>>();
+    if lines.first().copied() != Some("*** Begin Patch") {
+        return Err("apply_patch patch must start with '*** Begin Patch'".to_string());
+    }
+    if lines.last().copied() != Some("*** End Patch") {
+        return Err("apply_patch patch must end with '*** End Patch'".to_string());
+    }
+
+    let mut actions = Vec::new();
+    let mut index = 1usize;
+    while index < lines.len() - 1 {
+        let line = lines[index];
+        if let Some(path) = line.strip_prefix("*** Add File: ") {
+            index += 1;
+            let mut content_lines = Vec::new();
+            while index < lines.len() - 1 && !lines[index].starts_with("*** ") {
+                let patch_line = lines[index];
+                let added = patch_line
+                    .strip_prefix('+')
+                    .ok_or_else(|| format!("Add File section for '{}' requires '+' lines", path))?;
+                content_lines.push(added.to_string());
+                index += 1;
+            }
+            actions.push(PatchAction::Add {
+                path: path.to_string(),
+                content: content_lines.join("\n"),
+            });
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            actions.push(PatchAction::Delete {
+                path: path.to_string(),
+            });
+            index += 1;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
+            index += 1;
+            let mut body = Vec::new();
+            while index < lines.len() - 1 && !lines[index].starts_with("*** ") {
+                body.push(lines[index]);
+                index += 1;
+            }
+            let hunks = parse_patch_hunks(path, &body)?;
+            actions.push(PatchAction::Update {
+                path: path.to_string(),
+                hunks,
+            });
+            continue;
+        }
+        return Err(format!("Unsupported patch header: {line}"));
+    }
+
+    if actions.is_empty() {
+        return Err("apply_patch patch did not contain any file actions".to_string());
+    }
+
+    Ok(actions)
+}
+
+fn parse_patch_hunks(path: &str, lines: &[&str]) -> Result<Vec<PatchHunk>, String> {
+    let mut hunks = Vec::new();
+    let mut old_lines = Vec::new();
+    let mut new_lines = Vec::new();
+
+    for line in lines {
+        if line.starts_with("*** Move to: ") {
+            return Err(format!(
+                "apply_patch does not support move operations yet for '{}'",
+                path
+            ));
+        }
+        if line.starts_with("@@") {
+            if !old_lines.is_empty() || !new_lines.is_empty() {
+                hunks.push(PatchHunk {
+                    old_lines,
+                    new_lines,
+                });
+                old_lines = Vec::new();
+                new_lines = Vec::new();
+            }
+            continue;
+        }
+        let (prefix, content) = line
+            .chars()
+            .next()
+            .map(|prefix| (prefix, &line[prefix.len_utf8()..]))
+            .ok_or_else(|| format!("Invalid empty patch line in '{}'", path))?;
+        match prefix {
+            ' ' => {
+                old_lines.push(content.to_string());
+                new_lines.push(content.to_string());
+            }
+            '-' => old_lines.push(content.to_string()),
+            '+' => new_lines.push(content.to_string()),
+            _ => {
+                return Err(format!(
+                    "Invalid patch line prefix '{}' in update for '{}'",
+                    prefix, path
+                ));
+            }
+        }
+    }
+
+    if !old_lines.is_empty() || !new_lines.is_empty() {
+        hunks.push(PatchHunk {
+            old_lines,
+            new_lines,
+        });
+    }
+    if hunks.is_empty() {
+        return Err(format!(
+            "Update File section for '{}' did not contain any hunks",
+            path
+        ));
+    }
+
+    Ok(hunks)
+}
+
+fn apply_patch_hunks_to_text(
+    content: &str,
+    path: &str,
+    hunks: &[PatchHunk],
+) -> Result<String, String> {
+    let trailing_newline = content.ends_with('\n');
+    let stripped = content.strip_suffix('\n').unwrap_or(content);
+    let mut lines = if stripped.is_empty() {
+        Vec::new()
+    } else {
+        stripped
+            .split('\n')
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    let mut search_start = 0usize;
+
+    for hunk in hunks {
+        if hunk.old_lines.is_empty() {
+            return Err(format!(
+                "apply_patch does not support insertion-only hunks yet for '{}'",
+                path
+            ));
+        }
+        let position = find_hunk_position(&lines, &hunk.old_lines, search_start)
+            .ok_or_else(|| format!("Failed to match patch hunk in '{}'", path))?;
+        lines.splice(
+            position..position + hunk.old_lines.len(),
+            hunk.new_lines.clone(),
+        );
+        search_start = position;
+    }
+
+    let mut updated = lines.join("\n");
+    if trailing_newline && !updated.is_empty() {
+        updated.push('\n');
+    }
+    Ok(updated)
+}
+
+fn find_hunk_position(lines: &[String], needle: &[String], search_start: usize) -> Option<usize> {
+    if needle.is_empty() || needle.len() > lines.len() {
+        return None;
+    }
+
+    (search_start..=lines.len().saturating_sub(needle.len()))
+        .find(|start| lines[*start..*start + needle.len()] == *needle)
 }
 
 fn parse_rg_matches(workspace_root: &Path, stdout: &[u8]) -> Result<Vec<SearchMatch>, String> {

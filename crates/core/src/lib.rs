@@ -401,6 +401,90 @@ mod tests {
     }
 
     #[test]
+    fn apply_patch_updates_multiple_hunks_in_one_file() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("notes.txt");
+        fs::write(&file_path, "one\ntwo\nthree\nfour\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_patch_update",
+            "apply_patch",
+            &json!({
+                "patch": "*** Begin Patch\n*** Update File: notes.txt\n@@\n one\n-two\n+TWO\n three\n@@\n three\n-four\n+FOUR\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Updated file: notes.txt"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        let updated = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(updated, "one\nTWO\nthree\nFOUR\n");
+    }
+
+    #[test]
+    fn apply_patch_creates_new_file() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_patch_add",
+            "apply_patch",
+            &json!({
+                "patch": "*** Begin Patch\n*** Add File: created.txt\n+hello\n+world\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Added file: created.txt"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        let created = fs::read_to_string(workspace.path().join("created.txt")).unwrap();
+        assert_eq!(created, "hello\nworld");
+    }
+
+    #[test]
+    fn apply_patch_deletes_file() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("remove.txt");
+        fs::write(&file_path, "delete me").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_patch_delete",
+            "apply_patch",
+            &json!({
+                "patch": "*** Begin Patch\n*** Delete File: remove.txt\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Deleted file: remove.txt"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        assert!(!file_path.exists());
+    }
+
+    #[test]
     fn run_tool_call_returns_success_for_list_files_without_path() {
         let workspace = make_temp_dir("workspace");
         fs::write(workspace.path().join("one.txt"), "1").unwrap();

@@ -107,6 +107,25 @@ pub fn search_text_tool() -> ToolDefinition {
     })
 }
 
+pub fn apply_patch_tool() -> ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
+        name: "apply_patch".to_string(),
+        description: "Apply a structured patch with add, delete, or multi-hunk update operations inside the workspace."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "type": "string",
+                    "description": "Patch text using *** Begin Patch / *** End Patch blocks with Add File, Delete File, or Update File sections."
+                }
+            },
+            "required": ["patch"],
+            "additionalProperties": false
+        }),
+    })
+}
+
 pub fn find_symbol_tool() -> ToolDefinition {
     ToolDefinition::Custom(CustomToolDefinition {
         name: "find_symbol".to_string(),
@@ -183,6 +202,7 @@ pub fn default_tools() -> Vec<ToolDefinition> {
         read_file_tool(),
         list_files_tool(),
         search_text_tool(),
+        apply_patch_tool(),
         find_symbol_tool(),
         run_command_tool(),
         text_editor_tool(),
