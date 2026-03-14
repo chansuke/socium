@@ -144,9 +144,10 @@ mod tests {
         MAX_TEXT_EDITOR_VIEW_READ_BYTES, TEXT_EDITOR_TOOL_NAME,
     };
     use crate::tools::runtime::{
-        find_symbol_in_workspace, list_files_from_workspace, read_file_from_workspace,
-        resolve_workspace_path, resolve_workspace_path_for_create, run_tool_call, run_tool_calls,
-        search_text_from_workspace,
+        find_symbol_in_workspace, git_branch_from_workspace, git_diff_from_workspace,
+        git_log_from_workspace, git_status_from_workspace, list_files_from_workspace,
+        read_file_from_workspace, resolve_workspace_path, resolve_workspace_path_for_create,
+        run_tool_call, run_tool_calls, search_text_from_workspace,
     };
     use serde::{Deserialize, Serialize};
     use serde_json::json;
@@ -482,6 +483,122 @@ mod tests {
         }
 
         assert!(!file_path.exists());
+    }
+
+    #[test]
+    fn apply_patch_moves_file_and_updates_contents() {
+        let workspace = make_temp_dir("workspace");
+        let from_path = workspace.path().join("old.txt");
+        fs::write(&from_path, "alpha\nbeta\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_patch_move",
+            "apply_patch",
+            &json!({
+                "patch": "*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n@@\n alpha\n-beta\n+gamma\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Moved file: old.txt -> new.txt"));
+                assert!(content.contains("Updated file: new.txt"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        assert!(!from_path.exists());
+        let moved = fs::read_to_string(workspace.path().join("new.txt")).unwrap();
+        assert_eq!(moved, "alpha\ngamma\n");
+    }
+
+    #[test]
+    fn apply_patch_dry_run_returns_preview_without_writing() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("preview.txt");
+        fs::write(&file_path, "before\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_patch_preview",
+            "apply_patch",
+            &json!({
+                "dry_run": true,
+                "patch": "*** Begin Patch\n*** Update File: preview.txt\n@@\n-before\n+after\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Preview: true"));
+                assert!(content.contains("--- preview.txt"));
+                assert!(content.contains("+++ preview.txt"));
+                assert!(content.contains("-before"));
+                assert!(content.contains("+after"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        let unchanged = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(unchanged, "before\n");
+    }
+
+    #[test]
+    fn git_branch_returns_current_branch() {
+        let workspace = make_temp_dir("git-branch");
+        init_git_repo(workspace.path());
+
+        let output = git_branch_from_workspace(workspace.path(), &json!({})).unwrap();
+
+        assert!(output.contains("Branch: main"));
+    }
+
+    #[test]
+    fn git_status_reports_branch_and_dirty_entries() {
+        let workspace = make_temp_dir("git-status");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+        fs::write(workspace.path().join("untracked.txt"), "new\n").unwrap();
+
+        let output = git_status_from_workspace(workspace.path(), &json!({})).unwrap();
+
+        assert!(output.contains("Branch: main"));
+        assert!(output.contains(" M tracked.txt"));
+        assert!(output.contains("?? untracked.txt"));
+    }
+
+    #[test]
+    fn git_diff_returns_patch_for_requested_path() {
+        let workspace = make_temp_dir("git-diff");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+
+        let output =
+            git_diff_from_workspace(workspace.path(), &json!({ "path": "tracked.txt" })).unwrap();
+
+        assert!(output.contains("Path: tracked.txt"));
+        assert!(output.contains("--- a/tracked.txt"));
+        assert!(output.contains("+++ b/tracked.txt"));
+        assert!(output.contains("-initial"));
+        assert!(output.contains("+changed"));
+    }
+
+    #[test]
+    fn git_log_returns_recent_commits() {
+        let workspace = make_temp_dir("git-log");
+        init_git_repo(workspace.path());
+
+        let output = git_log_from_workspace(workspace.path(), &json!({ "max_count": 1 })).unwrap();
+
+        assert!(output.contains("Count: 1"));
+        assert!(output.contains("initial commit"));
     }
 
     #[test]
@@ -1382,5 +1499,29 @@ mod tests {
         let path = std::env::temp_dir().join(format!("socium_{prefix}_{nanos}_{count}"));
         fs::create_dir_all(&path).unwrap();
         TempDir { path }
+    }
+
+    fn init_git_repo(path: &Path) {
+        run_git(path, &["init", "-b", "main"]);
+        run_git(path, &["config", "user.email", "socium@example.com"]);
+        run_git(path, &["config", "user.name", "Socium Tests"]);
+        fs::write(path.join("tracked.txt"), "initial\n").unwrap();
+        run_git(path, &["add", "tracked.txt"]);
+        run_git(path, &["commit", "-m", "initial commit"]);
+    }
+
+    fn run_git(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

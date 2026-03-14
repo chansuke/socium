@@ -115,12 +115,83 @@ pub fn apply_patch_tool() -> ToolDefinition {
         input_schema: json!({
             "type": "object",
             "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, validates the patch and returns a preview without writing files."
+                },
                 "patch": {
                     "type": "string",
                     "description": "Patch text using *** Begin Patch / *** End Patch blocks with Add File, Delete File, or Update File sections."
                 }
             },
             "required": ["patch"],
+            "additionalProperties": false
+        }),
+    })
+}
+
+pub fn git_branch_tool() -> ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
+        name: "git_branch".to_string(),
+        description: "Show the current Git branch for the workspace repository.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    })
+}
+
+pub fn git_status_tool() -> ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
+        name: "git_status".to_string(),
+        description:
+            "Show Git status for the workspace repository, including branch and dirty files."
+                .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Optional relative path to limit status output to part of the workspace."
+                }
+            },
+            "additionalProperties": false
+        }),
+    })
+}
+
+pub fn git_diff_tool() -> ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
+        name: "git_diff".to_string(),
+        description:
+            "Show the current Git diff for the workspace repository or an optional relative path."
+                .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Optional relative path to limit the diff."
+                }
+            },
+            "additionalProperties": false
+        }),
+    })
+}
+
+pub fn git_log_tool() -> ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
+        name: "git_log".to_string(),
+        description: "Show recent Git commit history for the workspace repository.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "max_count": {
+                    "type": "integer",
+                    "description": "Optional number of commits to return."
+                }
+            },
             "additionalProperties": false
         }),
     })
@@ -203,6 +274,10 @@ pub fn default_tools() -> Vec<ToolDefinition> {
         list_files_tool(),
         search_text_tool(),
         apply_patch_tool(),
+        git_branch_tool(),
+        git_status_tool(),
+        git_diff_tool(),
+        git_log_tool(),
         find_symbol_tool(),
         run_command_tool(),
         text_editor_tool(),

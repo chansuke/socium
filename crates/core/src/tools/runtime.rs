@@ -31,6 +31,10 @@ pub(crate) fn run_tool_call(
         "list_files" => list_files_from_workspace(workspace_root, input),
         "search_text" => search_text_from_workspace(workspace_root, input),
         "apply_patch" => apply_patch_from_workspace(workspace_root, input),
+        "git_branch" => git_branch_from_workspace(workspace_root, input),
+        "git_status" => git_status_from_workspace(workspace_root, input),
+        "git_diff" => git_diff_from_workspace(workspace_root, input),
+        "git_log" => git_log_from_workspace(workspace_root, input),
         "find_symbol" => find_symbol_in_workspace(workspace_root, input),
         "run_command" => run_command_from_workspace(workspace_root, input),
         TEXT_EDITOR_TOOL_NAME => text_editor_from_workspace(workspace_root, input),
@@ -122,9 +126,18 @@ struct SearchMatch {
 }
 
 enum PatchAction {
-    Add { path: String, content: String },
-    Delete { path: String },
-    Update { path: String, hunks: Vec<PatchHunk> },
+    Add {
+        path: String,
+        content: String,
+    },
+    Delete {
+        path: String,
+    },
+    Update {
+        path: String,
+        move_to: Option<String>,
+        hunks: Vec<PatchHunk>,
+    },
 }
 
 struct PatchHunk {
@@ -392,7 +405,12 @@ pub(crate) fn apply_patch_from_workspace(
         .as_object()
         .ok_or("apply_patch requires an object input")?;
     let patch = require_string_field(input_object, "patch", "apply_patch")?;
+    let dry_run =
+        optional_bool_field(input_object, "dry_run", "apply_patch dry_run")?.unwrap_or(false);
     let actions = parse_patch_actions(patch)?;
+    if dry_run {
+        return preview_patch_actions(workspace_root, &actions);
+    }
     let mut results = Vec::new();
 
     for action in actions {
@@ -422,18 +440,54 @@ pub(crate) fn apply_patch_from_workspace(
                     .map_err(|e| format!("Failed to delete file '{}': {e}", path))?;
                 results.push(format!("Deleted file: {path}"));
             }
-            PatchAction::Update { path, hunks } => {
-                let target_path = resolve_workspace_path(workspace_root, &path)?;
-                let metadata = fs::metadata(&target_path)
+            PatchAction::Update {
+                path,
+                move_to,
+                hunks,
+            } => {
+                let source_path = resolve_workspace_path(workspace_root, &path)?;
+                let metadata = fs::metadata(&source_path)
                     .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
                 if !metadata.is_file() {
                     return Err(format!("Path is not a file: '{}'", path));
                 }
-                let content = read_utf8_file_with_limit(&target_path, &path, MAX_READ_FILE_BYTES)?;
+                let content = read_utf8_file_with_limit(&source_path, &path, MAX_READ_FILE_BYTES)?;
                 let updated = apply_patch_hunks_to_text(&content, &path, &hunks)?;
-                fs::write(&target_path, updated)
-                    .map_err(|e| format!("Failed to write updated file '{}': {e}", path))?;
-                results.push(format!("Updated file: {path}"));
+                let target_display = move_to.clone().unwrap_or_else(|| path.clone());
+                let target_path = if let Some(move_to) = &move_to {
+                    let target_path = resolve_workspace_path_for_create(workspace_root, move_to)?;
+                    if move_to != &path && target_path.exists() {
+                        return Err(format!(
+                            "Cannot move file '{}' to '{}': destination already exists",
+                            path, move_to
+                        ));
+                    }
+                    target_path
+                } else {
+                    source_path.clone()
+                };
+                if let Some(parent) = target_path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        format!(
+                            "Failed to create parent directories for '{}': {e}",
+                            target_display
+                        )
+                    })?;
+                }
+                fs::write(&target_path, updated).map_err(|e| {
+                    format!("Failed to write updated file '{}': {e}", target_display)
+                })?;
+                if let Some(move_to) = move_to {
+                    if move_to != path {
+                        fs::remove_file(&source_path).map_err(|e| {
+                            format!("Failed to remove moved source file '{}': {e}", path)
+                        })?;
+                        results.push(format!("Moved file: {path} -> {move_to}"));
+                    }
+                    results.push(format!("Updated file: {move_to}"));
+                } else {
+                    results.push(format!("Updated file: {path}"));
+                }
             }
         }
     }
@@ -480,6 +534,16 @@ fn parse_patch_actions(patch: &str) -> Result<Vec<PatchAction>, String> {
         }
         if let Some(path) = line.strip_prefix("*** Update File: ") {
             index += 1;
+            let move_to = if index < lines.len() - 1 {
+                lines[index]
+                    .strip_prefix("*** Move to: ")
+                    .map(ToString::to_string)
+            } else {
+                None
+            };
+            if move_to.is_some() {
+                index += 1;
+            }
             let mut body = Vec::new();
             while index < lines.len() - 1 && !lines[index].starts_with("*** ") {
                 body.push(lines[index]);
@@ -488,6 +552,7 @@ fn parse_patch_actions(patch: &str) -> Result<Vec<PatchAction>, String> {
             let hunks = parse_patch_hunks(path, &body)?;
             actions.push(PatchAction::Update {
                 path: path.to_string(),
+                move_to,
                 hunks,
             });
             continue;
@@ -508,12 +573,6 @@ fn parse_patch_hunks(path: &str, lines: &[&str]) -> Result<Vec<PatchHunk>, Strin
     let mut new_lines = Vec::new();
 
     for line in lines {
-        if line.starts_with("*** Move to: ") {
-            return Err(format!(
-                "apply_patch does not support move operations yet for '{}'",
-                path
-            ));
-        }
         if line.starts_with("@@") {
             if !old_lines.is_empty() || !new_lines.is_empty() {
                 hunks.push(PatchHunk {
@@ -609,6 +668,204 @@ fn find_hunk_position(lines: &[String], needle: &[String], search_start: usize) 
 
     (search_start..=lines.len().saturating_sub(needle.len()))
         .find(|start| lines[*start..*start + needle.len()] == *needle)
+}
+
+fn preview_patch_actions(workspace_root: &Path, actions: &[PatchAction]) -> Result<String, String> {
+    let mut lines = vec!["Preview: true".to_string()];
+    for action in actions {
+        match action {
+            PatchAction::Add { path, content } => {
+                lines.push(format!("*** Add File: {path}"));
+                lines.push(format!("+++ {path}"));
+                lines.extend(content.lines().map(|line| format!("+{line}")));
+            }
+            PatchAction::Delete { path } => {
+                let target_path = resolve_workspace_path(workspace_root, path)?;
+                let content = read_utf8_file_with_limit(&target_path, path, MAX_READ_FILE_BYTES)?;
+                lines.push(format!("*** Delete File: {path}"));
+                lines.push(format!("--- {path}"));
+                lines.extend(content.lines().map(|line| format!("-{line}")));
+            }
+            PatchAction::Update {
+                path,
+                move_to,
+                hunks,
+            } => {
+                let target = move_to.as_deref().unwrap_or(path);
+                lines.push(format!("*** Update File: {path}"));
+                if let Some(move_to) = move_to {
+                    lines.push(format!("*** Move to: {move_to}"));
+                }
+                lines.push(format!("--- {path}"));
+                lines.push(format!("+++ {target}"));
+                for hunk in hunks {
+                    lines.push("@@".to_string());
+                    for old_line in &hunk.old_lines {
+                        if !hunk.new_lines.contains(old_line) {
+                            lines.push(format!("-{old_line}"));
+                        }
+                    }
+                    for new_line in &hunk.new_lines {
+                        if !hunk.old_lines.contains(new_line) {
+                            lines.push(format!("+{new_line}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn git_branch_from_workspace(
+    workspace_root: &Path,
+    input: &Value,
+) -> Result<String, String> {
+    require_object_input(input, "git_branch")?;
+    let output = run_git_capture(workspace_root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let branch = stdout_to_string(&output)?.trim().to_string();
+    Ok(format!("Branch: {branch}"))
+}
+
+pub(crate) fn git_status_from_workspace(
+    workspace_root: &Path,
+    input: &Value,
+) -> Result<String, String> {
+    let input_object = require_object_input(input, "git_status")?;
+    let path = optional_string_field(input_object, "path", "git_status path")?;
+    let mut args = vec![
+        "status".to_string(),
+        "--short".to_string(),
+        "--branch".to_string(),
+    ];
+    if let Some(path) = path {
+        args.push("--".to_string());
+        args.push(git_relative_path(workspace_root, path)?);
+    }
+    let output = run_git_capture_owned(workspace_root, &args)?;
+    let stdout = stdout_to_string(&output)?;
+    let mut lines = stdout.lines();
+    let branch_line = lines.next().unwrap_or("## HEAD");
+    let branch = branch_line.trim_start_matches("## ").trim();
+    let mut result = vec![format!("Branch: {branch}")];
+    if let Some(path) = path {
+        result.push(format!("Path: {path}"));
+    }
+    let status_lines = lines.collect::<Vec<_>>();
+    if status_lines.is_empty() {
+        result.push("(clean)".to_string());
+    } else {
+        result.extend(status_lines.into_iter().map(ToString::to_string));
+    }
+    Ok(result.join("\n"))
+}
+
+pub(crate) fn git_diff_from_workspace(
+    workspace_root: &Path,
+    input: &Value,
+) -> Result<String, String> {
+    let input_object = require_object_input(input, "git_diff")?;
+    let path = optional_string_field(input_object, "path", "git_diff path")?;
+    let mut args = vec!["diff".to_string()];
+    if let Some(path) = path {
+        args.push("--".to_string());
+        args.push(git_relative_path(workspace_root, path)?);
+    }
+    let output = run_git_capture_owned(workspace_root, &args)?;
+    let stdout = stdout_to_string(&output)?;
+    let mut result = Vec::new();
+    if let Some(path) = path {
+        result.push(format!("Path: {path}"));
+    }
+    if stdout.trim().is_empty() {
+        result.push("(no diff)".to_string());
+    } else {
+        result.push(stdout);
+    }
+    Ok(result.join("\n"))
+}
+
+pub(crate) fn git_log_from_workspace(
+    workspace_root: &Path,
+    input: &Value,
+) -> Result<String, String> {
+    let input_object = require_object_input(input, "git_log")?;
+    let max_count = optional_bounded_usize_field(input_object, "max_count", "git_log", 10, 100)?;
+    let output = run_git_capture_owned(
+        workspace_root,
+        &[
+            "log".to_string(),
+            "--oneline".to_string(),
+            format!("-n{max_count}"),
+        ],
+    )?;
+    let stdout = stdout_to_string(&output)?;
+    let mut result = vec![format!("Count: {max_count}")];
+    if stdout.trim().is_empty() {
+        result.push("(no commits)".to_string());
+    } else {
+        result.push(stdout);
+    }
+    Ok(result.join("\n"))
+}
+
+fn require_object_input<'a>(
+    input: &'a Value,
+    tool_name: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    input
+        .as_object()
+        .ok_or_else(|| format!("{tool_name} requires an object input"))
+}
+
+fn run_git_capture(workspace_root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    let owned = args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
+    run_git_capture_owned(workspace_root, &owned)
+}
+
+fn run_git_capture_owned(
+    workspace_root: &Path,
+    args: &[String],
+) -> Result<std::process::Output, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace_root)
+        .output()
+        .map_err(|e| format!("Failed to run git command {:?}: {e}", args))?;
+    if output.status.success() {
+        return Ok(output);
+    }
+
+    Err(format!(
+        "Git command {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+fn stdout_to_string(output: &std::process::Output) -> Result<String, String> {
+    String::from_utf8(output.stdout.clone())
+        .map_err(|e| format!("Command output was not valid UTF-8: {e}"))
+}
+
+fn git_relative_path(workspace_root: &Path, requested_path: &str) -> Result<String, String> {
+    let workspace_canonical = workspace_root.canonicalize().map_err(|e| {
+        format!(
+            "Failed to resolve workspace root '{}': {e}",
+            workspace_root.display()
+        )
+    })?;
+    let resolved = resolve_workspace_path(workspace_root, requested_path)?;
+    let relative = resolved.strip_prefix(&workspace_canonical).map_err(|e| {
+        format!(
+            "Failed to derive git-relative path for '{}': {e}",
+            requested_path
+        )
+    })?;
+    Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
 fn parse_rg_matches(workspace_root: &Path, stdout: &[u8]) -> Result<Vec<SearchMatch>, String> {
