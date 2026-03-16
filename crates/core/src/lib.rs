@@ -144,10 +144,11 @@ mod tests {
         MAX_TEXT_EDITOR_VIEW_READ_BYTES, TEXT_EDITOR_TOOL_NAME,
     };
     use crate::tools::runtime::{
-        find_symbol_in_workspace, git_branch_from_workspace, git_diff_from_workspace,
-        git_log_from_workspace, git_status_from_workspace, list_files_from_workspace,
-        read_file_from_workspace, resolve_workspace_path, resolve_workspace_path_for_create,
-        run_tool_call, run_tool_calls, search_text_from_workspace,
+        find_symbol_in_workspace, git_branch_from_workspace, git_commit_from_workspace,
+        git_diff_from_workspace, git_log_from_workspace, git_status_from_workspace,
+        list_files_from_workspace, read_file_from_workspace, resolve_workspace_path,
+        resolve_workspace_path_for_create, run_tool_call, run_tool_calls,
+        search_text_from_workspace,
     };
     use serde::{Deserialize, Serialize};
     use serde_json::json;
@@ -599,6 +600,116 @@ mod tests {
 
         assert!(output.contains("Count: 1"));
         assert!(output.contains("initial commit"));
+    }
+
+    #[test]
+    fn text_editor_create_warns_when_git_worktree_is_dirty() {
+        let workspace = make_temp_dir("git-dirty-create");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "dirty\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_dirty_create",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "create",
+                "path": "new.txt",
+                "file_text": "created"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Created file"));
+                assert!(content.contains("Warning: git worktree has uncommitted changes"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn apply_patch_warns_when_git_worktree_is_dirty() {
+        let workspace = make_temp_dir("git-dirty-patch");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "dirty\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_dirty_patch",
+            "apply_patch",
+            &json!({
+                "patch": "*** Begin Patch\n*** Add File: another.txt\n+hello\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Added file: another.txt"));
+                assert!(content.contains("Warning: git worktree has uncommitted changes"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn git_commit_requires_explicit_confirmation() {
+        let workspace = make_temp_dir("git-commit-confirm");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_git_commit_denied",
+            "git_commit",
+            &json!({
+                "message": "save work"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("requires explicit confirmation"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        let head_message = git_stdout(workspace.path(), &["log", "-1", "--pretty=%s"]);
+        assert_eq!(head_message.trim(), "initial commit");
+    }
+
+    #[test]
+    fn git_commit_creates_commit_when_confirmed() {
+        let workspace = make_temp_dir("git-commit-ok");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+
+        let output = git_commit_from_workspace(
+            workspace.path(),
+            &json!({
+                "message": "save work",
+                "confirmed": true
+            }),
+        )
+        .unwrap();
+
+        assert!(output.contains("Commit:"));
+        assert!(output.contains("Message: save work"));
+
+        let head_message = git_stdout(workspace.path(), &["log", "-1", "--pretty=%s"]);
+        assert_eq!(head_message.trim(), "save work");
+
+        let status = git_stdout(workspace.path(), &["status", "--short"]);
+        assert!(status.trim().is_empty());
     }
 
     #[test]
@@ -1523,5 +1634,21 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn git_stdout(path: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
     }
 }

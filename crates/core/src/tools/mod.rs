@@ -197,6 +197,29 @@ pub fn git_log_tool() -> ToolDefinition {
     })
 }
 
+pub fn git_commit_tool() -> ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
+        name: "git_commit".to_string(),
+        description: "Create a Git commit for the current workspace, but only when the caller explicitly confirms the intent."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "Commit message to use."
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true to confirm explicit user intent for the commit."
+                }
+            },
+            "required": ["message", "confirmed"],
+            "additionalProperties": false
+        }),
+    })
+}
+
 pub fn find_symbol_tool() -> ToolDefinition {
     ToolDefinition::Custom(CustomToolDefinition {
         name: "find_symbol".to_string(),
@@ -278,6 +301,7 @@ pub fn default_tools() -> Vec<ToolDefinition> {
         git_status_tool(),
         git_diff_tool(),
         git_log_tool(),
+        git_commit_tool(),
         find_symbol_tool(),
         run_command_tool(),
         text_editor_tool(),

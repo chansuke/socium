@@ -35,6 +35,7 @@ pub(crate) fn run_tool_call(
         "git_status" => git_status_from_workspace(workspace_root, input),
         "git_diff" => git_diff_from_workspace(workspace_root, input),
         "git_log" => git_log_from_workspace(workspace_root, input),
+        "git_commit" => git_commit_from_workspace(workspace_root, input),
         "find_symbol" => find_symbol_in_workspace(workspace_root, input),
         "run_command" => run_command_from_workspace(workspace_root, input),
         TEXT_EDITOR_TOOL_NAME => text_editor_from_workspace(workspace_root, input),
@@ -492,7 +493,10 @@ pub(crate) fn apply_patch_from_workspace(
         }
     }
 
-    Ok(results.join("\n"))
+    Ok(maybe_prepend_dirty_worktree_warning(
+        workspace_root,
+        results.join("\n"),
+    ))
 }
 
 fn parse_patch_actions(patch: &str) -> Result<Vec<PatchAction>, String> {
@@ -809,6 +813,37 @@ pub(crate) fn git_log_from_workspace(
     Ok(result.join("\n"))
 }
 
+pub(crate) fn git_commit_from_workspace(
+    workspace_root: &Path,
+    input: &Value,
+) -> Result<String, String> {
+    let input_object = require_object_input(input, "git_commit")?;
+    let message = require_string_field(input_object, "message", "git_commit")?;
+    let confirmed =
+        optional_bool_field(input_object, "confirmed", "git_commit confirmed")?.unwrap_or(false);
+    if !confirmed {
+        return Err(
+            "git_commit requires explicit confirmation. Rerun with confirmed set to true."
+                .to_string(),
+        );
+    }
+
+    let status_output = run_git_capture(workspace_root, &["status", "--porcelain"])?;
+    if status_output.stdout.is_empty() {
+        return Err("git_commit found no changes to commit".to_string());
+    }
+
+    run_git_capture(workspace_root, &["add", "-A"])?;
+    run_git_capture_owned(
+        workspace_root,
+        &["commit".to_string(), "-m".to_string(), message.to_string()],
+    )?;
+    let head = run_git_capture(workspace_root, &["rev-parse", "--short", "HEAD"])?;
+    let commit = stdout_to_string(&head)?.trim().to_string();
+
+    Ok(format!("Commit: {commit}\nMessage: {message}"))
+}
+
 fn require_object_input<'a>(
     input: &'a Value,
     tool_name: &str,
@@ -866,6 +901,25 @@ fn git_relative_path(workspace_root: &Path, requested_path: &str) -> Result<Stri
         )
     })?;
     Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn maybe_prepend_dirty_worktree_warning(workspace_root: &Path, content: String) -> String {
+    if git_worktree_is_dirty(workspace_root) {
+        format!("Warning: git worktree has uncommitted changes\n{content}")
+    } else {
+        content
+    }
+}
+
+fn git_worktree_is_dirty(workspace_root: &Path) -> bool {
+    let Ok(output) = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(workspace_root)
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && !output.stdout.is_empty()
 }
 
 fn parse_rg_matches(workspace_root: &Path, stdout: &[u8]) -> Result<Vec<SearchMatch>, String> {
@@ -1155,7 +1209,10 @@ pub(crate) fn text_editor_str_replace(
     let updated = content.replacen(old_str, new_str, 1);
     fs::write(&resolved_path, updated)
         .map_err(|e| format!("Failed to write file '{}': {e}", path))?;
-    Ok(format!("Path: {}\nReplaced 1 occurrence", path))
+    Ok(maybe_prepend_dirty_worktree_warning(
+        workspace_root,
+        format!("Path: {}\nReplaced 1 occurrence", path),
+    ))
 }
 
 pub(crate) fn text_editor_create(
@@ -1178,7 +1235,10 @@ pub(crate) fn text_editor_create(
     }
     fs::write(&target_path, file_text)
         .map_err(|e| format!("Failed to create file '{}': {e}", path))?;
-    Ok(format!("Path: {}\nCreated file", path))
+    Ok(maybe_prepend_dirty_worktree_warning(
+        workspace_root,
+        format!("Path: {}\nCreated file", path),
+    ))
 }
 
 pub(crate) fn text_editor_insert(
@@ -1223,7 +1283,10 @@ pub(crate) fn text_editor_insert(
 
     fs::write(&resolved_path, updated)
         .map_err(|e| format!("Failed to write file '{}': {e}", path))?;
-    Ok(format!("Path: {}\nInserted text after line {}", path, line))
+    Ok(maybe_prepend_dirty_worktree_warning(
+        workspace_root,
+        format!("Path: {}\nInserted text after line {}", path, line),
+    ))
 }
 
 pub(crate) fn require_string_field<'a>(
