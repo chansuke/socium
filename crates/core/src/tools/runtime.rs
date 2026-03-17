@@ -1,5 +1,8 @@
+use crate::AgentProgress;
+use crate::agent::state::{load_json_file, save_json_file};
 use crate::agent::types::ContentBlock;
 use crate::constants::*;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{ErrorKind, Read};
@@ -8,24 +11,59 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[allow(dead_code)]
 pub(crate) fn run_tool_calls(workspace_root: &Path, blocks: &[ContentBlock]) -> Vec<ContentBlock> {
+    let mut noop = |_| {};
+    run_tool_calls_with_progress(workspace_root, blocks, &mut noop)
+}
+
+pub(crate) fn run_tool_calls_with_progress<F>(
+    workspace_root: &Path,
+    blocks: &[ContentBlock],
+    on_progress: &mut F,
+) -> Vec<ContentBlock>
+where
+    F: FnMut(AgentProgress),
+{
     blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, name, input } => {
-                Some(run_tool_call(workspace_root, id, name, input))
-            }
+            ContentBlock::ToolUse { id, name, input } => Some(run_tool_call_with_progress(
+                workspace_root,
+                id,
+                name,
+                input,
+                on_progress,
+            )),
             _ => None,
         })
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn run_tool_call(
     workspace_root: &Path,
     tool_use_id: &str,
     name: &str,
     input: &Value,
 ) -> ContentBlock {
+    let mut noop = |_| {};
+    run_tool_call_with_progress(workspace_root, tool_use_id, name, input, &mut noop)
+}
+
+pub(crate) fn run_tool_call_with_progress<F>(
+    workspace_root: &Path,
+    tool_use_id: &str,
+    name: &str,
+    input: &Value,
+    on_progress: &mut F,
+) -> ContentBlock
+where
+    F: FnMut(AgentProgress),
+{
+    on_progress(AgentProgress::ToolCallStarted {
+        name: name.to_string(),
+    });
     let result = match name {
         "read_file" => read_file_from_workspace(workspace_root, input),
         "list_files" => list_files_from_workspace(workspace_root, input),
@@ -37,10 +75,17 @@ pub(crate) fn run_tool_call(
         "git_log" => git_log_from_workspace(workspace_root, input),
         "git_commit" => git_commit_from_workspace(workspace_root, input),
         "find_symbol" => find_symbol_in_workspace(workspace_root, input),
-        "run_command" => run_command_from_workspace(workspace_root, input),
+        "run_command" => {
+            run_command_from_workspace_with_progress(workspace_root, input, on_progress)
+        }
         TEXT_EDITOR_TOOL_NAME => text_editor_from_workspace(workspace_root, input),
         other => Err(format!("Unsupported tool: {other}")),
     };
+    let is_error = result.is_err();
+    on_progress(AgentProgress::ToolCallFinished {
+        name: name.to_string(),
+        is_error,
+    });
 
     match result {
         Ok(content) => ContentBlock::ToolResult {
@@ -146,10 +191,34 @@ struct PatchHunk {
     new_lines: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct EditHistoryState {
+    entries: Vec<EditHistoryEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EditHistoryEntry {
+    path: String,
+    previous_content: Option<String>,
+}
+
+#[allow(dead_code)]
 pub(crate) fn run_command_from_workspace(
     workspace_root: &Path,
     input: &Value,
 ) -> Result<String, String> {
+    let mut noop = |_| {};
+    run_command_from_workspace_with_progress(workspace_root, input, &mut noop)
+}
+
+fn run_command_from_workspace_with_progress<F>(
+    workspace_root: &Path,
+    input: &Value,
+    on_progress: &mut F,
+) -> Result<String, String>
+where
+    F: FnMut(AgentProgress),
+{
     let input_object = input
         .as_object()
         .ok_or("run_command requires an object input")?;
@@ -175,7 +244,16 @@ pub(crate) fn run_command_from_workspace(
     }
 
     let resolved_cwd = resolve_workspace_command_cwd(workspace_root, cwd)?;
+    on_progress(AgentProgress::CommandStarted {
+        command: display_command(&command),
+        cwd: cwd.to_string(),
+    });
     let execution = execute_command(&command, &resolved_cwd, cwd, timeout_ms, permission)?;
+    on_progress(AgentProgress::CommandFinished {
+        command: execution.command_display.clone(),
+        exit_code: execution.exit_code,
+        timed_out: execution.timed_out,
+    });
 
     let output = format_command_execution(&execution);
     if execution.timed_out || execution.exit_code.unwrap_or_default() != 0 {
@@ -922,6 +1000,61 @@ fn git_worktree_is_dirty(workspace_root: &Path) -> bool {
     output.status.success() && !output.stdout.is_empty()
 }
 
+fn edit_history_path(workspace_root: &Path) -> PathBuf {
+    workspace_root
+        .join(STATE_DIR_NAME)
+        .join(EDIT_HISTORY_FILE_NAME)
+}
+
+fn record_edit_history(
+    workspace_root: &Path,
+    path: &str,
+    previous_content: Option<String>,
+) -> Result<(), String> {
+    let history_path = edit_history_path(workspace_root);
+    let mut history = load_json_file::<EditHistoryState>(&history_path).map_err(|e| {
+        format!(
+            "Failed to load edit history '{}': {e}",
+            history_path.display()
+        )
+    })?;
+    history.entries.push(EditHistoryEntry {
+        path: path.to_string(),
+        previous_content,
+    });
+    if history.entries.len() > MAX_EDIT_HISTORY_ENTRIES {
+        let overflow = history.entries.len() - MAX_EDIT_HISTORY_ENTRIES;
+        history.entries.drain(0..overflow);
+    }
+    save_json_file(&history_path, &history).map_err(|e| {
+        format!(
+            "Failed to save edit history '{}': {e}",
+            history_path.display()
+        )
+    })
+}
+
+fn pop_edit_history(workspace_root: &Path, path: &str) -> Result<Option<EditHistoryEntry>, String> {
+    let history_path = edit_history_path(workspace_root);
+    let mut history = load_json_file::<EditHistoryState>(&history_path).map_err(|e| {
+        format!(
+            "Failed to load edit history '{}': {e}",
+            history_path.display()
+        )
+    })?;
+    let Some(index) = history.entries.iter().rposition(|entry| entry.path == path) else {
+        return Ok(None);
+    };
+    let entry = history.entries.remove(index);
+    save_json_file(&history_path, &history).map_err(|e| {
+        format!(
+            "Failed to save edit history '{}': {e}",
+            history_path.display()
+        )
+    })?;
+    Ok(Some(entry))
+}
+
 fn parse_rg_matches(workspace_root: &Path, stdout: &[u8]) -> Result<Vec<SearchMatch>, String> {
     let text = String::from_utf8(stdout.to_vec())
         .map_err(|e| format!("ripgrep returned non UTF-8 output: {e}"))?;
@@ -1135,9 +1268,7 @@ pub(crate) fn text_editor_from_workspace(
         "str_replace" => text_editor_str_replace(workspace_root, input_object),
         "create" => text_editor_create(workspace_root, input_object),
         "insert" => text_editor_insert(workspace_root, input_object),
-        "undo_edit" => {
-            Err("undo_edit is not supported by this text editor implementation".to_string())
-        }
+        "undo_edit" => text_editor_undo_edit(workspace_root, input_object),
         other => Err(format!("Unsupported text editor command: {other}")),
     }
 }
@@ -1207,6 +1338,7 @@ pub(crate) fn text_editor_str_replace(
     }
 
     let updated = content.replacen(old_str, new_str, 1);
+    record_edit_history(workspace_root, path, Some(content))?;
     fs::write(&resolved_path, updated)
         .map_err(|e| format!("Failed to write file '{}': {e}", path))?;
     Ok(maybe_prepend_dirty_worktree_warning(
@@ -1233,6 +1365,7 @@ pub(crate) fn text_editor_create(
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create parent directories for '{}': {e}", path))?;
     }
+    record_edit_history(workspace_root, path, None)?;
     fs::write(&target_path, file_text)
         .map_err(|e| format!("Failed to create file '{}': {e}", path))?;
     Ok(maybe_prepend_dirty_worktree_warning(
@@ -1281,11 +1414,45 @@ pub(crate) fn text_editor_insert(
     updated.push_str(insert_text);
     updated.push_str(&content[insert_at..]);
 
+    record_edit_history(workspace_root, path, Some(content))?;
     fs::write(&resolved_path, updated)
         .map_err(|e| format!("Failed to write file '{}': {e}", path))?;
     Ok(maybe_prepend_dirty_worktree_warning(
         workspace_root,
         format!("Path: {}\nInserted text after line {}", path, line),
+    ))
+}
+
+pub(crate) fn text_editor_undo_edit(
+    workspace_root: &Path,
+    input: &serde_json::Map<String, Value>,
+) -> Result<String, String> {
+    let path = require_string_field(input, "path", "text_editor undo_edit path")?;
+    let history_entry = pop_edit_history(workspace_root, path)?
+        .ok_or_else(|| format!("No edit history found for '{}'", path))?;
+    let target_path = resolve_workspace_path_for_create(workspace_root, path)?;
+
+    match history_entry.previous_content {
+        Some(previous_content) => {
+            if let Some(parent) = target_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    format!("Failed to create parent directories for '{}': {e}", path)
+                })?;
+            }
+            fs::write(&target_path, previous_content)
+                .map_err(|e| format!("Failed to restore file '{}': {e}", path))?;
+        }
+        None => {
+            if target_path.exists() {
+                fs::remove_file(&target_path)
+                    .map_err(|e| format!("Failed to remove file '{}': {e}", path))?;
+            }
+        }
+    }
+
+    Ok(maybe_prepend_dirty_worktree_warning(
+        workspace_root,
+        format!("Path: {}\nUndid last edit", path),
     ))
 }
 

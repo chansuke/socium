@@ -20,6 +20,33 @@ pub struct AgentReply {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentProgress {
+    ModelRequestStarted {
+        round: usize,
+        provider: String,
+    },
+    AssistantText {
+        text: String,
+    },
+    ToolCallStarted {
+        name: String,
+    },
+    ToolCallFinished {
+        name: String,
+        is_error: bool,
+    },
+    CommandStarted {
+        command: String,
+        cwd: String,
+    },
+    CommandFinished {
+        command: String,
+        exit_code: Option<i32>,
+        timed_out: bool,
+    },
+}
+
 pub struct AgentService {
     workspace_root: PathBuf,
     conversation_path: PathBuf,
@@ -105,6 +132,17 @@ impl AgentService {
         &mut self,
         user_input: String,
     ) -> Result<AgentReply, Box<dyn std::error::Error>> {
+        self.submit_with_progress(user_input, |_| {}).await
+    }
+
+    pub async fn submit_with_progress<F>(
+        &mut self,
+        user_input: String,
+        mut on_progress: F,
+    ) -> Result<AgentReply, Box<dyn std::error::Error>>
+    where
+        F: FnMut(AgentProgress),
+    {
         self.messages.push(Message::user_text(user_input));
         let assistant_chunks = run_agent_turn(
             self.provider,
@@ -116,6 +154,7 @@ impl AgentService {
             &self.tools,
             &self.workspace_root,
             &mut self.messages,
+            &mut on_progress,
         )
         .await?;
         self.persist_messages()?;
@@ -136,6 +175,7 @@ impl AgentService {
 
 #[cfg(test)]
 mod tests {
+    use crate::AgentProgress;
     use crate::agent::state::{load_json_file, save_json_file};
     use crate::agent::turn::extract_text;
     use crate::agent::types::ContentBlock;
@@ -147,8 +187,8 @@ mod tests {
         find_symbol_in_workspace, git_branch_from_workspace, git_commit_from_workspace,
         git_diff_from_workspace, git_log_from_workspace, git_status_from_workspace,
         list_files_from_workspace, read_file_from_workspace, resolve_workspace_path,
-        resolve_workspace_path_for_create, run_tool_call, run_tool_calls,
-        search_text_from_workspace,
+        resolve_workspace_path_for_create, run_tool_call, run_tool_call_with_progress,
+        run_tool_calls, search_text_from_workspace,
     };
     use serde::{Deserialize, Serialize};
     use serde_json::json;
@@ -1139,9 +1179,27 @@ mod tests {
     }
 
     #[test]
-    fn text_editor_undo_edit_returns_error() {
+    fn text_editor_undo_edit_restores_previous_file_content() {
         let workspace = make_temp_dir("workspace");
-        fs::write(workspace.path().join("undo.txt"), "x").unwrap();
+        let file_path = workspace.path().join("undo.txt");
+        fs::write(&file_path, "before").unwrap();
+
+        let edit_result = run_tool_call(
+            workspace.path(),
+            "tool_te_undo_edit_before",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "str_replace",
+                "path": "undo.txt",
+                "old_str": "before",
+                "new_str": "after"
+            }),
+        );
+
+        match edit_result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            _ => panic!("expected tool_result"),
+        }
 
         let result = run_tool_call(
             workspace.path(),
@@ -1157,11 +1215,57 @@ mod tests {
             ContentBlock::ToolResult {
                 content, is_error, ..
             } => {
-                assert!(content.contains("undo_edit is not supported"));
-                assert_eq!(is_error, Some(true));
+                assert!(content.contains("Undid last edit"));
+                assert_eq!(is_error, None);
             }
             _ => panic!("expected tool_result"),
         }
+
+        let restored = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(restored, "before");
+    }
+
+    #[test]
+    fn text_editor_undo_edit_removes_last_created_file() {
+        let workspace = make_temp_dir("workspace");
+
+        let create_result = run_tool_call(
+            workspace.path(),
+            "tool_te_undo_create_before",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "create",
+                "path": "created.txt",
+                "file_text": "new"
+            }),
+        );
+
+        match create_result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            _ => panic!("expected tool_result"),
+        }
+
+        let undo_result = run_tool_call(
+            workspace.path(),
+            "tool_te_undo_create",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "undo_edit",
+                "path": "created.txt"
+            }),
+        );
+
+        match undo_result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(content.contains("Undid last edit"));
+                assert_eq!(is_error, None);
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        assert!(!workspace.path().join("created.txt").exists());
     }
 
     #[test]
@@ -1405,6 +1509,49 @@ mod tests {
             }
             _ => panic!("expected tool_result"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_emits_tool_and_command_progress_events() {
+        let workspace = make_temp_dir("workspace");
+        let mut progress = Vec::new();
+
+        let result = run_tool_call_with_progress(
+            workspace.path(),
+            "tool_cmd_progress",
+            "run_command",
+            &json!({
+                "command": ["pwd"]
+            }),
+            &mut |event| progress.push(event),
+        );
+
+        match result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            _ => panic!("expected tool_result"),
+        }
+        assert_eq!(
+            progress,
+            vec![
+                AgentProgress::ToolCallStarted {
+                    name: "run_command".to_string(),
+                },
+                AgentProgress::CommandStarted {
+                    command: "pwd".to_string(),
+                    cwd: ".".to_string(),
+                },
+                AgentProgress::CommandFinished {
+                    command: "pwd".to_string(),
+                    exit_code: Some(0),
+                    timed_out: false,
+                },
+                AgentProgress::ToolCallFinished {
+                    name: "run_command".to_string(),
+                    is_error: false,
+                },
+            ]
+        );
     }
 
     #[cfg(unix)]
