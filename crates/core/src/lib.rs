@@ -1699,6 +1699,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn git_commit_emits_approval_required_event_when_confirmation_is_missing() {
+        let workspace = make_temp_dir("git-commit-needs-confirmation");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+
+        let mut progress = Vec::new();
+        let result = run_tool_call_with_progress(
+            workspace.path(),
+            "tool_git_commit_needs_confirmation",
+            "git_commit",
+            &json!({
+                "message": "test commit"
+            }),
+            &mut |event| progress.push(event),
+        );
+
+        match result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, Some(true)),
+            _ => panic!("expected tool_result"),
+        }
+        assert_eq!(
+            progress,
+            vec![
+                AgentProgress::ToolCallStarted {
+                    name: "git_commit".to_string(),
+                },
+                AgentProgress::ApprovalRequired {
+                    tool: "git_commit".to_string(),
+                    reason: "explicit confirmation required".to_string(),
+                },
+                AgentProgress::ToolCallFinished {
+                    name: "git_commit".to_string(),
+                    is_error: true,
+                },
+            ]
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn run_command_requires_workspace_write_approval_and_runs_after_approval() {

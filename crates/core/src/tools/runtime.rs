@@ -73,7 +73,7 @@ where
         "git_status" => git_status_from_workspace(workspace_root, input),
         "git_diff" => git_diff_from_workspace(workspace_root, input),
         "git_log" => git_log_from_workspace(workspace_root, input),
-        "git_commit" => git_commit_from_workspace(workspace_root, input),
+        "git_commit" => git_commit_from_workspace_with_progress(workspace_root, input, on_progress),
         "find_symbol" => find_symbol_in_workspace(workspace_root, input),
         "run_command" => {
             run_command_from_workspace_with_progress(workspace_root, input, on_progress)
@@ -895,15 +895,32 @@ pub(crate) fn git_log_from_workspace(
     Ok(result.join("\n"))
 }
 
+#[allow(dead_code)]
 pub(crate) fn git_commit_from_workspace(
     workspace_root: &Path,
     input: &Value,
 ) -> Result<String, String> {
+    let mut noop = |_| {};
+    git_commit_from_workspace_with_progress(workspace_root, input, &mut noop)
+}
+
+fn git_commit_from_workspace_with_progress<F>(
+    workspace_root: &Path,
+    input: &Value,
+    on_progress: &mut F,
+) -> Result<String, String>
+where
+    F: FnMut(AgentProgress),
+{
     let input_object = require_object_input(input, "git_commit")?;
     let message = require_string_field(input_object, "message", "git_commit")?;
     let confirmed =
         optional_bool_field(input_object, "confirmed", "git_commit confirmed")?.unwrap_or(false);
     if !confirmed {
+        on_progress(AgentProgress::ApprovalRequired {
+            tool: "git_commit".to_string(),
+            reason: "explicit confirmation required".to_string(),
+        });
         return Err(
             "git_commit requires explicit confirmation. Rerun with confirmed set to true."
                 .to_string(),
