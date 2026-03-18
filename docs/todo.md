@@ -24,9 +24,9 @@ Evolve `socium` from a minimal Anthropic-backed TUI agent into a coding agent th
   - [x] `git_status`
   - [x] `git_diff`
   - [x] `git_log`
-  - [x] `git_commit`
-  - [x] text editor with `view`, `str_replace`, `create`, `insert`
-- [x] Shell execution, repo navigation, patch editing, and basic git workflows now exist, but there is still no web/docs retrieval or streaming tool progress.
+- [x] `git_commit`
+  - [x] text editor with `view`, `str_replace`, `create`, `insert`, `undo_edit`
+- [x] Shell execution, repo navigation, patch editing, and basic git workflows now exist, with live tool progress in the TUI, but there is still no web/docs retrieval or true token streaming.
 - [x] The TUI is functional but still minimal.
 
 ## Priority 0: Core Agent Capability Gaps
@@ -48,7 +48,7 @@ These are the highest-value features missing compared with Codex and Claude Code
 - [x] Add fast text search based on `rg`.
 - [x] Add file globbing and filtered file listing.
 - [x] Add symbol-oriented navigation where practical.
-- [ ] Add line-addressable file references in agent responses.
+- [x] Add line-addressable file references in agent responses.
 
 ### 3. Real editing primitives
 
@@ -57,7 +57,7 @@ These are the highest-value features missing compared with Codex and Claude Code
   - [x] delete file
   - [x] rename/move file
   - [x] multi-hunk edits
-  - [ ] undo or edit history
+  - [x] undo or edit history
   - [x] diff previews before apply where needed
 - [x] Keep workspace boundary protections.
 
@@ -74,8 +74,8 @@ These are the highest-value features missing compared with Codex and Claude Code
 ### 5. Streaming and live progress
 
 - [ ] Stream assistant output instead of waiting for the full turn.
-- [ ] Show tool invocation progress in the TUI.
-- [ ] Show command status updates while tasks are running.
+- [x] Show tool invocation progress in the TUI.
+- [x] Show command status updates while tasks are running.
 
 ### 6. Context management
 
@@ -135,16 +135,16 @@ Planned provider targets may include local OpenAI-compatible servers or direct l
 
 ### 11. Improve the TUI
 
-- [ ] Show persisted conversation history on startup.
-- [ ] Add transcript scrolling.
+- [x] Show persisted conversation history on startup.
+- [x] Add transcript scrolling.
 - [ ] Add tool activity and command output panes.
-- [ ] Add `/help` and other documented slash commands.
+- [x] Add `/help` and other documented slash commands.
 - [ ] Improve status reporting for:
-  - [ ] thinking
-  - [ ] running command
-  - [ ] waiting for approval
-  - [ ] completed
-  - [ ] failed
+  - [x] thinking
+  - [x] running command
+  - [x] waiting for approval
+  - [x] completed
+  - [x] failed
 
 ### 12. Add a web/docs retrieval tool
 
@@ -211,15 +211,15 @@ Goal: make `socium` a usable coding agent for local repositories.
 - [x] Repo search and navigation with `rg`-based tooling
 - [x] Patch-based editing and diff support
 - [x] Git status and diff integration
-- [ ] Basic streaming or live progress feedback in the TUI
-- [ ] `/help` and core slash commands
+- [x] Basic streaming or live progress feedback in the TUI
+- [x] `/help` and core slash commands
 - [ ] Provider-neutral tool abstraction groundwork
 
 Exit criteria:
 
-- [ ] The agent can inspect a repo, edit files, run tests, and explain results in one session.
-- [ ] The user can see what tools/commands ran and whether they succeeded.
-- [ ] Common coding tasks do not require manual file hunting outside the agent.
+- [x] The agent can inspect a repo, edit files, run tests, and explain results in one session.
+- [x] The user can see what tools/commands ran and whether they succeeded.
+- [x] Common coding tasks do not require manual file hunting outside the agent.
 
 ### v0.2
 
