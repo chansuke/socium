@@ -6,7 +6,7 @@ pub mod tools;
 use crate::agent::state::{
     ConversationState, ConversationStateRef, load_json_file, save_json_file,
 };
-use crate::agent::turn::run_agent_turn;
+use crate::agent::turn::{extract_text, run_agent_turn};
 use crate::agent::types::Message;
 use crate::constants::*;
 use crate::providers::{ProviderConfig, ProviderKind};
@@ -17,6 +17,19 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub struct AgentReply {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptRole {
+    User,
+    Assistant,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptEntry {
+    pub role: TranscriptRole,
     pub text: String,
 }
 
@@ -128,6 +141,27 @@ impl AgentService {
         self.persist_messages()
     }
 
+    pub fn transcript_entries(&self) -> Vec<TranscriptEntry> {
+        self.messages
+            .iter()
+            .filter_map(|message| {
+                let text = match &message.content {
+                    crate::agent::types::MessageContent::Text(text) => text.clone(),
+                    crate::agent::types::MessageContent::Blocks(blocks) => extract_text(blocks),
+                };
+                if text.trim().is_empty() {
+                    return None;
+                }
+                let role = match message.role {
+                    crate::agent::types::Role::User => TranscriptRole::User,
+                    crate::agent::types::Role::Assistant => TranscriptRole::Assistant,
+                    crate::agent::types::Role::System => TranscriptRole::System,
+                };
+                Some(TranscriptEntry { role, text })
+            })
+            .collect()
+    }
+
     pub async fn submit(
         &mut self,
         user_input: String,
@@ -175,14 +209,16 @@ impl AgentService {
 
 #[cfg(test)]
 mod tests {
-    use crate::AgentProgress;
     use crate::agent::state::{load_json_file, save_json_file};
     use crate::agent::turn::extract_text;
-    use crate::agent::types::ContentBlock;
+    use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
     use crate::constants::{
-        MAX_COMMAND_TIMEOUT_MS, MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES,
-        MAX_TEXT_EDITOR_VIEW_READ_BYTES, TEXT_EDITOR_TOOL_NAME,
+        CONVERSATION_STATE_FILE_NAME, MAX_COMMAND_TIMEOUT_MS, MAX_LIST_ENTRIES,
+        MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES, STATE_DIR_NAME,
+        TEXT_EDITOR_TOOL_NAME,
     };
+    use crate::providers::{ProviderConfig, ProviderKind};
+    use crate::tools::default_tools;
     use crate::tools::runtime::{
         find_symbol_in_workspace, git_branch_from_workspace, git_commit_from_workspace,
         git_diff_from_workspace, git_log_from_workspace, git_status_from_workspace,
@@ -190,6 +226,7 @@ mod tests {
         resolve_workspace_path_for_create, run_tool_call, run_tool_call_with_progress,
         run_tool_calls, search_text_from_workspace,
     };
+    use crate::{AgentProgress, AgentService, TranscriptEntry, TranscriptRole};
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::fs;
@@ -238,6 +275,72 @@ mod tests {
         assert!(path.exists());
         let loaded = load_json_file::<InputHistoryState>(&path).unwrap();
         assert_eq!(loaded.entries, state.entries);
+    }
+
+    #[test]
+    fn transcript_entries_include_text_messages_and_skip_tool_only_blocks() {
+        let workspace = make_temp_dir("transcript");
+        let conversation_path = workspace
+            .path()
+            .join(STATE_DIR_NAME)
+            .join(CONVERSATION_STATE_FILE_NAME);
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: MessageContent::Text("hello".to_string()),
+            },
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "answer".to_string(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool_1".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({"path": "src/lib.rs"}),
+                    },
+                ]),
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "tool_1".to_string(),
+                    content: "Path: src/lib.rs".to_string(),
+                    is_error: None,
+                }]),
+            },
+        ];
+
+        let service = AgentService {
+            workspace_root: workspace.path().to_path_buf(),
+            conversation_path,
+            messages,
+            provider: ProviderKind::Anthropic,
+            provider_config: ProviderConfig::Anthropic {
+                api_key: "test".to_string(),
+                anthropic_version: "2023-06-01".to_string(),
+            },
+            supports_tools: true,
+            model: "test-model".to_string(),
+            max_tokens: 128,
+            tools: default_tools(),
+            client: reqwest::Client::builder().build().unwrap(),
+        };
+
+        assert_eq!(
+            service.transcript_entries(),
+            vec![
+                TranscriptEntry {
+                    role: TranscriptRole::User,
+                    text: "hello".to_string(),
+                },
+                TranscriptEntry {
+                    role: TranscriptRole::Assistant,
+                    text: "answer".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
