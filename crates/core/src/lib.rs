@@ -39,6 +39,10 @@ pub enum AgentProgress {
         round: usize,
         provider: String,
     },
+    ApprovalRequired {
+        tool: String,
+        reason: String,
+    },
     AssistantText {
         text: String,
     },
@@ -1652,6 +1656,44 @@ mod tests {
                 AgentProgress::ToolCallFinished {
                     name: "run_command".to_string(),
                     is_error: false,
+                },
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_emits_approval_required_event_when_permission_is_missing() {
+        let workspace = make_temp_dir("workspace");
+        let mut progress = Vec::new();
+
+        let result = run_tool_call_with_progress(
+            workspace.path(),
+            "tool_cmd_needs_approval",
+            "run_command",
+            &json!({
+                "command": ["touch", "created.txt"]
+            }),
+            &mut |event| progress.push(event),
+        );
+
+        match result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, Some(true)),
+            _ => panic!("expected tool_result"),
+        }
+        assert_eq!(
+            progress,
+            vec![
+                AgentProgress::ToolCallStarted {
+                    name: "run_command".to_string(),
+                },
+                AgentProgress::ApprovalRequired {
+                    tool: "run_command".to_string(),
+                    reason: "workspace-write approval required".to_string(),
+                },
+                AgentProgress::ToolCallFinished {
+                    name: "run_command".to_string(),
+                    is_error: true,
                 },
             ]
         );

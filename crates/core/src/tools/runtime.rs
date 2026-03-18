@@ -234,6 +234,10 @@ where
     let required_approval = permission.required_approval();
 
     if approval < required_approval {
+        on_progress(AgentProgress::ApprovalRequired {
+            tool: "run_command".to_string(),
+            reason: format!("{} approval required", required_approval.label()),
+        });
         return Err(format!(
             "Command '{}' is classified as {} and requires {} approval. Rerun with approval set to '{}'.",
             display_command(&command),

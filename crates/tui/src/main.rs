@@ -338,6 +338,13 @@ impl App {
             AgentProgress::ModelRequestStarted { round, provider } => {
                 self.status = Some(model_request_status(round, &provider));
             }
+            AgentProgress::ApprovalRequired { tool, reason } => {
+                self.push_message(
+                    Speaker::System,
+                    format!("Approval required for {tool}: {reason}"),
+                );
+                self.status = Some("Waiting for approval".to_string());
+            }
             AgentProgress::AssistantText { text } => {
                 self.pop_thinking_message();
                 if !text.trim().is_empty() {
