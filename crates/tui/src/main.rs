@@ -10,8 +10,16 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Paragraph},
 };
-use socium_core::AgentService;
-use std::{env, path::PathBuf, time::Instant};
+use socium_core::{AgentProgress, AgentReply, AgentService, TranscriptEntry, TranscriptRole};
+use std::{
+    env,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+use tokio::sync::{
+    mpsc::{UnboundedReceiver, unbounded_channel},
+    oneshot,
+};
 
 const BG: Color = Color::Rgb(10, 14, 24);
 const TEXT: Color = Color::Rgb(220, 223, 235);
@@ -43,16 +51,19 @@ async fn main() -> Result<()> {
 }
 
 struct App {
-    agent: AgentService,
+    agent: Option<AgentService>,
     input: String,
     character_index: usize,
     input_mode: InputMode,
     messages: Vec<ChatEntry>,
+    activity_log: Vec<String>,
+    transcript_scroll: usize,
     status: Option<String>,
     workspace_label: String,
     model_label: String,
     max_tokens: u32,
     last_latency_ms: Option<u128>,
+    pending_task: Option<PendingTask>,
 }
 
 #[derive(Clone, Copy)]
@@ -79,6 +90,18 @@ struct PendingSubmission {
     started_at: Instant,
 }
 
+struct PendingTask {
+    progress_rx: UnboundedReceiver<AgentProgress>,
+    result_rx: oneshot::Receiver<SubmitOutcome>,
+    streamed_assistant_text: bool,
+}
+
+struct SubmitOutcome {
+    agent: AgentService,
+    reply: Result<AgentReply, String>,
+    latency_ms: u128,
+}
+
 enum SubmitAction {
     None,
     Exit,
@@ -98,18 +121,22 @@ impl App {
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(1000);
         let workspace_label = format_workspace_path(env::current_dir().ok());
+        let messages = transcript_entries_to_chat_entries(agent.transcript_entries());
 
         Self {
-            agent,
+            agent: Some(agent),
             input: String::new(),
             character_index: 0,
             input_mode: InputMode::Editing,
-            messages: Vec::new(),
+            messages,
+            activity_log: Vec::new(),
+            transcript_scroll: 0,
             status: Some("Ready".to_string()),
             workspace_label,
             model_label,
             max_tokens,
             last_latency_ms: None,
+            pending_task: None,
         }
     }
 
@@ -160,6 +187,11 @@ impl App {
             speaker,
             body: body.into(),
         });
+        self.transcript_scroll = 0;
+    }
+
+    fn push_activity(&mut self, line: impl Into<String>) {
+        self.activity_log.push(line.into());
     }
 
     fn pop_thinking_message(&mut self) {
@@ -173,6 +205,10 @@ impl App {
     }
 
     fn begin_submit(&mut self) -> Result<SubmitAction> {
+        if self.pending_task.is_some() {
+            self.status = Some("Request already in progress".to_string());
+            return Ok(SubmitAction::None);
+        }
         let user_input = self.input.trim().to_string();
         self.input.clear();
         self.reset_cursor();
@@ -184,9 +220,15 @@ impl App {
 
         match user_input.as_str() {
             "/quit" | "/exit" => return Ok(SubmitAction::Exit),
+            "/help" => {
+                self.push_message(Speaker::System, help_text());
+                self.status = Some("Help".to_string());
+                return Ok(SubmitAction::None);
+            }
             "/clear" => {
-                self.agent.clear()?;
+                self.agent_mut()?.clear()?;
                 self.messages.clear();
+                self.activity_log.clear();
                 self.last_latency_ms = None;
                 self.status = Some("Conversation cleared".to_string());
                 return Ok(SubmitAction::None);
@@ -210,40 +252,185 @@ impl App {
         }))
     }
 
-    async fn finish_submit(&mut self, pending: PendingSubmission) -> Result<bool> {
-        let reply = self.agent.submit(pending.user_input).await;
-        self.last_latency_ms = Some(pending.started_at.elapsed().as_millis());
+    fn agent_mut(&mut self) -> Result<&mut AgentService> {
+        self.agent
+            .as_mut()
+            .ok_or_else(|| eyre!("agent is unavailable while a request is running"))
+    }
+
+    fn start_submit_task(&mut self, pending: PendingSubmission) -> Result<()> {
+        let Some(mut agent) = self.agent.take() else {
+            return Err(eyre!("agent is unavailable while a request is running"));
+        };
+        let (progress_tx, progress_rx) = unbounded_channel();
+        let (result_tx, result_rx) = oneshot::channel();
+        let PendingSubmission {
+            user_input,
+            started_at,
+        } = pending;
+
+        tokio::spawn(async move {
+            let reply = agent
+                .submit_with_progress(user_input, |event| {
+                    let _ = progress_tx.send(event);
+                })
+                .await
+                .map_err(|err| err.to_string());
+            let _ = result_tx.send(SubmitOutcome {
+                agent,
+                reply,
+                latency_ms: started_at.elapsed().as_millis(),
+            });
+        });
+
+        self.pending_task = Some(PendingTask {
+            progress_rx,
+            result_rx,
+            streamed_assistant_text: false,
+        });
+        Ok(())
+    }
+
+    fn poll_pending_task(&mut self) {
+        let mut progress_events = Vec::new();
+        let mut streamed_assistant_text = None;
+        let mut completed = None;
+
+        if let Some(task) = self.pending_task.as_mut() {
+            while let Ok(event) = task.progress_rx.try_recv() {
+                if matches!(event, AgentProgress::AssistantText { .. }) {
+                    task.streamed_assistant_text = true;
+                }
+                progress_events.push(event);
+            }
+            streamed_assistant_text = Some(task.streamed_assistant_text);
+            if let Ok(outcome) = task.result_rx.try_recv() {
+                completed = Some(outcome);
+            }
+        }
+
+        for event in progress_events {
+            self.apply_progress(event);
+        }
+
+        let Some(outcome) = completed else {
+            return;
+        };
+        let streamed_assistant_text = streamed_assistant_text.unwrap_or(false);
+        self.pending_task = None;
+        self.agent = Some(outcome.agent);
+        self.last_latency_ms = Some(outcome.latency_ms);
         self.pop_thinking_message();
 
-        match reply {
+        match outcome.reply {
             Ok(reply) => {
-                if reply.text.trim().is_empty() {
-                    self.push_message(Speaker::Socium, "(no text response)");
-                } else {
-                    self.push_message(Speaker::Socium, reply.text);
+                if !streamed_assistant_text {
+                    if reply.text.trim().is_empty() {
+                        self.push_message(Speaker::Socium, "(no text response)");
+                    } else {
+                        self.push_message(Speaker::Socium, reply.text);
+                    }
                 }
+                self.push_activity("Request completed");
                 self.status = Some("Done".to_string());
             }
             Err(err) => {
                 self.push_message(Speaker::System, format!("Request failed: {err}"));
+                self.push_activity(format!("Request failed: {err}"));
                 self.status = Some("Failed".to_string());
             }
         }
+    }
 
-        Ok(false)
+    fn apply_progress(&mut self, event: AgentProgress) {
+        match event {
+            AgentProgress::ModelRequestStarted { round, provider } => {
+                self.push_activity(format!("Model request round {round} via {provider}"));
+                self.status = Some(model_request_status(round, &provider));
+            }
+            AgentProgress::ApprovalRequired { tool, reason } => {
+                self.push_activity(format!("Approval required for {tool}: {reason}"));
+                self.push_message(
+                    Speaker::System,
+                    format!("Approval required for {tool}: {reason}"),
+                );
+                self.status = Some("Waiting for approval".to_string());
+            }
+            AgentProgress::AssistantText { text } => {
+                self.pop_thinking_message();
+                if !text.trim().is_empty() {
+                    self.push_message(Speaker::Socium, text);
+                    self.status = Some("Responding".to_string());
+                }
+            }
+            AgentProgress::ToolCallStarted { name } => {
+                self.push_activity(format!("Running tool: {name}"));
+                self.pop_thinking_message();
+                self.push_message(Speaker::System, format!("Running tool: {name}"));
+                self.status = Some(format!("Tool: {name}"));
+            }
+            AgentProgress::ToolCallFinished { name, is_error } => {
+                self.push_activity(format!(
+                    "Finished tool: {name}{}",
+                    progress_suffix(is_error)
+                ));
+                self.push_message(
+                    Speaker::System,
+                    format!("Finished tool: {name}{}", progress_suffix(is_error)),
+                );
+                self.status = Some(if is_error {
+                    format!("Tool failed: {name}")
+                } else {
+                    format!("Tool finished: {name}")
+                });
+            }
+            AgentProgress::CommandStarted { command, cwd } => {
+                self.push_activity(format!("Running command in {cwd}: {command}"));
+                self.push_message(
+                    Speaker::System,
+                    format!("Running command in {cwd}: {command}"),
+                );
+                self.status = Some(format!("Command: {}", truncate_text(&command, 36)));
+            }
+            AgentProgress::CommandFinished {
+                command,
+                exit_code,
+                timed_out,
+            } => {
+                self.push_activity(format_command_progress_message(
+                    &command, exit_code, timed_out,
+                ));
+                self.push_message(
+                    Speaker::System,
+                    format_command_progress_message(&command, exit_code, timed_out),
+                );
+                self.status = Some(command_completion_status(&command, exit_code, timed_out));
+            }
+        }
     }
 
     async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         loop {
+            self.poll_pending_task();
             terminal.draw(|frame| self.draw(frame))?;
+
+            if !event::poll(Duration::from_millis(50))? {
+                continue;
+            }
 
             if let Event::Key(key) = event::read()? {
                 match self.input_mode {
                     InputMode::Normal if key.kind == KeyEventKind::Press => match key.code {
                         KeyCode::Char('e') | KeyCode::Enter => {
                             self.input_mode = InputMode::Editing;
-                            self.status = Some("Ready".to_string());
+                            if self.pending_task.is_none() {
+                                self.status = Some("Ready".to_string());
+                            }
                         }
+                        KeyCode::Up | KeyCode::Char('k') => self.scroll_transcript_up(1),
+                        KeyCode::Down | KeyCode::Char('j') => self.scroll_transcript_down(1),
+                        KeyCode::PageUp => self.scroll_transcript_up(10),
+                        KeyCode::PageDown => self.scroll_transcript_down(10),
                         KeyCode::Char('q') => return Ok(()),
                         _ => {}
                     },
@@ -253,26 +440,36 @@ impl App {
                             SubmitAction::Exit => return Ok(()),
                             SubmitAction::Pending(pending) => {
                                 terminal.draw(|frame| self.draw(frame))?;
-                                if self.finish_submit(pending).await? {
-                                    return Ok(());
-                                }
+                                self.start_submit_task(pending)?;
                             }
                         },
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             return Ok(());
                         }
                         KeyCode::Char(to_insert)
-                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            if self.pending_task.is_none()
+                                && !key.modifiers.contains(KeyModifiers::CONTROL)
                                 && !key.modifiers.contains(KeyModifiers::ALT) =>
                         {
                             self.enter_char(to_insert);
                         }
-                        KeyCode::Backspace => self.delete_char(),
-                        KeyCode::Left => self.move_cursor_left(),
-                        KeyCode::Right => self.move_cursor_right(),
+                        KeyCode::Backspace if self.pending_task.is_none() => self.delete_char(),
+                        KeyCode::Left if self.pending_task.is_none() => self.move_cursor_left(),
+                        KeyCode::Right if self.pending_task.is_none() => self.move_cursor_right(),
                         KeyCode::Esc => {
                             self.input_mode = InputMode::Normal;
-                            self.status = Some("Press E to resume typing".to_string());
+                            self.status = Some(if self.pending_task.is_some() {
+                                "Request in progress".to_string()
+                            } else {
+                                "Press E to resume typing".to_string()
+                            });
+                        }
+                        KeyCode::Char(_)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT)
+                                && self.pending_task.is_some() =>
+                        {
+                            self.status = Some("Request in progress".to_string());
                         }
                         _ => {}
                     },
@@ -288,14 +485,21 @@ impl App {
         let vertical = Layout::vertical([
             Constraint::Length(10),
             Constraint::Min(8),
+            Constraint::Length(6),
             Constraint::Length(2),
             Constraint::Length(1),
         ]);
-        let [header_area, transcript_area, composer_area, footer_area] =
-            vertical.areas(frame.area());
+        let [
+            header_area,
+            transcript_area,
+            activity_area,
+            composer_area,
+            footer_area,
+        ] = vertical.areas(frame.area());
 
         self.draw_header(frame, header_area);
         self.draw_transcript(frame, transcript_area);
+        self.draw_activity(frame, activity_area);
         self.draw_composer(frame, composer_area);
         self.draw_footer(frame, footer_area);
     }
@@ -328,6 +532,34 @@ impl App {
             Paragraph::new(self.visible_transcript(area.width as usize, area.height as usize))
                 .style(Style::default().bg(BG).fg(TEXT));
         frame.render_widget(transcript, area);
+    }
+
+    fn draw_activity(&self, frame: &mut Frame, area: Rect) {
+        let lines =
+            recent_activity_lines(&self.activity_log, area.height.saturating_sub(2) as usize);
+        let block = Block::bordered()
+            .title(" activity ")
+            .border_style(Style::default().fg(CODE_BORDER))
+            .style(Style::default().bg(BG));
+        let text = if lines.is_empty() {
+            Text::from(vec![Line::from(Span::styled(
+                "No tool activity yet",
+                Style::default().fg(SOFT),
+            ))])
+        } else {
+            Text::from(
+                lines
+                    .into_iter()
+                    .map(|line| {
+                        Line::from(vec![
+                            Span::styled("• ", Style::default().fg(PINK)),
+                            Span::styled(line, Style::default().fg(TEXT)),
+                        ])
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        frame.render_widget(Paragraph::new(text).block(block), area);
     }
 
     fn draw_composer(&self, frame: &mut Frame, area: Rect) {
@@ -463,8 +695,22 @@ impl App {
             lines.extend(render_entry(entry, width.max(24)));
         }
 
-        let start = lines.len().saturating_sub(height.max(1));
+        let start = transcript_window_start(lines.len(), height.max(1), self.transcript_scroll);
         Text::from(lines.into_iter().skip(start).collect::<Vec<_>>())
+    }
+
+    fn scroll_transcript_up(&mut self, amount: usize) {
+        self.transcript_scroll = self.transcript_scroll.saturating_add(amount.max(1));
+        self.status = Some("Transcript scroll".to_string());
+    }
+
+    fn scroll_transcript_down(&mut self, amount: usize) {
+        self.transcript_scroll = self.transcript_scroll.saturating_sub(amount.max(1));
+        self.status = Some(if self.transcript_scroll == 0 {
+            "Ready".to_string()
+        } else {
+            "Transcript scroll".to_string()
+        });
     }
 
     fn estimated_tokens(&self) -> u32 {
@@ -484,6 +730,75 @@ impl App {
         }
         100_u32.saturating_sub((used.saturating_mul(100)) / self.max_tokens)
     }
+}
+
+fn model_request_status(round: usize, provider: &str) -> String {
+    if round <= 1 {
+        format!("Thinking ({provider})")
+    } else {
+        format!("Thinking ({provider}, round {round})")
+    }
+}
+
+fn progress_suffix(is_error: bool) -> &'static str {
+    if is_error { " (error)" } else { "" }
+}
+
+fn format_command_progress_message(
+    command: &str,
+    exit_code: Option<i32>,
+    timed_out: bool,
+) -> String {
+    if timed_out {
+        return format!("Command timed out: {command}");
+    }
+    match exit_code {
+        Some(code) => format!("Command finished ({code}): {command}"),
+        None => format!("Command finished (terminated): {command}"),
+    }
+}
+
+fn command_completion_status(command: &str, exit_code: Option<i32>, timed_out: bool) -> String {
+    if timed_out {
+        return format!("Command timed out: {}", truncate_text(command, 24));
+    }
+    match exit_code {
+        Some(0) => format!("Command finished: {}", truncate_text(command, 24)),
+        Some(code) => format!("Command failed ({code}): {}", truncate_text(command, 24)),
+        None => format!("Command terminated: {}", truncate_text(command, 24)),
+    }
+}
+
+fn transcript_entries_to_chat_entries(entries: Vec<TranscriptEntry>) -> Vec<ChatEntry> {
+    entries
+        .into_iter()
+        .map(|entry| ChatEntry {
+            speaker: match entry.role {
+                TranscriptRole::User => Speaker::User,
+                TranscriptRole::Assistant => Speaker::Socium,
+                TranscriptRole::System => Speaker::System,
+            },
+            body: entry.text,
+        })
+        .collect()
+}
+
+fn transcript_window_start(total_lines: usize, height: usize, scroll: usize) -> usize {
+    let visible_height = height.max(1);
+    let max_start = total_lines.saturating_sub(visible_height);
+    max_start.saturating_sub(scroll.min(max_start))
+}
+
+fn recent_activity_lines(entries: &[String], max_lines: usize) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+    let start = entries.len().saturating_sub(max_lines);
+    entries[start..].to_vec()
+}
+
+fn help_text() -> &'static str {
+    "/help  Show available commands\n/clear Clear the current conversation\n/exit  Quit Socium"
 }
 
 fn build_logo_rows(rows: &[&str]) -> Vec<Line<'static>> {
@@ -882,4 +1197,108 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
         .collect::<String>();
     truncated.push('…');
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Speaker, recent_activity_lines, transcript_entries_to_chat_entries, transcript_window_start,
+    };
+    use super::{command_completion_status, format_command_progress_message, model_request_status};
+    use socium_core::{TranscriptEntry, TranscriptRole};
+
+    #[test]
+    fn model_request_status_includes_round_after_first_request() {
+        assert_eq!(model_request_status(1, "anthropic"), "Thinking (anthropic)");
+        assert_eq!(
+            model_request_status(2, "anthropic"),
+            "Thinking (anthropic, round 2)"
+        );
+    }
+
+    #[test]
+    fn command_completion_status_reports_failures_and_timeouts() {
+        assert_eq!(
+            command_completion_status("cargo test", Some(0), false),
+            "Command finished: cargo test"
+        );
+        assert_eq!(
+            command_completion_status("cargo test", Some(101), false),
+            "Command failed (101): cargo test"
+        );
+        assert_eq!(
+            command_completion_status("cargo test", None, true),
+            "Command timed out: cargo test"
+        );
+    }
+
+    #[test]
+    fn format_command_progress_message_reports_exit_code() {
+        assert_eq!(
+            format_command_progress_message("cargo test", Some(0), false),
+            "Command finished (0): cargo test"
+        );
+        assert_eq!(
+            format_command_progress_message("cargo test", None, true),
+            "Command timed out: cargo test"
+        );
+    }
+
+    #[test]
+    fn help_text_lists_supported_slash_commands() {
+        let help = super::help_text();
+
+        assert!(help.contains("/help"));
+        assert!(help.contains("/clear"));
+        assert!(help.contains("/exit"));
+    }
+
+    #[test]
+    fn transcript_entries_map_to_chat_speakers() {
+        let entries = vec![
+            TranscriptEntry {
+                role: TranscriptRole::User,
+                text: "u".to_string(),
+            },
+            TranscriptEntry {
+                role: TranscriptRole::Assistant,
+                text: "a".to_string(),
+            },
+            TranscriptEntry {
+                role: TranscriptRole::System,
+                text: "s".to_string(),
+            },
+        ];
+
+        let chat = transcript_entries_to_chat_entries(entries);
+
+        assert_eq!(chat.len(), 3);
+        assert!(matches!(chat[0].speaker, Speaker::User));
+        assert!(matches!(chat[1].speaker, Speaker::Socium));
+        assert!(matches!(chat[2].speaker, Speaker::System));
+    }
+
+    #[test]
+    fn transcript_window_start_respects_scroll_offset() {
+        assert_eq!(transcript_window_start(20, 5, 0), 15);
+        assert_eq!(transcript_window_start(20, 5, 3), 12);
+        assert_eq!(transcript_window_start(20, 5, 99), 0);
+        assert_eq!(transcript_window_start(3, 10, 5), 0);
+    }
+
+    #[test]
+    fn recent_activity_lines_keeps_latest_entries() {
+        let entries = vec![
+            "one".to_string(),
+            "two".to_string(),
+            "three".to_string(),
+            "four".to_string(),
+        ];
+
+        assert_eq!(
+            recent_activity_lines(&entries, 2),
+            vec!["three".to_string(), "four".to_string()]
+        );
+        assert_eq!(recent_activity_lines(&entries, 0), Vec::<String>::new());
+    }
 }

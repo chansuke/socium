@@ -6,7 +6,7 @@ pub mod tools;
 use crate::agent::state::{
     ConversationState, ConversationStateRef, load_json_file, save_json_file,
 };
-use crate::agent::turn::run_agent_turn;
+use crate::agent::turn::{extract_text, run_agent_turn};
 use crate::agent::types::Message;
 use crate::constants::*;
 use crate::providers::{ProviderConfig, ProviderKind};
@@ -18,6 +18,50 @@ use std::time::Duration;
 
 pub struct AgentReply {
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptRole {
+    User,
+    Assistant,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptEntry {
+    pub role: TranscriptRole,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentProgress {
+    ModelRequestStarted {
+        round: usize,
+        provider: String,
+    },
+    ApprovalRequired {
+        tool: String,
+        reason: String,
+    },
+    AssistantText {
+        text: String,
+    },
+    ToolCallStarted {
+        name: String,
+    },
+    ToolCallFinished {
+        name: String,
+        is_error: bool,
+    },
+    CommandStarted {
+        command: String,
+        cwd: String,
+    },
+    CommandFinished {
+        command: String,
+        exit_code: Option<i32>,
+        timed_out: bool,
+    },
 }
 
 pub struct AgentService {
@@ -101,10 +145,42 @@ impl AgentService {
         self.persist_messages()
     }
 
+    pub fn transcript_entries(&self) -> Vec<TranscriptEntry> {
+        self.messages
+            .iter()
+            .filter_map(|message| {
+                let text = match &message.content {
+                    crate::agent::types::MessageContent::Text(text) => text.clone(),
+                    crate::agent::types::MessageContent::Blocks(blocks) => extract_text(blocks),
+                };
+                if text.trim().is_empty() {
+                    return None;
+                }
+                let role = match message.role {
+                    crate::agent::types::Role::User => TranscriptRole::User,
+                    crate::agent::types::Role::Assistant => TranscriptRole::Assistant,
+                    crate::agent::types::Role::System => TranscriptRole::System,
+                };
+                Some(TranscriptEntry { role, text })
+            })
+            .collect()
+    }
+
     pub async fn submit(
         &mut self,
         user_input: String,
     ) -> Result<AgentReply, Box<dyn std::error::Error>> {
+        self.submit_with_progress(user_input, |_| {}).await
+    }
+
+    pub async fn submit_with_progress<F>(
+        &mut self,
+        user_input: String,
+        mut on_progress: F,
+    ) -> Result<AgentReply, Box<dyn std::error::Error>>
+    where
+        F: FnMut(AgentProgress),
+    {
         self.messages.push(Message::user_text(user_input));
         let assistant_chunks = run_agent_turn(
             self.provider,
@@ -116,6 +192,7 @@ impl AgentService {
             &self.tools,
             &self.workspace_root,
             &mut self.messages,
+            &mut on_progress,
         )
         .await?;
         self.persist_messages()?;
@@ -138,15 +215,22 @@ impl AgentService {
 mod tests {
     use crate::agent::state::{load_json_file, save_json_file};
     use crate::agent::turn::extract_text;
-    use crate::agent::types::ContentBlock;
+    use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
     use crate::constants::{
-        MAX_LIST_ENTRIES, MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES,
+        CONVERSATION_STATE_FILE_NAME, MAX_COMMAND_TIMEOUT_MS, MAX_LIST_ENTRIES,
+        MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES, STATE_DIR_NAME,
         TEXT_EDITOR_TOOL_NAME,
     };
+    use crate::providers::{ProviderConfig, ProviderKind};
+    use crate::tools::default_tools;
     use crate::tools::runtime::{
+        find_symbol_in_workspace, git_branch_from_workspace, git_commit_from_workspace,
+        git_diff_from_workspace, git_log_from_workspace, git_status_from_workspace,
         list_files_from_workspace, read_file_from_workspace, resolve_workspace_path,
-        resolve_workspace_path_for_create, run_tool_call, run_tool_calls,
+        resolve_workspace_path_for_create, run_tool_call, run_tool_call_with_progress,
+        run_tool_calls, search_text_from_workspace,
     };
+    use crate::{AgentProgress, AgentService, TranscriptEntry, TranscriptRole};
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::fs;
@@ -195,6 +279,72 @@ mod tests {
         assert!(path.exists());
         let loaded = load_json_file::<InputHistoryState>(&path).unwrap();
         assert_eq!(loaded.entries, state.entries);
+    }
+
+    #[test]
+    fn transcript_entries_include_text_messages_and_skip_tool_only_blocks() {
+        let workspace = make_temp_dir("transcript");
+        let conversation_path = workspace
+            .path()
+            .join(STATE_DIR_NAME)
+            .join(CONVERSATION_STATE_FILE_NAME);
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: MessageContent::Text("hello".to_string()),
+            },
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "answer".to_string(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool_1".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({"path": "src/lib.rs"}),
+                    },
+                ]),
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "tool_1".to_string(),
+                    content: "Path: src/lib.rs".to_string(),
+                    is_error: None,
+                }]),
+            },
+        ];
+
+        let service = AgentService {
+            workspace_root: workspace.path().to_path_buf(),
+            conversation_path,
+            messages,
+            provider: ProviderKind::Anthropic,
+            provider_config: ProviderConfig::Anthropic {
+                api_key: "test".to_string(),
+                anthropic_version: "2023-06-01".to_string(),
+            },
+            supports_tools: true,
+            model: "test-model".to_string(),
+            max_tokens: 128,
+            tools: default_tools(),
+            client: reqwest::Client::builder().build().unwrap(),
+        };
+
+        assert_eq!(
+            service.transcript_entries(),
+            vec![
+                TranscriptEntry {
+                    role: TranscriptRole::User,
+                    text: "hello".to_string(),
+                },
+                TranscriptEntry {
+                    role: TranscriptRole::Assistant,
+                    text: "answer".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -284,6 +434,429 @@ mod tests {
             list_files_from_workspace(workspace.path(), &json!({"path": "empty"})).unwrap();
 
         assert_eq!(output, "Path: empty\n(empty)");
+    }
+
+    #[test]
+    fn search_text_returns_line_addressable_matches() {
+        let workspace = make_temp_dir("workspace");
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::write(
+            workspace.path().join("src/lib.rs"),
+            "pub fn alpha() {}\nlet needle = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("src/other.rs"),
+            "const NEEDLE: &str = \"needle\";\n",
+        )
+        .unwrap();
+
+        let output = search_text_from_workspace(
+            workspace.path(),
+            &json!({
+                "pattern": "needle",
+                "path": "src"
+            }),
+        )
+        .unwrap();
+
+        assert!(output.contains("Pattern: needle"));
+        assert!(output.contains("Path: src"));
+        assert!(output.contains("src/lib.rs:2:let needle = 1;"));
+        assert!(output.contains("src/other.rs:1:const NEEDLE: &str = \"needle\";"));
+    }
+
+    #[test]
+    fn search_text_respects_glob_and_max_results() {
+        let workspace = make_temp_dir("workspace");
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::write(workspace.path().join("src/a.rs"), "needle\n").unwrap();
+        fs::write(workspace.path().join("src/b.rs"), "needle\n").unwrap();
+        fs::write(workspace.path().join("src/c.txt"), "needle\n").unwrap();
+
+        let output = search_text_from_workspace(
+            workspace.path(),
+            &json!({
+                "pattern": "needle",
+                "glob": "*.rs",
+                "max_results": 1
+            }),
+        )
+        .unwrap();
+
+        assert!(output.contains("Glob: *.rs"));
+        assert!(output.contains("src/a.rs:1:needle") || output.contains("src/b.rs:1:needle"));
+        assert!(!output.contains("src/c.txt"));
+        assert!(output.contains("(truncated: showing first 1 matches; more matches omitted)"));
+    }
+
+    #[test]
+    fn list_files_supports_recursive_glob_filtering() {
+        let workspace = make_temp_dir("workspace");
+        fs::create_dir_all(workspace.path().join("src/nested")).unwrap();
+        fs::write(workspace.path().join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+        fs::write(
+            workspace.path().join("src/nested/mod.rs"),
+            "pub mod nested;\n",
+        )
+        .unwrap();
+        fs::write(workspace.path().join("src/nested/readme.txt"), "note\n").unwrap();
+
+        let output = list_files_from_workspace(
+            workspace.path(),
+            &json!({
+                "path": "src",
+                "recursive": true,
+                "glob": "*.rs"
+            }),
+        )
+        .unwrap();
+
+        assert!(output.contains("Path: src"));
+        assert!(output.contains("Glob: *.rs"));
+        assert!(output.contains("Recursive: true"));
+        assert!(output.contains("[file] lib.rs"));
+        assert!(output.contains("[file] nested/mod.rs"));
+        assert!(!output.contains("readme.txt"));
+    }
+
+    #[test]
+    fn find_symbol_returns_rust_declaration_matches() {
+        let workspace = make_temp_dir("workspace");
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::write(
+            workspace.path().join("src/lib.rs"),
+            "pub struct Widget;\nfn helper() {}\nimpl Widget { pub fn build() -> Self { Self } }\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("src/other.rs"),
+            "pub enum WidgetState { Ready }\n",
+        )
+        .unwrap();
+
+        let output = find_symbol_in_workspace(
+            workspace.path(),
+            &json!({
+                "symbol": "Widget"
+            }),
+        )
+        .unwrap();
+
+        assert!(output.contains("Symbol: Widget"));
+        assert!(output.contains("src/lib.rs:1:pub struct Widget;"));
+        assert!(output.contains("src/lib.rs:3:impl Widget { pub fn build() -> Self { Self } }"));
+        assert!(!output.contains("WidgetState"));
+    }
+
+    #[test]
+    fn apply_patch_updates_multiple_hunks_in_one_file() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("notes.txt");
+        fs::write(&file_path, "one\ntwo\nthree\nfour\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_patch_update",
+            "apply_patch",
+            &json!({
+                "patch": "*** Begin Patch\n*** Update File: notes.txt\n@@\n one\n-two\n+TWO\n three\n@@\n three\n-four\n+FOUR\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Updated file: notes.txt"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        let updated = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(updated, "one\nTWO\nthree\nFOUR\n");
+    }
+
+    #[test]
+    fn apply_patch_creates_new_file() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_patch_add",
+            "apply_patch",
+            &json!({
+                "patch": "*** Begin Patch\n*** Add File: created.txt\n+hello\n+world\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Added file: created.txt"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        let created = fs::read_to_string(workspace.path().join("created.txt")).unwrap();
+        assert_eq!(created, "hello\nworld");
+    }
+
+    #[test]
+    fn apply_patch_deletes_file() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("remove.txt");
+        fs::write(&file_path, "delete me").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_patch_delete",
+            "apply_patch",
+            &json!({
+                "patch": "*** Begin Patch\n*** Delete File: remove.txt\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Deleted file: remove.txt"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        assert!(!file_path.exists());
+    }
+
+    #[test]
+    fn apply_patch_moves_file_and_updates_contents() {
+        let workspace = make_temp_dir("workspace");
+        let from_path = workspace.path().join("old.txt");
+        fs::write(&from_path, "alpha\nbeta\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_patch_move",
+            "apply_patch",
+            &json!({
+                "patch": "*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n@@\n alpha\n-beta\n+gamma\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Moved file: old.txt -> new.txt"));
+                assert!(content.contains("Updated file: new.txt"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        assert!(!from_path.exists());
+        let moved = fs::read_to_string(workspace.path().join("new.txt")).unwrap();
+        assert_eq!(moved, "alpha\ngamma\n");
+    }
+
+    #[test]
+    fn apply_patch_dry_run_returns_preview_without_writing() {
+        let workspace = make_temp_dir("workspace");
+        let file_path = workspace.path().join("preview.txt");
+        fs::write(&file_path, "before\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_patch_preview",
+            "apply_patch",
+            &json!({
+                "dry_run": true,
+                "patch": "*** Begin Patch\n*** Update File: preview.txt\n@@\n-before\n+after\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Preview: true"));
+                assert!(content.contains("--- preview.txt"));
+                assert!(content.contains("+++ preview.txt"));
+                assert!(content.contains("-before"));
+                assert!(content.contains("+after"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        let unchanged = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(unchanged, "before\n");
+    }
+
+    #[test]
+    fn git_branch_returns_current_branch() {
+        let workspace = make_temp_dir("git-branch");
+        init_git_repo(workspace.path());
+
+        let output = git_branch_from_workspace(workspace.path(), &json!({})).unwrap();
+
+        assert!(output.contains("Branch: main"));
+    }
+
+    #[test]
+    fn git_status_reports_branch_and_dirty_entries() {
+        let workspace = make_temp_dir("git-status");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+        fs::write(workspace.path().join("untracked.txt"), "new\n").unwrap();
+
+        let output = git_status_from_workspace(workspace.path(), &json!({})).unwrap();
+
+        assert!(output.contains("Branch: main"));
+        assert!(output.contains(" M tracked.txt"));
+        assert!(output.contains("?? untracked.txt"));
+    }
+
+    #[test]
+    fn git_diff_returns_patch_for_requested_path() {
+        let workspace = make_temp_dir("git-diff");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+
+        let output =
+            git_diff_from_workspace(workspace.path(), &json!({ "path": "tracked.txt" })).unwrap();
+
+        assert!(output.contains("Path: tracked.txt"));
+        assert!(output.contains("--- a/tracked.txt"));
+        assert!(output.contains("+++ b/tracked.txt"));
+        assert!(output.contains("-initial"));
+        assert!(output.contains("+changed"));
+    }
+
+    #[test]
+    fn git_log_returns_recent_commits() {
+        let workspace = make_temp_dir("git-log");
+        init_git_repo(workspace.path());
+
+        let output = git_log_from_workspace(workspace.path(), &json!({ "max_count": 1 })).unwrap();
+
+        assert!(output.contains("Count: 1"));
+        assert!(output.contains("initial commit"));
+    }
+
+    #[test]
+    fn text_editor_create_warns_when_git_worktree_is_dirty() {
+        let workspace = make_temp_dir("git-dirty-create");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "dirty\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_dirty_create",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "create",
+                "path": "new.txt",
+                "file_text": "created"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Created file"));
+                assert!(content.contains("Warning: git worktree has uncommitted changes"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn apply_patch_warns_when_git_worktree_is_dirty() {
+        let workspace = make_temp_dir("git-dirty-patch");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "dirty\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_dirty_patch",
+            "apply_patch",
+            &json!({
+                "patch": "*** Begin Patch\n*** Add File: another.txt\n+hello\n*** End Patch\n"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Added file: another.txt"));
+                assert!(content.contains("Warning: git worktree has uncommitted changes"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn git_commit_requires_explicit_confirmation() {
+        let workspace = make_temp_dir("git-commit-confirm");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_git_commit_denied",
+            "git_commit",
+            &json!({
+                "message": "save work"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("requires explicit confirmation"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        let head_message = git_stdout(workspace.path(), &["log", "-1", "--pretty=%s"]);
+        assert_eq!(head_message.trim(), "initial commit");
+    }
+
+    #[test]
+    fn git_commit_creates_commit_when_confirmed() {
+        let workspace = make_temp_dir("git-commit-ok");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+
+        let output = git_commit_from_workspace(
+            workspace.path(),
+            &json!({
+                "message": "save work",
+                "confirmed": true
+            }),
+        )
+        .unwrap();
+
+        assert!(output.contains("Commit:"));
+        assert!(output.contains("Message: save work"));
+
+        let head_message = git_stdout(workspace.path(), &["log", "-1", "--pretty=%s"]);
+        assert_eq!(head_message.trim(), "save work");
+
+        let status = git_stdout(workspace.path(), &["status", "--short"]);
+        assert!(status.trim().is_empty());
     }
 
     #[test]
@@ -713,9 +1286,27 @@ mod tests {
     }
 
     #[test]
-    fn text_editor_undo_edit_returns_error() {
+    fn text_editor_undo_edit_restores_previous_file_content() {
         let workspace = make_temp_dir("workspace");
-        fs::write(workspace.path().join("undo.txt"), "x").unwrap();
+        let file_path = workspace.path().join("undo.txt");
+        fs::write(&file_path, "before").unwrap();
+
+        let edit_result = run_tool_call(
+            workspace.path(),
+            "tool_te_undo_edit_before",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "str_replace",
+                "path": "undo.txt",
+                "old_str": "before",
+                "new_str": "after"
+            }),
+        );
+
+        match edit_result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            _ => panic!("expected tool_result"),
+        }
 
         let result = run_tool_call(
             workspace.path(),
@@ -731,11 +1322,57 @@ mod tests {
             ContentBlock::ToolResult {
                 content, is_error, ..
             } => {
-                assert!(content.contains("undo_edit is not supported"));
-                assert_eq!(is_error, Some(true));
+                assert!(content.contains("Undid last edit"));
+                assert_eq!(is_error, None);
             }
             _ => panic!("expected tool_result"),
         }
+
+        let restored = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(restored, "before");
+    }
+
+    #[test]
+    fn text_editor_undo_edit_removes_last_created_file() {
+        let workspace = make_temp_dir("workspace");
+
+        let create_result = run_tool_call(
+            workspace.path(),
+            "tool_te_undo_create_before",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "create",
+                "path": "created.txt",
+                "file_text": "new"
+            }),
+        );
+
+        match create_result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            _ => panic!("expected tool_result"),
+        }
+
+        let undo_result = run_tool_call(
+            workspace.path(),
+            "tool_te_undo_create",
+            TEXT_EDITOR_TOOL_NAME,
+            &json!({
+                "command": "undo_edit",
+                "path": "created.txt"
+            }),
+        );
+
+        match undo_result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(content.contains("Undid last edit"));
+                assert_eq!(is_error, None);
+            }
+            _ => panic!("expected tool_result"),
+        }
+
+        assert!(!workspace.path().join("created.txt").exists());
     }
 
     #[test]
@@ -951,6 +1588,316 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn run_command_runs_safe_command_in_requested_cwd() {
+        let workspace = make_temp_dir("workspace");
+        let nested = workspace.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_cmd_pwd",
+            "run_command",
+            &json!({
+                "command": ["pwd"],
+                "cwd": "nested"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Command: pwd"));
+                assert!(content.contains("Cwd: nested"));
+                assert!(content.contains("Permission: safe-read-only"));
+                assert!(content.contains("Exit code: 0"));
+                assert!(content.contains(nested.to_string_lossy().as_ref()));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_emits_tool_and_command_progress_events() {
+        let workspace = make_temp_dir("workspace");
+        let mut progress = Vec::new();
+
+        let result = run_tool_call_with_progress(
+            workspace.path(),
+            "tool_cmd_progress",
+            "run_command",
+            &json!({
+                "command": ["pwd"]
+            }),
+            &mut |event| progress.push(event),
+        );
+
+        match result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            _ => panic!("expected tool_result"),
+        }
+        assert_eq!(
+            progress,
+            vec![
+                AgentProgress::ToolCallStarted {
+                    name: "run_command".to_string(),
+                },
+                AgentProgress::CommandStarted {
+                    command: "pwd".to_string(),
+                    cwd: ".".to_string(),
+                },
+                AgentProgress::CommandFinished {
+                    command: "pwd".to_string(),
+                    exit_code: Some(0),
+                    timed_out: false,
+                },
+                AgentProgress::ToolCallFinished {
+                    name: "run_command".to_string(),
+                    is_error: false,
+                },
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_emits_approval_required_event_when_permission_is_missing() {
+        let workspace = make_temp_dir("workspace");
+        let mut progress = Vec::new();
+
+        let result = run_tool_call_with_progress(
+            workspace.path(),
+            "tool_cmd_needs_approval",
+            "run_command",
+            &json!({
+                "command": ["touch", "created.txt"]
+            }),
+            &mut |event| progress.push(event),
+        );
+
+        match result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, Some(true)),
+            _ => panic!("expected tool_result"),
+        }
+        assert_eq!(
+            progress,
+            vec![
+                AgentProgress::ToolCallStarted {
+                    name: "run_command".to_string(),
+                },
+                AgentProgress::ApprovalRequired {
+                    tool: "run_command".to_string(),
+                    reason: "workspace-write approval required".to_string(),
+                },
+                AgentProgress::ToolCallFinished {
+                    name: "run_command".to_string(),
+                    is_error: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn git_commit_emits_approval_required_event_when_confirmation_is_missing() {
+        let workspace = make_temp_dir("git-commit-needs-confirmation");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+
+        let mut progress = Vec::new();
+        let result = run_tool_call_with_progress(
+            workspace.path(),
+            "tool_git_commit_needs_confirmation",
+            "git_commit",
+            &json!({
+                "message": "test commit"
+            }),
+            &mut |event| progress.push(event),
+        );
+
+        match result {
+            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, Some(true)),
+            _ => panic!("expected tool_result"),
+        }
+        assert_eq!(
+            progress,
+            vec![
+                AgentProgress::ToolCallStarted {
+                    name: "git_commit".to_string(),
+                },
+                AgentProgress::ApprovalRequired {
+                    tool: "git_commit".to_string(),
+                    reason: "explicit confirmation required".to_string(),
+                },
+                AgentProgress::ToolCallFinished {
+                    name: "git_commit".to_string(),
+                    is_error: true,
+                },
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_requires_workspace_write_approval_and_runs_after_approval() {
+        let workspace = make_temp_dir("workspace");
+
+        let rejected = run_tool_call(
+            workspace.path(),
+            "tool_cmd_touch_denied",
+            "run_command",
+            &json!({
+                "command": ["touch", "created.txt"]
+            }),
+        );
+
+        match rejected {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("requires workspace-write approval"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+        assert!(!workspace.path().join("created.txt").exists());
+
+        let approved = run_tool_call(
+            workspace.path(),
+            "tool_cmd_touch_ok",
+            "run_command",
+            &json!({
+                "command": ["touch", "created.txt"],
+                "approval": "workspace-write"
+            }),
+        );
+
+        match approved {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, None);
+                assert!(content.contains("Permission: workspace-write"));
+                assert!(content.contains("Exit code: 0"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+        assert!(workspace.path().join("created.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_rejects_destructive_command_without_destructive_approval() {
+        let workspace = make_temp_dir("workspace");
+        let target = workspace.path().join("victim.txt");
+        fs::write(&target, "keep").unwrap();
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_cmd_rm",
+            "run_command",
+            &json!({
+                "command": ["rm", "victim.txt"],
+                "approval": "workspace-write"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("requires destructive approval"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+        assert!(target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_captures_stderr_and_non_zero_exit_code() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_cmd_sh_exit",
+            "run_command",
+            &json!({
+                "command": ["sh", "-c", "printf 'out'; printf 'err' >&2; exit 7"],
+                "approval": "workspace-write"
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("Exit code: 7"));
+                assert!(content.contains("Stdout:\nout"));
+                assert!(content.contains("Stderr:\nerr"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_times_out() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_cmd_timeout",
+            "run_command",
+            &json!({
+                "command": ["sh", "-c", "sleep 1"],
+                "approval": "workspace-write",
+                "timeout_ms": 10
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("Timed out: true"));
+                assert!(content.contains("Timeout: 10 ms"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[test]
+    fn run_command_rejects_timeout_above_limit() {
+        let workspace = make_temp_dir("workspace");
+
+        let result = run_tool_call(
+            workspace.path(),
+            "tool_cmd_timeout_limit",
+            "run_command",
+            &json!({
+                "command": ["pwd"],
+                "timeout_ms": MAX_COMMAND_TIMEOUT_MS + 1
+            }),
+        );
+
+        match result {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(is_error, Some(true));
+                assert!(content.contains("timeout_ms must be between"));
+            }
+            _ => panic!("expected tool_result"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rejects_symlink_escape_outside_workspace() {
         use std::os::unix::fs::symlink;
 
@@ -994,5 +1941,45 @@ mod tests {
         let path = std::env::temp_dir().join(format!("socium_{prefix}_{nanos}_{count}"));
         fs::create_dir_all(&path).unwrap();
         TempDir { path }
+    }
+
+    fn init_git_repo(path: &Path) {
+        run_git(path, &["init", "-b", "main"]);
+        run_git(path, &["config", "user.email", "socium@example.com"]);
+        run_git(path, &["config", "user.name", "Socium Tests"]);
+        fs::write(path.join("tracked.txt"), "initial\n").unwrap();
+        run_git(path, &["add", "tracked.txt"]);
+        run_git(path, &["commit", "-m", "initial commit"]);
+    }
+
+    fn run_git(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(path: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
     }
 }

@@ -1,3 +1,4 @@
+use crate::constants::DEFAULT_SYSTEM_PROMPT;
 use crate::tools::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,6 +7,7 @@ use serde_json::Value;
 pub(crate) struct AgentMessageRequest<'a> {
     pub model: &'a str,
     pub max_tokens: u32,
+    pub system: &'a str,
     pub messages: &'a [Message],
     pub tools: &'a [ToolDefinition],
 }
@@ -20,6 +22,7 @@ impl<'a> AgentMessageRequest<'a> {
         Self {
             model,
             max_tokens,
+            system: DEFAULT_SYSTEM_PROMPT,
             messages,
             tools,
         }
@@ -93,4 +96,23 @@ pub(crate) enum Role {
     User,
     Assistant,
     System,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentMessageRequest, Message};
+    use crate::constants::DEFAULT_SYSTEM_PROMPT;
+    use crate::tools::default_tools;
+
+    #[test]
+    fn agent_message_request_serializes_default_system_prompt() {
+        let messages = vec![Message::user_text("hello".to_string())];
+        let tools = default_tools();
+        let request = AgentMessageRequest::new("test-model", 128, &messages, &tools);
+
+        let value = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(value["system"], DEFAULT_SYSTEM_PROMPT);
+        assert!(value["system"].as_str().unwrap().contains("path:line"));
+    }
 }
