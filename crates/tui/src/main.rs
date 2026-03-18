@@ -56,6 +56,7 @@ struct App {
     character_index: usize,
     input_mode: InputMode,
     messages: Vec<ChatEntry>,
+    activity_log: Vec<String>,
     transcript_scroll: usize,
     status: Option<String>,
     workspace_label: String,
@@ -128,6 +129,7 @@ impl App {
             character_index: 0,
             input_mode: InputMode::Editing,
             messages,
+            activity_log: Vec::new(),
             transcript_scroll: 0,
             status: Some("Ready".to_string()),
             workspace_label,
@@ -188,6 +190,10 @@ impl App {
         self.transcript_scroll = 0;
     }
 
+    fn push_activity(&mut self, line: impl Into<String>) {
+        self.activity_log.push(line.into());
+    }
+
     fn pop_thinking_message(&mut self) {
         if self
             .messages
@@ -222,6 +228,7 @@ impl App {
             "/clear" => {
                 self.agent_mut()?.clear()?;
                 self.messages.clear();
+                self.activity_log.clear();
                 self.last_latency_ms = None;
                 self.status = Some("Conversation cleared".to_string());
                 return Ok(SubmitAction::None);
@@ -324,10 +331,12 @@ impl App {
                         self.push_message(Speaker::Socium, reply.text);
                     }
                 }
+                self.push_activity("Request completed");
                 self.status = Some("Done".to_string());
             }
             Err(err) => {
                 self.push_message(Speaker::System, format!("Request failed: {err}"));
+                self.push_activity(format!("Request failed: {err}"));
                 self.status = Some("Failed".to_string());
             }
         }
@@ -336,9 +345,11 @@ impl App {
     fn apply_progress(&mut self, event: AgentProgress) {
         match event {
             AgentProgress::ModelRequestStarted { round, provider } => {
+                self.push_activity(format!("Model request round {round} via {provider}"));
                 self.status = Some(model_request_status(round, &provider));
             }
             AgentProgress::ApprovalRequired { tool, reason } => {
+                self.push_activity(format!("Approval required for {tool}: {reason}"));
                 self.push_message(
                     Speaker::System,
                     format!("Approval required for {tool}: {reason}"),
@@ -353,11 +364,16 @@ impl App {
                 }
             }
             AgentProgress::ToolCallStarted { name } => {
+                self.push_activity(format!("Running tool: {name}"));
                 self.pop_thinking_message();
                 self.push_message(Speaker::System, format!("Running tool: {name}"));
                 self.status = Some(format!("Tool: {name}"));
             }
             AgentProgress::ToolCallFinished { name, is_error } => {
+                self.push_activity(format!(
+                    "Finished tool: {name}{}",
+                    progress_suffix(is_error)
+                ));
                 self.push_message(
                     Speaker::System,
                     format!("Finished tool: {name}{}", progress_suffix(is_error)),
@@ -369,6 +385,7 @@ impl App {
                 });
             }
             AgentProgress::CommandStarted { command, cwd } => {
+                self.push_activity(format!("Running command in {cwd}: {command}"));
                 self.push_message(
                     Speaker::System,
                     format!("Running command in {cwd}: {command}"),
@@ -380,6 +397,9 @@ impl App {
                 exit_code,
                 timed_out,
             } => {
+                self.push_activity(format_command_progress_message(
+                    &command, exit_code, timed_out,
+                ));
                 self.push_message(
                     Speaker::System,
                     format_command_progress_message(&command, exit_code, timed_out),
@@ -465,14 +485,21 @@ impl App {
         let vertical = Layout::vertical([
             Constraint::Length(10),
             Constraint::Min(8),
+            Constraint::Length(6),
             Constraint::Length(2),
             Constraint::Length(1),
         ]);
-        let [header_area, transcript_area, composer_area, footer_area] =
-            vertical.areas(frame.area());
+        let [
+            header_area,
+            transcript_area,
+            activity_area,
+            composer_area,
+            footer_area,
+        ] = vertical.areas(frame.area());
 
         self.draw_header(frame, header_area);
         self.draw_transcript(frame, transcript_area);
+        self.draw_activity(frame, activity_area);
         self.draw_composer(frame, composer_area);
         self.draw_footer(frame, footer_area);
     }
@@ -505,6 +532,34 @@ impl App {
             Paragraph::new(self.visible_transcript(area.width as usize, area.height as usize))
                 .style(Style::default().bg(BG).fg(TEXT));
         frame.render_widget(transcript, area);
+    }
+
+    fn draw_activity(&self, frame: &mut Frame, area: Rect) {
+        let lines =
+            recent_activity_lines(&self.activity_log, area.height.saturating_sub(2) as usize);
+        let block = Block::bordered()
+            .title(" activity ")
+            .border_style(Style::default().fg(CODE_BORDER))
+            .style(Style::default().bg(BG));
+        let text = if lines.is_empty() {
+            Text::from(vec![Line::from(Span::styled(
+                "No tool activity yet",
+                Style::default().fg(SOFT),
+            ))])
+        } else {
+            Text::from(
+                lines
+                    .into_iter()
+                    .map(|line| {
+                        Line::from(vec![
+                            Span::styled("• ", Style::default().fg(PINK)),
+                            Span::styled(line, Style::default().fg(TEXT)),
+                        ])
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        frame.render_widget(Paragraph::new(text).block(block), area);
     }
 
     fn draw_composer(&self, frame: &mut Frame, area: Rect) {
@@ -732,6 +787,14 @@ fn transcript_window_start(total_lines: usize, height: usize, scroll: usize) -> 
     let visible_height = height.max(1);
     let max_start = total_lines.saturating_sub(visible_height);
     max_start.saturating_sub(scroll.min(max_start))
+}
+
+fn recent_activity_lines(entries: &[String], max_lines: usize) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+    let start = entries.len().saturating_sub(max_lines);
+    entries[start..].to_vec()
 }
 
 fn help_text() -> &'static str {
@@ -1138,7 +1201,9 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Speaker, transcript_entries_to_chat_entries, transcript_window_start};
+    use super::{
+        Speaker, recent_activity_lines, transcript_entries_to_chat_entries, transcript_window_start,
+    };
     use super::{command_completion_status, format_command_progress_message, model_request_status};
     use socium_core::{TranscriptEntry, TranscriptRole};
 
@@ -1219,5 +1284,21 @@ mod tests {
         assert_eq!(transcript_window_start(20, 5, 3), 12);
         assert_eq!(transcript_window_start(20, 5, 99), 0);
         assert_eq!(transcript_window_start(3, 10, 5), 0);
+    }
+
+    #[test]
+    fn recent_activity_lines_keeps_latest_entries() {
+        let entries = vec![
+            "one".to_string(),
+            "two".to_string(),
+            "three".to_string(),
+            "four".to_string(),
+        ];
+
+        assert_eq!(
+            recent_activity_lines(&entries, 2),
+            vec!["three".to_string(), "four".to_string()]
+        );
+        assert_eq!(recent_activity_lines(&entries, 0), Vec::<String>::new());
     }
 }
