@@ -10,7 +10,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Paragraph},
 };
-use socium_core::{AgentProgress, AgentReply, AgentService};
+use socium_core::{AgentProgress, AgentReply, AgentService, TranscriptEntry, TranscriptRole};
 use std::{
     env,
     path::PathBuf,
@@ -56,6 +56,7 @@ struct App {
     character_index: usize,
     input_mode: InputMode,
     messages: Vec<ChatEntry>,
+    transcript_scroll: usize,
     status: Option<String>,
     workspace_label: String,
     model_label: String,
@@ -119,13 +120,15 @@ impl App {
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(1000);
         let workspace_label = format_workspace_path(env::current_dir().ok());
+        let messages = transcript_entries_to_chat_entries(agent.transcript_entries());
 
         Self {
             agent: Some(agent),
             input: String::new(),
             character_index: 0,
             input_mode: InputMode::Editing,
-            messages: Vec::new(),
+            messages,
+            transcript_scroll: 0,
             status: Some("Ready".to_string()),
             workspace_label,
             model_label,
@@ -182,6 +185,7 @@ impl App {
             speaker,
             body: body.into(),
         });
+        self.transcript_scroll = 0;
     }
 
     fn pop_thinking_message(&mut self) {
@@ -210,6 +214,11 @@ impl App {
 
         match user_input.as_str() {
             "/quit" | "/exit" => return Ok(SubmitAction::Exit),
+            "/help" => {
+                self.push_message(Speaker::System, help_text());
+                self.status = Some("Help".to_string());
+                return Ok(SubmitAction::None);
+            }
             "/clear" => {
                 self.agent_mut()?.clear()?;
                 self.messages.clear();
@@ -391,6 +400,10 @@ impl App {
                                 self.status = Some("Ready".to_string());
                             }
                         }
+                        KeyCode::Up | KeyCode::Char('k') => self.scroll_transcript_up(1),
+                        KeyCode::Down | KeyCode::Char('j') => self.scroll_transcript_down(1),
+                        KeyCode::PageUp => self.scroll_transcript_up(10),
+                        KeyCode::PageDown => self.scroll_transcript_down(10),
                         KeyCode::Char('q') => return Ok(()),
                         _ => {}
                     },
@@ -620,8 +633,22 @@ impl App {
             lines.extend(render_entry(entry, width.max(24)));
         }
 
-        let start = lines.len().saturating_sub(height.max(1));
+        let start = transcript_window_start(lines.len(), height.max(1), self.transcript_scroll);
         Text::from(lines.into_iter().skip(start).collect::<Vec<_>>())
+    }
+
+    fn scroll_transcript_up(&mut self, amount: usize) {
+        self.transcript_scroll = self.transcript_scroll.saturating_add(amount.max(1));
+        self.status = Some("Transcript scroll".to_string());
+    }
+
+    fn scroll_transcript_down(&mut self, amount: usize) {
+        self.transcript_scroll = self.transcript_scroll.saturating_sub(amount.max(1));
+        self.status = Some(if self.transcript_scroll == 0 {
+            "Ready".to_string()
+        } else {
+            "Transcript scroll".to_string()
+        });
     }
 
     fn estimated_tokens(&self) -> u32 {
@@ -678,6 +705,30 @@ fn command_completion_status(command: &str, exit_code: Option<i32>, timed_out: b
         Some(code) => format!("Command failed ({code}): {}", truncate_text(command, 24)),
         None => format!("Command terminated: {}", truncate_text(command, 24)),
     }
+}
+
+fn transcript_entries_to_chat_entries(entries: Vec<TranscriptEntry>) -> Vec<ChatEntry> {
+    entries
+        .into_iter()
+        .map(|entry| ChatEntry {
+            speaker: match entry.role {
+                TranscriptRole::User => Speaker::User,
+                TranscriptRole::Assistant => Speaker::Socium,
+                TranscriptRole::System => Speaker::System,
+            },
+            body: entry.text,
+        })
+        .collect()
+}
+
+fn transcript_window_start(total_lines: usize, height: usize, scroll: usize) -> usize {
+    let visible_height = height.max(1);
+    let max_start = total_lines.saturating_sub(visible_height);
+    max_start.saturating_sub(scroll.min(max_start))
+}
+
+fn help_text() -> &'static str {
+    "/help  Show available commands\n/clear Clear the current conversation\n/exit  Quit Socium"
 }
 
 fn build_logo_rows(rows: &[&str]) -> Vec<Line<'static>> {
@@ -1080,7 +1131,9 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{Speaker, transcript_entries_to_chat_entries, transcript_window_start};
     use super::{command_completion_status, format_command_progress_message, model_request_status};
+    use socium_core::{TranscriptEntry, TranscriptRole};
 
     #[test]
     fn model_request_status_includes_round_after_first_request() {
@@ -1117,5 +1170,47 @@ mod tests {
             format_command_progress_message("cargo test", None, true),
             "Command timed out: cargo test"
         );
+    }
+
+    #[test]
+    fn help_text_lists_supported_slash_commands() {
+        let help = super::help_text();
+
+        assert!(help.contains("/help"));
+        assert!(help.contains("/clear"));
+        assert!(help.contains("/exit"));
+    }
+
+    #[test]
+    fn transcript_entries_map_to_chat_speakers() {
+        let entries = vec![
+            TranscriptEntry {
+                role: TranscriptRole::User,
+                text: "u".to_string(),
+            },
+            TranscriptEntry {
+                role: TranscriptRole::Assistant,
+                text: "a".to_string(),
+            },
+            TranscriptEntry {
+                role: TranscriptRole::System,
+                text: "s".to_string(),
+            },
+        ];
+
+        let chat = transcript_entries_to_chat_entries(entries);
+
+        assert_eq!(chat.len(), 3);
+        assert!(matches!(chat[0].speaker, Speaker::User));
+        assert!(matches!(chat[1].speaker, Speaker::Socium));
+        assert!(matches!(chat[2].speaker, Speaker::System));
+    }
+
+    #[test]
+    fn transcript_window_start_respects_scroll_offset() {
+        assert_eq!(transcript_window_start(20, 5, 0), 15);
+        assert_eq!(transcript_window_start(20, 5, 3), 12);
+        assert_eq!(transcript_window_start(20, 5, 99), 0);
+        assert_eq!(transcript_window_start(3, 10, 5), 0);
     }
 }
