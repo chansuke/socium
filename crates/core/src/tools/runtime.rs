@@ -257,6 +257,12 @@ where
         command: execution.command_display.clone(),
         exit_code: execution.exit_code,
         timed_out: execution.timed_out,
+        stdout_preview: format_command_stream(&execution.stdout)
+            .trim_end_matches('\n')
+            .to_string(),
+        stderr_preview: format_command_stream(&execution.stderr)
+            .trim_end_matches('\n')
+            .to_string(),
     });
 
     let output = format_command_execution(&execution);

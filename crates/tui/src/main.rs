@@ -57,6 +57,7 @@ struct App {
     input_mode: InputMode,
     messages: Vec<ChatEntry>,
     activity_log: Vec<String>,
+    last_command_output: Option<CommandOutputState>,
     transcript_scroll: usize,
     status: Option<String>,
     workspace_label: String,
@@ -83,6 +84,14 @@ enum Speaker {
 struct ChatEntry {
     speaker: Speaker,
     body: String,
+}
+
+struct CommandOutputState {
+    command: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    stdout_preview: String,
+    stderr_preview: String,
 }
 
 struct PendingSubmission {
@@ -130,6 +139,7 @@ impl App {
             input_mode: InputMode::Editing,
             messages,
             activity_log: Vec::new(),
+            last_command_output: None,
             transcript_scroll: 0,
             status: Some("Ready".to_string()),
             workspace_label,
@@ -229,6 +239,7 @@ impl App {
                 self.agent_mut()?.clear()?;
                 self.messages.clear();
                 self.activity_log.clear();
+                self.last_command_output = None;
                 self.last_latency_ms = None;
                 self.status = Some("Conversation cleared".to_string());
                 return Ok(SubmitAction::None);
@@ -396,10 +407,19 @@ impl App {
                 command,
                 exit_code,
                 timed_out,
+                stdout_preview,
+                stderr_preview,
             } => {
                 self.push_activity(format_command_progress_message(
                     &command, exit_code, timed_out,
                 ));
+                self.last_command_output = Some(CommandOutputState {
+                    command: command.clone(),
+                    exit_code,
+                    timed_out,
+                    stdout_preview,
+                    stderr_preview,
+                });
                 self.push_message(
                     Speaker::System,
                     format_command_progress_message(&command, exit_code, timed_out),
@@ -485,21 +505,25 @@ impl App {
         let vertical = Layout::vertical([
             Constraint::Length(10),
             Constraint::Min(8),
-            Constraint::Length(6),
+            Constraint::Length(8),
             Constraint::Length(2),
             Constraint::Length(1),
         ]);
         let [
             header_area,
             transcript_area,
-            activity_area,
+            lower_area,
             composer_area,
             footer_area,
         ] = vertical.areas(frame.area());
+        let [activity_area, command_output_area] =
+            Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
+                .areas(lower_area);
 
         self.draw_header(frame, header_area);
         self.draw_transcript(frame, transcript_area);
         self.draw_activity(frame, activity_area);
+        self.draw_command_output(frame, command_output_area);
         self.draw_composer(frame, composer_area);
         self.draw_footer(frame, footer_area);
     }
@@ -558,6 +582,31 @@ impl App {
                     })
                     .collect::<Vec<_>>(),
             )
+        };
+        frame.render_widget(Paragraph::new(text).block(block), area);
+    }
+
+    fn draw_command_output(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::bordered()
+            .title(" last command ")
+            .border_style(Style::default().fg(CODE_BORDER))
+            .style(Style::default().bg(BG));
+        let text = if let Some(output) = &self.last_command_output {
+            Text::from(
+                command_output_preview_lines(
+                    output,
+                    area.width.saturating_sub(2) as usize,
+                    area.height.saturating_sub(2) as usize,
+                )
+                .into_iter()
+                .map(|line| Line::from(Span::styled(line, Style::default().fg(TEXT))))
+                .collect::<Vec<_>>(),
+            )
+        } else {
+            Text::from(vec![Line::from(Span::styled(
+                "No command output yet",
+                Style::default().fg(SOFT),
+            ))])
         };
         frame.render_widget(Paragraph::new(text).block(block), area);
     }
@@ -795,6 +844,44 @@ fn recent_activity_lines(entries: &[String], max_lines: usize) -> Vec<String> {
     }
     let start = entries.len().saturating_sub(max_lines);
     entries[start..].to_vec()
+}
+
+fn command_output_preview_lines(
+    output: &CommandOutputState,
+    width: usize,
+    max_lines: usize,
+) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+
+    let wrap_width = width.max(12);
+    let mut lines = vec![
+        format!("$ {}", output.command),
+        if output.timed_out {
+            "status: timed out".to_string()
+        } else {
+            match output.exit_code {
+                Some(code) => format!("status: exit {code}"),
+                None => "status: terminated".to_string(),
+            }
+        },
+    ];
+
+    lines.push("stdout:".to_string());
+    lines.extend(wrap_multiline(
+        &output.stdout_preview,
+        wrap_width,
+        wrap_width,
+    ));
+    lines.push("stderr:".to_string());
+    lines.extend(wrap_multiline(
+        &output.stderr_preview,
+        wrap_width,
+        wrap_width,
+    ));
+
+    lines.into_iter().take(max_lines).collect()
 }
 
 fn help_text() -> &'static str {
@@ -1202,7 +1289,8 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Speaker, recent_activity_lines, transcript_entries_to_chat_entries, transcript_window_start,
+        CommandOutputState, Speaker, command_output_preview_lines, recent_activity_lines,
+        transcript_entries_to_chat_entries, transcript_window_start,
     };
     use super::{command_completion_status, format_command_progress_message, model_request_status};
     use socium_core::{TranscriptEntry, TranscriptRole};
@@ -1300,5 +1388,23 @@ mod tests {
             vec!["three".to_string(), "four".to_string()]
         );
         assert_eq!(recent_activity_lines(&entries, 0), Vec::<String>::new());
+    }
+
+    #[test]
+    fn command_output_preview_lines_include_status_and_streams() {
+        let output = CommandOutputState {
+            command: "cargo test".to_string(),
+            exit_code: Some(0),
+            timed_out: false,
+            stdout_preview: "ok".to_string(),
+            stderr_preview: "(empty)".to_string(),
+        };
+
+        let lines = command_output_preview_lines(&output, 40, 6);
+
+        assert_eq!(lines[0], "$ cargo test");
+        assert_eq!(lines[1], "status: exit 0");
+        assert!(lines.contains(&"stdout:".to_string()));
+        assert!(lines.contains(&"stderr:".to_string()));
     }
 }

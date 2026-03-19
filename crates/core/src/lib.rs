@@ -61,6 +61,8 @@ pub enum AgentProgress {
         command: String,
         exit_code: Option<i32>,
         timed_out: bool,
+        stdout_preview: String,
+        stderr_preview: String,
     },
 }
 
@@ -1652,6 +1654,8 @@ mod tests {
                     command: "pwd".to_string(),
                     exit_code: Some(0),
                     timed_out: false,
+                    stdout_preview: workspace.path().to_string_lossy().trim().to_string(),
+                    stderr_preview: "(empty)".to_string(),
                 },
                 AgentProgress::ToolCallFinished {
                     name: "run_command".to_string(),
