@@ -53,7 +53,7 @@ These are the highest-value features missing compared with Codex and Claude Code
 ### 3. Real editing primitives
 
 - [x] Add patch-based editing instead of relying mostly on `str_replace`.
-- [ ] Support:
+- [x] Support:
   - [x] delete file
   - [x] rename/move file
   - [x] multi-hunk edits
@@ -137,9 +137,9 @@ Planned provider targets may include local OpenAI-compatible servers or direct l
 
 - [x] Show persisted conversation history on startup.
 - [x] Add transcript scrolling.
-- [ ] Add tool activity and command output panes.
+- [x] Add tool activity and command output panes.
 - [x] Add `/help` and other documented slash commands.
-- [ ] Improve status reporting for:
+- [x] Improve status reporting for:
   - [x] thinking
   - [x] running command
   - [x] waiting for approval
