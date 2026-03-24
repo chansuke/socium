@@ -29,6 +29,11 @@ pub enum ProviderConfig {
     Opencode,
 }
 
+pub(crate) struct ProviderResponse {
+    pub message: AgentMessageResponse,
+    pub streamed_text: bool,
+}
+
 impl ProviderKind {
     pub fn from_env() -> io::Result<Self> {
         let raw = env::var("PROVIDER").unwrap_or_else(|_| "anthropic".to_string());
@@ -84,12 +89,16 @@ impl fmt::Display for ProviderKind {
     }
 }
 
-pub(crate) async fn send_message(
+pub(crate) async fn send_message<F>(
     provider: ProviderKind,
     client: &reqwest::Client,
     config: &ProviderConfig,
     message_request: &AgentMessageRequest<'_>,
-) -> Result<AgentMessageResponse, Box<dyn std::error::Error>> {
+    on_text_delta: &mut F,
+) -> Result<ProviderResponse, Box<dyn std::error::Error>>
+where
+    F: FnMut(String) + Send,
+{
     match (provider, config) {
         (
             ProviderKind::Anthropic,
@@ -97,7 +106,16 @@ pub(crate) async fn send_message(
                 api_key,
                 anthropic_version,
             },
-        ) => anthropic::send_message(client, api_key, anthropic_version, message_request).await,
+        ) => {
+            anthropic::send_message(
+                client,
+                api_key,
+                anthropic_version,
+                message_request,
+                on_text_delta,
+            )
+            .await
+        }
         (ProviderKind::Codex, ProviderConfig::Codex) => Err(Error::new(
             ErrorKind::Unsupported,
             "Provider 'codex' is not implemented yet",

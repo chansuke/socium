@@ -181,7 +181,7 @@ impl AgentService {
         mut on_progress: F,
     ) -> Result<AgentReply, Box<dyn std::error::Error>>
     where
-        F: FnMut(AgentProgress),
+        F: FnMut(AgentProgress) + Send,
     {
         self.messages.push(Message::user_text(user_input));
         let assistant_chunks = run_agent_turn(

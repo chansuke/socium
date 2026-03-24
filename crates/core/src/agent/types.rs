@@ -34,7 +34,7 @@ pub(crate) struct AgentMessageResponse {
     pub content: Vec<ContentBlock>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub(crate) enum ContentBlock {
     #[serde(rename = "text")]

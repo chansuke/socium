@@ -22,7 +22,7 @@ pub(crate) async fn run_agent_turn<F>(
     on_progress: &mut F,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>>
 where
-    F: FnMut(AgentProgress),
+    F: FnMut(AgentProgress) + Send,
 {
     let mut finished = false;
     let mut assistant_text_chunks = Vec::new();
@@ -33,15 +33,26 @@ where
             provider: provider.to_string(),
         });
         let message_request = AgentMessageRequest::new(model, max_tokens, messages, tools);
-        let response =
-            providers::send_message(provider, client, provider_config, &message_request).await?;
-        let assistant_blocks = response.content;
+        let mut emit_text_delta = |text: String| {
+            on_progress(AgentProgress::AssistantText { text });
+        };
+        let response = providers::send_message(
+            provider,
+            client,
+            provider_config,
+            &message_request,
+            &mut emit_text_delta,
+        )
+        .await?;
+        let assistant_blocks = response.message.content;
 
         let message_text = extract_text(&assistant_blocks);
-        if !message_text.is_empty() {
+        if !response.streamed_text && !message_text.is_empty() {
             on_progress(AgentProgress::AssistantText {
                 text: message_text.clone(),
             });
+            assistant_text_chunks.push(message_text);
+        } else if !message_text.is_empty() {
             assistant_text_chunks.push(message_text);
         }
 
