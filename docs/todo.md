@@ -26,7 +26,7 @@ Evolve `socium` from a minimal Anthropic-backed TUI agent into a coding agent th
   - [x] `git_log`
 - [x] `git_commit`
   - [x] text editor with `view`, `str_replace`, `create`, `insert`, `undo_edit`
-- [x] Shell execution, repo navigation, patch editing, and basic git workflows now exist, with live tool progress in the TUI, but there is still no web/docs retrieval or true token streaming.
+- [x] Shell execution, repo navigation, patch editing, and basic git workflows now exist, with live tool progress and assistant streaming in the TUI, but there is still no web/docs retrieval.
 - [x] The TUI is functional but still minimal.
 
 ## Priority 0: Core Agent Capability Gaps
@@ -73,7 +73,7 @@ These are the highest-value features missing compared with Codex and Claude Code
 
 ### 5. Streaming and live progress
 
-- [ ] Stream assistant output instead of waiting for the full turn.
+- [x] Stream assistant output instead of waiting for the full turn.
 - [x] Show tool invocation progress in the TUI.
 - [x] Show command status updates while tasks are running.
 
