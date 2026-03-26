@@ -204,6 +204,11 @@ impl App {
         self.activity_log.push(line.into());
     }
 
+    fn append_streamed_assistant_text(&mut self, text: &str) {
+        append_streamed_assistant_text(&mut self.messages, text);
+        self.transcript_scroll = 0;
+    }
+
     fn pop_thinking_message(&mut self) {
         if self
             .messages
@@ -369,8 +374,8 @@ impl App {
             }
             AgentProgress::AssistantText { text } => {
                 self.pop_thinking_message();
-                if !text.trim().is_empty() {
-                    self.push_message(Speaker::Socium, text);
+                if !text.is_empty() {
+                    self.append_streamed_assistant_text(&text);
                     self.status = Some("Responding".to_string());
                 }
             }
@@ -787,6 +792,24 @@ fn model_request_status(round: usize, provider: &str) -> String {
     } else {
         format!("Thinking ({provider}, round {round})")
     }
+}
+
+fn append_streamed_assistant_text(messages: &mut Vec<ChatEntry>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+
+    if let Some(entry) = messages.last_mut()
+        && entry.speaker == Speaker::Socium
+    {
+        entry.body.push_str(text);
+        return;
+    }
+
+    messages.push(ChatEntry {
+        speaker: Speaker::Socium,
+        body: text.to_string(),
+    });
 }
 
 fn progress_suffix(is_error: bool) -> &'static str {
@@ -1289,8 +1312,9 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandOutputState, Speaker, command_output_preview_lines, recent_activity_lines,
-        transcript_entries_to_chat_entries, transcript_window_start,
+        ChatEntry, CommandOutputState, Speaker, append_streamed_assistant_text,
+        command_output_preview_lines, recent_activity_lines, transcript_entries_to_chat_entries,
+        transcript_window_start,
     };
     use super::{command_completion_status, format_command_progress_message, model_request_status};
     use socium_core::{TranscriptEntry, TranscriptRole};
@@ -1406,5 +1430,38 @@ mod tests {
         assert_eq!(lines[1], "status: exit 0");
         assert!(lines.contains(&"stdout:".to_string()));
         assert!(lines.contains(&"stderr:".to_string()));
+    }
+
+    #[test]
+    fn append_streamed_assistant_text_appends_to_latest_assistant_entry() {
+        let mut messages = vec![
+            ChatEntry {
+                speaker: Speaker::User,
+                body: "user".to_string(),
+            },
+            ChatEntry {
+                speaker: Speaker::Socium,
+                body: "hel".to_string(),
+            },
+        ];
+
+        append_streamed_assistant_text(&mut messages, "lo");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].body, "hello");
+    }
+
+    #[test]
+    fn append_streamed_assistant_text_pushes_new_entry_after_system_message() {
+        let mut messages = vec![ChatEntry {
+            speaker: Speaker::System,
+            body: "tool finished".to_string(),
+        }];
+
+        append_streamed_assistant_text(&mut messages, "answer");
+
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(messages[1].speaker, Speaker::Socium));
+        assert_eq!(messages[1].body, "answer");
     }
 }
