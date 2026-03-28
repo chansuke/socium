@@ -9,6 +9,18 @@ pub(crate) struct ConversationState {
     pub messages: Vec<Message>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ConversationSummaryState {
+    #[serde(default)]
+    pub summary: Option<ConversationSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub(crate) struct ConversationSummary {
+    pub covered_messages: usize,
+    pub text: String,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct ConversationStateRef<'a> {
     pub messages: &'a [Message],

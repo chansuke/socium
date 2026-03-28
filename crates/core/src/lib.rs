@@ -3,8 +3,12 @@ pub mod constants;
 pub mod providers;
 pub mod tools;
 
+pub use crate::agent::context::ContextMetrics;
+
+use crate::agent::context::{context_metrics_for_input, prepare_context_messages};
 use crate::agent::state::{
-    ConversationState, ConversationStateRef, load_json_file, save_json_file,
+    ConversationState, ConversationStateRef, ConversationSummaryState, load_json_file,
+    save_json_file,
 };
 use crate::agent::turn::{extract_text, run_agent_turn};
 use crate::agent::types::Message;
@@ -69,7 +73,9 @@ pub enum AgentProgress {
 pub struct AgentService {
     workspace_root: PathBuf,
     conversation_path: PathBuf,
+    summary_path: PathBuf,
     messages: Vec<Message>,
+    summary_state: ConversationSummaryState,
     provider: ProviderKind,
     provider_config: ProviderConfig,
     supports_tools: bool,
@@ -88,6 +94,9 @@ impl AgentService {
         let conversation_path = workspace_root
             .join(STATE_DIR_NAME)
             .join(CONVERSATION_STATE_FILE_NAME);
+        let summary_path = workspace_root
+            .join(STATE_DIR_NAME)
+            .join(SUMMARY_STATE_FILE_NAME);
 
         let messages = match load_json_file::<ConversationState>(&conversation_path) {
             Ok(state) => {
@@ -110,6 +119,23 @@ impl AgentService {
                 Vec::new()
             }
         };
+        let mut summary_state = match load_json_file::<ConversationSummaryState>(&summary_path) {
+            Ok(state) => state,
+            Err(err) => {
+                eprintln!(
+                    "Failed to load persisted summaries '{}': {err}. Continuing without summaries.",
+                    summary_path.display()
+                );
+                ConversationSummaryState::default()
+            }
+        };
+        if summary_state
+            .summary
+            .as_ref()
+            .is_some_and(|summary| summary.covered_messages > messages.len())
+        {
+            summary_state = ConversationSummaryState::default();
+        }
 
         let provider = ProviderKind::from_env()?;
         let provider_config = provider.config_from_env()?;
@@ -131,7 +157,9 @@ impl AgentService {
         Ok(Self {
             workspace_root,
             conversation_path,
+            summary_path,
             messages,
+            summary_state,
             provider,
             provider_config,
             supports_tools: provider.capabilities().supports_tools,
@@ -144,7 +172,8 @@ impl AgentService {
 
     pub fn clear(&mut self) -> std::io::Result<()> {
         self.messages.clear();
-        self.persist_messages()
+        self.summary_state = ConversationSummaryState::default();
+        self.persist_state()
     }
 
     pub fn transcript_entries(&self) -> Vec<TranscriptEntry> {
@@ -184,6 +213,16 @@ impl AgentService {
         F: FnMut(AgentProgress) + Send,
     {
         self.messages.push(Message::user_text(user_input));
+        let prepared_context = prepare_context_messages(
+            &self.messages,
+            &self.summary_state,
+            self.provider,
+            &self.model,
+            self.max_tokens,
+            &self.tools,
+        )?;
+        let initial_len = prepared_context.messages.len();
+        let mut context_messages = prepared_context.messages;
         let assistant_chunks = run_agent_turn(
             self.provider,
             &self.client,
@@ -193,35 +232,51 @@ impl AgentService {
             self.supports_tools,
             &self.tools,
             &self.workspace_root,
-            &mut self.messages,
+            &mut context_messages,
             &mut on_progress,
         )
         .await?;
-        self.persist_messages()?;
+        let new_messages = context_messages.split_off(initial_len);
+        self.messages.extend(new_messages);
+        self.summary_state = prepared_context.summary_state;
+        self.persist_state()?;
         Ok(AgentReply {
             text: assistant_chunks.join("\n"),
         })
     }
 
-    fn persist_messages(&self) -> std::io::Result<()> {
+    pub fn context_metrics(&self, pending_user_input: &str) -> std::io::Result<ContextMetrics> {
+        context_metrics_for_input(
+            &self.messages,
+            pending_user_input,
+            &self.summary_state,
+            self.provider,
+            &self.model,
+            self.max_tokens,
+            &self.tools,
+        )
+    }
+
+    fn persist_state(&self) -> std::io::Result<()> {
         save_json_file(
             &self.conversation_path,
             &ConversationStateRef {
                 messages: &self.messages,
             },
-        )
+        )?;
+        save_json_file(&self.summary_path, &self.summary_state)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::state::{load_json_file, save_json_file};
+    use crate::agent::state::{ConversationSummaryState, load_json_file, save_json_file};
     use crate::agent::turn::extract_text;
     use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
     use crate::constants::{
         CONVERSATION_STATE_FILE_NAME, MAX_COMMAND_TIMEOUT_MS, MAX_LIST_ENTRIES,
         MAX_READ_FILE_BYTES, MAX_TEXT_EDITOR_VIEW_READ_BYTES, STATE_DIR_NAME,
-        TEXT_EDITOR_TOOL_NAME,
+        SUMMARY_STATE_FILE_NAME, TEXT_EDITOR_TOOL_NAME,
     };
     use crate::providers::{ProviderConfig, ProviderKind};
     use crate::tools::default_tools;
@@ -290,6 +345,10 @@ mod tests {
             .path()
             .join(STATE_DIR_NAME)
             .join(CONVERSATION_STATE_FILE_NAME);
+        let summary_path = workspace
+            .path()
+            .join(STATE_DIR_NAME)
+            .join(SUMMARY_STATE_FILE_NAME);
         let messages = vec![
             Message {
                 role: Role::User,
@@ -321,7 +380,9 @@ mod tests {
         let service = AgentService {
             workspace_root: workspace.path().to_path_buf(),
             conversation_path,
+            summary_path,
             messages,
+            summary_state: ConversationSummaryState::default(),
             provider: ProviderKind::Anthropic,
             provider_config: ProviderConfig::Anthropic {
                 api_key: "test".to_string(),
