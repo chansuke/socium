@@ -79,9 +79,9 @@ These are the highest-value features missing compared with Codex and Claude Code
 
 ### 6. Context management
 
-- [ ] Replace rough character-based context estimation with model-aware budgeting.
-- [ ] Add message summarization/compression for long sessions.
-- [ ] Persist summaries separately from raw transcript when needed.
+- [x] Replace rough character-based context estimation with model-aware budgeting.
+- [x] Add message summarization/compression for long sessions.
+- [x] Persist summaries separately from raw transcript when needed.
 
 ## Priority 1: Provider Architecture
 
