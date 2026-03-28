@@ -10,7 +10,9 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Paragraph},
 };
-use socium_core::{AgentProgress, AgentReply, AgentService, TranscriptEntry, TranscriptRole};
+use socium_core::{
+    AgentProgress, AgentReply, AgentService, ContextMetrics, TranscriptEntry, TranscriptRole,
+};
 use std::{
     env,
     path::PathBuf,
@@ -62,7 +64,7 @@ struct App {
     status: Option<String>,
     workspace_label: String,
     model_label: String,
-    max_tokens: u32,
+    context_metrics: ContextMetrics,
     last_latency_ms: Option<u128>,
     pending_task: Option<PendingTask>,
 }
@@ -125,12 +127,9 @@ enum Segment {
 impl App {
     fn new(agent: AgentService) -> Self {
         let model_label = env::var("MODEL").unwrap_or_else(|_| "socium-default".to_string());
-        let max_tokens = env::var("MAX_TOKENS")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(1000);
         let workspace_label = format_workspace_path(env::current_dir().ok());
         let messages = transcript_entries_to_chat_entries(agent.transcript_entries());
+        let context_metrics = agent.context_metrics("").unwrap_or_default();
 
         Self {
             agent: Some(agent),
@@ -144,7 +143,7 @@ impl App {
             status: Some("Ready".to_string()),
             workspace_label,
             model_label,
-            max_tokens,
+            context_metrics,
             last_latency_ms: None,
             pending_task: None,
         }
@@ -162,6 +161,7 @@ impl App {
         let index = self.byte_index();
         self.input.insert(index, new_char);
         self.move_cursor_right();
+        self.refresh_context_metrics();
     }
 
     fn byte_index(&self) -> usize {
@@ -182,6 +182,7 @@ impl App {
         let after_char_to_delete = self.input.chars().skip(current_index);
         self.input = before_char_to_delete.chain(after_char_to_delete).collect();
         self.move_cursor_left();
+        self.refresh_context_metrics();
     }
 
     fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
@@ -247,6 +248,7 @@ impl App {
                 self.last_command_output = None;
                 self.last_latency_ms = None;
                 self.status = Some("Conversation cleared".to_string());
+                self.refresh_context_metrics();
                 return Ok(SubmitAction::None);
             }
             _ => {}
@@ -278,6 +280,9 @@ impl App {
         let Some(mut agent) = self.agent.take() else {
             return Err(eyre!("agent is unavailable while a request is running"));
         };
+        self.context_metrics = agent
+            .context_metrics(&pending.user_input)
+            .unwrap_or_default();
         let (progress_tx, progress_rx) = unbounded_channel();
         let (result_tx, result_rx) = oneshot::channel();
         let PendingSubmission {
@@ -335,6 +340,7 @@ impl App {
         let streamed_assistant_text = streamed_assistant_text.unwrap_or(false);
         self.pending_task = None;
         self.agent = Some(outcome.agent);
+        self.refresh_context_metrics();
         self.last_latency_ms = Some(outcome.latency_ms);
         self.pop_thinking_message();
 
@@ -686,14 +692,27 @@ impl App {
                 Span::styled(
                     format!(
                         "({}% context left, {latency_label})",
-                        self.context_left_percentage()
+                        self.context_metrics.context_left_percentage
                     ),
                     Style::default().fg(MUTED),
                 ),
                 Span::styled(" ", Style::default().fg(MUTED)),
                 Span::styled(
-                    format!("{}/{}", self.estimated_tokens(), self.max_tokens),
+                    format!(
+                        "{}/{}",
+                        self.context_metrics.estimated_input_tokens,
+                        self.context_metrics.input_budget_tokens
+                    ),
                     Style::default().fg(SOFT),
+                ),
+                Span::styled(" ", Style::default().fg(MUTED)),
+                Span::styled(
+                    if self.context_metrics.summary_active {
+                        format!("summary {}", self.context_metrics.summarized_messages)
+                    } else {
+                        "summary off".to_string()
+                    },
+                    Style::default().fg(PINK),
                 ),
             ]))
             .style(Style::default().bg(BG)),
@@ -767,22 +786,12 @@ impl App {
         });
     }
 
-    fn estimated_tokens(&self) -> u32 {
-        let total_chars = self
-            .messages
-            .iter()
-            .map(|entry| entry.body.chars().count())
-            .sum::<usize>()
-            + self.input.chars().count();
-        ((total_chars / 4).max(1)) as u32
-    }
-
-    fn context_left_percentage(&self) -> u32 {
-        let used = self.estimated_tokens().min(self.max_tokens);
-        if self.max_tokens == 0 {
-            return 0;
+    fn refresh_context_metrics(&mut self) {
+        if let Some(agent) = self.agent.as_ref()
+            && let Ok(metrics) = agent.context_metrics(&self.input)
+        {
+            self.context_metrics = metrics;
         }
-        100_u32.saturating_sub((used.saturating_mul(100)) / self.max_tokens)
     }
 }
 
