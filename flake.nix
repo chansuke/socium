@@ -60,7 +60,6 @@
               pkgs.clippy
               pkgs.rustfmt
               pkgs.rust-analyzer
-              pkgs.vim
               pkgs.git
               pkgs.cacert
               pkgs.openssl
