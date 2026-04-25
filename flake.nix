@@ -23,19 +23,28 @@
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
 
-            nativeBuildInputs = [ pkgs.pkg-config ];
+            nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
+            nativeCheckInputs = [ pkgs.git ];
             buildInputs = [ pkgs.openssl ]
               ++ lib.optionals pkgs.stdenv.isDarwin [
                 pkgs.darwin.apple_sdk.frameworks.Security
                 pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
               ];
+            SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+            NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+
+            postFixup = ''
+              wrapProgram "$out/bin/socium-tui" \
+                --set-default SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" \
+                --set-default NIX_SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+            '';
           };
         });
 
       apps = forAllSystems (pkgs: {
         default = {
           type = "app";
-          program = "${self.packages.${pkgs.system}.default}/bin/socium";
+          program = "${self.packages.${pkgs.system}.default}/bin/socium-tui";
         };
       });
 
@@ -52,6 +61,8 @@
               pkgs.rustfmt
               pkgs.rust-analyzer
               pkgs.vim
+              pkgs.git
+              pkgs.cacert
               pkgs.openssl
               pkgs.pkg-config
               pkgs.nixfmt
