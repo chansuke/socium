@@ -171,6 +171,42 @@ struct SearchMatch {
     text: String,
 }
 
+struct SearchExecution {
+    matches: Vec<SearchMatch>,
+    status_code: Option<i32>,
+    used_ripgrep: bool,
+}
+
+#[derive(Clone, Copy)]
+enum SearchMode {
+    SmartCase,
+    FixedCaseSensitive,
+}
+
+enum SearchMatcher {
+    CaseSensitive(String),
+    CaseInsensitive(String),
+}
+
+impl SearchMatcher {
+    fn new(pattern: &str, mode: SearchMode) -> Self {
+        match mode {
+            SearchMode::SmartCase if pattern.chars().any(char::is_uppercase) => {
+                Self::CaseSensitive(pattern.to_string())
+            }
+            SearchMode::SmartCase => Self::CaseInsensitive(pattern.to_lowercase()),
+            SearchMode::FixedCaseSensitive => Self::CaseSensitive(pattern.to_string()),
+        }
+    }
+
+    fn is_match(&self, line: &str) -> bool {
+        match self {
+            Self::CaseSensitive(pattern) => line.contains(pattern),
+            Self::CaseInsensitive(pattern) => line.to_lowercase().contains(pattern),
+        }
+    }
+}
+
 enum PatchAction {
     Add {
         path: String,
@@ -403,31 +439,29 @@ pub(crate) fn search_text_from_workspace(
         MAX_SEARCH_RESULTS,
     )?;
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
+    let execution = search_with_ripgrep_fallback(
+        workspace_root,
+        &resolved_path,
+        pattern,
+        glob,
+        SearchMode::SmartCase,
+        "rg",
+        "search_text",
+    )?;
+    let formatted = format_search_results(
+        "Pattern",
+        pattern,
+        path,
+        glob,
+        max_results,
+        execution.matches,
+    );
 
-    let mut args = vec![
-        "--line-number".to_string(),
-        "--with-filename".to_string(),
-        "--color".to_string(),
-        "never".to_string(),
-        "--no-heading".to_string(),
-        "--smart-case".to_string(),
-    ];
-    if let Some(glob) = glob {
-        args.push("--glob".to_string());
-        args.push(glob.to_string());
+    if !execution.used_ripgrep {
+        return Ok(formatted);
     }
-    args.push(pattern.to_string());
-    args.push(resolved_path.to_string_lossy().into_owned());
 
-    let output = Command::new("rg")
-        .args(&args)
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| format!("Failed to run ripgrep for search_text: {e}"))?;
-    let matches = parse_rg_matches(workspace_root, &output.stdout)?;
-    let formatted = format_search_results("Pattern", pattern, path, glob, max_results, matches);
-
-    match output.status.code() {
+    match execution.status_code {
         Some(0) | Some(1) => Ok(formatted),
         Some(code) => Err(format!(
             "search_text failed with exit code {code}\n{formatted}"
@@ -454,30 +488,28 @@ pub(crate) fn find_symbol_in_workspace(
     )?;
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
 
-    let output = Command::new("rg")
-        .args([
-            "--line-number",
-            "--with-filename",
-            "--color",
-            "never",
-            "--no-heading",
-            "--fixed-strings",
-            "--glob",
-            "*.rs",
-            symbol,
-            resolved_path.to_string_lossy().as_ref(),
-        ])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| format!("Failed to run ripgrep for find_symbol: {e}"))?;
-    let matches = parse_rg_matches(workspace_root, &output.stdout)?
+    let execution = search_with_ripgrep_fallback(
+        workspace_root,
+        &resolved_path,
+        symbol,
+        Some("*.rs"),
+        SearchMode::FixedCaseSensitive,
+        "rg",
+        "find_symbol",
+    )?;
+    let matches = execution
+        .matches
         .into_iter()
         .filter(|entry| looks_like_rust_symbol_declaration(&entry.text, symbol))
         .collect::<Vec<_>>();
     let formatted =
         format_search_results("Symbol", symbol, path, Some("*.rs"), max_results, matches);
 
-    match output.status.code() {
+    if !execution.used_ripgrep {
+        return Ok(formatted);
+    }
+
+    match execution.status_code {
         Some(0) | Some(1) => Ok(formatted),
         Some(code) => Err(format!(
             "find_symbol failed with exit code {code}\n{formatted}"
@@ -1160,6 +1192,166 @@ fn format_search_results(
         ));
     }
     lines.join("\n")
+}
+
+fn search_with_ripgrep_fallback(
+    workspace_root: &Path,
+    resolved_path: &Path,
+    pattern: &str,
+    glob: Option<&str>,
+    mode: SearchMode,
+    ripgrep_program: &str,
+    tool_name: &str,
+) -> Result<SearchExecution, String> {
+    let mut args = vec![
+        "--line-number".to_string(),
+        "--with-filename".to_string(),
+        "--color".to_string(),
+        "never".to_string(),
+        "--no-heading".to_string(),
+    ];
+    match mode {
+        SearchMode::SmartCase => args.push("--smart-case".to_string()),
+        SearchMode::FixedCaseSensitive => args.push("--fixed-strings".to_string()),
+    }
+    if let Some(glob) = glob {
+        args.push("--glob".to_string());
+        args.push(glob.to_string());
+    }
+    args.push(pattern.to_string());
+    args.push(resolved_path.to_string_lossy().into_owned());
+
+    match Command::new(ripgrep_program)
+        .args(&args)
+        .current_dir(workspace_root)
+        .output()
+    {
+        Ok(output) => Ok(SearchExecution {
+            matches: parse_rg_matches(workspace_root, &output.stdout)?,
+            status_code: output.status.code(),
+            used_ripgrep: true,
+        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(SearchExecution {
+            matches: fallback_search_matches(workspace_root, resolved_path, pattern, glob, mode)?,
+            status_code: Some(0),
+            used_ripgrep: false,
+        }),
+        Err(error) => Err(format!("Failed to run ripgrep for {tool_name}: {error}")),
+    }
+}
+
+fn fallback_search_matches(
+    workspace_root: &Path,
+    resolved_path: &Path,
+    pattern: &str,
+    glob: Option<&str>,
+    mode: SearchMode,
+) -> Result<Vec<SearchMatch>, String> {
+    let metadata = fs::metadata(resolved_path)
+        .map_err(|e| format!("Failed to inspect path '{}': {e}", resolved_path.display()))?;
+    let matcher = SearchMatcher::new(pattern, mode);
+    let mut matches = Vec::new();
+
+    if metadata.is_dir() {
+        collect_fallback_search_matches_in_dir(
+            workspace_root,
+            resolved_path,
+            glob,
+            &matcher,
+            &mut matches,
+        )?;
+    } else if metadata.is_file() {
+        collect_fallback_search_matches_in_file(
+            workspace_root,
+            resolved_path,
+            glob,
+            &matcher,
+            &mut matches,
+        )?;
+    } else {
+        return Err(format!(
+            "Path is neither a file nor directory: '{}'",
+            resolved_path.display()
+        ));
+    }
+
+    matches.sort_unstable_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.line_number.cmp(&right.line_number))
+            .then(left.text.cmp(&right.text))
+    });
+    Ok(matches)
+}
+
+fn collect_fallback_search_matches_in_dir(
+    workspace_root: &Path,
+    current: &Path,
+    glob: Option<&str>,
+    matcher: &SearchMatcher,
+    matches: &mut Vec<SearchMatch>,
+) -> Result<(), String> {
+    let read_dir = fs::read_dir(current)
+        .map_err(|e| format!("Failed to list directory '{}': {e}", current.display()))?;
+    let mut entries = Vec::new();
+    for entry_result in read_dir {
+        let entry = entry_result.map_err(|e| format!("Failed to read directory entry: {e}"))?;
+        let sort_key = entry.file_name().to_string_lossy().to_string();
+        entries.push((sort_key, entry));
+    }
+    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+    for (_, entry) in entries {
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect directory entry type: {e}"))?;
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_fallback_search_matches_in_dir(workspace_root, &path, glob, matcher, matches)?;
+        } else if file_type.is_file() {
+            collect_fallback_search_matches_in_file(workspace_root, &path, glob, matcher, matches)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_fallback_search_matches_in_file(
+    workspace_root: &Path,
+    file_path: &Path,
+    glob: Option<&str>,
+    matcher: &SearchMatcher,
+    matches: &mut Vec<SearchMatch>,
+) -> Result<(), String> {
+    let display_path = normalize_match_path(workspace_root, file_path.to_string_lossy().as_ref());
+    if !search_path_matches_glob(glob, &display_path) {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(file_path)
+        .map_err(|e| format!("Failed to read file '{}': {e}", display_path))?;
+    for (index, line) in content.lines().enumerate() {
+        let line = line.trim_end_matches('\r');
+        if matcher.is_match(line) {
+            matches.push(SearchMatch {
+                path: display_path.clone(),
+                line_number: index + 1,
+                text: line.to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn search_path_matches_glob(glob: Option<&str>, path: &str) -> bool {
+    glob.is_none_or(|pattern| {
+        glob_matches(pattern, path)
+            || Path::new(path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|file_name| glob_matches(pattern, file_name))
+    })
 }
 
 fn looks_like_rust_symbol_declaration(line: &str, symbol: &str) -> bool {
@@ -2104,4 +2296,133 @@ pub(crate) fn resolve_workspace_path_for_create(
         ));
     }
     Ok(joined)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn make_temp_dir(prefix: &str) -> TempDir {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let count = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("socium_runtime_{prefix}_{nanos}_{count}"));
+        fs::create_dir_all(&path).unwrap();
+        TempDir { path }
+    }
+
+    #[test]
+    fn search_falls_back_when_ripgrep_is_unavailable() {
+        let workspace = make_temp_dir("search-fallback");
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::write(
+            workspace.path().join("src/lib.rs"),
+            "pub fn alpha() {}\nlet needle = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("src/other.rs"),
+            "const NEEDLE: &str = \"needle\";\n",
+        )
+        .unwrap();
+
+        let execution = search_with_ripgrep_fallback(
+            workspace.path(),
+            &workspace.path().join("src"),
+            "needle",
+            None,
+            SearchMode::SmartCase,
+            "__socium_missing_rg__",
+            "search_text",
+        )
+        .unwrap();
+
+        assert!(!execution.used_ripgrep);
+        assert_eq!(execution.status_code, Some(0));
+        assert!(
+            execution
+                .matches
+                .iter()
+                .any(|entry| entry.path == "src/lib.rs" && entry.line_number == 2)
+        );
+        assert!(
+            execution
+                .matches
+                .iter()
+                .any(|entry| entry.path == "src/other.rs"
+                    && entry.text == "const NEEDLE: &str = \"needle\";")
+        );
+    }
+
+    #[test]
+    fn find_symbol_falls_back_when_ripgrep_is_unavailable() {
+        let workspace = make_temp_dir("find-symbol-fallback");
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::write(
+            workspace.path().join("src/lib.rs"),
+            "pub struct Widget;\nfn helper() {}\nimpl Widget { pub fn build() -> Self { Self } }\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("src/other.rs"),
+            "pub enum WidgetState { Ready }\n",
+        )
+        .unwrap();
+
+        let execution = search_with_ripgrep_fallback(
+            workspace.path(),
+            workspace.path(),
+            "Widget",
+            Some("*.rs"),
+            SearchMode::FixedCaseSensitive,
+            "__socium_missing_rg__",
+            "find_symbol",
+        )
+        .unwrap();
+
+        let matches = execution
+            .matches
+            .into_iter()
+            .filter(|entry| looks_like_rust_symbol_declaration(&entry.text, "Widget"))
+            .collect::<Vec<_>>();
+
+        assert!(!execution.used_ripgrep);
+        assert!(
+            matches
+                .iter()
+                .any(|entry| entry.text == "pub struct Widget;")
+        );
+        assert!(
+            matches
+                .iter()
+                .any(|entry| entry.text == "impl Widget { pub fn build() -> Self { Self } }")
+        );
+        assert!(
+            !matches
+                .iter()
+                .any(|entry| entry.text.contains("WidgetState"))
+        );
+    }
 }
