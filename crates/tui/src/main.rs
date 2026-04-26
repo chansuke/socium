@@ -23,6 +23,8 @@ use tokio::sync::{
     oneshot,
 };
 
+const INPUT_HISTORY_FILE_NAME: &str = "input_history.json";
+
 const BG: Color = Color::Rgb(10, 14, 24);
 const TEXT: Color = Color::Rgb(220, 223, 235);
 const MUTED: Color = Color::Rgb(118, 124, 151);
@@ -67,6 +69,9 @@ struct App {
     context_metrics: ContextMetrics,
     last_latency_ms: Option<u128>,
     pending_task: Option<PendingTask>,
+    input_history: repl::InputSession,
+    history_index: Option<usize>,
+    history_draft: String,
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +135,15 @@ impl App {
         let workspace_label = format_workspace_path(env::current_dir().ok());
         let messages = transcript_entries_to_chat_entries(agent.transcript_entries());
         let context_metrics = agent.context_metrics("").unwrap_or_default();
+        let history_path = env::current_dir()
+            .unwrap_or_default()
+            .join(".socium")
+            .join(INPUT_HISTORY_FILE_NAME);
+        let input_history =
+            repl::InputSession::load(history_path.clone()).unwrap_or(repl::InputSession {
+                history_path,
+                entries: Vec::new(),
+            });
 
         Self {
             agent: Some(agent),
@@ -146,6 +160,9 @@ impl App {
             context_metrics,
             last_latency_ms: None,
             pending_task: None,
+            input_history,
+            history_index: None,
+            history_draft: String::new(),
         }
     }
 
@@ -193,6 +210,41 @@ impl App {
         self.character_index = 0;
     }
 
+    fn history_prev(&mut self) {
+        if self.input_history.entries.is_empty() {
+            return;
+        }
+        match self.history_index {
+            None => {
+                self.history_draft = self.input.clone();
+                self.history_index = Some(self.input_history.entries.len() - 1);
+            }
+            Some(i) if i > 0 => {
+                self.history_index = Some(i - 1);
+            }
+            _ => {}
+        }
+        if let Some(i) = self.history_index {
+            self.input = self.input_history.entries[i].clone();
+            self.character_index = self.input.chars().count();
+            self.refresh_context_metrics();
+        }
+    }
+
+    fn history_next(&mut self) {
+        if let Some(i) = self.history_index {
+            if i + 1 < self.input_history.entries.len() {
+                self.history_index = Some(i + 1);
+                self.input = self.input_history.entries[i + 1].clone();
+            } else {
+                self.history_index = None;
+                self.input = self.history_draft.clone();
+            }
+            self.character_index = self.input.chars().count();
+            self.refresh_context_metrics();
+        }
+    }
+
     fn push_message(&mut self, speaker: Speaker, body: impl Into<String>) {
         self.messages.push(ChatEntry {
             speaker,
@@ -226,6 +278,11 @@ impl App {
             return Ok(SubmitAction::None);
         }
         let user_input = self.input.trim().to_string();
+        if let Err(err) = self.input_history.record_entry(&user_input) {
+            eprintln!("Warning: failed to persist input history: {err}");
+        }
+        self.history_index = None;
+        self.history_draft.clear();
         self.input.clear();
         self.reset_cursor();
 
@@ -477,14 +534,38 @@ impl App {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             return Ok(());
                         }
+                        KeyCode::Up if self.pending_task.is_none() => self.history_prev(),
+                        KeyCode::Down if self.pending_task.is_none() => self.history_next(),
+                        KeyCode::Char('p')
+                            if self.pending_task.is_none()
+                                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            self.history_prev();
+                        }
+                        KeyCode::Char('n')
+                            if self.pending_task.is_none()
+                                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            self.history_next();
+                        }
                         KeyCode::Char(to_insert)
                             if self.pending_task.is_none()
                                 && !key.modifiers.contains(KeyModifiers::CONTROL)
                                 && !key.modifiers.contains(KeyModifiers::ALT) =>
                         {
+                            if self.history_index.is_some() {
+                                self.history_index = None;
+                                self.history_draft.clear();
+                            }
                             self.enter_char(to_insert);
                         }
-                        KeyCode::Backspace if self.pending_task.is_none() => self.delete_char(),
+                        KeyCode::Backspace if self.pending_task.is_none() => {
+                            if self.history_index.is_some() {
+                                self.history_index = None;
+                                self.history_draft.clear();
+                            }
+                            self.delete_char();
+                        }
                         KeyCode::Left if self.pending_task.is_none() => self.move_cursor_left(),
                         KeyCode::Right if self.pending_task.is_none() => self.move_cursor_right(),
                         KeyCode::Esc => {
