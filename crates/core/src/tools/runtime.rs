@@ -5,7 +5,7 @@ use crate::constants::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
-use std::io::{ErrorKind, Read};
+use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -448,20 +448,18 @@ pub(crate) fn search_text_from_workspace(
         "rg",
         "search_text",
     )?;
-    let formatted = format_search_results(
-        "Pattern",
-        pattern,
-        path,
-        glob,
-        max_results,
-        execution.matches,
-    );
+    let SearchExecution {
+        matches,
+        status_code,
+        used_ripgrep,
+    } = execution;
+    let formatted = format_search_results("Pattern", pattern, path, glob, max_results, matches);
 
-    if !execution.used_ripgrep {
+    if !used_ripgrep {
         return Ok(formatted);
     }
 
-    match execution.status_code {
+    match status_code {
         Some(0) | Some(1) => Ok(formatted),
         Some(code) => Err(format!(
             "search_text failed with exit code {code}\n{formatted}"
@@ -497,19 +495,23 @@ pub(crate) fn find_symbol_in_workspace(
         "rg",
         "find_symbol",
     )?;
-    let matches = execution
-        .matches
+    let SearchExecution {
+        matches,
+        status_code,
+        used_ripgrep,
+    } = execution;
+    let matches = matches
         .into_iter()
         .filter(|entry| looks_like_rust_symbol_declaration(&entry.text, symbol))
         .collect::<Vec<_>>();
     let formatted =
         format_search_results("Symbol", symbol, path, Some("*.rs"), max_results, matches);
 
-    if !execution.used_ripgrep {
+    if !used_ripgrep {
         return Ok(formatted);
     }
 
-    match execution.status_code {
+    match status_code {
         Some(0) | Some(1) => Ok(formatted),
         Some(code) => Err(format!(
             "find_symbol failed with exit code {code}\n{formatted}"
@@ -1328,15 +1330,41 @@ fn collect_fallback_search_matches_in_file(
         return Ok(());
     }
 
-    let content = fs::read_to_string(file_path)
-        .map_err(|e| format!("Failed to read file '{}': {e}", display_path))?;
-    for (index, line) in content.lines().enumerate() {
-        let line = line.trim_end_matches('\r');
-        if matcher.is_match(line) {
+    let metadata = fs::metadata(file_path)
+        .map_err(|e| format!("Failed to inspect file '{}': {e}", display_path))?;
+    if metadata.len() > MAX_READ_FILE_BYTES as u64 {
+        return Ok(());
+    }
+
+    let file = fs::File::open(file_path)
+        .map_err(|e| format!("Failed to open file '{}': {e}", display_path))?;
+    let mut reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    let mut line_number = 0usize;
+
+    loop {
+        buffer.clear();
+        let bytes_read = reader
+            .read_until(b'\n', &mut buffer)
+            .map_err(|e| format!("Failed to read file '{}': {e}", display_path))?;
+        if bytes_read == 0 {
+            break;
+        }
+        line_number += 1;
+
+        if buffer.ends_with(b"\n") {
+            buffer.pop();
+        }
+        if buffer.ends_with(b"\r") {
+            buffer.pop();
+        }
+
+        let line = String::from_utf8_lossy(&buffer);
+        if matcher.is_match(&line) {
             matches.push(SearchMatch {
                 path: display_path.clone(),
-                line_number: index + 1,
-                text: line.to_string(),
+                line_number,
+                text: line.into_owned(),
             });
         }
     }
@@ -2402,13 +2430,17 @@ mod tests {
         )
         .unwrap();
 
-        let matches = execution
-            .matches
+        let SearchExecution {
+            matches,
+            used_ripgrep,
+            ..
+        } = execution;
+        let matches = matches
             .into_iter()
             .filter(|entry| looks_like_rust_symbol_declaration(&entry.text, "Widget"))
             .collect::<Vec<_>>();
 
-        assert!(!execution.used_ripgrep);
+        assert!(!used_ripgrep);
         assert!(
             matches
                 .iter()
@@ -2423,6 +2455,37 @@ mod tests {
             !matches
                 .iter()
                 .any(|entry| entry.text.contains("WidgetState"))
+        );
+    }
+
+    #[test]
+    fn search_fallback_handles_non_utf8_files_without_failing() {
+        let workspace = make_temp_dir("search-non-utf8-fallback");
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::write(workspace.path().join("src/good.rs"), "let needle = 1;\n").unwrap();
+        fs::write(
+            workspace.path().join("src/bad.rs"),
+            b"let \xffneedle = 2;\n",
+        )
+        .unwrap();
+
+        let execution = search_with_ripgrep_fallback(
+            workspace.path(),
+            &workspace.path().join("src"),
+            "needle",
+            Some("*.rs"),
+            SearchMode::SmartCase,
+            "__socium_missing_rg__",
+            "search_text",
+        )
+        .unwrap();
+
+        assert!(!execution.used_ripgrep);
+        assert!(
+            execution
+                .matches
+                .iter()
+                .any(|entry| entry.path == "src/good.rs" && entry.text == "let needle = 1;")
         );
     }
 }
