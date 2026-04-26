@@ -145,14 +145,25 @@ Planned provider targets may include local OpenAI-compatible servers or direct l
   - [x] waiting for approval
   - [x] completed
   - [x] failed
+- [ ] Add input history navigation in TUI editing mode (Up/Down or Ctrl+P/N to recall previous prompts).
+  - [ ] Wire existing `InputSession` / `repl.rs` history into the ratatui key handler.
+  - [ ] Persist history to `.socium/input_history.json` across sessions.
 
-### 12. Add a web/docs retrieval tool
+### 12. Add session management and continuation
+
+- [ ] Add CLI flags for session control:
+  - [ ] `--new` (or `-n`): start a fresh session, ignoring any persisted conversation.
+  - [ ] `--continue` (or `-c`): explicitly resume the most recent session (current default behaviour, made explicit).
+- [ ] Support named or timestamped sessions so multiple independent conversations can coexist under the same workspace.
+- [ ] Add a `/sessions` slash command (or equivalent) to list and switch between saved sessions from within the TUI.
+
+### 13. Add a web/docs retrieval tool
 
 - [ ] Allow the agent to fetch documentation pages and API references.
 - [ ] Keep this permissioned and auditable.
 - [ ] Distinguish web retrieval from local repo inspection.
 
-### 13. Add task planning support
+### 14. Add task planning support
 
 - [ ] Support explicit plan creation and progress tracking.
 - [ ] Let the agent update plan state during long tasks.
@@ -160,7 +171,7 @@ Planned provider targets may include local OpenAI-compatible servers or direct l
 
 ## Priority 3: Reliability
 
-### 14. End-to-end testing
+### 15. End-to-end testing
 
 - [ ] Add integration tests for:
   - [ ] provider request/response handling
@@ -169,7 +180,7 @@ Planned provider targets may include local OpenAI-compatible servers or direct l
   - [ ] streaming behavior
 - [ ] Add fixture-based tests for multi-turn agent behavior.
 
-### 15. Evaluation harness
+### 16. Evaluation harness
 
 - [ ] Create benchmark tasks for:
   - [ ] code search
@@ -181,7 +192,7 @@ Planned provider targets may include local OpenAI-compatible servers or direct l
   - [ ] Codex/OpenAI provider
   - [ ] local LLM provider
 
-### 16. Logging and observability
+### 17. Logging and observability
 
 - [ ] Add structured logs for provider calls, tool invocations, failures, and latency.
 - [ ] Make provider/tool debugging easier without exposing secrets.
