@@ -50,6 +50,9 @@ pub enum AgentProgress {
     AssistantText {
         text: String,
     },
+    ThinkingText {
+        text: String,
+    },
     ToolCallStarted {
         name: String,
     },

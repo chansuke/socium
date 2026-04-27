@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::io::Error;
 
-use super::{ProviderCapabilities, ProviderResponse};
+use super::{DeltaEvent, ProviderCapabilities, ProviderResponse};
 
 pub const CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     supports_tools: true,
@@ -15,13 +15,21 @@ pub(crate) async fn send_message<F>(
     api_key: &str,
     anthropic_version: &str,
     message_request: &AgentMessageRequest<'_>,
-    on_text_delta: &mut F,
+    on_delta: &mut F,
 ) -> Result<ProviderResponse, Box<dyn std::error::Error>>
 where
-    F: FnMut(String) + Send,
+    F: FnMut(DeltaEvent) + Send,
 {
     let mut body = serde_json::to_value(message_request)?;
     body["stream"] = Value::Bool(true);
+    if let Ok(budget_str) = std::env::var("THINKING_BUDGET_TOKENS")
+        && let Ok(budget) = budget_str.parse::<u64>()
+    {
+        body["thinking"] = serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": budget
+        });
+    }
     let mut response = client
         .post(ANTHROPIC_MESSAGES_API)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -41,12 +49,12 @@ where
 
     while let Some(chunk) = response.chunk().await? {
         for event in parser.push(&chunk)? {
-            builder.apply_event(&event, on_text_delta)?;
+            builder.apply_event(&event, on_delta)?;
         }
     }
 
     if let Some(event) = parser.finish()? {
-        builder.apply_event(&event, on_text_delta)?;
+        builder.apply_event(&event, on_delta)?;
     }
 
     let streamed_text = builder.streamed_text;
@@ -94,6 +102,11 @@ enum StreamContentBlockStart {
         #[serde(default)]
         text: String,
     },
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -108,6 +121,10 @@ enum StreamContentBlockStart {
 enum StreamDelta {
     #[serde(rename = "text_delta")]
     Text { text: String },
+    #[serde(rename = "thinking_delta")]
+    Thinking { thinking: String },
+    #[serde(rename = "signature_delta")]
+    Signature { signature: String },
     #[serde(rename = "input_json_delta")]
     InputJson { partial_json: String },
 }
@@ -187,12 +204,18 @@ struct StreamingMessageBuilder {
 
 enum StreamingContentBlock {
     Text(TextBlockState),
+    Thinking(ThinkingBlockState),
     ToolUse(ToolUseBlockState),
 }
 
 struct TextBlockState {
     text: String,
     separator_pending: bool,
+}
+
+struct ThinkingBlockState {
+    thinking: String,
+    signature: String,
 }
 
 struct ToolUseBlockState {
@@ -206,7 +229,7 @@ impl StreamingMessageBuilder {
     fn apply_event(
         &mut self,
         raw_event: &str,
-        on_text_delta: &mut impl FnMut(String),
+        on_delta: &mut impl FnMut(DeltaEvent),
     ) -> Result<(), Box<dyn std::error::Error>> {
         let event: AnthropicStreamEvent = serde_json::from_str(raw_event)?;
         match event {
@@ -223,9 +246,9 @@ impl StreamingMessageBuilder {
             AnthropicStreamEvent::ContentBlockStart {
                 index,
                 content_block,
-            } => self.start_block(index, content_block, on_text_delta)?,
+            } => self.start_block(index, content_block, on_delta)?,
             AnthropicStreamEvent::ContentBlockDelta { index, delta } => {
-                self.apply_delta(index, delta, on_text_delta)?
+                self.apply_delta(index, delta, on_delta)?
             }
         }
         Ok(())
@@ -239,6 +262,10 @@ impl StreamingMessageBuilder {
             };
             content.push(match block {
                 StreamingContentBlock::Text(state) => ContentBlock::Text { text: state.text },
+                StreamingContentBlock::Thinking(state) => ContentBlock::Thinking {
+                    thinking: state.thinking,
+                    signature: state.signature,
+                },
                 StreamingContentBlock::ToolUse(state) => {
                     let input = if state.input_json.trim().is_empty() {
                         state.initial_input
@@ -260,7 +287,7 @@ impl StreamingMessageBuilder {
         &mut self,
         index: usize,
         content_block: StreamContentBlockStart,
-        on_text_delta: &mut impl FnMut(String),
+        on_delta: &mut impl FnMut(DeltaEvent),
     ) -> Result<(), Box<dyn std::error::Error>> {
         ensure_block_capacity(&mut self.blocks, index);
         let block = match content_block {
@@ -275,10 +302,19 @@ impl StreamingMessageBuilder {
                     let emitted = append_text_to_state(&mut state, &text);
                     if !emitted.is_empty() {
                         self.streamed_text = true;
-                        on_text_delta(emitted);
+                        on_delta(DeltaEvent::Text(emitted));
                     }
                 }
                 StreamingContentBlock::Text(state)
+            }
+            StreamContentBlockStart::Thinking { thinking } => {
+                if !thinking.is_empty() {
+                    on_delta(DeltaEvent::Thinking(thinking.clone()));
+                }
+                StreamingContentBlock::Thinking(ThinkingBlockState {
+                    thinking,
+                    signature: String::new(),
+                })
             }
             StreamContentBlockStart::ToolUse { id, name, input } => {
                 StreamingContentBlock::ToolUse(ToolUseBlockState {
@@ -297,7 +333,7 @@ impl StreamingMessageBuilder {
         &mut self,
         index: usize,
         delta: StreamDelta,
-        on_text_delta: &mut impl FnMut(String),
+        on_delta: &mut impl FnMut(DeltaEvent),
     ) -> Result<(), Box<dyn std::error::Error>> {
         let Some(block) = self.blocks.get_mut(index).and_then(Option::as_mut) else {
             return Err(Error::other(format!(
@@ -311,23 +347,22 @@ impl StreamingMessageBuilder {
                 let emitted = append_text_to_state(state, &text);
                 if !emitted.is_empty() {
                     self.streamed_text = true;
-                    on_text_delta(emitted);
+                    on_delta(DeltaEvent::Text(emitted));
                 }
+            }
+            (StreamingContentBlock::Thinking(state), StreamDelta::Thinking { thinking }) => {
+                state.thinking.push_str(&thinking);
+                if !thinking.is_empty() {
+                    on_delta(DeltaEvent::Thinking(thinking));
+                }
+            }
+            (StreamingContentBlock::Thinking(state), StreamDelta::Signature { signature }) => {
+                state.signature.push_str(&signature);
             }
             (StreamingContentBlock::ToolUse(state), StreamDelta::InputJson { partial_json }) => {
                 state.input_json.push_str(&partial_json);
             }
-            (StreamingContentBlock::Text(_), StreamDelta::InputJson { .. }) => {
-                return Err(Error::other(
-                    "Anthropic stream sent tool input delta for a text block",
-                )
-                .into());
-            }
-            (StreamingContentBlock::ToolUse(_), StreamDelta::Text { .. }) => {
-                return Err(
-                    Error::other("Anthropic stream sent text delta for a tool_use block").into(),
-                );
-            }
+            _ => {}
         }
 
         Ok(())
@@ -358,9 +393,19 @@ fn append_text_to_state(state: &mut TextBlockState, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SseParser, StreamingMessageBuilder};
+    use super::{DeltaEvent, SseParser, StreamingMessageBuilder};
     use crate::agent::types::ContentBlock;
     use serde_json::json;
+
+    fn text_deltas(events: &[DeltaEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                DeltaEvent::Text(t) => Some(t.clone()),
+                DeltaEvent::Thinking(_) => None,
+            })
+            .collect()
+    }
 
     #[test]
     fn sse_parser_reassembles_split_events() {
@@ -388,36 +433,39 @@ mod tests {
     #[test]
     fn streaming_builder_collects_text_and_tool_use_blocks() {
         let mut builder = StreamingMessageBuilder::default();
-        let mut deltas = Vec::new();
+        let mut events = Vec::new();
 
         builder
             .apply_event(
                 "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"Hello\"}}",
-                &mut |delta| deltas.push(delta),
+                &mut |e| events.push(e),
             )
             .unwrap();
         builder
             .apply_event(
                 "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}",
-                &mut |delta| deltas.push(delta),
+                &mut |e| events.push(e),
             )
             .unwrap();
         builder
             .apply_event(
                 "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"read_file\",\"input\":{}}}",
-                &mut |delta| deltas.push(delta),
+                &mut |e| events.push(e),
             )
             .unwrap();
         builder
             .apply_event(
                 "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"src/main.rs\\\"}\"}}",
-                &mut |delta| deltas.push(delta),
+                &mut |e| events.push(e),
             )
             .unwrap();
 
         let response = builder.finish().unwrap();
 
-        assert_eq!(deltas, vec!["Hello".to_string(), " world".to_string()]);
+        assert_eq!(
+            text_deltas(&events),
+            vec!["Hello".to_string(), " world".to_string()]
+        );
         assert_eq!(
             response.content,
             vec![
@@ -436,21 +484,24 @@ mod tests {
     #[test]
     fn streaming_builder_inserts_separator_between_text_blocks() {
         let mut builder = StreamingMessageBuilder::default();
-        let mut deltas = Vec::new();
+        let mut events = Vec::new();
 
         builder
             .apply_event(
                 "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"First\"}}",
-                &mut |delta| deltas.push(delta),
+                &mut |e| events.push(e),
             )
             .unwrap();
         builder
             .apply_event(
                 "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"Second\"}}",
-                &mut |delta| deltas.push(delta),
+                &mut |e| events.push(e),
             )
             .unwrap();
 
-        assert_eq!(deltas, vec!["First".to_string(), "\nSecond".to_string()]);
+        assert_eq!(
+            text_deltas(&events),
+            vec!["First".to_string(), "\nSecond".to_string()]
+        );
     }
 }

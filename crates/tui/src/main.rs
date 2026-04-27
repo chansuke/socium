@@ -272,6 +272,28 @@ impl App {
         }
     }
 
+    fn append_streamed_thinking_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(entry) = self.messages.last_mut()
+            && entry.speaker == Speaker::Thinking
+        {
+            // プレースホルダーが入っている場合は実際の思考内容で置き換える
+            if entry.body.starts_with("Preparing response for:") {
+                entry.body = text.to_string();
+            } else {
+                entry.body.push_str(text);
+            }
+        } else {
+            self.messages.push(ChatEntry {
+                speaker: Speaker::Thinking,
+                body: text.to_string(),
+            });
+        }
+        self.transcript_scroll = 0;
+    }
+
     fn begin_submit(&mut self) -> Result<SubmitAction> {
         if self.pending_task.is_some() {
             self.status = Some("Request already in progress".to_string());
@@ -440,6 +462,12 @@ impl App {
                 if !text.is_empty() {
                     self.append_streamed_assistant_text(&text);
                     self.status = Some("Responding".to_string());
+                }
+            }
+            AgentProgress::ThinkingText { text } => {
+                if !text.is_empty() {
+                    self.append_streamed_thinking_text(&text);
+                    self.status = Some("Thinking".to_string());
                 }
             }
             AgentProgress::ToolCallStarted { name } => {

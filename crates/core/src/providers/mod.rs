@@ -34,6 +34,11 @@ pub(crate) struct ProviderResponse {
     pub streamed_text: bool,
 }
 
+pub(crate) enum DeltaEvent {
+    Text(String),
+    Thinking(String),
+}
+
 impl ProviderKind {
     pub fn from_env() -> io::Result<Self> {
         let raw = env::var("PROVIDER").unwrap_or_else(|_| "anthropic".to_string());
@@ -94,10 +99,10 @@ pub(crate) async fn send_message<F>(
     client: &reqwest::Client,
     config: &ProviderConfig,
     message_request: &AgentMessageRequest<'_>,
-    on_text_delta: &mut F,
+    on_delta: &mut F,
 ) -> Result<ProviderResponse, Box<dyn std::error::Error>>
 where
-    F: FnMut(String) + Send,
+    F: FnMut(DeltaEvent) + Send,
 {
     match (provider, config) {
         (
@@ -112,7 +117,7 @@ where
                 api_key,
                 anthropic_version,
                 message_request,
-                on_text_delta,
+                on_delta,
             )
             .await
         }
