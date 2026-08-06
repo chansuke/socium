@@ -73,15 +73,6 @@ struct CommandExecution {
     stderr: String,
 }
 
-#[allow(dead_code)]
-pub(crate) fn run_command_from_workspace(
-    workspace_root: &Path,
-    input: &Value,
-) -> Result<String, String> {
-    let mut noop = |_| {};
-    run_command_from_workspace_with_progress(workspace_root, input, &mut noop)
-}
-
 pub(crate) fn run_command_from_workspace_with_progress<F>(
     workspace_root: &Path,
     input: &Value,

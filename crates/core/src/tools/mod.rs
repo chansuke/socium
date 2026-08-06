@@ -335,7 +335,7 @@ pub fn default_tools() -> Vec<ToolDefinition> {
     ]
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn run_tool_calls(workspace_root: &Path, blocks: &[ContentBlock]) -> Vec<ContentBlock> {
     let mut noop = |_| {};
     run_tool_calls_with_progress(workspace_root, blocks, &mut noop)
@@ -364,7 +364,7 @@ where
         .collect()
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn run_tool_call(
     workspace_root: &Path,
     tool_use_id: &str,

@@ -18,10 +18,12 @@ pub(crate) fn resolve_workspace_command_cwd(
     Ok(resolved)
 }
 
-pub(crate) fn resolve_workspace_path(
+/// Canonicalizes the workspace root, rejects absolute request paths, and
+/// returns the joined candidate path together with the canonical workspace root.
+fn canonical_workspace_join(
     workspace_root: &Path,
     requested_path: &str,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, PathBuf), String> {
     let workspace_canonical = workspace_root.canonicalize().map_err(|e| {
         format!(
             "Failed to resolve workspace root '{}': {e}",
@@ -36,15 +38,32 @@ pub(crate) fn resolve_workspace_path(
         ));
     }
     let joined = workspace_canonical.join(path);
-    let canonical = joined
-        .canonicalize()
-        .map_err(|e| format!("Failed to resolve path '{}': {e}", requested_path))?;
-    if !canonical.starts_with(&workspace_canonical) {
+    Ok((joined, workspace_canonical))
+}
+
+fn ensure_inside_workspace(
+    canonical: &Path,
+    workspace_canonical: &Path,
+    requested_path: &str,
+) -> Result<(), String> {
+    if !canonical.starts_with(workspace_canonical) {
         return Err(format!(
             "Path '{}' is outside the workspace",
             requested_path
         ));
     }
+    Ok(())
+}
+
+pub(crate) fn resolve_workspace_path(
+    workspace_root: &Path,
+    requested_path: &str,
+) -> Result<PathBuf, String> {
+    let (joined, workspace_canonical) = canonical_workspace_join(workspace_root, requested_path)?;
+    let canonical = joined
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve path '{}': {e}", requested_path))?;
+    ensure_inside_workspace(&canonical, &workspace_canonical, requested_path)?;
     Ok(canonical)
 }
 
@@ -52,20 +71,7 @@ pub(crate) fn resolve_workspace_path_for_create(
     workspace_root: &Path,
     requested_path: &str,
 ) -> Result<PathBuf, String> {
-    let workspace_canonical = workspace_root.canonicalize().map_err(|e| {
-        format!(
-            "Failed to resolve workspace root '{}': {e}",
-            workspace_root.display()
-        )
-    })?;
-    let path = PathBuf::from(requested_path);
-    if path.is_absolute() {
-        return Err(format!(
-            "Absolute paths are not allowed: '{}'",
-            requested_path
-        ));
-    }
-    let joined = workspace_canonical.join(path);
+    let (joined, workspace_canonical) = canonical_workspace_join(workspace_root, requested_path)?;
     match fs::symlink_metadata(&joined) {
         Ok(metadata) => {
             let canonical = match joined.canonicalize() {
@@ -78,12 +84,7 @@ pub(crate) fn resolve_workspace_path_for_create(
                 }
                 Err(e) => return Err(format!("Failed to resolve path '{}': {e}", requested_path)),
             };
-            if !canonical.starts_with(&workspace_canonical) {
-                return Err(format!(
-                    "Path '{}' is outside the workspace",
-                    requested_path
-                ));
-            }
+            ensure_inside_workspace(&canonical, &workspace_canonical, requested_path)?;
             return Ok(canonical);
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -132,12 +133,7 @@ pub(crate) fn resolve_workspace_path_for_create(
             requested_path
         )
     })?;
-    if !canonical_ancestor.starts_with(&workspace_canonical) {
-        return Err(format!(
-            "Path '{}' is outside the workspace",
-            requested_path
-        ));
-    }
+    ensure_inside_workspace(&canonical_ancestor, &workspace_canonical, requested_path)?;
     Ok(joined)
 }
 

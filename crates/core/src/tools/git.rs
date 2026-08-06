@@ -33,7 +33,7 @@ pub(crate) fn git_status_from_workspace(
         args.push("--".to_string());
         args.push(git_relative_path(workspace_root, path)?);
     }
-    let output = run_git_capture_owned(workspace_root, &args)?;
+    let output = run_git_capture(workspace_root, &args)?;
     let stdout = stdout_to_string(&output)?;
     let mut lines = stdout.lines();
     let branch_line = lines.next().unwrap_or("## HEAD");
@@ -62,7 +62,7 @@ pub(crate) fn git_diff_from_workspace(
         args.push("--".to_string());
         args.push(git_relative_path(workspace_root, path)?);
     }
-    let output = run_git_capture_owned(workspace_root, &args)?;
+    let output = run_git_capture(workspace_root, &args)?;
     let stdout = stdout_to_string(&output)?;
     let mut result = Vec::new();
     if let Some(path) = path {
@@ -82,7 +82,7 @@ pub(crate) fn git_log_from_workspace(
 ) -> Result<String, String> {
     let input_object = require_object_input(input, "git_log")?;
     let max_count = optional_bounded_usize_field(input_object, "max_count", "git_log", 10, 100)?;
-    let output = run_git_capture_owned(
+    let output = run_git_capture(
         workspace_root,
         &[
             "log".to_string(),
@@ -100,7 +100,7 @@ pub(crate) fn git_log_from_workspace(
     Ok(result.join("\n"))
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn git_commit_from_workspace(
     workspace_root: &Path,
     input: &Value,
@@ -138,7 +138,7 @@ where
     }
 
     run_git_capture(workspace_root, &["add", "-A"])?;
-    run_git_capture_owned(
+    run_git_capture(
         workspace_root,
         &["commit".to_string(), "-m".to_string(), message.to_string()],
     )?;
@@ -148,20 +148,12 @@ where
     Ok(format!("Commit: {commit}\nMessage: {message}"))
 }
 
-fn run_git_capture(workspace_root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    let owned = args
-        .iter()
-        .map(|arg| (*arg).to_string())
-        .collect::<Vec<_>>();
-    run_git_capture_owned(workspace_root, &owned)
-}
-
-fn run_git_capture_owned(
-    workspace_root: &Path,
-    args: &[String],
-) -> Result<std::process::Output, String> {
+fn run_git_capture<S>(workspace_root: &Path, args: &[S]) -> Result<std::process::Output, String>
+where
+    S: AsRef<str> + std::fmt::Debug,
+{
     let output = Command::new("git")
-        .args(args)
+        .args(args.iter().map(AsRef::as_ref))
         .current_dir(workspace_root)
         .output()
         .map_err(|e| format!("Failed to run git command {:?}: {e}", args))?;
