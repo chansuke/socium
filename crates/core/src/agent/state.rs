@@ -57,3 +57,54 @@ where
     })?;
     fs::write(path, serialized)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::make_temp_dir;
+    use serde::{Deserialize, Serialize};
+    use std::fs;
+
+    #[derive(Debug, Serialize, Deserialize, Default)]
+    struct InputHistoryState {
+        entries: Vec<String>,
+    }
+
+    #[test]
+    fn load_json_file_returns_default_for_missing_file() {
+        let temp = make_temp_dir("json-default");
+        let missing = temp.path().join("missing.json");
+
+        let state = load_json_file::<InputHistoryState>(&missing).unwrap();
+
+        assert!(state.entries.is_empty());
+    }
+
+    #[test]
+    fn load_json_file_reports_invalid_data() {
+        let temp = make_temp_dir("json-invalid");
+        let path = temp.path().join("invalid.json");
+        fs::write(&path, "{ not-valid-json }").unwrap();
+
+        let err = load_json_file::<InputHistoryState>(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("Invalid JSON"));
+        assert!(err.to_string().contains("invalid.json"));
+    }
+
+    #[test]
+    fn save_json_file_creates_parent_directory_and_round_trips() {
+        let temp = make_temp_dir("json-save");
+        let path = temp.path().join("nested/state/history.json");
+        let state = InputHistoryState {
+            entries: vec!["one".to_string(), "two".to_string()],
+        };
+
+        save_json_file(&path, &state).unwrap();
+
+        assert!(path.exists());
+        let loaded = load_json_file::<InputHistoryState>(&path).unwrap();
+        assert_eq!(loaded.entries, state.entries);
+    }
+}

@@ -1,0 +1,16 @@
+use crate::constants::MAX_TOOL_ROUNDS;
+use crate::providers::error::ProviderError;
+
+/// Error type for the public `AgentService` API.
+///
+/// Tool failures deliberately do not appear here: a failing tool becomes an
+/// `is_error` tool result inside the turn, not a turn failure.
+#[derive(Debug, thiserror::Error)]
+pub enum AgentError {
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
+    #[error(transparent)]
+    State(#[from] std::io::Error),
+    #[error("Tool execution reached the maximum rounds ({MAX_TOOL_ROUNDS}) and may be incomplete")]
+    ToolRoundsExhausted,
+}

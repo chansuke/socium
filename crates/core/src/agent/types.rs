@@ -39,6 +39,8 @@ pub(crate) struct AgentMessageResponse {
 pub(crate) enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
