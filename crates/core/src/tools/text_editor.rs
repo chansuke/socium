@@ -1,3 +1,4 @@
+use crate::AgentProgress;
 use crate::constants::*;
 use crate::tools::edit_history::{pop_edit_history, record_edit_history};
 use crate::tools::error::ToolError;
@@ -9,9 +10,35 @@ use crate::tools::text_file::{
     truncate_by_characters,
 };
 use crate::tools::workspace::{resolve_workspace_path, resolve_workspace_path_for_create};
+use crate::tools::{AnthropicTextEditorToolDefinition, Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
+
+pub(crate) struct TextEditorTool;
+
+impl Tool for TextEditorTool {
+    fn name(&self) -> &'static str {
+        TEXT_EDITOR_TOOL_NAME
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::AnthropicTextEditor(AnthropicTextEditorToolDefinition {
+            tool_type: "text_editor_20250728".to_string(),
+            name: TEXT_EDITOR_TOOL_NAME.to_string(),
+            max_characters: Some(MAX_TEXT_EDITOR_VIEW_CHARACTERS),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        _on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        text_editor_from_workspace(ctx.workspace_root, input)
+    }
+}
 
 pub(crate) fn text_editor_from_workspace(
     workspace_root: &Path,

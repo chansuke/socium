@@ -4,11 +4,66 @@ use crate::tools::error::ToolError;
 use crate::tools::input::{optional_string_field, optional_timeout_ms, require_string_array_field};
 use crate::tools::text_file::truncate_by_characters;
 use crate::tools::workspace::resolve_workspace_command_cwd;
-use serde_json::Value;
+use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use serde_json::{Value, json};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+pub(crate) struct RunCommandTool;
+
+impl Tool for RunCommandTool {
+    fn name(&self) -> &'static str {
+        "run_command"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::Custom(CustomToolDefinition {
+            name: "run_command".to_string(),
+            description: "Run a workspace command for search, build, test, lint, or local execution. Commands are passed as an array of executable plus arguments, not as a shell string. The runtime classifies commands as safe-read-only, workspace-write, or destructive and may require the approval field to match the required permission level."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "array",
+                        "description": "Executable followed by arguments, each as a separate string.",
+                        "items": {
+                            "type": "string"
+                        },
+                        "minItems": 1
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional relative working directory inside the workspace. Defaults to the workspace root."
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": format!("Optional timeout in milliseconds. Must be between 1 and {MAX_COMMAND_TIMEOUT_MS}.")
+                    },
+                    "approval": {
+                        "type": "string",
+                        "description": "Optional approval granted by the user when the runtime requires it.",
+                        "enum": ["workspace-write", "destructive"]
+                    }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            }),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        let mut forward = |progress| on_progress(progress);
+        run_command_from_workspace_with_progress(ctx.workspace_root, input, &mut forward)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum CommandApproval {

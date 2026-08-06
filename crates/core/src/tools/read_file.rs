@@ -1,10 +1,48 @@
+use crate::AgentProgress;
 use crate::constants::*;
 use crate::tools::error::ToolError;
 use crate::tools::text_file::read_utf8_file_with_limit;
 use crate::tools::workspace::resolve_workspace_path;
-use serde_json::Value;
+use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
+
+pub(crate) struct ReadFileTool;
+
+impl Tool for ReadFileTool {
+    fn name(&self) -> &'static str {
+        "read_file"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::Custom(CustomToolDefinition {
+            name: "read_file".to_string(),
+            description: "Read a UTF-8 text file from the current workspace by relative path."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to a file in the workspace. Absolute paths are not allowed."
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        _on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        read_file_from_workspace(ctx.workspace_root, input)
+    }
+}
 
 struct ReadFileInput<'a> {
     path: &'a str,

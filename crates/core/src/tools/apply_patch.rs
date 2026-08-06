@@ -1,12 +1,54 @@
+use crate::AgentProgress;
 use crate::constants::*;
 use crate::tools::error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{optional_bool_field, require_string_field};
 use crate::tools::text_file::read_utf8_file_with_limit;
 use crate::tools::workspace::{resolve_workspace_path, resolve_workspace_path_for_create};
-use serde_json::Value;
+use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
+
+pub(crate) struct ApplyPatchTool;
+
+impl Tool for ApplyPatchTool {
+    fn name(&self) -> &'static str {
+        "apply_patch"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::Custom(CustomToolDefinition {
+            name: "apply_patch".to_string(),
+            description: "Apply a structured patch with add, delete, or multi-hunk update operations inside the workspace."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true, validates the patch and returns a preview without writing files."
+                    },
+                    "patch": {
+                        "type": "string",
+                        "description": "Patch text using *** Begin Patch / *** End Patch blocks with Add File, Delete File, or Update File sections."
+                    }
+                },
+                "required": ["patch"],
+                "additionalProperties": false
+            }),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        _on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        apply_patch_from_workspace(ctx.workspace_root, input)
+    }
+}
 
 enum PatchAction {
     Add {

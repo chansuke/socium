@@ -1,11 +1,56 @@
+use crate::AgentProgress;
 use crate::constants::*;
 use crate::tools::error::ToolError;
 use crate::tools::input::{optional_bool_field, optional_string_field};
 use crate::tools::ripgrep::glob_matches;
 use crate::tools::workspace::resolve_workspace_path;
-use serde_json::Value;
+use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
+
+pub(crate) struct ListFilesTool;
+
+impl Tool for ListFilesTool {
+    fn name(&self) -> &'static str {
+        "list_files"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::Custom(CustomToolDefinition {
+            name: "list_files".to_string(),
+            description: "List files and directories at a given path. Supports optional recursive traversal and file glob filtering for repo navigation."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Optional relative path to a file or directory in the workspace. Defaults to the current directory."
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "If true, recursively lists matching files beneath the path."
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "Optional glob filter such as '*.rs' or 'src/**/*.ts'. Applies to file paths relative to the requested path."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        _on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        list_files_from_workspace(ctx.workspace_root, input)
+    }
+}
 
 struct ListFilesInput<'a> {
     path: &'a str,

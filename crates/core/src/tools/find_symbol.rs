@@ -1,3 +1,4 @@
+use crate::AgentProgress;
 use crate::constants::*;
 use crate::tools::error::ToolError;
 use crate::tools::input::{
@@ -7,8 +8,53 @@ use crate::tools::ripgrep::{
     SearchExecution, SearchMode, format_search_results, search_with_ripgrep_fallback,
 };
 use crate::tools::workspace::resolve_workspace_path;
-use serde_json::Value;
+use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use serde_json::{Value, json};
 use std::path::Path;
+
+pub(crate) struct FindSymbolTool;
+
+impl Tool for FindSymbolTool {
+    fn name(&self) -> &'static str {
+        "find_symbol"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::Custom(CustomToolDefinition {
+            name: "find_symbol".to_string(),
+            description: "Find declaration-like Rust symbol references for quick navigation. Returns line-addressable matches in the form path:line:text."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Rust symbol name to search for."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Optional relative file or directory path to limit the search scope."
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": format!("Optional max number of matches to return. Must be between 1 and {MAX_SEARCH_RESULTS}.")
+                    }
+                },
+                "required": ["symbol"],
+                "additionalProperties": false
+            }),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        _on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        find_symbol_in_workspace(ctx.workspace_root, input)
+    }
+}
 
 struct FindSymbolInput<'a> {
     symbol: &'a str,

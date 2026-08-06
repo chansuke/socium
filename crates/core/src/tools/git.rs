@@ -5,9 +5,186 @@ use crate::tools::input::{
     require_string_field,
 };
 use crate::tools::workspace::resolve_workspace_path;
-use serde_json::Value;
+use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use serde_json::{Value, json};
 use std::path::Path;
 use std::process::Command;
+
+pub(crate) struct GitBranchTool;
+
+impl Tool for GitBranchTool {
+    fn name(&self) -> &'static str {
+        "git_branch"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::Custom(CustomToolDefinition {
+            name: "git_branch".to_string(),
+            description: "Show the current Git branch for the workspace repository.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        _on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        git_branch_from_workspace(ctx.workspace_root, input)
+    }
+}
+
+pub(crate) struct GitStatusTool;
+
+impl Tool for GitStatusTool {
+    fn name(&self) -> &'static str {
+        "git_status"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::Custom(CustomToolDefinition {
+            name: "git_status".to_string(),
+            description:
+                "Show Git status for the workspace repository, including branch and dirty files."
+                    .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Optional relative path to limit status output to part of the workspace."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        _on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        git_status_from_workspace(ctx.workspace_root, input)
+    }
+}
+
+pub(crate) struct GitDiffTool;
+
+impl Tool for GitDiffTool {
+    fn name(&self) -> &'static str {
+        "git_diff"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::Custom(CustomToolDefinition {
+            name: "git_diff".to_string(),
+            description:
+                "Show the current Git diff for the workspace repository or an optional relative path."
+                    .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Optional relative path to limit the diff."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        _on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        git_diff_from_workspace(ctx.workspace_root, input)
+    }
+}
+
+pub(crate) struct GitLogTool;
+
+impl Tool for GitLogTool {
+    fn name(&self) -> &'static str {
+        "git_log"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::Custom(CustomToolDefinition {
+            name: "git_log".to_string(),
+            description: "Show recent Git commit history for the workspace repository.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "max_count": {
+                        "type": "integer",
+                        "description": "Optional number of commits to return."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        _on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        git_log_from_workspace(ctx.workspace_root, input)
+    }
+}
+
+pub(crate) struct GitCommitTool;
+
+impl Tool for GitCommitTool {
+    fn name(&self) -> &'static str {
+        "git_commit"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::Custom(CustomToolDefinition {
+            name: "git_commit".to_string(),
+            description: "Create a Git commit for the current workspace, but only when the caller explicitly confirms the intent."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Commit message to use."
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Must be true to confirm explicit user intent for the commit."
+                    }
+                },
+                "required": ["message", "confirmed"],
+                "additionalProperties": false
+            }),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        let mut forward = |progress| on_progress(progress);
+        git_commit_from_workspace_with_progress(ctx.workspace_root, input, &mut forward)
+    }
+}
 
 struct GitPathInput<'a> {
     path: Option<&'a str>,
