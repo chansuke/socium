@@ -4,7 +4,7 @@ use crate::constants::MAX_TOOL_ROUNDS;
 use crate::providers;
 use crate::providers::{DeltaEvent, ProviderConfig, ProviderKind};
 use crate::tools::ToolDefinition;
-use crate::tools::runtime::run_tool_calls_with_progress;
+use crate::tools::run_tool_calls_with_progress;
 use std::io::Error;
 use std::path::Path;
 
@@ -92,4 +92,32 @@ pub(crate) fn extract_text(blocks: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::types::ContentBlock;
+    use serde_json::json;
+
+    #[test]
+    fn extract_text_ignores_non_text_blocks() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "first".to_string(),
+            },
+            ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "read_file".to_string(),
+                input: json!({"path": "ignored.txt"}),
+            },
+            ContentBlock::Text {
+                text: "second".to_string(),
+            },
+        ];
+
+        let text = extract_text(&blocks);
+
+        assert_eq!(text, "first\nsecond");
+    }
 }
