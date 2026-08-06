@@ -40,17 +40,37 @@ impl App {
             started_at,
         } = pending;
 
-        tokio::spawn(async move {
-            let reply = agent
-                .submit_with_progress(user_input, |event| {
-                    let _ = progress_tx.send(event);
-                })
-                .await
-                .map_err(|err| err.to_string());
-            let _ = result_tx.send(SubmitOutcome {
-                agent,
-                reply,
-                latency_ms: started_at.elapsed().as_millis(),
+        // Run the submission on a dedicated OS thread with its own
+        // current-thread runtime: the tool runtime is synchronous and
+        // blocking (std::process, std::fs), so it must not occupy a worker
+        // of the UI's tokio runtime.
+        std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    let _ = result_tx.send(SubmitOutcome {
+                        agent,
+                        reply: Err(err.to_string()),
+                        latency_ms: started_at.elapsed().as_millis(),
+                    });
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let reply = agent
+                    .submit_with_progress(user_input, |event| {
+                        let _ = progress_tx.send(event);
+                    })
+                    .await
+                    .map_err(|err| err.to_string());
+                let _ = result_tx.send(SubmitOutcome {
+                    agent,
+                    reply,
+                    latency_ms: started_at.elapsed().as_millis(),
+                });
             });
         });
 
