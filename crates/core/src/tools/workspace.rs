@@ -1,3 +1,4 @@
+use crate::tools::error::ToolError;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -5,15 +6,15 @@ use std::path::{Path, PathBuf};
 pub(crate) fn resolve_workspace_command_cwd(
     workspace_root: &Path,
     requested_path: &str,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, ToolError> {
     let resolved = resolve_workspace_path(workspace_root, requested_path)?;
     let metadata = fs::metadata(&resolved)
         .map_err(|e| format!("Failed to inspect command cwd '{}': {e}", requested_path))?;
     if !metadata.is_dir() {
-        return Err(format!(
+        return Err(ToolError::Message(format!(
             "run_command cwd is not a directory: '{}'",
             requested_path
-        ));
+        )));
     }
     Ok(resolved)
 }
@@ -23,7 +24,7 @@ pub(crate) fn resolve_workspace_command_cwd(
 fn canonical_workspace_join(
     workspace_root: &Path,
     requested_path: &str,
-) -> Result<(PathBuf, PathBuf), String> {
+) -> Result<(PathBuf, PathBuf), ToolError> {
     let workspace_canonical = workspace_root.canonicalize().map_err(|e| {
         format!(
             "Failed to resolve workspace root '{}': {e}",
@@ -32,10 +33,9 @@ fn canonical_workspace_join(
     })?;
     let path = PathBuf::from(requested_path);
     if path.is_absolute() {
-        return Err(format!(
-            "Absolute paths are not allowed: '{}'",
-            requested_path
-        ));
+        return Err(ToolError::AbsolutePath {
+            path: requested_path.to_string(),
+        });
     }
     let joined = workspace_canonical.join(path);
     Ok((joined, workspace_canonical))
@@ -45,12 +45,11 @@ fn ensure_inside_workspace(
     canonical: &Path,
     workspace_canonical: &Path,
     requested_path: &str,
-) -> Result<(), String> {
+) -> Result<(), ToolError> {
     if !canonical.starts_with(workspace_canonical) {
-        return Err(format!(
-            "Path '{}' is outside the workspace",
-            requested_path
-        ));
+        return Err(ToolError::OutsideWorkspace {
+            path: requested_path.to_string(),
+        });
     }
     Ok(())
 }
@@ -58,7 +57,7 @@ fn ensure_inside_workspace(
 pub(crate) fn resolve_workspace_path(
     workspace_root: &Path,
     requested_path: &str,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, ToolError> {
     let (joined, workspace_canonical) = canonical_workspace_join(workspace_root, requested_path)?;
     let canonical = joined
         .canonicalize()
@@ -70,26 +69,27 @@ pub(crate) fn resolve_workspace_path(
 pub(crate) fn resolve_workspace_path_for_create(
     workspace_root: &Path,
     requested_path: &str,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, ToolError> {
     let (joined, workspace_canonical) = canonical_workspace_join(workspace_root, requested_path)?;
     match fs::symlink_metadata(&joined) {
         Ok(metadata) => {
             let canonical = match joined.canonicalize() {
                 Ok(path) => path,
                 Err(e) if metadata.file_type().is_symlink() && e.kind() == ErrorKind::NotFound => {
-                    return Err(format!(
-                        "Path '{}' points to a dangling symlink",
-                        requested_path
-                    ));
+                    return Err(
+                        format!("Path '{}' points to a dangling symlink", requested_path).into(),
+                    );
                 }
-                Err(e) => return Err(format!("Failed to resolve path '{}': {e}", requested_path)),
+                Err(e) => {
+                    return Err(format!("Failed to resolve path '{}': {e}", requested_path).into());
+                }
             };
             ensure_inside_workspace(&canonical, &workspace_canonical, requested_path)?;
             return Ok(canonical);
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => {
-            return Err(format!("Failed to inspect path '{}': {e}", requested_path));
+            return Err(format!("Failed to inspect path '{}': {e}", requested_path).into());
         }
     }
 
@@ -105,13 +105,15 @@ pub(crate) fn resolve_workspace_path_for_create(
                         return Err(format!(
                             "Path '{}' includes a dangling symlink in an ancestor",
                             requested_path
-                        ));
+                        )
+                        .into());
                     }
                     Err(e) => {
                         return Err(format!(
                             "Failed to resolve parent directory for '{}': {e}",
                             requested_path
-                        ));
+                        )
+                        .into());
                     }
                 };
                 canonical_ancestor = Some(canonical);
@@ -122,7 +124,8 @@ pub(crate) fn resolve_workspace_path_for_create(
                 return Err(format!(
                     "Failed to inspect parent directory for '{}': {e}",
                     requested_path
-                ));
+                )
+                .into());
             }
         }
     }
@@ -159,7 +162,13 @@ mod tests {
         let result = resolve_workspace_path(workspace.path(), &escape);
 
         assert!(result.is_err());
-        assert!(result.err().unwrap().contains("outside the workspace"));
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("outside the workspace")
+        );
     }
 
     #[test]
@@ -182,7 +191,13 @@ mod tests {
         let result = resolve_workspace_path(workspace.path(), "missing.txt");
 
         assert!(result.is_err());
-        assert!(result.err().unwrap().starts_with("Failed to resolve path"));
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .starts_with("Failed to resolve path")
+        );
     }
 
     #[test]
@@ -198,6 +213,7 @@ mod tests {
             result
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("Absolute paths are not allowed")
         );
     }
@@ -225,7 +241,13 @@ mod tests {
         let result = resolve_workspace_path_for_create(workspace.path(), &escape);
 
         assert!(result.is_err());
-        assert!(result.err().unwrap().contains("outside the workspace"));
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("outside the workspace")
+        );
     }
 
     #[cfg(unix)]
@@ -242,7 +264,13 @@ mod tests {
         let result = resolve_workspace_path_for_create(workspace.path(), "link.txt");
 
         assert!(result.is_err());
-        assert!(result.err().unwrap().contains("dangling symlink"));
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("dangling symlink")
+        );
     }
 
     #[cfg(unix)]
@@ -260,6 +288,12 @@ mod tests {
         let output = read_file_from_workspace(workspace.path(), &json!({"path": "link.txt"}));
 
         assert!(output.is_err());
-        assert!(output.err().unwrap().contains("outside the workspace"));
+        assert!(
+            output
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("outside the workspace")
+        );
     }
 }

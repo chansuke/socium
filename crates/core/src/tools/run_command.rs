@@ -1,5 +1,6 @@
 use crate::AgentProgress;
 use crate::constants::*;
+use crate::tools::error::ToolError;
 use crate::tools::input::{optional_string_field, optional_timeout_ms, require_string_array_field};
 use crate::tools::text_file::truncate_by_characters;
 use crate::tools::workspace::resolve_workspace_command_cwd;
@@ -73,25 +74,49 @@ struct CommandExecution {
     stderr: String,
 }
 
+struct RunCommandInput<'a> {
+    command: Vec<String>,
+    cwd: &'a str,
+    timeout_ms: u64,
+    approval: CommandApproval,
+}
+
+impl<'a> RunCommandInput<'a> {
+    fn parse(input: &'a Value) -> Result<Self, ToolError> {
+        let input_object = input
+            .as_object()
+            .ok_or("run_command requires an object input")?;
+        let command = require_string_array_field(input_object, "command", "run_command")?;
+        let cwd = optional_string_field(input_object, "cwd", "run_command cwd")?.unwrap_or(".");
+        let timeout_ms = optional_timeout_ms(input_object)?;
+        let approval = CommandApproval::parse(optional_string_field(
+            input_object,
+            "approval",
+            "run_command approval",
+        )?)?;
+        Ok(Self {
+            command,
+            cwd,
+            timeout_ms,
+            approval,
+        })
+    }
+}
+
 pub(crate) fn run_command_from_workspace_with_progress<F>(
     workspace_root: &Path,
     input: &Value,
     on_progress: &mut F,
-) -> Result<String, String>
+) -> Result<String, ToolError>
 where
     F: FnMut(AgentProgress),
 {
-    let input_object = input
-        .as_object()
-        .ok_or("run_command requires an object input")?;
-    let command = require_string_array_field(input_object, "command", "run_command")?;
-    let cwd = optional_string_field(input_object, "cwd", "run_command cwd")?.unwrap_or(".");
-    let timeout_ms = optional_timeout_ms(input_object)?;
-    let approval = CommandApproval::parse(optional_string_field(
-        input_object,
-        "approval",
-        "run_command approval",
-    )?)?;
+    let RunCommandInput {
+        command,
+        cwd,
+        timeout_ms,
+        approval,
+    } = RunCommandInput::parse(input)?;
     let permission = classify_command(&command);
     let required_approval = permission.required_approval();
 
@@ -106,7 +131,7 @@ where
             permission.label(),
             required_approval.label(),
             required_approval.label()
-        ));
+        ).into());
     }
 
     let resolved_cwd = resolve_workspace_command_cwd(workspace_root, cwd)?;
@@ -129,7 +154,7 @@ where
 
     let output = format_command_execution(&execution);
     if execution.timed_out || execution.exit_code.unwrap_or_default() != 0 {
-        Err(output)
+        Err(output.into())
     } else {
         Ok(output)
     }

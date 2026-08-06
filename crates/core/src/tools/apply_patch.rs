@@ -1,4 +1,5 @@
 use crate::constants::*;
+use crate::tools::error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{optional_bool_field, require_string_field};
 use crate::tools::text_file::read_utf8_file_with_limit;
@@ -27,16 +28,28 @@ struct PatchHunk {
     new_lines: Vec<String>,
 }
 
+struct ApplyPatchInput<'a> {
+    patch: &'a str,
+    dry_run: bool,
+}
+
+impl<'a> ApplyPatchInput<'a> {
+    fn parse(input: &'a Value) -> Result<Self, ToolError> {
+        let input_object = input
+            .as_object()
+            .ok_or("apply_patch requires an object input")?;
+        let patch = require_string_field(input_object, "patch", "apply_patch")?;
+        let dry_run =
+            optional_bool_field(input_object, "dry_run", "apply_patch dry_run")?.unwrap_or(false);
+        Ok(Self { patch, dry_run })
+    }
+}
+
 pub(crate) fn apply_patch_from_workspace(
     workspace_root: &Path,
     input: &Value,
-) -> Result<String, String> {
-    let input_object = input
-        .as_object()
-        .ok_or("apply_patch requires an object input")?;
-    let patch = require_string_field(input_object, "patch", "apply_patch")?;
-    let dry_run =
-        optional_bool_field(input_object, "dry_run", "apply_patch dry_run")?.unwrap_or(false);
+) -> Result<String, ToolError> {
+    let ApplyPatchInput { patch, dry_run } = ApplyPatchInput::parse(input)?;
     let actions = parse_patch_actions(patch)?;
     if dry_run {
         return preview_patch_actions(workspace_root, &actions);
@@ -48,7 +61,7 @@ pub(crate) fn apply_patch_from_workspace(
             PatchAction::Add { path, content } => {
                 let target_path = resolve_workspace_path_for_create(workspace_root, &path)?;
                 if target_path.exists() {
-                    return Err(format!("Cannot add file '{}': path already exists", path));
+                    return Err(format!("Cannot add file '{}': path already exists", path).into());
                 }
                 if let Some(parent) = target_path.parent() {
                     fs::create_dir_all(parent).map_err(|e| {
@@ -64,7 +77,7 @@ pub(crate) fn apply_patch_from_workspace(
                 let metadata = fs::metadata(&target_path)
                     .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
                 if !metadata.is_file() {
-                    return Err(format!("Path is not a file: '{}'", path));
+                    return Err(format!("Path is not a file: '{}'", path).into());
                 }
                 fs::remove_file(&target_path)
                     .map_err(|e| format!("Failed to delete file '{}': {e}", path))?;
@@ -79,7 +92,7 @@ pub(crate) fn apply_patch_from_workspace(
                 let metadata = fs::metadata(&source_path)
                     .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
                 if !metadata.is_file() {
-                    return Err(format!("Path is not a file: '{}'", path));
+                    return Err(format!("Path is not a file: '{}'", path).into());
                 }
                 let content = read_utf8_file_with_limit(&source_path, &path, MAX_READ_FILE_BYTES)?;
                 let updated = apply_patch_hunks_to_text(&content, &path, &hunks)?;
@@ -90,7 +103,8 @@ pub(crate) fn apply_patch_from_workspace(
                         return Err(format!(
                             "Cannot move file '{}' to '{}': destination already exists",
                             path, move_to
-                        ));
+                        )
+                        .into());
                     }
                     target_path
                 } else {
@@ -303,7 +317,10 @@ fn find_hunk_position(lines: &[String], needle: &[String], search_start: usize) 
         .find(|start| lines[*start..*start + needle.len()] == *needle)
 }
 
-fn preview_patch_actions(workspace_root: &Path, actions: &[PatchAction]) -> Result<String, String> {
+fn preview_patch_actions(
+    workspace_root: &Path,
+    actions: &[PatchAction],
+) -> Result<String, ToolError> {
     let mut lines = vec!["Preview: true".to_string()];
     for action in actions {
         match action {

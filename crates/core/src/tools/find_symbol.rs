@@ -1,4 +1,5 @@
 use crate::constants::*;
+use crate::tools::error::ToolError;
 use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_string_field,
 };
@@ -9,22 +10,43 @@ use crate::tools::workspace::resolve_workspace_path;
 use serde_json::Value;
 use std::path::Path;
 
+struct FindSymbolInput<'a> {
+    symbol: &'a str,
+    path: &'a str,
+    max_results: usize,
+}
+
+impl<'a> FindSymbolInput<'a> {
+    fn parse(input: &'a Value) -> Result<Self, ToolError> {
+        let input_object = input
+            .as_object()
+            .ok_or("find_symbol requires an object input")?;
+        let symbol = require_string_field(input_object, "symbol", "find_symbol")?;
+        let path = optional_string_field(input_object, "path", "find_symbol path")?.unwrap_or(".");
+        let max_results = optional_bounded_usize_field(
+            input_object,
+            "max_results",
+            "find_symbol",
+            DEFAULT_SEARCH_RESULTS,
+            MAX_SEARCH_RESULTS,
+        )?;
+        Ok(Self {
+            symbol,
+            path,
+            max_results,
+        })
+    }
+}
+
 pub(crate) fn find_symbol_in_workspace(
     workspace_root: &Path,
     input: &Value,
-) -> Result<String, String> {
-    let input_object = input
-        .as_object()
-        .ok_or("find_symbol requires an object input")?;
-    let symbol = require_string_field(input_object, "symbol", "find_symbol")?;
-    let path = optional_string_field(input_object, "path", "find_symbol path")?.unwrap_or(".");
-    let max_results = optional_bounded_usize_field(
-        input_object,
-        "max_results",
-        "find_symbol",
-        DEFAULT_SEARCH_RESULTS,
-        MAX_SEARCH_RESULTS,
-    )?;
+) -> Result<String, ToolError> {
+    let FindSymbolInput {
+        symbol,
+        path,
+        max_results,
+    } = FindSymbolInput::parse(input)?;
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
 
     let execution = search_with_ripgrep_fallback(
@@ -54,10 +76,8 @@ pub(crate) fn find_symbol_in_workspace(
 
     match status_code {
         Some(0) | Some(1) => Ok(formatted),
-        Some(code) => Err(format!(
-            "find_symbol failed with exit code {code}\n{formatted}"
-        )),
-        None => Err(format!("find_symbol terminated unexpectedly\n{formatted}")),
+        Some(code) => Err(format!("find_symbol failed with exit code {code}\n{formatted}").into()),
+        None => Err(format!("find_symbol terminated unexpectedly\n{formatted}").into()),
     }
 }
 

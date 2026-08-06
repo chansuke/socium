@@ -1,37 +1,44 @@
 use crate::constants::*;
+use crate::tools::error::ToolError;
 use serde_json::Value;
 
 pub(crate) fn require_object_input<'a>(
     input: &'a Value,
     tool_name: &str,
-) -> Result<&'a serde_json::Map<String, Value>, String> {
-    input
-        .as_object()
-        .ok_or_else(|| format!("{tool_name} requires an object input"))
+) -> Result<&'a serde_json::Map<String, Value>, ToolError> {
+    input.as_object().ok_or_else(|| ToolError::NotAnObject {
+        tool: tool_name.to_string(),
+    })
 }
 
 pub(crate) fn require_string_field<'a>(
     input: &'a serde_json::Map<String, Value>,
     field: &str,
     context: &str,
-) -> Result<&'a str, String> {
+) -> Result<&'a str, ToolError> {
     input
         .get(field)
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("{context} requires a string field: {field}"))
+        .ok_or_else(|| ToolError::MissingStringField {
+            context: context.to_string(),
+            field: field.to_string(),
+        })
 }
 
 pub(crate) fn optional_string_field<'a>(
     input: &'a serde_json::Map<String, Value>,
     field: &str,
     context: &str,
-) -> Result<Option<&'a str>, String> {
+) -> Result<Option<&'a str>, ToolError> {
     match input.get(field) {
         None => Ok(None),
         Some(value) => value
             .as_str()
             .map(Some)
-            .ok_or_else(|| format!("{context} requires a string field: {field}")),
+            .ok_or_else(|| ToolError::MissingStringField {
+                context: context.to_string(),
+                field: field.to_string(),
+            }),
     }
 }
 
@@ -39,13 +46,16 @@ pub(crate) fn optional_bool_field(
     input: &serde_json::Map<String, Value>,
     field: &str,
     context: &str,
-) -> Result<Option<bool>, String> {
+) -> Result<Option<bool>, ToolError> {
     match input.get(field) {
         None => Ok(None),
         Some(value) => value
             .as_bool()
             .map(Some)
-            .ok_or_else(|| format!("{context} requires a boolean field: {field}")),
+            .ok_or_else(|| ToolError::MissingBoolField {
+                context: context.to_string(),
+                field: field.to_string(),
+            }),
     }
 }
 
@@ -55,19 +65,26 @@ pub(crate) fn optional_bounded_usize_field(
     context: &str,
     default: usize,
     max: usize,
-) -> Result<usize, String> {
+) -> Result<usize, ToolError> {
     let Some(value) = input.get(field) else {
         return Ok(default);
     };
     let raw = value
         .as_u64()
-        .ok_or_else(|| format!("{context} requires an integer field: {field}"))?;
-    let parsed = usize::try_from(raw)
-        .map_err(|_| format!("{context} field '{field}' is too large for this platform"))?;
+        .ok_or_else(|| ToolError::MissingIntegerField {
+            context: context.to_string(),
+            field: field.to_string(),
+        })?;
+    let parsed = usize::try_from(raw).map_err(|_| ToolError::IntegerFieldTooLarge {
+        context: context.to_string(),
+        field: field.to_string(),
+    })?;
     if !(1..=max).contains(&parsed) {
-        return Err(format!(
-            "{context} field '{field}' must be between 1 and {max}"
-        ));
+        return Err(ToolError::IntegerFieldOutOfRange {
+            context: context.to_string(),
+            field: field.to_string(),
+            max,
+        });
     }
     Ok(parsed)
 }
@@ -76,15 +93,20 @@ pub(crate) fn require_string_array_field(
     input: &serde_json::Map<String, Value>,
     field: &str,
     context: &str,
-) -> Result<Vec<String>, String> {
-    let values = input
-        .get(field)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("{context} requires an array field: {field}"))?;
+) -> Result<Vec<String>, ToolError> {
+    let values =
+        input
+            .get(field)
+            .and_then(Value::as_array)
+            .ok_or_else(|| ToolError::MissingArrayField {
+                context: context.to_string(),
+                field: field.to_string(),
+            })?;
     if values.is_empty() {
-        return Err(format!(
-            "{context} requires a non-empty array field: {field}"
-        ));
+        return Err(ToolError::EmptyArrayField {
+            context: context.to_string(),
+            field: field.to_string(),
+        });
     }
 
     values
@@ -93,7 +115,10 @@ pub(crate) fn require_string_array_field(
             value
                 .as_str()
                 .map(ToString::to_string)
-                .ok_or_else(|| format!("{context} requires string array items in field: {field}"))
+                .ok_or_else(|| ToolError::NonStringArrayItem {
+                    context: context.to_string(),
+                    field: field.to_string(),
+                })
         })
         .collect()
 }
@@ -102,14 +127,19 @@ pub(crate) fn require_i64_field(
     input: &serde_json::Map<String, Value>,
     field: &str,
     context: &str,
-) -> Result<i64, String> {
+) -> Result<i64, ToolError> {
     input
         .get(field)
         .and_then(Value::as_i64)
-        .ok_or_else(|| format!("{context} requires an integer field: {field}"))
+        .ok_or_else(|| ToolError::MissingIntegerField {
+            context: context.to_string(),
+            field: field.to_string(),
+        })
 }
 
-pub(crate) fn optional_timeout_ms(input: &serde_json::Map<String, Value>) -> Result<u64, String> {
+pub(crate) fn optional_timeout_ms(
+    input: &serde_json::Map<String, Value>,
+) -> Result<u64, ToolError> {
     let Some(timeout_ms) = input.get("timeout_ms") else {
         return Ok(DEFAULT_COMMAND_TIMEOUT_MS);
     };
@@ -117,9 +147,9 @@ pub(crate) fn optional_timeout_ms(input: &serde_json::Map<String, Value>) -> Res
         .as_u64()
         .ok_or("run_command timeout_ms requires an integer field: timeout_ms")?;
     if !(1..=MAX_COMMAND_TIMEOUT_MS).contains(&timeout_ms) {
-        return Err(format!(
+        return Err(ToolError::Message(format!(
             "run_command timeout_ms must be between 1 and {MAX_COMMAND_TIMEOUT_MS}"
-        ));
+        )));
     }
     Ok(timeout_ms)
 }

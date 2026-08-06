@@ -1,4 +1,5 @@
 use crate::constants::*;
+use crate::tools::error::ToolError;
 use crate::tools::input::{optional_bool_field, optional_string_field};
 use crate::tools::ripgrep::glob_matches;
 use crate::tools::workspace::resolve_workspace_path;
@@ -6,23 +7,44 @@ use serde_json::Value;
 use std::fs;
 use std::path::Path;
 
+struct ListFilesInput<'a> {
+    path: &'a str,
+    recursive: bool,
+    glob: Option<&'a str>,
+}
+
+impl<'a> ListFilesInput<'a> {
+    fn parse(input: &'a Value) -> Result<Self, ToolError> {
+        let input_object = input
+            .as_object()
+            .ok_or("list_files requires an object input")?;
+        let raw_path = match input_object.get("path") {
+            None => ".",
+            Some(value) => value
+                .as_str()
+                .ok_or("list_files requires an optional string field: path")?,
+        };
+        let path = if raw_path.is_empty() { "." } else { raw_path };
+        let recursive = optional_bool_field(input_object, "recursive", "list_files recursive")?
+            .unwrap_or(false);
+        let glob = optional_string_field(input_object, "glob", "list_files glob")?;
+        Ok(Self {
+            path,
+            recursive,
+            glob,
+        })
+    }
+}
+
 pub(crate) fn list_files_from_workspace(
     workspace_root: &Path,
     input: &Value,
-) -> Result<String, String> {
-    let input_object = input
-        .as_object()
-        .ok_or("list_files requires an object input")?;
-    let raw_path = match input_object.get("path") {
-        None => ".",
-        Some(value) => value
-            .as_str()
-            .ok_or("list_files requires an optional string field: path")?,
-    };
-    let path = if raw_path.is_empty() { "." } else { raw_path };
-    let recursive =
-        optional_bool_field(input_object, "recursive", "list_files recursive")?.unwrap_or(false);
-    let glob = optional_string_field(input_object, "glob", "list_files glob")?;
+) -> Result<String, ToolError> {
+    let ListFilesInput {
+        path,
+        recursive,
+        glob,
+    } = ListFilesInput::parse(input)?;
 
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
     let metadata = fs::metadata(&resolved_path)
@@ -42,7 +64,7 @@ pub(crate) fn list_files_from_workspace(
     }
 
     if !metadata.is_dir() {
-        return Err(format!("Path is neither a file nor directory: '{}'", path));
+        return Err(format!("Path is neither a file nor directory: '{}'", path).into());
     }
 
     let entries = if recursive || glob.is_some() {
@@ -50,7 +72,7 @@ pub(crate) fn list_files_from_workspace(
     } else {
         collect_directory_entries(&resolved_path)?
     };
-    format_list_file_entries(path, glob, recursive, entries)
+    Ok(format_list_file_entries(path, glob, recursive, entries)?)
 }
 
 fn collect_directory_entries(resolved_path: &Path) -> Result<Vec<(String, String)>, String> {

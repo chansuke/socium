@@ -8,6 +8,7 @@ use crate::constants::{
 
 pub(crate) mod apply_patch;
 pub(crate) mod edit_history;
+pub(crate) mod error;
 pub(crate) mod find_symbol;
 pub(crate) mod git;
 pub(crate) mod input;
@@ -23,6 +24,7 @@ pub(crate) mod workspace;
 use crate::AgentProgress;
 use crate::agent::types::ContentBlock;
 use crate::tools::apply_patch::apply_patch_from_workspace;
+use crate::tools::error::ToolError;
 use crate::tools::find_symbol::find_symbol_in_workspace;
 use crate::tools::git::{
     git_branch_from_workspace, git_commit_from_workspace_with_progress, git_diff_from_workspace,
@@ -403,7 +405,7 @@ where
             run_command_from_workspace_with_progress(workspace_root, input, on_progress)
         }
         TEXT_EDITOR_TOOL_NAME => text_editor_from_workspace(workspace_root, input),
-        other => Err(format!("Unsupported tool: {other}")),
+        other => Err(ToolError::UnsupportedTool(other.to_string())),
     };
     let is_error = result.is_err();
     on_progress(AgentProgress::ToolCallFinished {
@@ -417,9 +419,9 @@ where
             content,
             is_error: None,
         },
-        Err(message) => ContentBlock::ToolResult {
+        Err(err) => ContentBlock::ToolResult {
             tool_use_id: tool_use_id.to_string(),
-            content: message,
+            content: err.to_string(),
             is_error: Some(true),
         },
     }

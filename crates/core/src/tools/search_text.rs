@@ -1,4 +1,5 @@
 use crate::constants::*;
+use crate::tools::error::ToolError;
 use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_string_field,
 };
@@ -9,23 +10,47 @@ use crate::tools::workspace::resolve_workspace_path;
 use serde_json::Value;
 use std::path::Path;
 
+struct SearchTextInput<'a> {
+    pattern: &'a str,
+    path: &'a str,
+    glob: Option<&'a str>,
+    max_results: usize,
+}
+
+impl<'a> SearchTextInput<'a> {
+    fn parse(input: &'a Value) -> Result<Self, ToolError> {
+        let input_object = input
+            .as_object()
+            .ok_or("search_text requires an object input")?;
+        let pattern = require_string_field(input_object, "pattern", "search_text")?;
+        let path = optional_string_field(input_object, "path", "search_text path")?.unwrap_or(".");
+        let glob = optional_string_field(input_object, "glob", "search_text glob")?;
+        let max_results = optional_bounded_usize_field(
+            input_object,
+            "max_results",
+            "search_text",
+            DEFAULT_SEARCH_RESULTS,
+            MAX_SEARCH_RESULTS,
+        )?;
+        Ok(Self {
+            pattern,
+            path,
+            glob,
+            max_results,
+        })
+    }
+}
+
 pub(crate) fn search_text_from_workspace(
     workspace_root: &Path,
     input: &Value,
-) -> Result<String, String> {
-    let input_object = input
-        .as_object()
-        .ok_or("search_text requires an object input")?;
-    let pattern = require_string_field(input_object, "pattern", "search_text")?;
-    let path = optional_string_field(input_object, "path", "search_text path")?.unwrap_or(".");
-    let glob = optional_string_field(input_object, "glob", "search_text glob")?;
-    let max_results = optional_bounded_usize_field(
-        input_object,
-        "max_results",
-        "search_text",
-        DEFAULT_SEARCH_RESULTS,
-        MAX_SEARCH_RESULTS,
-    )?;
+) -> Result<String, ToolError> {
+    let SearchTextInput {
+        pattern,
+        path,
+        glob,
+        max_results,
+    } = SearchTextInput::parse(input)?;
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
     let execution = search_with_ripgrep_fallback(
         workspace_root,
@@ -49,10 +74,8 @@ pub(crate) fn search_text_from_workspace(
 
     match status_code {
         Some(0) | Some(1) => Ok(formatted),
-        Some(code) => Err(format!(
-            "search_text failed with exit code {code}\n{formatted}"
-        )),
-        None => Err(format!("search_text terminated unexpectedly\n{formatted}")),
+        Some(code) => Err(format!("search_text failed with exit code {code}\n{formatted}").into()),
+        None => Err(format!("search_text terminated unexpectedly\n{formatted}").into()),
     }
 }
 

@@ -1,4 +1,5 @@
 use crate::AgentProgress;
+use crate::tools::error::ToolError;
 use crate::tools::input::{
     optional_bool_field, optional_bounded_usize_field, optional_string_field, require_object_input,
     require_string_field,
@@ -8,10 +9,50 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
+struct GitPathInput<'a> {
+    path: Option<&'a str>,
+}
+
+impl<'a> GitPathInput<'a> {
+    fn parse(input: &'a Value, tool: &str, field_context: &str) -> Result<Self, ToolError> {
+        let input_object = require_object_input(input, tool)?;
+        let path = optional_string_field(input_object, "path", field_context)?;
+        Ok(Self { path })
+    }
+}
+
+struct GitLogInput {
+    max_count: usize,
+}
+
+impl GitLogInput {
+    fn parse(input: &Value) -> Result<Self, ToolError> {
+        let input_object = require_object_input(input, "git_log")?;
+        let max_count =
+            optional_bounded_usize_field(input_object, "max_count", "git_log", 10, 100)?;
+        Ok(Self { max_count })
+    }
+}
+
+struct GitCommitInput<'a> {
+    message: &'a str,
+    confirmed: bool,
+}
+
+impl<'a> GitCommitInput<'a> {
+    fn parse(input: &'a Value) -> Result<Self, ToolError> {
+        let input_object = require_object_input(input, "git_commit")?;
+        let message = require_string_field(input_object, "message", "git_commit")?;
+        let confirmed = optional_bool_field(input_object, "confirmed", "git_commit confirmed")?
+            .unwrap_or(false);
+        Ok(Self { message, confirmed })
+    }
+}
+
 pub(crate) fn git_branch_from_workspace(
     workspace_root: &Path,
     input: &Value,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     require_object_input(input, "git_branch")?;
     let output = run_git_capture(workspace_root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let branch = stdout_to_string(&output)?.trim().to_string();
@@ -21,9 +62,8 @@ pub(crate) fn git_branch_from_workspace(
 pub(crate) fn git_status_from_workspace(
     workspace_root: &Path,
     input: &Value,
-) -> Result<String, String> {
-    let input_object = require_object_input(input, "git_status")?;
-    let path = optional_string_field(input_object, "path", "git_status path")?;
+) -> Result<String, ToolError> {
+    let GitPathInput { path } = GitPathInput::parse(input, "git_status", "git_status path")?;
     let mut args = vec![
         "status".to_string(),
         "--short".to_string(),
@@ -54,9 +94,8 @@ pub(crate) fn git_status_from_workspace(
 pub(crate) fn git_diff_from_workspace(
     workspace_root: &Path,
     input: &Value,
-) -> Result<String, String> {
-    let input_object = require_object_input(input, "git_diff")?;
-    let path = optional_string_field(input_object, "path", "git_diff path")?;
+) -> Result<String, ToolError> {
+    let GitPathInput { path } = GitPathInput::parse(input, "git_diff", "git_diff path")?;
     let mut args = vec!["diff".to_string()];
     if let Some(path) = path {
         args.push("--".to_string());
@@ -79,9 +118,8 @@ pub(crate) fn git_diff_from_workspace(
 pub(crate) fn git_log_from_workspace(
     workspace_root: &Path,
     input: &Value,
-) -> Result<String, String> {
-    let input_object = require_object_input(input, "git_log")?;
-    let max_count = optional_bounded_usize_field(input_object, "max_count", "git_log", 10, 100)?;
+) -> Result<String, ToolError> {
+    let GitLogInput { max_count } = GitLogInput::parse(input)?;
     let output = run_git_capture(
         workspace_root,
         &[
@@ -104,7 +142,7 @@ pub(crate) fn git_log_from_workspace(
 pub(crate) fn git_commit_from_workspace(
     workspace_root: &Path,
     input: &Value,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     let mut noop = |_| {};
     git_commit_from_workspace_with_progress(workspace_root, input, &mut noop)
 }
@@ -113,28 +151,24 @@ pub(crate) fn git_commit_from_workspace_with_progress<F>(
     workspace_root: &Path,
     input: &Value,
     on_progress: &mut F,
-) -> Result<String, String>
+) -> Result<String, ToolError>
 where
     F: FnMut(AgentProgress),
 {
-    let input_object = require_object_input(input, "git_commit")?;
-    let message = require_string_field(input_object, "message", "git_commit")?;
-    let confirmed =
-        optional_bool_field(input_object, "confirmed", "git_commit confirmed")?.unwrap_or(false);
+    let GitCommitInput { message, confirmed } = GitCommitInput::parse(input)?;
     if !confirmed {
         on_progress(AgentProgress::ApprovalRequired {
             tool: "git_commit".to_string(),
             reason: "explicit confirmation required".to_string(),
         });
         return Err(
-            "git_commit requires explicit confirmation. Rerun with confirmed set to true."
-                .to_string(),
+            "git_commit requires explicit confirmation. Rerun with confirmed set to true.".into(),
         );
     }
 
     let status_output = run_git_capture(workspace_root, &["status", "--porcelain"])?;
     if status_output.stdout.is_empty() {
-        return Err("git_commit found no changes to commit".to_string());
+        return Err("git_commit found no changes to commit".into());
     }
 
     run_git_capture(workspace_root, &["add", "-A"])?;
@@ -173,7 +207,7 @@ fn stdout_to_string(output: &std::process::Output) -> Result<String, String> {
         .map_err(|e| format!("Command output was not valid UTF-8: {e}"))
 }
 
-fn git_relative_path(workspace_root: &Path, requested_path: &str) -> Result<String, String> {
+fn git_relative_path(workspace_root: &Path, requested_path: &str) -> Result<String, ToolError> {
     let workspace_canonical = workspace_root.canonicalize().map_err(|e| {
         format!(
             "Failed to resolve workspace root '{}': {e}",

@@ -1,26 +1,38 @@
 use crate::constants::*;
+use crate::tools::error::ToolError;
 use crate::tools::text_file::read_utf8_file_with_limit;
 use crate::tools::workspace::resolve_workspace_path;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
 
+struct ReadFileInput<'a> {
+    path: &'a str,
+}
+
+impl<'a> ReadFileInput<'a> {
+    fn parse(input: &'a Value) -> Result<Self, ToolError> {
+        let path = input
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or("read_file requires a string field: path")?;
+        Ok(Self { path })
+    }
+}
+
 pub(crate) fn read_file_from_workspace(
     workspace_root: &Path,
     input: &Value,
-) -> Result<String, String> {
-    let path = input
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or("read_file requires a string field: path")?;
-    let resolved_path = resolve_workspace_path(workspace_root, path)?;
+) -> Result<String, ToolError> {
+    let input = ReadFileInput::parse(input)?;
+    let resolved_path = resolve_workspace_path(workspace_root, input.path)?;
     let metadata = fs::metadata(&resolved_path)
-        .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
+        .map_err(|e| format!("Failed to inspect file '{}': {e}", input.path))?;
     if !metadata.is_file() {
-        return Err(format!("Path is not a file: '{}'", path));
+        return Err(format!("Path is not a file: '{}'", input.path).into());
     }
-    let content = read_utf8_file_with_limit(&resolved_path, path, MAX_READ_FILE_BYTES)?;
-    Ok(format!("Path: {}\n{}", path, content))
+    let content = read_utf8_file_with_limit(&resolved_path, input.path, MAX_READ_FILE_BYTES)?;
+    Ok(format!("Path: {}\n{}", input.path, content))
 }
 
 #[cfg(test)]

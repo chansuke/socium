@@ -1,5 +1,6 @@
 use crate::constants::*;
 use crate::tools::edit_history::{pop_edit_history, record_edit_history};
+use crate::tools::error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{require_i64_field, require_string_field};
 use crate::tools::list_files::list_files_from_workspace;
@@ -15,7 +16,7 @@ use std::path::Path;
 pub(crate) fn text_editor_from_workspace(
     workspace_root: &Path,
     input: &Value,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     let input_object = input
         .as_object()
         .ok_or("text_editor tool requires an object input")?;
@@ -27,14 +28,14 @@ pub(crate) fn text_editor_from_workspace(
         "create" => text_editor_create(workspace_root, input_object),
         "insert" => text_editor_insert(workspace_root, input_object),
         "undo_edit" => text_editor_undo_edit(workspace_root, input_object),
-        other => Err(format!("Unsupported text editor command: {other}")),
+        other => Err(format!("Unsupported text editor command: {other}").into()),
     }
 }
 
 pub(crate) fn text_editor_view(
     workspace_root: &Path,
     input: &serde_json::Map<String, Value>,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     let path = require_string_field(input, "path", "text_editor view path")?;
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
     let metadata = fs::metadata(&resolved_path)
@@ -44,7 +45,7 @@ pub(crate) fn text_editor_view(
         return list_files_from_workspace(workspace_root, &json!({ "path": path }));
     }
     if !metadata.is_file() {
-        return Err(format!("Path is neither a file nor directory: '{}'", path));
+        return Err(format!("Path is neither a file nor directory: '{}'", path).into());
     }
 
     let content = read_utf8_file_with_limit(&resolved_path, path, MAX_TEXT_EDITOR_VIEW_READ_BYTES)?;
@@ -65,19 +66,19 @@ pub(crate) fn text_editor_view(
 pub(crate) fn text_editor_str_replace(
     workspace_root: &Path,
     input: &serde_json::Map<String, Value>,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     let path = require_string_field(input, "path", "text_editor str_replace path")?;
     let old_str = require_string_field(input, "old_str", "text_editor str_replace old_str")?;
     let new_str = require_string_field(input, "new_str", "text_editor str_replace new_str")?;
     if old_str.is_empty() {
-        return Err("text_editor str_replace old_str cannot be empty".to_string());
+        return Err("text_editor str_replace old_str cannot be empty".into());
     }
 
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
     let metadata = fs::metadata(&resolved_path)
         .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
     if !metadata.is_file() {
-        return Err(format!("Path is not a file: '{}'", path));
+        return Err(format!("Path is not a file: '{}'", path).into());
     }
 
     let content = read_utf8_file_with_limit(&resolved_path, path, MAX_READ_FILE_BYTES)?;
@@ -86,13 +87,15 @@ pub(crate) fn text_editor_str_replace(
         return Err(format!(
             "No matches found for old_str in file '{}'; replacement not applied",
             path
-        ));
+        )
+        .into());
     }
     if matches > 1 {
         return Err(format!(
             "Multiple matches found for old_str in file '{}'; provide a more specific old_str",
             path
-        ));
+        )
+        .into());
     }
 
     let updated = content.replacen(old_str, new_str, 1);
@@ -108,16 +111,13 @@ pub(crate) fn text_editor_str_replace(
 pub(crate) fn text_editor_create(
     workspace_root: &Path,
     input: &serde_json::Map<String, Value>,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     let path = require_string_field(input, "path", "text_editor create path")?;
     let file_text = require_string_field(input, "file_text", "text_editor create file_text")?;
     let target_path = resolve_workspace_path_for_create(workspace_root, path)?;
 
     if target_path.exists() {
-        return Err(format!(
-            "Cannot create file '{}': path already exists",
-            path
-        ));
+        return Err(format!("Cannot create file '{}': path already exists", path).into());
     }
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent)
@@ -135,11 +135,11 @@ pub(crate) fn text_editor_create(
 pub(crate) fn text_editor_insert(
     workspace_root: &Path,
     input: &serde_json::Map<String, Value>,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     let path = require_string_field(input, "path", "text_editor insert path")?;
     let insert_line = require_i64_field(input, "insert_line", "text_editor insert insert_line")?;
     if insert_line < 0 {
-        return Err("text_editor insert insert_line must be >= 0".to_string());
+        return Err("text_editor insert insert_line must be >= 0".into());
     }
 
     let insert_text = require_string_field(input, "insert_text", "text_editor insert insert_text")?;
@@ -148,7 +148,7 @@ pub(crate) fn text_editor_insert(
     let metadata = fs::metadata(&resolved_path)
         .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
     if !metadata.is_file() {
-        return Err(format!("Path is not a file: '{}'", path));
+        return Err(format!("Path is not a file: '{}'", path).into());
     }
 
     let content = read_utf8_file_with_limit(&resolved_path, path, MAX_READ_FILE_BYTES)?;
@@ -158,7 +158,8 @@ pub(crate) fn text_editor_insert(
         return Err(format!(
             "insert_line {} is out of range for '{}' (file has {} lines)",
             line, path, line_count
-        ));
+        )
+        .into());
     }
 
     let insert_at = byte_index_after_line(&content, line).ok_or_else(|| {
@@ -184,7 +185,7 @@ pub(crate) fn text_editor_insert(
 pub(crate) fn text_editor_undo_edit(
     workspace_root: &Path,
     input: &serde_json::Map<String, Value>,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     let path = require_string_field(input, "path", "text_editor undo_edit path")?;
     let history_entry = pop_edit_history(workspace_root, path)?
         .ok_or_else(|| format!("No edit history found for '{}'", path))?;
