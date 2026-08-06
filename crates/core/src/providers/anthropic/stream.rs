@@ -1,69 +1,8 @@
-use crate::agent::types::{AgentMessageRequest, AgentMessageResponse, ContentBlock};
-use crate::constants::ANTHROPIC_MESSAGES_API;
+use crate::agent::types::{AgentMessageResponse, ContentBlock};
+use crate::providers::DeltaEvent;
+use crate::providers::error::ProviderError;
 use serde::Deserialize;
 use serde_json::Value;
-use std::io::Error;
-
-use super::{DeltaEvent, ProviderCapabilities, ProviderResponse};
-
-pub const CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
-    supports_tools: true,
-};
-
-pub(crate) async fn send_message<F>(
-    client: &reqwest::Client,
-    api_key: &str,
-    anthropic_version: &str,
-    message_request: &AgentMessageRequest<'_>,
-    on_delta: &mut F,
-) -> Result<ProviderResponse, Box<dyn std::error::Error>>
-where
-    F: FnMut(DeltaEvent) + Send,
-{
-    let mut body = serde_json::to_value(message_request)?;
-    body["stream"] = Value::Bool(true);
-    if let Ok(budget_str) = std::env::var("THINKING_BUDGET_TOKENS")
-        && let Ok(budget) = budget_str.parse::<u64>()
-    {
-        body["thinking"] = serde_json::json!({
-            "type": "enabled",
-            "budget_tokens": budget
-        });
-    }
-    let mut response = client
-        .post(ANTHROPIC_MESSAGES_API)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", anthropic_version)
-        .json(&body)
-        .send()
-        .await?;
-    let status = response.status();
-    if !status.is_success() {
-        let error_body = response.text().await?;
-        return Err(Error::other(format!("Anthropic API error {status}: {error_body}")).into());
-    }
-
-    let mut parser = SseParser::default();
-    let mut builder = StreamingMessageBuilder::default();
-
-    while let Some(chunk) = response.chunk().await? {
-        for event in parser.push(&chunk)? {
-            builder.apply_event(&event, on_delta)?;
-        }
-    }
-
-    if let Some(event) = parser.finish()? {
-        builder.apply_event(&event, on_delta)?;
-    }
-
-    let streamed_text = builder.streamed_text;
-    let message = builder.finish()?;
-    Ok(ProviderResponse {
-        message,
-        streamed_text,
-    })
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -130,76 +69,10 @@ enum StreamDelta {
 }
 
 #[derive(Default)]
-struct SseParser {
-    buffer: Vec<u8>,
-}
-
-impl SseParser {
-    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        self.buffer.extend_from_slice(chunk);
-        let mut events = Vec::new();
-
-        while let Some((event_end, separator_len)) = find_event_boundary(&self.buffer) {
-            let event_bytes = self.buffer[..event_end].to_vec();
-            self.buffer.drain(..event_end + separator_len);
-            if let Some(event) = parse_sse_event(&event_bytes)? {
-                events.push(event);
-            }
-        }
-
-        Ok(events)
-    }
-
-    fn finish(&mut self) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        if self.buffer.is_empty() {
-            return Ok(None);
-        }
-        let remaining = std::mem::take(&mut self.buffer);
-        parse_sse_event(&remaining)
-    }
-}
-
-fn find_event_boundary(bytes: &[u8]) -> Option<(usize, usize)> {
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index..].starts_with(b"\r\n\r\n") {
-            return Some((index, 4));
-        }
-        if bytes[index..].starts_with(b"\n\n") {
-            return Some((index, 2));
-        }
-        index += 1;
-    }
-    None
-}
-
-fn parse_sse_event(bytes: &[u8]) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let text = std::str::from_utf8(bytes)?;
-    let mut data_lines = Vec::new();
-
-    for raw_line in text.lines() {
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        if line.is_empty() || line.starts_with(':') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("data:") {
-            let data = rest.strip_prefix(' ').unwrap_or(rest);
-            data_lines.push(data);
-        }
-    }
-
-    if data_lines.is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(data_lines.join("\n")))
-}
-
-#[derive(Default)]
-struct StreamingMessageBuilder {
+pub(super) struct StreamingMessageBuilder {
     blocks: Vec<Option<StreamingContentBlock>>,
     text_block_count: usize,
-    streamed_text: bool,
+    pub(super) streamed_text: bool,
 }
 
 enum StreamingContentBlock {
@@ -226,11 +99,11 @@ struct ToolUseBlockState {
 }
 
 impl StreamingMessageBuilder {
-    fn apply_event(
+    pub(super) fn apply_event(
         &mut self,
         raw_event: &str,
         on_delta: &mut impl FnMut(DeltaEvent),
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), ProviderError> {
         let event: AnthropicStreamEvent = serde_json::from_str(raw_event)?;
         match event {
             AnthropicStreamEvent::MessageStart
@@ -239,14 +112,15 @@ impl StreamingMessageBuilder {
             | AnthropicStreamEvent::MessageStop
             | AnthropicStreamEvent::Ping => {}
             AnthropicStreamEvent::Error { error } => {
-                return Err(
-                    Error::other(format!("Anthropic streaming error: {}", error.message)).into(),
-                );
+                return Err(ProviderError::Stream(format!(
+                    "Anthropic streaming error: {}",
+                    error.message
+                )));
             }
             AnthropicStreamEvent::ContentBlockStart {
                 index,
                 content_block,
-            } => self.start_block(index, content_block, on_delta)?,
+            } => self.start_block(index, content_block, on_delta),
             AnthropicStreamEvent::ContentBlockDelta { index, delta } => {
                 self.apply_delta(index, delta, on_delta)?
             }
@@ -254,7 +128,7 @@ impl StreamingMessageBuilder {
         Ok(())
     }
 
-    fn finish(self) -> Result<AgentMessageResponse, Box<dyn std::error::Error>> {
+    pub(super) fn finish(self) -> Result<AgentMessageResponse, ProviderError> {
         let mut content = Vec::with_capacity(self.blocks.len());
         for block in self.blocks {
             let Some(block) = block else {
@@ -288,7 +162,7 @@ impl StreamingMessageBuilder {
         index: usize,
         content_block: StreamContentBlockStart,
         on_delta: &mut impl FnMut(DeltaEvent),
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) {
         ensure_block_capacity(&mut self.blocks, index);
         let block = match content_block {
             StreamContentBlockStart::Text { text } => {
@@ -326,7 +200,6 @@ impl StreamingMessageBuilder {
             }
         };
         self.blocks[index] = Some(block);
-        Ok(())
     }
 
     fn apply_delta(
@@ -334,12 +207,11 @@ impl StreamingMessageBuilder {
         index: usize,
         delta: StreamDelta,
         on_delta: &mut impl FnMut(DeltaEvent),
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), ProviderError> {
         let Some(block) = self.blocks.get_mut(index).and_then(Option::as_mut) else {
-            return Err(Error::other(format!(
+            return Err(ProviderError::Stream(format!(
                 "Anthropic stream referenced unknown content block index {index}"
-            ))
-            .into());
+            )));
         };
 
         match (block, delta) {
@@ -393,8 +265,9 @@ fn append_text_to_state(state: &mut TextBlockState, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeltaEvent, SseParser, StreamingMessageBuilder};
+    use super::StreamingMessageBuilder;
     use crate::agent::types::ContentBlock;
+    use crate::providers::DeltaEvent;
     use serde_json::json;
 
     fn text_deltas(events: &[DeltaEvent]) -> Vec<String> {
@@ -405,29 +278,6 @@ mod tests {
                 DeltaEvent::Thinking(_) => None,
             })
             .collect()
-    }
-
-    #[test]
-    fn sse_parser_reassembles_split_events() {
-        let mut parser = SseParser::default();
-        let first = parser
-            .push(
-                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,",
-            )
-            .unwrap();
-        assert!(first.is_empty());
-
-        let second = parser
-            .push(b"\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
-            .unwrap();
-
-        assert_eq!(
-            second,
-            vec![
-                "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}"
-                    .to_string()
-            ]
-        );
     }
 
     #[test]

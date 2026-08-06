@@ -1,8 +1,13 @@
 pub mod anthropic;
 pub mod codex;
+pub mod error;
 pub mod opencode;
 
 use crate::agent::types::{AgentMessageRequest, AgentMessageResponse};
+use crate::providers::anthropic::AnthropicProvider;
+use crate::providers::codex::CodexProvider;
+use crate::providers::error::ProviderError;
+use crate::providers::opencode::OpencodeProvider;
 use std::env;
 use std::fmt;
 use std::io::{self, Error, ErrorKind};
@@ -15,16 +20,6 @@ pub struct ProviderCapabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Anthropic,
-    Codex,
-    Opencode,
-}
-
-#[derive(Debug, Clone)]
-pub enum ProviderConfig {
-    Anthropic {
-        api_key: String,
-        anthropic_version: String,
-    },
     Codex,
     Opencode,
 }
@@ -56,31 +51,6 @@ impl ProviderKind {
             )),
         }
     }
-
-    pub fn capabilities(self) -> ProviderCapabilities {
-        match self {
-            Self::Anthropic => anthropic::CAPABILITIES,
-            Self::Codex => codex::CAPABILITIES,
-            Self::Opencode => opencode::CAPABILITIES,
-        }
-    }
-
-    pub fn config_from_env(self) -> io::Result<ProviderConfig> {
-        match self {
-            Self::Anthropic => {
-                let api_key = env::var("ANTHROPIC_API_KEY")
-                    .map_err(|_| Error::new(ErrorKind::NotFound, "ANTHROPIC_API_KEY is not set"))?;
-                let anthropic_version =
-                    env::var("ANTHROPIC_VERSION").unwrap_or_else(|_| "2023-06-01".to_string());
-                Ok(ProviderConfig::Anthropic {
-                    api_key,
-                    anthropic_version,
-                })
-            }
-            Self::Codex => Ok(ProviderConfig::Codex),
-            Self::Opencode => Ok(ProviderConfig::Opencode),
-        }
-    }
 }
 
 impl fmt::Display for ProviderKind {
@@ -94,47 +64,24 @@ impl fmt::Display for ProviderKind {
     }
 }
 
-pub(crate) async fn send_message<F>(
-    provider: ProviderKind,
-    client: &reqwest::Client,
-    config: &ProviderConfig,
-    message_request: &AgentMessageRequest<'_>,
-    on_delta: &mut F,
-) -> Result<ProviderResponse, Box<dyn std::error::Error>>
-where
-    F: FnMut(DeltaEvent) + Send,
-{
-    match (provider, config) {
-        (
-            ProviderKind::Anthropic,
-            ProviderConfig::Anthropic {
-                api_key,
-                anthropic_version,
-            },
-        ) => {
-            anthropic::send_message(
-                client,
-                api_key,
-                anthropic_version,
-                message_request,
-                on_delta,
-            )
-            .await
-        }
-        (ProviderKind::Codex, ProviderConfig::Codex) => Err(Error::new(
-            ErrorKind::Unsupported,
-            "Provider 'codex' is not implemented yet",
-        )
-        .into()),
-        (ProviderKind::Opencode, ProviderConfig::Opencode) => Err(Error::new(
-            ErrorKind::Unsupported,
-            "Provider 'opencode' is not implemented yet",
-        )
-        .into()),
-        _ => Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Provider kind does not match provider config",
-        )
-        .into()),
+/// A model provider: identity, capabilities, and streaming message
+/// transport behind one dyn-compatible interface.
+#[async_trait::async_trait]
+pub(crate) trait Provider: Send + Sync {
+    fn kind(&self) -> ProviderKind;
+    fn capabilities(&self) -> ProviderCapabilities;
+    async fn send_message(
+        &self,
+        client: &reqwest::Client,
+        request: &AgentMessageRequest<'_>,
+        on_delta: &mut (dyn FnMut(DeltaEvent) + Send),
+    ) -> Result<ProviderResponse, ProviderError>;
+}
+
+pub(crate) fn provider_from_env() -> Result<Box<dyn Provider>, ProviderError> {
+    match ProviderKind::from_env()? {
+        ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::from_env()?)),
+        ProviderKind::Codex => Ok(Box::new(CodexProvider)),
+        ProviderKind::Opencode => Ok(Box::new(OpencodeProvider)),
     }
 }

@@ -1,19 +1,22 @@
 pub mod agent;
 pub mod constants;
+pub mod error;
 pub mod providers;
 pub mod tools;
 
 pub use crate::agent::context::ContextMetrics;
+pub use crate::error::AgentError;
 
 use crate::agent::context::{context_metrics_for_input, prepare_context_messages};
 use crate::agent::state::{
     ConversationState, ConversationStateRef, ConversationSummaryState, load_json_file,
     save_json_file,
 };
-use crate::agent::turn::{extract_text, run_agent_turn};
+use crate::agent::turn::{TurnContext, extract_text, run_agent_turn};
 use crate::agent::types::Message;
 use crate::constants::*;
-use crate::providers::{ProviderConfig, ProviderKind};
+use crate::providers::error::ProviderError;
+use crate::providers::{Provider, provider_from_env};
 use crate::tools::{ToolDefinition, default_tools};
 use std::env;
 use std::io::{Error, ErrorKind};
@@ -79,9 +82,7 @@ pub struct AgentService {
     summary_path: PathBuf,
     messages: Vec<Message>,
     summary_state: ConversationSummaryState,
-    provider: ProviderKind,
-    provider_config: ProviderConfig,
-    supports_tools: bool,
+    provider: Box<dyn Provider>,
     model: String,
     max_tokens: u32,
     tools: Vec<ToolDefinition>,
@@ -89,11 +90,41 @@ pub struct AgentService {
 }
 
 impl AgentService {
-    pub fn from_current_dir() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::from_env(env::current_dir()?)
+    pub fn from_current_dir() -> Result<Self, AgentError> {
+        Self::from_env(env::current_dir().map_err(AgentError::State)?)
     }
 
-    pub fn from_env(workspace_root: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Construction seam that takes the provider and HTTP client directly,
+    /// so tests can inject a mock `Provider` without touching the
+    /// environment or the network.
+    pub(crate) fn with_provider(
+        workspace_root: PathBuf,
+        provider: Box<dyn Provider>,
+        model: String,
+        max_tokens: u32,
+        client: reqwest::Client,
+    ) -> Self {
+        let conversation_path = workspace_root
+            .join(STATE_DIR_NAME)
+            .join(CONVERSATION_STATE_FILE_NAME);
+        let summary_path = workspace_root
+            .join(STATE_DIR_NAME)
+            .join(SUMMARY_STATE_FILE_NAME);
+        Self {
+            workspace_root,
+            conversation_path,
+            summary_path,
+            messages: Vec::new(),
+            summary_state: ConversationSummaryState::default(),
+            provider,
+            model,
+            max_tokens,
+            tools: default_tools(),
+            client,
+        }
+    }
+
+    pub fn from_env(workspace_root: PathBuf) -> Result<Self, AgentError> {
         let conversation_path = workspace_root
             .join(STATE_DIR_NAME)
             .join(CONVERSATION_STATE_FILE_NAME);
@@ -140,8 +171,7 @@ impl AgentService {
             summary_state = ConversationSummaryState::default();
         }
 
-        let provider = ProviderKind::from_env()?;
-        let provider_config = provider.config_from_env()?;
+        let provider = provider_from_env()?;
         let model = env::var("MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
         let max_tokens = env::var("MAX_TOKENS")
             .unwrap_or_else(|_| "1000".to_string())
@@ -152,25 +182,15 @@ impl AgentService {
                     format!("MAX_TOKENS must be an unsigned integer: {e}"),
                 )
             })?;
-        let tools = default_tools();
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(90))
-            .build()?;
+            .build()
+            .map_err(ProviderError::Http)?;
 
-        Ok(Self {
-            workspace_root,
-            conversation_path,
-            summary_path,
-            messages,
-            summary_state,
-            provider,
-            provider_config,
-            supports_tools: provider.capabilities().supports_tools,
-            model,
-            max_tokens,
-            tools,
-            client,
-        })
+        let mut service = Self::with_provider(workspace_root, provider, model, max_tokens, client);
+        service.messages = messages;
+        service.summary_state = summary_state;
+        Ok(service)
     }
 
     pub fn clear(&mut self) -> std::io::Result<()> {
@@ -200,10 +220,7 @@ impl AgentService {
             .collect()
     }
 
-    pub async fn submit(
-        &mut self,
-        user_input: String,
-    ) -> Result<AgentReply, Box<dyn std::error::Error>> {
+    pub async fn submit(&mut self, user_input: String) -> Result<AgentReply, AgentError> {
         self.submit_with_progress(user_input, |_| {}).await
     }
 
@@ -211,7 +228,7 @@ impl AgentService {
         &mut self,
         user_input: String,
         mut on_progress: F,
-    ) -> Result<AgentReply, Box<dyn std::error::Error>>
+    ) -> Result<AgentReply, AgentError>
     where
         F: FnMut(AgentProgress) + Send,
     {
@@ -219,26 +236,23 @@ impl AgentService {
         let prepared_context = prepare_context_messages(
             &self.messages,
             &self.summary_state,
-            self.provider,
+            self.provider.kind(),
             &self.model,
             self.max_tokens,
             &self.tools,
         )?;
         let initial_len = prepared_context.messages.len();
         let mut context_messages = prepared_context.messages;
-        let assistant_chunks = run_agent_turn(
-            self.provider,
-            &self.client,
-            &self.provider_config,
-            &self.model,
-            self.max_tokens,
-            self.supports_tools,
-            &self.tools,
-            &self.workspace_root,
-            &mut context_messages,
-            &mut on_progress,
-        )
-        .await?;
+        let turn_context = TurnContext {
+            provider: self.provider.as_ref(),
+            client: &self.client,
+            model: &self.model,
+            max_tokens: self.max_tokens,
+            tools: &self.tools,
+            workspace_root: &self.workspace_root,
+        };
+        let assistant_chunks =
+            run_agent_turn(&turn_context, &mut context_messages, &mut on_progress).await?;
         let new_messages = context_messages.split_off(initial_len);
         self.messages.extend(new_messages);
         self.summary_state = prepared_context.summary_state;
@@ -253,7 +267,7 @@ impl AgentService {
             &self.messages,
             pending_user_input,
             &self.summary_state,
-            self.provider,
+            self.provider.kind(),
             &self.model,
             self.max_tokens,
             &self.tools,
@@ -279,7 +293,7 @@ mod tests {
     use crate::agent::state::ConversationSummaryState;
     use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
     use crate::constants::{CONVERSATION_STATE_FILE_NAME, STATE_DIR_NAME, SUMMARY_STATE_FILE_NAME};
-    use crate::providers::{ProviderConfig, ProviderKind};
+    use crate::providers::anthropic::AnthropicProvider;
     use crate::test_support::make_temp_dir;
     use crate::tools::default_tools;
     use crate::{AgentService, TranscriptEntry, TranscriptRole};
@@ -330,12 +344,7 @@ mod tests {
             summary_path,
             messages,
             summary_state: ConversationSummaryState::default(),
-            provider: ProviderKind::Anthropic,
-            provider_config: ProviderConfig::Anthropic {
-                api_key: "test".to_string(),
-                anthropic_version: "2023-06-01".to_string(),
-            },
-            supports_tools: true,
+            provider: Box::new(AnthropicProvider::with_credentials("test", "2023-06-01")),
             model: "test-model".to_string(),
             max_tokens: 128,
             tools: default_tools(),
