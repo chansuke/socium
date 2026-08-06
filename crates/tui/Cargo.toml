@@ -8,7 +8,5 @@ socium-core = { path = "../core" }
 ratatui = "0.30.0"
 color-eyre = "0.6.5"
 tokio = { version = "1", features = ["full"] }
-libc = "0.2.181"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-time = { version = "0.3.47", features = ["formatting", "local-offset", "macros"] }

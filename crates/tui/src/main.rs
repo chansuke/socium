@@ -1,5 +1,4 @@
-#[allow(dead_code)]
-mod repl;
+mod input_history;
 
 use color_eyre::{Result, eyre::eyre};
 use ratatui::{
@@ -69,7 +68,7 @@ struct App {
     context_metrics: ContextMetrics,
     last_latency_ms: Option<u128>,
     pending_task: Option<PendingTask>,
-    input_history: repl::InputSession,
+    input_history: input_history::InputSession,
     history_index: Option<usize>,
     history_draft: String,
 }
@@ -139,11 +138,12 @@ impl App {
             .unwrap_or_default()
             .join(".socium")
             .join(INPUT_HISTORY_FILE_NAME);
-        let input_history =
-            repl::InputSession::load(history_path.clone()).unwrap_or(repl::InputSession {
+        let input_history = input_history::InputSession::load(history_path.clone()).unwrap_or(
+            input_history::InputSession {
                 history_path,
                 entries: Vec::new(),
-            });
+            },
+        );
 
         Self {
             agent: Some(agent),
