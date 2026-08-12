@@ -13,14 +13,14 @@ runs:
         github_access_token: ${{ github.token }}
 
     - name: Setup Cachix (numtide)
-      uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+      uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
       with:
         name: numtide
         authToken: ''
 
     - name: Setup Cachix (chansuke)
       if: inputs.cachix-auth-token != ''
-      uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+      uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
       with:
         name: chansuke
         authToken: ${{ inputs.cachix-auth-token }}
