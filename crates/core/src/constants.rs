@@ -24,4 +24,18 @@ pub const MIN_RECENT_CONTEXT_MESSAGES: usize = 8;
 pub const MAX_SUMMARY_LINES: usize = 24;
 pub const MAX_SUMMARY_LINE_CHARACTERS: usize = 240;
 pub const MAX_SUMMARY_CHARACTERS: usize = 4_000;
+// Compaction: summarize old conversation with a cheap dedicated model so
+// long sessions stop resending their full history on every call.
+// Auto-compaction fires when the last measured prompt size exceeds
+// COMPACTION_TRIGGER_RATIO of the context window (override with the
+// COMPACTION_TOKEN_THRESHOLD env var). COMPACTION_RETAIN_RECENT_MESSAGES
+// messages are kept verbatim; TARGET/MIN_RECENT_CONTEXT_MESSAGES remain
+// the emergency budget-based trimming path for uncompacted overflow.
+pub const COMPACTION_TRIGGER_RATIO: f32 = 0.8;
+pub const COMPACTION_RETAIN_RECENT_MESSAGES: usize = 16;
+pub const DEFAULT_COMPACTION_MODEL: &str = "claude-haiku-4-5";
+pub const COMPACTION_MAX_OUTPUT_TOKENS: u32 = 1_500;
+pub const COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS: usize = 600;
+pub const COMPACTION_SYSTEM_PROMPT: &str = "You compact the conversation history of Socium, a coding agent. You receive the transcript of an agent session, possibly preceded by a summary of even earlier conversation in <previous_summary>. Merge everything into one summary with exactly these five sections:\n1. User request\n2. Files touched (use path:line where known)\n3. Decisions\n4. Errors and unresolved issues\n5. Immediate next step\nBe specific and concise. Preserve exact file paths, command names, identifiers, and error messages. Output only the five numbered sections, with no preamble and no commentary.";
+
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Socium, a coding agent working inside the user's current workspace. Be concise and concrete. When you refer to repository code, cite exact locations using path:line notation such as src/main.rs:42. If you discuss a specific function, edit, bug, or search result, include at least one line-addressable reference when the exact line is available from the repo or tool output.";
