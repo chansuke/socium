@@ -48,6 +48,7 @@ enum SubmitAction {
     None,
     Exit,
     Pending(PendingSubmission),
+    Compact,
 }
 
 impl App {
@@ -203,6 +204,11 @@ impl App {
                 self.refresh_context_metrics();
                 return Ok(SubmitAction::None);
             }
+            "/compact" => {
+                self.push_message(Speaker::System, "Compacting conversation context…");
+                self.status = Some("Compacting".to_string());
+                return Ok(SubmitAction::Compact);
+            }
             _ => {}
         }
 
@@ -260,6 +266,10 @@ impl App {
                             SubmitAction::Pending(pending) => {
                                 terminal.draw(|frame| self.draw(frame))?;
                                 self.start_submit_task(pending)?;
+                            }
+                            SubmitAction::Compact => {
+                                terminal.draw(|frame| self.draw(frame))?;
+                                self.start_compact_task()?;
                             }
                         },
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {

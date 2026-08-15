@@ -49,7 +49,7 @@ pub(crate) fn command_output_preview_lines(
 }
 
 pub(crate) fn help_text() -> &'static str {
-    "/help  Show available commands\n/clear Clear the current conversation\n/exit  Quit Socium"
+    "/help    Show available commands\n/clear   Clear the current conversation\n/compact Summarize old conversation context to free tokens\n/exit    Quit Socium"
 }
 
 pub(crate) fn slice_chars(value: &str, start: usize, end: usize) -> String {
