@@ -83,8 +83,34 @@ impl App {
                 );
                 self.status = Some(command_completion_status(&command, exit_code, timed_out));
             }
+            AgentProgress::CompactionStarted => {
+                self.push_activity("Compacting conversation context".to_string());
+                self.push_message(
+                    Speaker::System,
+                    "Compacting conversation context…".to_string(),
+                );
+                self.status = Some("Compacting".to_string());
+            }
+            AgentProgress::CompactionFinished {
+                covered_messages,
+                used_llm,
+            } => {
+                let message = format_compaction_finished_message(covered_messages, used_llm);
+                self.push_activity(message.clone());
+                self.push_message(Speaker::System, message);
+                self.status = Some("Compacted".to_string());
+            }
         }
     }
+}
+
+fn format_compaction_finished_message(covered_messages: usize, used_llm: bool) -> String {
+    let summarizer = if used_llm {
+        "model summary"
+    } else {
+        "deterministic fallback"
+    };
+    format!("Compacted context: {covered_messages} messages summarized ({summarizer})")
 }
 
 fn model_request_status(round: usize, provider: &str) -> String {

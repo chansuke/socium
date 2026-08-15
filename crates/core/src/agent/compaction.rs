@@ -2,11 +2,22 @@ use crate::agent::turn::extract_text;
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
 use crate::constants::{
     COMPACTION_MAX_OUTPUT_TOKENS, COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS,
-    COMPACTION_SYSTEM_PROMPT, DEFAULT_COMPACTION_MODEL,
+    COMPACTION_SYSTEM_PROMPT, COMPACTION_TRIGGER_RATIO, DEFAULT_COMPACTION_MODEL,
 };
 use crate::providers::error::ProviderError;
 use crate::providers::{DeltaEvent, Provider};
 use std::env;
+
+/// Prompt-token level at which auto-compaction fires. The env override
+/// takes precedence; otherwise a fixed ratio of the context window.
+pub(crate) fn compaction_threshold_tokens(context_window_tokens: u32) -> u32 {
+    if let Ok(value) = env::var("COMPACTION_TOKEN_THRESHOLD")
+        && let Ok(threshold) = value.trim().parse::<u32>()
+    {
+        return threshold;
+    }
+    (context_window_tokens as f32 * COMPACTION_TRIGGER_RATIO) as u32
+}
 
 /// Index separating messages to compact (before) from messages kept
 /// verbatim (after). Starts `retain_recent` from the end, then moves

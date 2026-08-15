@@ -7,9 +7,11 @@ pub mod tools;
 pub use crate::agent::context::ContextMetrics;
 pub use crate::error::AgentError;
 
-use crate::agent::compaction::{CompactionRequest, retention_boundary, summarize_with_llm};
+use crate::agent::compaction::{
+    CompactionRequest, compaction_threshold_tokens, retention_boundary, summarize_with_llm,
+};
 use crate::agent::context::{
-    context_metrics_for_input, prepare_context_messages, summarize_messages,
+    context_metrics_for_input, prepare_context_messages, resolve_context_budget, summarize_messages,
 };
 use crate::agent::state::{
     ConversationState, ConversationStateRef, ConversationSummary, ConversationSummaryState,
@@ -87,6 +89,11 @@ pub enum AgentProgress {
         timed_out: bool,
         stdout_preview: String,
         stderr_preview: String,
+    },
+    CompactionStarted,
+    CompactionFinished {
+        covered_messages: usize,
+        used_llm: bool,
     },
 }
 
@@ -252,6 +259,19 @@ impl AgentService {
         F: FnMut(AgentProgress) + Send,
     {
         self.messages.push(Message::user_text(user_input));
+        if self.should_auto_compact()? {
+            on_progress(AgentProgress::CompactionStarted);
+            match self.run_compaction().await {
+                Ok(report) => on_progress(AgentProgress::CompactionFinished {
+                    covered_messages: report.covered_messages,
+                    used_llm: report.used_llm,
+                }),
+                // Compaction must never block the conversation; the
+                // budget-based trimming below still bounds the prompt.
+                Err(AgentError::NothingToCompact) => {}
+                Err(err) => eprintln!("Auto-compaction failed: {err}"),
+            }
+        }
         let prepared_context = prepare_context_messages(
             &self.messages,
             &self.summary_state,
@@ -306,6 +326,15 @@ impl AgentService {
     /// already fits in the retained window.
     pub async fn compact(&mut self) -> Result<CompactionReport, AgentError> {
         self.run_compaction().await
+    }
+
+    fn should_auto_compact(&self) -> Result<bool, AgentError> {
+        let Some(usage) = self.last_measured_usage else {
+            return Ok(false);
+        };
+        let budget = resolve_context_budget(self.provider.kind(), &self.model, self.max_tokens)?;
+        let threshold = compaction_threshold_tokens(budget.context_window_tokens);
+        Ok(usage.total_input_tokens() >= threshold)
     }
 
     async fn run_compaction(&mut self) -> Result<CompactionReport, AgentError> {
@@ -478,6 +507,86 @@ mod tests {
         (0..count)
             .map(|index| Message::user_text(format!("message {index}")))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn submit_auto_compacts_when_measured_usage_exceeds_threshold() {
+        let workspace = make_temp_dir("auto_compact");
+        let over_threshold = TokenUsage {
+            input_tokens: 170_000,
+            ..TokenUsage::default()
+        };
+        let provider = ScriptedProvider::new(vec![
+            Ok(text_provider_response("1. User request: summary", None)),
+            Ok(text_provider_response("turn answer", None)),
+        ]);
+        let mut service = service_with_scripted_provider(
+            workspace.path(),
+            provider,
+            plain_user_messages(30),
+            Some(over_threshold),
+        );
+
+        let mut progress_events = Vec::new();
+        let reply = service
+            .submit_with_progress("next question".to_string(), |event| {
+                progress_events.push(event)
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply.text, "turn answer");
+
+        let summary = service.summary_state.summary.as_ref().unwrap();
+        // 31 messages at compaction time, 16 retained.
+        assert_eq!(summary.covered_messages, 15);
+        assert_eq!(summary.text, "1. User request: summary");
+        assert!(
+            progress_events.contains(&crate::AgentProgress::CompactionFinished {
+                covered_messages: 15,
+                used_llm: true,
+            })
+        );
+
+        let persisted: ConversationSummaryState = crate::agent::state::load_json_file(
+            &workspace
+                .path()
+                .join(STATE_DIR_NAME)
+                .join(SUMMARY_STATE_FILE_NAME),
+        )
+        .unwrap();
+        assert_eq!(persisted.summary.unwrap().covered_messages, 15);
+    }
+
+    #[tokio::test]
+    async fn submit_skips_compaction_below_threshold() {
+        let workspace = make_temp_dir("no_auto_compact");
+        let below_threshold = TokenUsage {
+            input_tokens: 10_000,
+            ..TokenUsage::default()
+        };
+        let provider = ScriptedProvider::new(vec![Ok(text_provider_response("turn answer", None))]);
+        let mut service = service_with_scripted_provider(
+            workspace.path(),
+            provider,
+            plain_user_messages(30),
+            Some(below_threshold),
+        );
+
+        let mut progress_events = Vec::new();
+        service
+            .submit_with_progress("next question".to_string(), |event| {
+                progress_events.push(event)
+            })
+            .await
+            .unwrap();
+
+        // Exactly one model call (the turn itself): no compaction request
+        // was issued and no compaction progress was reported.
+        assert!(
+            !progress_events
+                .iter()
+                .any(|event| matches!(event, crate::AgentProgress::CompactionStarted))
+        );
     }
 
     #[tokio::test]
