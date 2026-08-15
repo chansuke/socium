@@ -7,10 +7,13 @@ pub mod tools;
 pub use crate::agent::context::ContextMetrics;
 pub use crate::error::AgentError;
 
-use crate::agent::context::{context_metrics_for_input, prepare_context_messages};
+use crate::agent::compaction::{CompactionRequest, retention_boundary, summarize_with_llm};
+use crate::agent::context::{
+    context_metrics_for_input, prepare_context_messages, summarize_messages,
+};
 use crate::agent::state::{
-    ConversationState, ConversationStateRef, ConversationSummaryState, load_json_file,
-    save_json_file,
+    ConversationState, ConversationStateRef, ConversationSummary, ConversationSummaryState,
+    load_json_file, save_json_file,
 };
 use crate::agent::turn::{TurnContext, extract_text, run_agent_turn};
 use crate::agent::types::Message;
@@ -25,6 +28,17 @@ use std::time::Duration;
 
 pub struct AgentReply {
     pub text: String,
+}
+
+/// Outcome of a compaction run: how much history the summary now covers
+/// and whether the LLM summarizer succeeded or the deterministic fallback
+/// was used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionReport {
+    pub covered_messages: usize,
+    pub retained_messages: usize,
+    pub used_llm: bool,
+    pub metrics: ContextMetrics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,6 +301,67 @@ impl AgentService {
         Ok(metrics)
     }
 
+    /// Force a compaction regardless of the token threshold (the `/compact`
+    /// command). Returns `NothingToCompact` when the whole conversation
+    /// already fits in the retained window.
+    pub async fn compact(&mut self) -> Result<CompactionReport, AgentError> {
+        self.run_compaction().await
+    }
+
+    async fn run_compaction(&mut self) -> Result<CompactionReport, AgentError> {
+        let boundary = retention_boundary(&self.messages, COMPACTION_RETAIN_RECENT_MESSAGES);
+        let covered = self
+            .summary_state
+            .summary
+            .as_ref()
+            .map(|summary| summary.covered_messages)
+            .unwrap_or(0);
+        if boundary <= covered {
+            return Err(AgentError::NothingToCompact);
+        }
+
+        let previous_summary = self
+            .summary_state
+            .summary
+            .as_ref()
+            .map(|summary| summary.text.clone());
+        let compaction_request = CompactionRequest {
+            previous_summary: previous_summary.as_deref(),
+            messages: &self.messages[covered..boundary],
+        };
+        let (text, used_llm) =
+            match summarize_with_llm(self.provider.as_ref(), &self.client, &compaction_request)
+                .await
+            {
+                Ok(text) => (text, true),
+                Err(err) => {
+                    eprintln!(
+                        "LLM compaction failed, falling back to deterministic summary: {err}"
+                    );
+                    (summarize_messages(&self.messages[..boundary]), false)
+                }
+            };
+
+        self.summary_state = ConversationSummaryState {
+            summary: Some(ConversationSummary {
+                covered_messages: boundary,
+                text,
+            }),
+        };
+        self.persist_state()?;
+
+        // The old measurement described the pre-compaction prompt; drop it
+        // so metrics reflect the compacted context until the next call.
+        self.last_measured_usage = None;
+        let metrics = self.context_metrics("")?;
+        Ok(CompactionReport {
+            covered_messages: boundary,
+            retained_messages: self.messages.len() - boundary,
+            used_llm,
+            metrics,
+        })
+    }
+
     fn persist_state(&self) -> std::io::Result<()> {
         save_json_file(
             &self.conversation_path,
@@ -379,6 +454,68 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn service_with_scripted_provider(
+        workspace: &std::path::Path,
+        provider: ScriptedProvider,
+        messages: Vec<Message>,
+        last_measured_usage: Option<TokenUsage>,
+    ) -> AgentService {
+        let mut service = AgentService::with_provider(
+            workspace.to_path_buf(),
+            Box::new(provider),
+            "claude-sonnet-4-5".to_string(),
+            1_000,
+            reqwest::Client::builder().build().unwrap(),
+        );
+        service.messages = messages;
+        service.last_measured_usage = last_measured_usage;
+        service
+    }
+
+    fn plain_user_messages(count: usize) -> Vec<Message> {
+        (0..count)
+            .map(|index| Message::user_text(format!("message {index}")))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn compact_falls_back_to_deterministic_summary_on_llm_error() {
+        let workspace = make_temp_dir("compact_fallback");
+        let provider = ScriptedProvider::new(vec![Err(
+            crate::providers::error::ProviderError::Api("model unavailable".to_string()),
+        )]);
+        let mut service = service_with_scripted_provider(
+            workspace.path(),
+            provider,
+            plain_user_messages(30),
+            None,
+        );
+
+        let report = service.compact().await.unwrap();
+
+        assert!(!report.used_llm);
+        assert_eq!(report.covered_messages, 14);
+        assert_eq!(report.retained_messages, 16);
+        let summary = service.summary_state.summary.unwrap();
+        assert!(summary.text.contains("message 0"));
+    }
+
+    #[tokio::test]
+    async fn compact_reports_nothing_to_do_for_short_conversations() {
+        let workspace = make_temp_dir("compact_short");
+        let provider = ScriptedProvider::new(vec![]);
+        let mut service = service_with_scripted_provider(
+            workspace.path(),
+            provider,
+            plain_user_messages(5),
+            None,
+        );
+
+        let result = service.compact().await;
+
+        assert!(matches!(result, Err(crate::AgentError::NothingToCompact)));
     }
 
     #[tokio::test]
