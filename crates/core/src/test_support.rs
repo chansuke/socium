@@ -1,5 +1,74 @@
+use crate::agent::types::{AgentMessageRequest, AgentMessageResponse, ContentBlock};
+use crate::providers::error::ProviderError;
+use crate::providers::{
+    DeltaEvent, Provider, ProviderCapabilities, ProviderKind, ProviderResponse, TokenUsage,
+};
+use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
+
+/// Scripted `Provider` for tests: returns pre-recorded responses in order
+/// and records every serialized request it receives.
+pub(crate) struct ScriptedProvider {
+    responses: Mutex<VecDeque<Result<ProviderResponse, ProviderError>>>,
+    pub(crate) recorded_requests: Mutex<Vec<serde_json::Value>>,
+}
+
+impl ScriptedProvider {
+    pub(crate) fn new(responses: Vec<Result<ProviderResponse, ProviderError>>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into()),
+            recorded_requests: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+pub(crate) fn text_provider_response(text: &str, usage: Option<TokenUsage>) -> ProviderResponse {
+    ProviderResponse {
+        message: AgentMessageResponse {
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+        },
+        streamed_text: false,
+        usage,
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for ScriptedProvider {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Anthropic
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            supports_tools: true,
+        }
+    }
+
+    async fn send_message(
+        &self,
+        _client: &reqwest::Client,
+        request: &AgentMessageRequest<'_>,
+        _on_delta: &mut (dyn FnMut(DeltaEvent) + Send),
+    ) -> Result<ProviderResponse, ProviderError> {
+        self.recorded_requests
+            .lock()
+            .unwrap()
+            .push(serde_json::to_value(request)?);
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| {
+                Err(ProviderError::Api(
+                    "ScriptedProvider ran out of scripted responses".to_string(),
+                ))
+            })
+    }
+}
 
 pub(crate) fn make_temp_dir(prefix: &str) -> tempfile::TempDir {
     tempfile::Builder::new()

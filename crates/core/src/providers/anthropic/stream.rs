@@ -1,6 +1,6 @@
 use crate::agent::types::{AgentMessageResponse, ContentBlock};
-use crate::providers::DeltaEvent;
 use crate::providers::error::ProviderError;
+use crate::providers::{DeltaEvent, TokenUsage};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -8,7 +8,10 @@ use serde_json::Value;
 #[serde(tag = "type")]
 enum AnthropicStreamEvent {
     #[serde(rename = "message_start")]
-    MessageStart,
+    MessageStart {
+        #[serde(default)]
+        message: Option<StreamMessageStart>,
+    },
     #[serde(rename = "content_block_start")]
     ContentBlockStart {
         index: usize,
@@ -19,13 +22,37 @@ enum AnthropicStreamEvent {
     #[serde(rename = "content_block_stop")]
     ContentBlockStop,
     #[serde(rename = "message_delta")]
-    MessageDelta,
+    MessageDelta {
+        #[serde(default)]
+        usage: Option<StreamUsage>,
+    },
     #[serde(rename = "message_stop")]
     MessageStop,
     #[serde(rename = "ping")]
     Ping,
     #[serde(rename = "error")]
     Error { error: AnthropicErrorPayload },
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamMessageStart {
+    #[serde(default)]
+    usage: Option<StreamUsage>,
+}
+
+/// Usage fragment carried by `message_start` (input side) and
+/// `message_delta` (cumulative output side). Fields are optional because
+/// each event only reports the counters it knows about.
+#[derive(Debug, Deserialize)]
+struct StreamUsage {
+    #[serde(default)]
+    input_tokens: Option<u32>,
+    #[serde(default)]
+    output_tokens: Option<u32>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u32>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +100,7 @@ pub(super) struct StreamingMessageBuilder {
     blocks: Vec<Option<StreamingContentBlock>>,
     text_block_count: usize,
     pub(super) streamed_text: bool,
+    pub(super) usage: Option<TokenUsage>,
 }
 
 enum StreamingContentBlock {
@@ -106,9 +134,17 @@ impl StreamingMessageBuilder {
     ) -> Result<(), ProviderError> {
         let event: AnthropicStreamEvent = serde_json::from_str(raw_event)?;
         match event {
-            AnthropicStreamEvent::MessageStart
-            | AnthropicStreamEvent::ContentBlockStop
-            | AnthropicStreamEvent::MessageDelta
+            AnthropicStreamEvent::MessageStart { message } => {
+                if let Some(usage) = message.and_then(|m| m.usage) {
+                    self.merge_usage(usage);
+                }
+            }
+            AnthropicStreamEvent::MessageDelta { usage } => {
+                if let Some(usage) = usage {
+                    self.merge_usage(usage);
+                }
+            }
+            AnthropicStreamEvent::ContentBlockStop
             | AnthropicStreamEvent::MessageStop
             | AnthropicStreamEvent::Ping => {}
             AnthropicStreamEvent::Error { error } => {
@@ -126,6 +162,25 @@ impl StreamingMessageBuilder {
             }
         }
         Ok(())
+    }
+
+    /// Counters arrive incrementally: `message_start` carries the input
+    /// side, `message_delta` carries the cumulative output side, so each
+    /// present field overwrites rather than accumulates.
+    fn merge_usage(&mut self, incoming: StreamUsage) {
+        let usage = self.usage.get_or_insert_with(TokenUsage::default);
+        if let Some(value) = incoming.input_tokens {
+            usage.input_tokens = value;
+        }
+        if let Some(value) = incoming.output_tokens {
+            usage.output_tokens = value;
+        }
+        if let Some(value) = incoming.cache_creation_input_tokens {
+            usage.cache_creation_input_tokens = value;
+        }
+        if let Some(value) = incoming.cache_read_input_tokens {
+            usage.cache_read_input_tokens = value;
+        }
     }
 
     pub(super) fn finish(self) -> Result<AgentMessageResponse, ProviderError> {
@@ -329,6 +384,47 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn streaming_builder_collects_usage_from_message_start_and_delta() {
+        let mut builder = StreamingMessageBuilder::default();
+        let mut sink = |_e| {};
+
+        builder
+            .apply_event(
+                "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":1,\"cache_creation_input_tokens\":300,\"cache_read_input_tokens\":4500}}}",
+                &mut sink,
+            )
+            .unwrap();
+        builder
+            .apply_event(
+                "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":87}}",
+                &mut sink,
+            )
+            .unwrap();
+
+        let usage = builder.usage.expect("usage should be captured");
+        assert_eq!(usage.input_tokens, 1200);
+        assert_eq!(usage.output_tokens, 87);
+        assert_eq!(usage.cache_creation_input_tokens, 300);
+        assert_eq!(usage.cache_read_input_tokens, 4500);
+        assert_eq!(usage.total_input_tokens(), 6000);
+    }
+
+    #[test]
+    fn streaming_builder_reports_no_usage_when_events_omit_it() {
+        let mut builder = StreamingMessageBuilder::default();
+        let mut sink = |_e| {};
+
+        builder
+            .apply_event("{\"type\":\"message_start\"}", &mut sink)
+            .unwrap();
+        builder
+            .apply_event("{\"type\":\"message_delta\"}", &mut sink)
+            .unwrap();
+
+        assert!(builder.usage.is_none());
     }
 
     #[test]

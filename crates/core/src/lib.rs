@@ -16,7 +16,7 @@ use crate::agent::turn::{TurnContext, extract_text, run_agent_turn};
 use crate::agent::types::Message;
 use crate::constants::*;
 use crate::providers::error::ProviderError;
-use crate::providers::{Provider, provider_from_env};
+use crate::providers::{Provider, TokenUsage, provider_from_env};
 use crate::tools::{ToolDefinition, default_tools};
 use std::env;
 use std::io::{Error, ErrorKind};
@@ -87,6 +87,10 @@ pub struct AgentService {
     max_tokens: u32,
     tools: Vec<ToolDefinition>,
     client: reqwest::Client,
+    /// Usage measured on the most recent model call. Volatile: not
+    /// persisted, so the first turn after a restart falls back to the
+    /// heuristic estimate.
+    last_measured_usage: Option<TokenUsage>,
 }
 
 impl AgentService {
@@ -121,6 +125,7 @@ impl AgentService {
             max_tokens,
             tools: default_tools(),
             client,
+            last_measured_usage: None,
         }
     }
 
@@ -251,19 +256,22 @@ impl AgentService {
             tools: &self.tools,
             workspace_root: &self.workspace_root,
         };
-        let assistant_chunks =
+        let outcome =
             run_agent_turn(&turn_context, &mut context_messages, &mut on_progress).await?;
+        if outcome.last_usage.is_some() {
+            self.last_measured_usage = outcome.last_usage;
+        }
         let new_messages = context_messages.split_off(initial_len);
         self.messages.extend(new_messages);
         self.summary_state = prepared_context.summary_state;
         self.persist_state()?;
         Ok(AgentReply {
-            text: assistant_chunks.join("\n"),
+            text: outcome.assistant_text_chunks.join("\n"),
         })
     }
 
     pub fn context_metrics(&self, pending_user_input: &str) -> std::io::Result<ContextMetrics> {
-        context_metrics_for_input(
+        let mut metrics = context_metrics_for_input(
             &self.messages,
             pending_user_input,
             &self.summary_state,
@@ -271,7 +279,12 @@ impl AgentService {
             &self.model,
             self.max_tokens,
             &self.tools,
-        )
+        )?;
+        metrics.apply_measured_input(
+            self.last_measured_usage
+                .map(|usage| usage.total_input_tokens()),
+        );
+        Ok(metrics)
     }
 
     fn persist_state(&self) -> std::io::Result<()> {
@@ -293,8 +306,9 @@ mod tests {
     use crate::agent::state::ConversationSummaryState;
     use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
     use crate::constants::{CONVERSATION_STATE_FILE_NAME, STATE_DIR_NAME, SUMMARY_STATE_FILE_NAME};
+    use crate::providers::TokenUsage;
     use crate::providers::anthropic::AnthropicProvider;
-    use crate::test_support::make_temp_dir;
+    use crate::test_support::{ScriptedProvider, make_temp_dir, text_provider_response};
     use crate::tools::default_tools;
     use crate::{AgentService, TranscriptEntry, TranscriptRole};
     use serde_json::json;
@@ -349,6 +363,7 @@ mod tests {
             max_tokens: 128,
             tools: default_tools(),
             client: reqwest::Client::builder().build().unwrap(),
+            last_measured_usage: None,
         };
 
         assert_eq!(
@@ -364,5 +379,34 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn submit_records_measured_usage_and_exposes_it_in_metrics() {
+        let workspace = make_temp_dir("measured_usage");
+        let usage = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 50,
+            cache_creation_input_tokens: 200,
+            cache_read_input_tokens: 300,
+        };
+        let provider =
+            ScriptedProvider::new(vec![Ok(text_provider_response("hi there", Some(usage)))]);
+        let mut service = AgentService::with_provider(
+            workspace.path().to_path_buf(),
+            Box::new(provider),
+            "claude-sonnet-4-5".to_string(),
+            1_000,
+            reqwest::Client::builder().build().unwrap(),
+        );
+
+        let metrics_before = service.context_metrics("").unwrap();
+        assert_eq!(metrics_before.measured_input_tokens, None);
+
+        let reply = service.submit("hello".to_string()).await.unwrap();
+        assert_eq!(reply.text, "hi there");
+
+        let metrics_after = service.context_metrics("").unwrap();
+        assert_eq!(metrics_after.measured_input_tokens, Some(1_500));
     }
 }

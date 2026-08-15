@@ -34,6 +34,25 @@ pub struct ContextMetrics {
     pub context_left_percentage: u32,
     pub summary_active: bool,
     pub summarized_messages: usize,
+    /// Input tokens measured by the provider on the most recent call, when
+    /// available. Preferred over `estimated_input_tokens` for display and
+    /// compaction thresholds.
+    pub measured_input_tokens: Option<u32>,
+}
+
+impl ContextMetrics {
+    /// Overlay a provider-measured input size onto heuristic metrics,
+    /// recomputing the remaining-context percentage from the measurement.
+    pub(crate) fn apply_measured_input(&mut self, measured_input_tokens: Option<u32>) {
+        self.measured_input_tokens = measured_input_tokens;
+        if let Some(measured) = measured_input_tokens {
+            self.context_left_percentage = context_left_percentage(
+                self.context_window_tokens,
+                measured,
+                self.max_output_tokens,
+            );
+        }
+    }
 }
 
 pub(crate) struct PreparedContext {
@@ -222,24 +241,33 @@ fn build_metrics(
     summary_active: bool,
     summarized_messages: usize,
 ) -> ContextMetrics {
-    let remaining_tokens = budget
-        .context_window_tokens
-        .saturating_sub(estimated_input_tokens.saturating_add(budget.max_output_tokens));
-    let context_left_percentage = if budget.context_window_tokens == 0 {
-        0
-    } else {
-        remaining_tokens.saturating_mul(100) / budget.context_window_tokens
-    };
-
     ContextMetrics {
         estimated_input_tokens,
         input_budget_tokens: budget.input_budget_tokens(),
         context_window_tokens: budget.context_window_tokens,
         max_output_tokens: budget.max_output_tokens,
-        context_left_percentage,
+        context_left_percentage: context_left_percentage(
+            budget.context_window_tokens,
+            estimated_input_tokens,
+            budget.max_output_tokens,
+        ),
         summary_active,
         summarized_messages,
+        measured_input_tokens: None,
     }
+}
+
+fn context_left_percentage(
+    context_window_tokens: u32,
+    input_tokens: u32,
+    max_output_tokens: u32,
+) -> u32 {
+    if context_window_tokens == 0 {
+        return 0;
+    }
+    let remaining_tokens =
+        context_window_tokens.saturating_sub(input_tokens.saturating_add(max_output_tokens));
+    remaining_tokens.saturating_mul(100) / context_window_tokens
 }
 
 fn estimate_request_tokens(
