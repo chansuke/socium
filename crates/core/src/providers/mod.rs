@@ -8,9 +8,31 @@ use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::codex::CodexProvider;
 use crate::providers::error::ProviderError;
 use crate::providers::opencode::OpencodeProvider;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::fmt;
 use std::io::{self, Error, ErrorKind};
+
+/// Token counts reported by the provider for a single model call.
+/// Mirrors the Anthropic `usage` payload; providers that do not report
+/// usage leave it absent on the response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_creation_input_tokens: u32,
+    pub cache_read_input_tokens: u32,
+}
+
+impl TokenUsage {
+    /// Prompt-side total as the API meters it: live input plus cache
+    /// writes and cache reads.
+    pub fn total_input_tokens(&self) -> u32 {
+        self.input_tokens
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderCapabilities {
@@ -27,6 +49,8 @@ pub enum ProviderKind {
 pub(crate) struct ProviderResponse {
     pub message: AgentMessageResponse,
     pub streamed_text: bool,
+    /// Measured usage for this call, when the provider reports it.
+    pub usage: Option<TokenUsage>,
 }
 
 pub(crate) enum DeltaEvent {

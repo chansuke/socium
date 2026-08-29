@@ -202,11 +202,18 @@ impl App {
                 ),
                 Span::styled(" ", Style::default().fg(MUTED)),
                 Span::styled(
-                    format!(
-                        "{}/{}",
-                        self.context_metrics.estimated_input_tokens,
-                        self.context_metrics.input_budget_tokens
-                    ),
+                    // A trailing '*' marks a provider-measured token count;
+                    // without it the value is a heuristic estimate.
+                    match self.context_metrics.measured_input_tokens {
+                        Some(measured) => {
+                            format!("{measured}*/{}", self.context_metrics.input_budget_tokens)
+                        }
+                        None => format!(
+                            "{}/{}",
+                            self.context_metrics.estimated_input_tokens,
+                            self.context_metrics.input_budget_tokens
+                        ),
+                    },
                     Style::default().fg(SOFT),
                 ),
                 Span::styled(" ", Style::default().fg(MUTED)),

@@ -101,10 +101,12 @@ impl Provider for AnthropicProvider {
         }
 
         let streamed_text = builder.streamed_text;
+        let usage = builder.usage;
         let message = builder.finish()?;
         Ok(ProviderResponse {
             message,
             streamed_text,
+            usage,
         })
     }
 }

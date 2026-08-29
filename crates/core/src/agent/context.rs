@@ -34,6 +34,25 @@ pub struct ContextMetrics {
     pub context_left_percentage: u32,
     pub summary_active: bool,
     pub summarized_messages: usize,
+    /// Input tokens measured by the provider on the most recent call, when
+    /// available. Preferred over `estimated_input_tokens` for display and
+    /// compaction thresholds.
+    pub measured_input_tokens: Option<u32>,
+}
+
+impl ContextMetrics {
+    /// Overlay a provider-measured input size onto heuristic metrics,
+    /// recomputing the remaining-context percentage from the measurement.
+    pub(crate) fn apply_measured_input(&mut self, measured_input_tokens: Option<u32>) {
+        self.measured_input_tokens = measured_input_tokens;
+        if let Some(measured) = measured_input_tokens {
+            self.context_left_percentage = context_left_percentage(
+                self.context_window_tokens,
+                measured,
+                self.max_output_tokens,
+            );
+        }
+    }
 }
 
 pub(crate) struct PreparedContext {
@@ -117,11 +136,23 @@ fn prepare_context_with_budget(
         };
     }
 
+    // A persisted compaction fixes the minimum coverage: never resurrect
+    // messages an earlier compaction already summarized.
+    let compacted_covered = summary_state
+        .summary
+        .as_ref()
+        .map(|summary| summary.covered_messages)
+        .unwrap_or(0)
+        .min(raw_messages.len());
+
     let base_keep_recent = raw_messages.len().min(TARGET_RECENT_CONTEXT_MESSAGES);
     let mut best = compose_context(
         raw_messages,
         summary_state,
-        raw_messages.len().saturating_sub(base_keep_recent),
+        raw_messages
+            .len()
+            .saturating_sub(base_keep_recent)
+            .max(compacted_covered),
         model,
         budget,
         tools,
@@ -140,7 +171,10 @@ fn prepare_context_with_budget(
         let candidate = compose_context(
             raw_messages,
             summary_state,
-            raw_messages.len().saturating_sub(keep_recent),
+            raw_messages
+                .len()
+                .saturating_sub(keep_recent)
+                .max(compacted_covered),
             model,
             budget,
             tools,
@@ -192,10 +226,27 @@ fn build_summary_state(
         return ConversationSummaryState::default();
     }
 
-    if let Some(summary) = &existing.summary
-        && summary.covered_messages == covered_messages
-    {
-        return existing.clone();
+    if let Some(summary) = &existing.summary {
+        if summary.covered_messages == covered_messages {
+            return existing.clone();
+        }
+        // Extend an existing summary incrementally so LLM-produced text
+        // from a compaction survives; only the newly covered slice gets
+        // the deterministic treatment.
+        if summary.covered_messages < covered_messages {
+            let extension =
+                summarize_messages(&raw_messages[summary.covered_messages..covered_messages]);
+            let mut text = format!("{}\n{}", summary.text, extension);
+            if text.chars().count() > MAX_SUMMARY_CHARACTERS {
+                text = truncate_summary_text(&text, MAX_SUMMARY_CHARACTERS);
+            }
+            return ConversationSummaryState {
+                summary: Some(ConversationSummary {
+                    covered_messages,
+                    text,
+                }),
+            };
+        }
     }
 
     ConversationSummaryState {
@@ -222,24 +273,33 @@ fn build_metrics(
     summary_active: bool,
     summarized_messages: usize,
 ) -> ContextMetrics {
-    let remaining_tokens = budget
-        .context_window_tokens
-        .saturating_sub(estimated_input_tokens.saturating_add(budget.max_output_tokens));
-    let context_left_percentage = if budget.context_window_tokens == 0 {
-        0
-    } else {
-        remaining_tokens.saturating_mul(100) / budget.context_window_tokens
-    };
-
     ContextMetrics {
         estimated_input_tokens,
         input_budget_tokens: budget.input_budget_tokens(),
         context_window_tokens: budget.context_window_tokens,
         max_output_tokens: budget.max_output_tokens,
-        context_left_percentage,
+        context_left_percentage: context_left_percentage(
+            budget.context_window_tokens,
+            estimated_input_tokens,
+            budget.max_output_tokens,
+        ),
         summary_active,
         summarized_messages,
+        measured_input_tokens: None,
     }
+}
+
+fn context_left_percentage(
+    context_window_tokens: u32,
+    input_tokens: u32,
+    max_output_tokens: u32,
+) -> u32 {
+    if context_window_tokens == 0 {
+        return 0;
+    }
+    let remaining_tokens =
+        context_window_tokens.saturating_sub(input_tokens.saturating_add(max_output_tokens));
+    remaining_tokens.saturating_mul(100) / context_window_tokens
 }
 
 fn estimate_request_tokens(
@@ -276,7 +336,7 @@ fn infer_context_window_tokens(provider: ProviderKind, model: &str) -> u32 {
     }
 }
 
-fn summarize_messages(messages: &[Message]) -> String {
+pub(crate) fn summarize_messages(messages: &[Message]) -> String {
     let mut lines = messages
         .iter()
         .filter_map(summarize_message_line)
@@ -470,6 +530,61 @@ mod tests {
         assert!(metrics.estimated_input_tokens > 0);
         assert_eq!(metrics.context_window_tokens, 200_000);
         assert_eq!(metrics.max_output_tokens, 1_000);
+    }
+
+    #[test]
+    fn build_summary_state_extends_existing_summary_without_discarding_it() {
+        let messages = (0..6)
+            .map(|index| Message::user_text(format!("message {index}")))
+            .collect::<Vec<_>>();
+        let existing = ConversationSummaryState {
+            summary: Some(crate::agent::state::ConversationSummary {
+                covered_messages: 2,
+                text: "1. User request: keep this LLM summary".to_string(),
+            }),
+        };
+
+        let extended = super::build_summary_state(&messages, &existing, 4);
+
+        let summary = extended.summary.unwrap();
+        assert_eq!(summary.covered_messages, 4);
+        assert!(
+            summary
+                .text
+                .starts_with("1. User request: keep this LLM summary")
+        );
+        assert!(summary.text.contains("message 2"));
+        assert!(summary.text.contains("message 3"));
+        assert!(!summary.text.contains("message 4"));
+    }
+
+    #[test]
+    fn prepare_context_never_resurrects_compacted_messages() {
+        let messages = (0..10)
+            .map(|index| Message::user_text(format!("message {index}")))
+            .collect::<Vec<_>>();
+        let existing = ConversationSummaryState {
+            summary: Some(crate::agent::state::ConversationSummary {
+                covered_messages: 6,
+                text: "persisted compaction summary".to_string(),
+            }),
+        };
+
+        let prepared = prepare_context_with_budget(
+            &messages,
+            &existing,
+            "claude-sonnet-4-5",
+            ContextBudget {
+                context_window_tokens: 200_000,
+                max_output_tokens: 500,
+            },
+            &default_tools(),
+        );
+
+        // Budget is huge, but coverage must not drop below the persisted 6.
+        assert_eq!(prepared.metrics.summarized_messages, 6);
+        // summary message + the 4 uncovered raw messages
+        assert_eq!(prepared.messages.len(), 5);
     }
 
     #[test]

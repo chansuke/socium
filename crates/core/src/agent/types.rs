@@ -19,10 +19,20 @@ impl<'a> AgentMessageRequest<'a> {
         messages: &'a [Message],
         tools: &'a [ToolDefinition],
     ) -> Self {
+        Self::with_system_prompt(model, max_tokens, DEFAULT_SYSTEM_PROMPT, messages, tools)
+    }
+
+    pub fn with_system_prompt(
+        model: &'a str,
+        max_tokens: u32,
+        system: &'a str,
+        messages: &'a [Message],
+        tools: &'a [ToolDefinition],
+    ) -> Self {
         Self {
             model,
             max_tokens,
-            system: DEFAULT_SYSTEM_PROMPT,
+            system,
             messages,
             tools,
         }
