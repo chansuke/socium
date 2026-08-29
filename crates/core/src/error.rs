@@ -13,4 +13,6 @@ pub enum AgentError {
     State(#[from] std::io::Error),
     #[error("Tool execution reached the maximum rounds ({MAX_TOOL_ROUNDS}) and may be incomplete")]
     ToolRoundsExhausted,
+    #[error("Nothing to compact: the conversation is already within the retained window")]
+    NothingToCompact,
 }

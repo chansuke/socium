@@ -2,7 +2,7 @@ use crate::AgentProgress;
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message};
 use crate::constants::MAX_TOOL_ROUNDS;
 use crate::error::AgentError;
-use crate::providers::{DeltaEvent, Provider};
+use crate::providers::{DeltaEvent, Provider, TokenUsage};
 use crate::tools::ToolDefinition;
 use crate::tools::run_tool_calls_with_progress;
 use std::path::Path;
@@ -16,17 +16,25 @@ pub(crate) struct TurnContext<'a> {
     pub(crate) workspace_root: &'a Path,
 }
 
+pub(crate) struct TurnOutcome {
+    pub(crate) assistant_text_chunks: Vec<String>,
+    /// Usage measured on the last model call of the turn; approximates the
+    /// prompt size the next turn will start from.
+    pub(crate) last_usage: Option<TokenUsage>,
+}
+
 pub(crate) async fn run_agent_turn<F>(
     ctx: &TurnContext<'_>,
     messages: &mut Vec<Message>,
     on_progress: &mut F,
-) -> Result<Vec<String>, AgentError>
+) -> Result<TurnOutcome, AgentError>
 where
     F: FnMut(AgentProgress) + Send,
 {
     let supports_tools = ctx.provider.capabilities().supports_tools;
     let mut finished = false;
     let mut assistant_text_chunks = Vec::new();
+    let mut last_usage = None;
     let max_rounds = if supports_tools { MAX_TOOL_ROUNDS } else { 1 };
     for round in 0..max_rounds {
         on_progress(AgentProgress::ModelRequestStarted {
@@ -43,6 +51,9 @@ where
             .provider
             .send_message(ctx.client, &message_request, &mut on_delta)
             .await?;
+        if response.usage.is_some() {
+            last_usage = response.usage;
+        }
         let assistant_blocks = response.message.content;
 
         let message_text = extract_text(&assistant_blocks);
@@ -75,7 +86,10 @@ where
     if !finished {
         return Err(AgentError::ToolRoundsExhausted);
     }
-    Ok(assistant_text_chunks)
+    Ok(TurnOutcome {
+        assistant_text_chunks,
+        last_usage,
+    })
 }
 
 pub(crate) fn extract_text(blocks: &[ContentBlock]) -> String {
