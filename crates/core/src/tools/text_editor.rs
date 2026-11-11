@@ -1,6 +1,6 @@
 use crate::AgentProgress;
 use crate::constants::*;
-use crate::tools::edit_history::{pop_edit_history, record_edit_history};
+use crate::tools::edit_history::{Mutation, apply_changes, undo};
 use crate::tools::error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{require_i64_field, require_string_field};
@@ -126,9 +126,14 @@ pub(crate) fn text_editor_str_replace(
     }
 
     let updated = content.replacen(old_str, new_str, 1);
-    record_edit_history(workspace_root, path, Some(content))?;
-    fs::write(&resolved_path, updated)
-        .map_err(|e| format!("Failed to write file '{}': {e}", path))?;
+    apply_changes(
+        workspace_root,
+        vec![Mutation {
+            path: path.into(),
+            before: Some(content),
+            after: Some(updated),
+        }],
+    )?;
     Ok(maybe_prepend_dirty_worktree_warning(
         workspace_root,
         format!("Path: {}\nReplaced 1 occurrence", path),
@@ -146,13 +151,14 @@ pub(crate) fn text_editor_create(
     if target_path.exists() {
         return Err(format!("Cannot create file '{}': path already exists", path).into());
     }
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create parent directories for '{}': {e}", path))?;
-    }
-    record_edit_history(workspace_root, path, None)?;
-    fs::write(&target_path, file_text)
-        .map_err(|e| format!("Failed to create file '{}': {e}", path))?;
+    apply_changes(
+        workspace_root,
+        vec![Mutation {
+            path: path.into(),
+            before: None,
+            after: Some(file_text.into()),
+        }],
+    )?;
     Ok(maybe_prepend_dirty_worktree_warning(
         workspace_root,
         format!("Path: {}\nCreated file", path),
@@ -200,9 +206,14 @@ pub(crate) fn text_editor_insert(
     updated.push_str(insert_text);
     updated.push_str(&content[insert_at..]);
 
-    record_edit_history(workspace_root, path, Some(content))?;
-    fs::write(&resolved_path, updated)
-        .map_err(|e| format!("Failed to write file '{}': {e}", path))?;
+    apply_changes(
+        workspace_root,
+        vec![Mutation {
+            path: path.into(),
+            before: Some(content),
+            after: Some(updated),
+        }],
+    )?;
     Ok(maybe_prepend_dirty_worktree_warning(
         workspace_root,
         format!("Path: {}\nInserted text after line {}", path, line),
@@ -214,28 +225,7 @@ pub(crate) fn text_editor_undo_edit(
     input: &serde_json::Map<String, Value>,
 ) -> Result<String, ToolError> {
     let path = require_string_field(input, "path", "text_editor undo_edit path")?;
-    let history_entry = pop_edit_history(workspace_root, path)?
-        .ok_or_else(|| format!("No edit history found for '{}'", path))?;
-    let target_path = resolve_workspace_path_for_create(workspace_root, path)?;
-
-    match history_entry.previous_content {
-        Some(previous_content) => {
-            if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| {
-                    format!("Failed to create parent directories for '{}': {e}", path)
-                })?;
-            }
-            fs::write(&target_path, previous_content)
-                .map_err(|e| format!("Failed to restore file '{}': {e}", path))?;
-        }
-        None => {
-            if target_path.exists() {
-                fs::remove_file(&target_path)
-                    .map_err(|e| format!("Failed to remove file '{}': {e}", path))?;
-            }
-        }
-    }
-
+    undo(workspace_root, path)?;
     Ok(maybe_prepend_dirty_worktree_warning(
         workspace_root,
         format!("Path: {}\nUndid last edit", path),

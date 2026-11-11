@@ -1,3 +1,9 @@
+pub use crate::agent::state::{
+    load_json_file as load_local_state, save_json_file as save_local_state,
+};
+mod control;
+mod process;
+pub use control::TaskControl;
 pub mod agent;
 pub mod constants;
 pub mod error;
@@ -17,7 +23,7 @@ use crate::agent::state::{
     ConversationState, ConversationStateRef, ConversationSummary, ConversationSummaryState,
     load_json_file, save_json_file,
 };
-use crate::agent::turn::{TurnContext, extract_text, run_agent_turn};
+use crate::agent::turn::{TurnContext, run_agent_turn};
 use crate::agent::types::Message;
 use crate::constants::*;
 use crate::providers::error::ProviderError;
@@ -62,6 +68,11 @@ pub enum AgentProgress {
         round: usize,
         provider: String,
     },
+    ApprovalRequested {
+        request_id: u64,
+        tool: String,
+        input: String,
+    },
     ApprovalRequired {
         tool: String,
         reason: String,
@@ -78,6 +89,10 @@ pub enum AgentProgress {
     ToolCallFinished {
         name: String,
         is_error: bool,
+    },
+    CommandOutput {
+        stdout_bytes: u64,
+        stderr_bytes: u64,
     },
     CommandStarted {
         command: String,
@@ -98,10 +113,12 @@ pub enum AgentProgress {
 }
 
 pub struct AgentService {
+    control: TaskControl,
+    state_lock: Option<std::fs::File>,
     workspace_root: PathBuf,
     conversation_path: PathBuf,
-    summary_path: PathBuf,
     messages: Vec<Message>,
+    events: Vec<serde_json::Value>,
     summary_state: ConversationSummaryState,
     provider: Box<dyn Provider>,
     model: String,
@@ -132,14 +149,13 @@ impl AgentService {
         let conversation_path = workspace_root
             .join(STATE_DIR_NAME)
             .join(CONVERSATION_STATE_FILE_NAME);
-        let summary_path = workspace_root
-            .join(STATE_DIR_NAME)
-            .join(SUMMARY_STATE_FILE_NAME);
         Self {
+            control: TaskControl::default(),
+            state_lock: None,
             workspace_root,
             conversation_path,
-            summary_path,
             messages: Vec::new(),
+            events: Vec::new(),
             summary_state: ConversationSummaryState::default(),
             provider,
             model,
@@ -151,52 +167,6 @@ impl AgentService {
     }
 
     pub fn from_env(workspace_root: PathBuf) -> Result<Self, AgentError> {
-        let conversation_path = workspace_root
-            .join(STATE_DIR_NAME)
-            .join(CONVERSATION_STATE_FILE_NAME);
-        let summary_path = workspace_root
-            .join(STATE_DIR_NAME)
-            .join(SUMMARY_STATE_FILE_NAME);
-
-        let messages = match load_json_file::<ConversationState>(&conversation_path) {
-            Ok(state) => {
-                let mut messages = state.messages;
-                if messages.len() > MAX_PERSISTED_MESSAGES {
-                    let overflow = messages.len() - MAX_PERSISTED_MESSAGES;
-                    messages.drain(0..overflow);
-                    eprintln!(
-                        "Persisted conversation exceeded {} messages and was truncated.",
-                        MAX_PERSISTED_MESSAGES
-                    );
-                }
-                messages
-            }
-            Err(err) => {
-                eprintln!(
-                    "Failed to load persisted conversation '{}': {err}. Starting with an empty conversation.",
-                    conversation_path.display()
-                );
-                Vec::new()
-            }
-        };
-        let mut summary_state = match load_json_file::<ConversationSummaryState>(&summary_path) {
-            Ok(state) => state,
-            Err(err) => {
-                eprintln!(
-                    "Failed to load persisted summaries '{}': {err}. Continuing without summaries.",
-                    summary_path.display()
-                );
-                ConversationSummaryState::default()
-            }
-        };
-        if summary_state
-            .summary
-            .as_ref()
-            .is_some_and(|summary| summary.covered_messages > messages.len())
-        {
-            summary_state = ConversationSummaryState::default();
-        }
-
         let provider = provider_from_env()?;
         let model = env::var("MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let max_tokens = env::var("MAX_TOKENS")
@@ -214,15 +184,67 @@ impl AgentService {
             .map_err(ProviderError::Http)?;
 
         let mut service = Self::with_provider(workspace_root, provider, model, max_tokens, client);
-        service.messages = messages;
-        service.summary_state = summary_state;
+        service.restore_state()?;
         Ok(service)
     }
 
-    pub fn clear(&mut self) -> std::io::Result<()> {
-        self.messages.clear();
-        self.summary_state = ConversationSummaryState::default();
+    pub fn task_control(&self) -> TaskControl {
+        self.control.clone()
+    }
+
+    fn ensure_state_lock(&mut self) -> std::io::Result<()> {
+        if self.state_lock.is_none() {
+            self.state_lock = Some(crate::agent::state::lock_workspace(&self.workspace_root)?);
+        }
+        Ok(())
+    }
+
+    fn restore_state(&mut self) -> std::io::Result<()> {
+        self.ensure_state_lock()?;
+        crate::tools::workspace::resolve_workspace_path_for_create(
+            &self.workspace_root,
+            &format!("{STATE_DIR_NAME}/{CONVERSATION_STATE_FILE_NAME}"),
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let state = load_json_file::<ConversationState>(&self.conversation_path)?;
+        if state.schema_version > 1 {
+            return Err(std::io::Error::other(format!(
+                "Unsupported conversation schema {}; original file preserved",
+                state.schema_version
+            )));
+        }
+        // Legacy summaries used unstable offsets after front truncation. Keep
+        // the raw history and recompute rather than applying a stale summary.
+        self.summary_state = state.summary_state.unwrap_or_default();
+        self.messages = state.messages;
+        self.events = state.events;
+        crate::agent::turn::repair_incomplete_tools(&mut self.messages);
+        if self
+            .summary_state
+            .summary
+            .as_ref()
+            .is_some_and(|s| s.covered_messages > self.messages.len())
+        {
+            return Err(std::io::Error::other(
+                "Summary coverage exceeds conversation history; original state preserved",
+            ));
+        }
         self.persist_state()
+    }
+
+    pub fn clear(&mut self) -> std::io::Result<()> {
+        self.ensure_state_lock()?;
+        let old_messages = std::mem::take(&mut self.messages);
+        let old_events = std::mem::take(&mut self.events);
+        let old_summary = self.summary_state.clone();
+        self.summary_state = ConversationSummaryState::default();
+        if let Err(err) = self.persist_state() {
+            self.messages = old_messages;
+            self.events = old_events;
+            self.summary_state = old_summary;
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub fn transcript_entries(&self) -> Vec<TranscriptEntry> {
@@ -231,7 +253,25 @@ impl AgentService {
             .filter_map(|message| {
                 let text = match &message.content {
                     crate::agent::types::MessageContent::Text(text) => text.clone(),
-                    crate::agent::types::MessageContent::Blocks(blocks) => extract_text(blocks),
+                    crate::agent::types::MessageContent::Blocks(blocks) => blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            crate::agent::types::ContentBlock::Text { text } => Some(text.clone()),
+                            crate::agent::types::ContentBlock::ToolUse { name, input, .. } => {
+                                Some(format!("Tool: {name} {input}"))
+                            }
+                            crate::agent::types::ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } => Some(format!(
+                                "Tool result {tool_use_id} (error={}): {content}",
+                                is_error == &Some(true)
+                            )),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 };
                 if text.trim().is_empty() {
                     return None;
@@ -247,6 +287,7 @@ impl AgentService {
     }
 
     pub async fn submit(&mut self, user_input: String) -> Result<AgentReply, AgentError> {
+        self.control.reset_cancellation();
         self.submit_with_progress(user_input, |_| {}).await
     }
 
@@ -258,7 +299,12 @@ impl AgentService {
     where
         F: FnMut(AgentProgress) + Send,
     {
+        self.ensure_state_lock()?;
+        crate::agent::turn::repair_incomplete_tools(&mut self.messages);
+        let turn_id = self.messages.len();
+        self.events.push(serde_json::json!({"type":"turn_started","turn_id":turn_id,"sequence":self.events.len()}));
         self.messages.push(Message::user_text(user_input));
+        self.persist_state()?;
         if self.should_auto_compact()? {
             on_progress(AgentProgress::CompactionStarted);
             match self.run_compaction().await {
@@ -289,16 +335,49 @@ impl AgentService {
             max_tokens: self.max_tokens,
             tools: &self.tools,
             workspace_root: &self.workspace_root,
+            control: &self.control,
         };
-        let outcome =
-            run_agent_turn(&turn_context, &mut context_messages, &mut on_progress).await?;
+        let raw_len = self.messages.len();
+        self.summary_state = prepared_context.summary_state;
+        let path = &self.conversation_path;
+        let raw_messages = &mut self.messages;
+        let summary = &self.summary_state;
+        let events = &mut self.events;
+        let mut checkpoint = |context: &[Message],
+                              event: serde_json::Value|
+         -> std::io::Result<()> {
+            raw_messages.truncate(raw_len);
+            raw_messages.extend_from_slice(&context[initial_len..]);
+            events.push(serde_json::json!({"sequence":events.len(),"turn_id":turn_id,"message_offset":raw_messages.len(),"event":event}));
+            save_json_file(
+                path,
+                &ConversationStateRef {
+                    schema_version: 1,
+                    messages: raw_messages,
+                    events,
+                    summary_state: summary,
+                },
+            )
+        };
+        let result = run_agent_turn(
+            &turn_context,
+            &mut context_messages,
+            &mut on_progress,
+            &mut checkpoint,
+        )
+        .await;
+        self.events.push(serde_json::json!({"type":if result.is_ok(){"turn_finished"}else{"turn_failed"},"sequence":self.events.len(),"turn_id":turn_id,"error":result.as_ref().err().map(ToString::to_string)}));
+        if let Err(error) = self.persist_state() {
+            return Err(std::io::Error::other(format!(
+                "Cannot persist turn completion: {error}; previous failure: {:?}",
+                result.as_ref().err()
+            ))
+            .into());
+        }
+        let outcome = result?;
         if outcome.last_usage.is_some() {
             self.last_measured_usage = outcome.last_usage;
         }
-        let new_messages = context_messages.split_off(initial_len);
-        self.messages.extend(new_messages);
-        self.summary_state = prepared_context.summary_state;
-        self.persist_state()?;
         Ok(AgentReply {
             text: outcome.assistant_text_chunks.join("\n"),
         })
@@ -325,6 +404,7 @@ impl AgentService {
     /// command). Returns `NothingToCompact` when the whole conversation
     /// already fits in the retained window.
     pub async fn compact(&mut self) -> Result<CompactionReport, AgentError> {
+        self.ensure_state_lock()?;
         self.run_compaction().await
     }
 
@@ -358,18 +438,18 @@ impl AgentService {
             previous_summary: previous_summary.as_deref(),
             messages: &self.messages[covered..boundary],
         };
-        let (text, used_llm) =
-            match summarize_with_llm(self.provider.as_ref(), &self.client, &compaction_request)
-                .await
-            {
-                Ok(text) => (text, true),
-                Err(err) => {
-                    eprintln!(
-                        "LLM compaction failed, falling back to deterministic summary: {err}"
-                    );
-                    (summarize_messages(&self.messages[..boundary]), false)
-                }
-            };
+        let summary_result = tokio::select! {
+            biased;
+            _ = self.control.cancelled() => return Err(AgentError::Cancelled),
+            result = summarize_with_llm(self.provider.as_ref(), &self.client, &compaction_request) => result,
+        };
+        let (text, used_llm) = match summary_result {
+            Ok(text) => (text, true),
+            Err(err) => {
+                eprintln!("LLM compaction failed, falling back to deterministic summary: {err}");
+                (summarize_messages(&self.messages[..boundary]), false)
+            }
+        };
 
         self.summary_state = ConversationSummaryState {
             summary: Some(ConversationSummary {
@@ -395,10 +475,12 @@ impl AgentService {
         save_json_file(
             &self.conversation_path,
             &ConversationStateRef {
+                schema_version: 1,
                 messages: &self.messages,
+                events: &self.events,
+                summary_state: &self.summary_state,
             },
-        )?;
-        save_json_file(&self.summary_path, &self.summary_state)
+        )
     }
 }
 
@@ -409,7 +491,7 @@ mod test_support;
 mod tests {
     use crate::agent::state::ConversationSummaryState;
     use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
-    use crate::constants::{CONVERSATION_STATE_FILE_NAME, STATE_DIR_NAME, SUMMARY_STATE_FILE_NAME};
+    use crate::constants::{CONVERSATION_STATE_FILE_NAME, STATE_DIR_NAME};
     use crate::providers::TokenUsage;
     use crate::providers::anthropic::AnthropicProvider;
     use crate::test_support::{ScriptedProvider, make_temp_dir, text_provider_response};
@@ -418,16 +500,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn transcript_entries_include_text_messages_and_skip_tool_only_blocks() {
+    fn transcript_entries_include_text_and_tool_results() {
         let workspace = make_temp_dir("transcript");
         let conversation_path = workspace
             .path()
             .join(STATE_DIR_NAME)
             .join(CONVERSATION_STATE_FILE_NAME);
-        let summary_path = workspace
-            .path()
-            .join(STATE_DIR_NAME)
-            .join(SUMMARY_STATE_FILE_NAME);
         let messages = vec![
             Message {
                 role: Role::User,
@@ -457,10 +535,12 @@ mod tests {
         ];
 
         let service = AgentService {
+            control: crate::TaskControl::default(),
+            state_lock: None,
             workspace_root: workspace.path().to_path_buf(),
             conversation_path,
-            summary_path,
             messages,
+            events: Vec::new(),
             summary_state: ConversationSummaryState::default(),
             provider: Box::new(AnthropicProvider::with_credentials("test", "2023-06-01")),
             model: "test-model".to_string(),
@@ -470,19 +550,17 @@ mod tests {
             last_measured_usage: None,
         };
 
+        let entries = service.transcript_entries();
+        assert_eq!(entries.len(), 3);
         assert_eq!(
-            service.transcript_entries(),
-            vec![
-                TranscriptEntry {
-                    role: TranscriptRole::User,
-                    text: "hello".to_string(),
-                },
-                TranscriptEntry {
-                    role: TranscriptRole::Assistant,
-                    text: "answer".to_string(),
-                },
-            ]
+            entries[0],
+            TranscriptEntry {
+                role: TranscriptRole::User,
+                text: "hello".into()
+            }
         );
+        assert!(entries[1].text.contains("Tool: read_file"));
+        assert!(entries[2].text.contains("Tool result tool_1"));
     }
 
     fn service_with_scripted_provider(
@@ -547,14 +625,23 @@ mod tests {
             })
         );
 
-        let persisted: ConversationSummaryState = crate::agent::state::load_json_file(
-            &workspace
-                .path()
-                .join(STATE_DIR_NAME)
-                .join(SUMMARY_STATE_FILE_NAME),
-        )
-        .unwrap();
-        assert_eq!(persisted.summary.unwrap().covered_messages, 15);
+        let persisted: crate::agent::state::ConversationState =
+            crate::agent::state::load_json_file(
+                &workspace
+                    .path()
+                    .join(STATE_DIR_NAME)
+                    .join(CONVERSATION_STATE_FILE_NAME),
+            )
+            .unwrap();
+        assert_eq!(
+            persisted
+                .summary_state
+                .unwrap()
+                .summary
+                .unwrap()
+                .covered_messages,
+            15
+        );
     }
 
     #[tokio::test]
@@ -656,3 +743,6 @@ mod tests {
         assert_eq!(metrics_after.measured_input_tokens, Some(1_500));
     }
 }
+
+#[cfg(test)]
+mod reliability_tests;

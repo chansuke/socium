@@ -5,7 +5,7 @@ use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_string_field,
 };
 use crate::tools::ripgrep::{
-    SearchExecution, SearchMode, format_search_results, search_with_ripgrep_fallback,
+    SearchExecution, SearchMode, format_search_results, search_with_ripgrep,
 };
 use crate::tools::workspace::resolve_workspace_path;
 use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
@@ -56,7 +56,7 @@ impl Tool for SearchTextTool {
         input: &Value,
         _on_progress: &mut dyn FnMut(AgentProgress),
     ) -> Result<String, ToolError> {
-        search_text_from_workspace(ctx.workspace_root, input)
+        search_text_controlled(ctx.workspace_root, input, ctx.control)
     }
 }
 
@@ -91,9 +91,17 @@ impl<'a> SearchTextInput<'a> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn search_text_from_workspace(
     workspace_root: &Path,
     input: &Value,
+) -> Result<String, ToolError> {
+    search_text_controlled(workspace_root, input, &crate::TaskControl::default())
+}
+fn search_text_controlled(
+    workspace_root: &Path,
+    input: &Value,
+    control: &crate::TaskControl,
 ) -> Result<String, ToolError> {
     let SearchTextInput {
         pattern,
@@ -102,24 +110,23 @@ pub(crate) fn search_text_from_workspace(
         max_results,
     } = SearchTextInput::parse(input)?;
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
-    let execution = search_with_ripgrep_fallback(
+    let execution = search_with_ripgrep(
         workspace_root,
         &resolved_path,
         pattern,
         glob,
         SearchMode::SmartCase,
-        "rg",
-        "search_text",
+        control,
     )?;
     let SearchExecution {
         matches,
         status_code,
-        used_ripgrep,
+        truncated,
     } = execution;
-    let formatted = format_search_results("Pattern", pattern, path, glob, max_results, matches);
+    let mut formatted = format_search_results("Pattern", pattern, path, glob, max_results, matches);
 
-    if !used_ripgrep {
-        return Ok(formatted);
+    if truncated {
+        formatted.push_str("\n(truncated at 256 KiB capture limit; narrow the search)");
     }
 
     match status_code {

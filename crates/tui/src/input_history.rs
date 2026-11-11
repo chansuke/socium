@@ -1,41 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io::{self, Error, ErrorKind};
-use std::path::{Path, PathBuf};
+use socium_core::{load_local_state as load_json_file, save_local_state as save_json_file};
+use std::io;
+use std::path::PathBuf;
 
 const MAX_INPUT_HISTORY_ENTRIES: usize = 1_000;
-
-fn load_json_file<T>(path: &Path) -> io::Result<T>
-where
-    T: for<'de> Deserialize<'de> + Default,
-{
-    match fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).map_err(|err| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("Invalid JSON in '{}': {err}", path.display()),
-            )
-        }),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(T::default()),
-        Err(err) => Err(err),
-    }
-}
-
-fn save_json_file<T>(path: &Path, value: &T) -> io::Result<()>
-where
-    T: Serialize,
-{
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let serialized = serde_json::to_string_pretty(value).map_err(|err| {
-        Error::other(format!(
-            "Failed to serialize JSON '{}': {err}",
-            path.display()
-        ))
-    })?;
-    fs::write(path, serialized)
-}
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub(crate) struct InputHistoryState {

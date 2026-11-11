@@ -10,6 +10,9 @@ pub(super) struct SseParser {
 
 impl SseParser {
     pub(super) fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, ProviderError> {
+        if self.buffer.len().saturating_add(chunk.len()) > 4 * 1024 * 1024 {
+            return Err(ProviderError::Stream("SSE buffer exceeded 4 MiB".into()));
+        }
         self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
 
@@ -34,9 +37,7 @@ impl SseParser {
         if self.buffer.is_empty() {
             return Ok(None);
         }
-        let remaining = std::mem::take(&mut self.buffer);
-        self.scan_offset = 0;
-        parse_sse_event(&remaining)
+        Err(ProviderError::Stream("Incomplete SSE event at EOF".into()))
     }
 }
 

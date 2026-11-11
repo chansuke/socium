@@ -7,9 +7,7 @@ use crate::tools::workspace::resolve_workspace_command_cwd;
 use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub(crate) struct RunCommandTool;
 
@@ -21,7 +19,7 @@ impl Tool for RunCommandTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::Custom(CustomToolDefinition {
             name: "run_command".to_string(),
-            description: "Run a workspace command for search, build, test, lint, or local execution. Commands are passed as an array of executable plus arguments, not as a shell string. The runtime classifies commands as safe-read-only, workspace-write, or destructive and may require the approval field to match the required permission level."
+            description: "Run a workspace command for search, build, test, lint, or local execution. Commands are passed as an array of executable plus arguments, not as a shell string. Commands run with host-user authority after explicit human approval through the application. No filesystem or network sandbox is implied."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -41,12 +39,8 @@ impl Tool for RunCommandTool {
                     "timeout_ms": {
                         "type": "integer",
                         "description": format!("Optional timeout in milliseconds. Must be between 1 and {MAX_COMMAND_TIMEOUT_MS}.")
-                    },
-                    "approval": {
-                        "type": "string",
-                        "description": "Optional approval granted by the user when the runtime requires it.",
-                        "enum": ["workspace-write", "destructive"]
                     }
+
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -61,65 +55,13 @@ impl Tool for RunCommandTool {
         on_progress: &mut dyn FnMut(AgentProgress),
     ) -> Result<String, ToolError> {
         let mut forward = |progress| on_progress(progress);
-        run_command_from_workspace_with_progress(ctx.workspace_root, input, &mut forward)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-enum CommandApproval {
-    None,
-    WorkspaceWrite,
-    Destructive,
-}
-
-impl CommandApproval {
-    fn parse(input: Option<&str>) -> Result<Self, String> {
-        match input {
-            None => Ok(Self::None),
-            Some("workspace-write") => Ok(Self::WorkspaceWrite),
-            Some("destructive") => Ok(Self::Destructive),
-            Some(other) => Err(format!(
-                "run_command approval must be either 'workspace-write' or 'destructive', got '{other}'"
-            )),
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::WorkspaceWrite => "workspace-write",
-            Self::Destructive => "destructive",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-enum CommandPermission {
-    SafeReadOnly,
-    WorkspaceWrite,
-    Destructive,
-}
-
-impl CommandPermission {
-    fn label(self) -> &'static str {
-        match self {
-            Self::SafeReadOnly => "safe-read-only",
-            Self::WorkspaceWrite => "workspace-write",
-            Self::Destructive => "destructive",
-        }
-    }
-
-    fn required_approval(self) -> CommandApproval {
-        match self {
-            Self::SafeReadOnly => CommandApproval::None,
-            Self::WorkspaceWrite => CommandApproval::WorkspaceWrite,
-            Self::Destructive => CommandApproval::Destructive,
-        }
+        run_command_controlled(ctx.workspace_root, input, ctx.control, &mut forward)
     }
 }
 
 struct CommandExecution {
-    permission: CommandPermission,
+    artifacts: String,
+    stop_reason: String,
     command_display: String,
     cwd_display: String,
     timeout_ms: u64,
@@ -133,7 +75,6 @@ struct RunCommandInput<'a> {
     command: Vec<String>,
     cwd: &'a str,
     timeout_ms: u64,
-    approval: CommandApproval,
 }
 
 impl<'a> RunCommandInput<'a> {
@@ -144,23 +85,35 @@ impl<'a> RunCommandInput<'a> {
         let command = require_string_array_field(input_object, "command", "run_command")?;
         let cwd = optional_string_field(input_object, "cwd", "run_command cwd")?.unwrap_or(".");
         let timeout_ms = optional_timeout_ms(input_object)?;
-        let approval = CommandApproval::parse(optional_string_field(
-            input_object,
-            "approval",
-            "run_command approval",
-        )?)?;
         Ok(Self {
             command,
             cwd,
             timeout_ms,
-            approval,
         })
     }
 }
 
+#[cfg(test)]
 pub(crate) fn run_command_from_workspace_with_progress<F>(
     workspace_root: &Path,
     input: &Value,
+    on_progress: &mut F,
+) -> Result<String, ToolError>
+where
+    F: FnMut(AgentProgress),
+{
+    run_command_controlled(
+        workspace_root,
+        input,
+        &crate::TaskControl::default(),
+        on_progress,
+    )
+}
+
+fn run_command_controlled<F>(
+    workspace_root: &Path,
+    input: &Value,
+    control: &crate::TaskControl,
     on_progress: &mut F,
 ) -> Result<String, ToolError>
 where
@@ -170,31 +123,21 @@ where
         command,
         cwd,
         timeout_ms,
-        approval,
     } = RunCommandInput::parse(input)?;
-    let permission = classify_command(&command);
-    let required_approval = permission.required_approval();
-
-    if approval < required_approval {
-        on_progress(AgentProgress::ApprovalRequired {
-            tool: "run_command".to_string(),
-            reason: format!("{} approval required", required_approval.label()),
-        });
-        return Err(format!(
-            "Command '{}' is classified as {} and requires {} approval. Rerun with approval set to '{}'.",
-            display_command(&command),
-            permission.label(),
-            required_approval.label(),
-            required_approval.label()
-        ).into());
-    }
-
     let resolved_cwd = resolve_workspace_command_cwd(workspace_root, cwd)?;
     on_progress(AgentProgress::CommandStarted {
         command: display_command(&command),
         cwd: cwd.to_string(),
     });
-    let execution = execute_command(&command, &resolved_cwd, cwd, timeout_ms, permission)?;
+    let execution = execute_command(
+        &command,
+        &resolved_cwd,
+        cwd,
+        timeout_ms,
+        control,
+        workspace_root,
+        on_progress,
+    )?;
     on_progress(AgentProgress::CommandFinished {
         command: execution.command_display.clone(),
         exit_code: execution.exit_code,
@@ -208,7 +151,7 @@ where
     });
 
     let output = format_command_execution(&execution);
-    if execution.timed_out || execution.exit_code.unwrap_or_default() != 0 {
+    if control.is_cancelled() || execution.timed_out || execution.exit_code != Some(0) {
         Err(output.into())
     } else {
         Ok(output)
@@ -220,66 +163,98 @@ fn execute_command(
     cwd: &Path,
     cwd_display: &str,
     timeout_ms: u64,
-    permission: CommandPermission,
+    control: &crate::TaskControl,
+    workspace_root: &Path,
+    on_progress: &mut dyn FnMut(AgentProgress),
 ) -> Result<CommandExecution, String> {
-    let program = command
-        .first()
-        .ok_or("run_command command must contain at least one element")?;
-    let args = &command[1..];
-
-    let mut child = Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            format!(
-                "Failed to spawn command '{}': {e}",
-                display_command(command)
-            )
-        })?;
-
-    let timeout = Duration::from_millis(timeout_ms);
-    let start = Instant::now();
-    let mut timed_out = false;
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    timed_out = true;
-                    child.kill().map_err(|e| {
-                        format!(
-                            "Failed to terminate timed out command '{}': {e}",
-                            display_command(command)
-                        )
-                    })?;
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => {
-                return Err(format!(
-                    "Failed while waiting for command '{}': {e}",
-                    display_command(command)
-                ));
-            }
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let stem = format!(
+        ".socium/outputs/{}-{timestamp}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let open = |suffix: &str| -> Result<std::fs::File, String> {
+        let path = crate::tools::workspace::resolve_workspace_path_for_create(
+            workspace_root,
+            &format!("{stem}.{suffix}"),
+        )
+        .map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
         }
+        opts.open(path).map_err(|e| e.to_string())
+    };
+    let mut files = [open("stdout")?, open("stderr")?];
+    let mut totals = [0u64; 2];
+    let mut reported = std::time::Instant::now();
+    const ARTIFACT_LIMIT: u64 = 8 * 1024 * 1024;
+    let mut observer = |stderr: bool, bytes: &[u8]| -> std::io::Result<()> {
+        let index = usize::from(stderr);
+        let keep = (ARTIFACT_LIMIT.saturating_sub(totals[index]) as usize).min(bytes.len());
+        files[index].write_all(&bytes[..keep])?;
+        totals[index] = totals[index].saturating_add(bytes.len() as u64);
+        if reported.elapsed() >= Duration::from_millis(100) {
+            on_progress(AgentProgress::CommandOutput {
+                stdout_bytes: totals[0],
+                stderr_bytes: totals[1],
+            });
+            reported = std::time::Instant::now();
+        }
+        Ok(())
+    };
+    let output=crate::process::run_observed(command,cwd,Duration::from_millis(timeout_ms),control,&mut observer)
+        .map_err(|e|format!("Command failed or output capture failed: {e}; partial artifacts: {stem}.stdout / {stem}.stderr"))?;
+    for file in &files {
+        file.sync_all()
+            .map_err(|e| format!("Command completed but output sync failed: {e}"))?;
+    }
+    let artifacts = format!(
+        "{stem}.stdout ({} bytes), {stem}.stderr ({} bytes); artifact cap 8 MiB per stream, truncated={}",
+        totals[0],
+        totals[1],
+        totals.iter().any(|n| *n > ARTIFACT_LIMIT)
+    );
+    let stop_reason = if output.cancelled {
+        "cancelled".into()
+    } else if output.timed_out {
+        "timeout".into()
+    } else if let Some(code) = output.status.code() {
+        format!("exit {code}")
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            format!("signal {:?}", output.status.signal())
+        }
+        #[cfg(not(unix))]
+        {
+            "terminated".into()
+        }
+    };
+    let timed_out = output.timed_out;
+    let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if output.truncated {
+        stdout.push_str("\n(output capture truncated at 256 KiB per stream)");
+    }
+    if output.cancelled {
+        stdout.push_str("\n(command cancelled)");
     }
 
-    let output = child.wait_with_output().map_err(|e| {
-        format!(
-            "Failed to collect output for command '{}': {e}",
-            display_command(command)
-        )
-    })?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
     Ok(CommandExecution {
-        permission,
+        artifacts,
+        stop_reason,
         command_display: display_command(command),
         cwd_display: cwd_display.to_string(),
         timeout_ms,
@@ -299,10 +274,11 @@ fn format_command_execution(execution: &CommandExecution) -> String {
     };
 
     format!(
-        "Command: {}\nCwd: {}\nPermission: {}\nTimeout: {} ms\nTimed out: {}\nExit code: {}\nStdout:\n{}\nStderr:\n{}",
+        "Command: {}\nCwd: {}\nPermission: approved host command\nStop reason: {}\nArtifacts: {}\nTimeout: {} ms\nTimed out: {}\nExit code: {}\nStdout:\n{}\nStderr:\n{}",
         execution.command_display,
         execution.cwd_display,
-        execution.permission.label(),
+        execution.stop_reason,
+        execution.artifacts,
         execution.timeout_ms,
         execution.timed_out,
         exit_code,
@@ -327,71 +303,6 @@ fn format_command_stream(stream: &str) -> String {
     }
 }
 
-fn classify_command(command: &[String]) -> CommandPermission {
-    let Some(program) = command.first() else {
-        return CommandPermission::Destructive;
-    };
-    let program_name = Path::new(program)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(program.as_str());
-    let first_arg = command.get(1).map(String::as_str).unwrap_or_default();
-
-    if is_destructive_command(program_name, first_arg) {
-        CommandPermission::Destructive
-    } else if is_safe_read_only_command(program_name, first_arg) {
-        CommandPermission::SafeReadOnly
-    } else {
-        CommandPermission::WorkspaceWrite
-    }
-}
-
-fn is_safe_read_only_command(program: &str, first_arg: &str) -> bool {
-    matches!(
-        program,
-        "cat"
-            | "echo"
-            | "env"
-            | "find"
-            | "git"
-            | "grep"
-            | "head"
-            | "ls"
-            | "pwd"
-            | "rg"
-            | "sed"
-            | "sort"
-            | "stat"
-            | "tail"
-            | "uname"
-            | "wc"
-            | "which"
-    ) && (program != "git"
-        || matches!(
-            first_arg,
-            "branch" | "diff" | "log" | "rev-parse" | "show" | "status"
-        ))
-}
-
-fn is_destructive_command(program: &str, first_arg: &str) -> bool {
-    matches!(
-        program,
-        "chmod" | "chown" | "dd" | "fdisk" | "mkfs" | "mv" | "rm" | "rmdir"
-    ) || (program == "git"
-        && matches!(
-            first_arg,
-            "checkout"
-                | "cherry-pick"
-                | "clean"
-                | "merge"
-                | "rebase"
-                | "reset"
-                | "restore"
-                | "revert"
-                | "switch"
-        ))
-}
-
 fn display_command(command: &[String]) -> String {
     command
         .iter()
@@ -409,282 +320,60 @@ fn display_command(command: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::types::ContentBlock;
-    use crate::test_support::make_temp_dir;
-    use crate::tools::{run_tool_call, run_tool_call_with_progress};
-    use serde_json::json;
-    use std::fs;
-
-    #[cfg(unix)]
+    use crate::{TaskControl, agent::types::ContentBlock, tools::run_tool_call_controlled};
     #[test]
-    fn run_command_runs_safe_command_in_requested_cwd() {
-        let workspace = make_temp_dir("workspace");
-        let nested = workspace.path().join("nested");
-        fs::create_dir(&nested).unwrap();
-
-        let result = run_tool_call(
+    fn forged_approval_is_denied_and_human_approval_is_single_use() {
+        let workspace = tempfile::tempdir().unwrap();
+        let input = json!({"command":["sh","-c","echo ok > marker"],"approval":"destructive"});
+        let control = TaskControl::default();
+        let result = run_tool_call_controlled(
             workspace.path(),
-            "tool_cmd_pwd",
+            "one",
             "run_command",
-            &json!({
-                "command": ["pwd"],
-                "cwd": "nested"
-            }),
+            &input,
+            &control,
+            &mut |_| {},
         );
-
-        match result {
+        assert!(matches!(
+            result,
             ContentBlock::ToolResult {
-                content, is_error, ..
-            } => {
-                assert_eq!(is_error, None);
-                assert!(content.contains("Command: pwd"));
-                assert!(content.contains("Cwd: nested"));
-                assert!(content.contains("Permission: safe-read-only"));
-                assert!(content.contains("Exit code: 0"));
-                assert!(content.contains(nested.to_string_lossy().as_ref()));
+                is_error: Some(true),
+                ..
             }
-            _ => panic!("expected tool_result"),
-        }
+        ));
+        assert!(!workspace.path().join("marker").exists());
+        control.enable_interactive_approval();
+        let mut id = None;
+        let result = run_tool_call_controlled(
+            workspace.path(),
+            "two",
+            "run_command",
+            &input,
+            &control,
+            &mut |event| {
+                if let AgentProgress::ApprovalRequested { request_id, .. } = event {
+                    id = Some(request_id);
+                    assert!(control.answer_approval(request_id, true));
+                }
+            },
+        );
+        assert!(matches!(
+            result,
+            ContentBlock::ToolResult { is_error: None, .. }
+        ));
+        assert!(workspace.path().join("marker").exists());
+        assert!(!control.answer_approval(id.unwrap(), true));
     }
-
-    #[cfg(unix)]
     #[test]
-    fn run_command_emits_tool_and_command_progress_events() {
-        let workspace = make_temp_dir("workspace");
-        let mut progress = Vec::new();
-
-        let result = run_tool_call_with_progress(
-            workspace.path(),
-            "tool_cmd_progress",
-            "run_command",
-            &json!({
-                "command": ["pwd"]
-            }),
-            &mut |event| progress.push(event),
+    fn signal_termination_is_a_tool_error() {
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(
+            run_command_from_workspace_with_progress(
+                workspace.path(),
+                &json!({"command":["sh","-c","kill -TERM $$"]}),
+                &mut |_| {}
+            )
+            .is_err()
         );
-
-        match result {
-            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
-            _ => panic!("expected tool_result"),
-        }
-        assert_eq!(
-            progress,
-            vec![
-                AgentProgress::ToolCallStarted {
-                    name: "run_command".to_string(),
-                },
-                AgentProgress::CommandStarted {
-                    command: "pwd".to_string(),
-                    cwd: ".".to_string(),
-                },
-                AgentProgress::CommandFinished {
-                    command: "pwd".to_string(),
-                    exit_code: Some(0),
-                    timed_out: false,
-                    stdout_preview: workspace.path().to_string_lossy().trim().to_string(),
-                    stderr_preview: "(empty)".to_string(),
-                },
-                AgentProgress::ToolCallFinished {
-                    name: "run_command".to_string(),
-                    is_error: false,
-                },
-            ]
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn run_command_emits_approval_required_event_when_permission_is_missing() {
-        let workspace = make_temp_dir("workspace");
-        let mut progress = Vec::new();
-
-        let result = run_tool_call_with_progress(
-            workspace.path(),
-            "tool_cmd_needs_approval",
-            "run_command",
-            &json!({
-                "command": ["touch", "created.txt"]
-            }),
-            &mut |event| progress.push(event),
-        );
-
-        match result {
-            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, Some(true)),
-            _ => panic!("expected tool_result"),
-        }
-        assert_eq!(
-            progress,
-            vec![
-                AgentProgress::ToolCallStarted {
-                    name: "run_command".to_string(),
-                },
-                AgentProgress::ApprovalRequired {
-                    tool: "run_command".to_string(),
-                    reason: "workspace-write approval required".to_string(),
-                },
-                AgentProgress::ToolCallFinished {
-                    name: "run_command".to_string(),
-                    is_error: true,
-                },
-            ]
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn run_command_requires_workspace_write_approval_and_runs_after_approval() {
-        let workspace = make_temp_dir("workspace");
-
-        let rejected = run_tool_call(
-            workspace.path(),
-            "tool_cmd_touch_denied",
-            "run_command",
-            &json!({
-                "command": ["touch", "created.txt"]
-            }),
-        );
-
-        match rejected {
-            ContentBlock::ToolResult {
-                content, is_error, ..
-            } => {
-                assert_eq!(is_error, Some(true));
-                assert!(content.contains("requires workspace-write approval"));
-            }
-            _ => panic!("expected tool_result"),
-        }
-        assert!(!workspace.path().join("created.txt").exists());
-
-        let approved = run_tool_call(
-            workspace.path(),
-            "tool_cmd_touch_ok",
-            "run_command",
-            &json!({
-                "command": ["touch", "created.txt"],
-                "approval": "workspace-write"
-            }),
-        );
-
-        match approved {
-            ContentBlock::ToolResult {
-                content, is_error, ..
-            } => {
-                assert_eq!(is_error, None);
-                assert!(content.contains("Permission: workspace-write"));
-                assert!(content.contains("Exit code: 0"));
-            }
-            _ => panic!("expected tool_result"),
-        }
-        assert!(workspace.path().join("created.txt").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn run_command_rejects_destructive_command_without_destructive_approval() {
-        let workspace = make_temp_dir("workspace");
-        let target = workspace.path().join("victim.txt");
-        fs::write(&target, "keep").unwrap();
-
-        let result = run_tool_call(
-            workspace.path(),
-            "tool_cmd_rm",
-            "run_command",
-            &json!({
-                "command": ["rm", "victim.txt"],
-                "approval": "workspace-write"
-            }),
-        );
-
-        match result {
-            ContentBlock::ToolResult {
-                content, is_error, ..
-            } => {
-                assert_eq!(is_error, Some(true));
-                assert!(content.contains("requires destructive approval"));
-            }
-            _ => panic!("expected tool_result"),
-        }
-        assert!(target.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn run_command_captures_stderr_and_non_zero_exit_code() {
-        let workspace = make_temp_dir("workspace");
-
-        let result = run_tool_call(
-            workspace.path(),
-            "tool_cmd_sh_exit",
-            "run_command",
-            &json!({
-                "command": ["sh", "-c", "printf 'out'; printf 'err' >&2; exit 7"],
-                "approval": "workspace-write"
-            }),
-        );
-
-        match result {
-            ContentBlock::ToolResult {
-                content, is_error, ..
-            } => {
-                assert_eq!(is_error, Some(true));
-                assert!(content.contains("Exit code: 7"));
-                assert!(content.contains("Stdout:\nout"));
-                assert!(content.contains("Stderr:\nerr"));
-            }
-            _ => panic!("expected tool_result"),
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn run_command_times_out() {
-        let workspace = make_temp_dir("workspace");
-
-        let result = run_tool_call(
-            workspace.path(),
-            "tool_cmd_timeout",
-            "run_command",
-            &json!({
-                "command": ["sh", "-c", "sleep 1"],
-                "approval": "workspace-write",
-                "timeout_ms": 10
-            }),
-        );
-
-        match result {
-            ContentBlock::ToolResult {
-                content, is_error, ..
-            } => {
-                assert_eq!(is_error, Some(true));
-                assert!(content.contains("Timed out: true"));
-                assert!(content.contains("Timeout: 10 ms"));
-            }
-            _ => panic!("expected tool_result"),
-        }
-    }
-
-    #[test]
-    fn run_command_rejects_timeout_above_limit() {
-        let workspace = make_temp_dir("workspace");
-
-        let result = run_tool_call(
-            workspace.path(),
-            "tool_cmd_timeout_limit",
-            "run_command",
-            &json!({
-                "command": ["pwd"],
-                "timeout_ms": MAX_COMMAND_TIMEOUT_MS + 1
-            }),
-        );
-
-        match result {
-            ContentBlock::ToolResult {
-                content, is_error, ..
-            } => {
-                assert_eq!(is_error, Some(true));
-                assert!(content.contains("timeout_ms must be between"));
-            }
-            _ => panic!("expected tool_result"),
-        }
     }
 }

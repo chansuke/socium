@@ -178,7 +178,7 @@ impl App {
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                "workspace-write (see /docs)",
+                "host (ask)",
                 Style::default().fg(PINK),
             )]))
             .style(Style::default().bg(BG)),

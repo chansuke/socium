@@ -1,0 +1,1528 @@
+{
+  "schema_version": 1,
+  "repository": "chansuke/socium",
+  "review_date": "2026-11-11",
+  "baseline_commit": "de374125a5ff00cc54b8f94da020250b3ab6b46c",
+  "tracker": {
+    "number": 52,
+    "url": "https://github.com/chansuke/socium/issues/52"
+  },
+  "status_policy": "Initial snapshot only. Read current GitHub issue state, labels and native dependencies before starting. Update both native relations and this manifest when dependency contracts change.",
+  "labels": [
+    {
+      "name": "review:2026-11-11",
+      "color": "5319E7",
+      "description": "2026-11-11 socium/pi/dshレビュー由来。SOC IDで追跡"
+    },
+    {
+      "name": "priority:p1",
+      "color": "B60205",
+      "description": "P1: 権限・整合性・主要動作の重大な欠陥。前提基盤も先行する"
+    },
+    {
+      "name": "priority:p2",
+      "color": "FBCA04",
+      "description": "P2: 信頼性・品質・機能の改善。P1の前提なら先行する"
+    },
+    {
+      "name": "priority:p3",
+      "color": "C5DEF5",
+      "description": "P3: 評価後に採否を決める条件付き拡張"
+    },
+    {
+      "name": "status:ready",
+      "color": "0E8A16",
+      "description": "未着手・未完了の必須前提なし。設計上の関連Issueは別扱い"
+    },
+    {
+      "name": "status:blocked",
+      "color": "D93F0B",
+      "description": "未完了の必須前提あり。設計/fixtureは先行可、完了は待つ"
+    },
+    {
+      "name": "status:deferred",
+      "color": "CFD3D7",
+      "description": "意図的に保留。前提完了に加えて採否・着手判断が必要"
+    },
+    {
+      "name": "status:in-progress",
+      "color": "1D76DB",
+      "description": "担当者が着手済み。完了時に状態ラベルを外してclose"
+    },
+    {
+      "name": "type:refactor",
+      "color": "BFD4F2",
+      "description": "責務・内部契約・設定構造の整理"
+    },
+    {
+      "name": "type:research",
+      "color": "D4C5F9",
+      "description": "測定・選択・採否判断が成果物。一括実装を約束しない"
+    },
+    {
+      "name": "type:testing",
+      "color": "BFDADC",
+      "description": "契約・故障注入・外部評価の検証基盤"
+    },
+    {
+      "name": "type:tracking",
+      "color": "5319E7",
+      "description": "複数Issueの進捗・依存関係を集約する親Issue"
+    },
+    {
+      "name": "area:security",
+      "color": "0052CC",
+      "description": "承認・権限・workspace境界"
+    },
+    {
+      "name": "area:runtime",
+      "color": "0052CC",
+      "description": "turn・実行process・中断・retry・観測"
+    },
+    {
+      "name": "area:state",
+      "color": "0052CC",
+      "description": "永続化・履歴・session・復旧"
+    },
+    {
+      "name": "area:context",
+      "color": "0052CC",
+      "description": "context予算・要約・指示読込"
+    },
+    {
+      "name": "area:provider",
+      "color": "0052CC",
+      "description": "provider契約・stream・model設定・cache"
+    },
+    {
+      "name": "area:tools",
+      "color": "0052CC",
+      "description": "編集・Git・検索・tool出力"
+    },
+    {
+      "name": "area:tui",
+      "color": "0052CC",
+      "description": "端末UI・入力・表示・操作"
+    },
+    {
+      "name": "area:delivery",
+      "color": "0052CC",
+      "description": "配布・実行環境・headless interface"
+    },
+    {
+      "name": "area:quality",
+      "color": "0052CC",
+      "description": "回帰試験・評価・採否判断"
+    },
+    {
+      "name": "area:docs",
+      "color": "0052CC",
+      "description": "設計文書・計画・TODOの整合"
+    }
+  ],
+  "issues": [
+    {
+      "id": "SOC-001",
+      "number": 53,
+      "url": "https://github.com/chansuke/socium/issues/53",
+      "source": "docs/tickets/SOC-001-trusted-approval.md",
+      "title": "SOC-001: モデル入力と分離した承認経路を実装する",
+      "priority": "P1",
+      "phase": 1,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p1",
+        "bug",
+        "area:security",
+        "area:runtime",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": [
+        {
+          "id": "SOC-003",
+          "number": 55
+        },
+        {
+          "id": "SOC-010",
+          "number": 62
+        },
+        {
+          "id": "SOC-031",
+          "number": 83
+        },
+        {
+          "id": "SOC-038",
+          "number": 91
+        }
+      ]
+    },
+    {
+      "id": "SOC-002",
+      "number": 54,
+      "url": "https://github.com/chansuke/socium/issues/54",
+      "source": "docs/tickets/SOC-002-workspace-path-boundary.md",
+      "title": "SOC-002: 未作成パスを含むworkspace境界検査を修正する",
+      "priority": "P1",
+      "phase": 1,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p1",
+        "bug",
+        "area:security",
+        "area:tools",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": [
+        {
+          "id": "SOC-003",
+          "number": 55
+        },
+        {
+          "id": "SOC-008",
+          "number": 60
+        },
+        {
+          "id": "SOC-022",
+          "number": 74
+        },
+        {
+          "id": "SOC-038",
+          "number": 91
+        },
+        {
+          "id": "SOC-039",
+          "number": 92
+        }
+      ]
+    },
+    {
+      "id": "SOC-003",
+      "number": 55,
+      "url": "https://github.com/chansuke/socium/issues/55",
+      "source": "docs/tickets/SOC-003-executor-permissions.md",
+      "title": "SOC-003: コマンド分類と実効的な実行権限を分離する",
+      "priority": "P1",
+      "phase": 1,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p1",
+        "bug",
+        "area:security",
+        "area:runtime",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-001",
+          "number": 53,
+          "reason": "信頼できる承認grantをexecutorに渡す"
+        },
+        {
+          "id": "SOC-002",
+          "number": 54,
+          "reason": "workspace境界とcwdを権限scopeに合わせる"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-004",
+      "number": 56,
+      "url": "https://github.com/chansuke/socium/issues/56",
+      "source": "docs/tickets/SOC-004-process-lifecycle.md",
+      "title": "SOC-004: コマンド出力・タイムアウト・子孫停止を修正する",
+      "priority": "P1",
+      "phase": 1,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p1",
+        "bug",
+        "area:runtime",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": [
+        {
+          "id": "SOC-011",
+          "number": 63
+        },
+        {
+          "id": "SOC-023",
+          "number": 75
+        },
+        {
+          "id": "SOC-038",
+          "number": 91
+        }
+      ]
+    },
+    {
+      "id": "SOC-005",
+      "number": 57,
+      "url": "https://github.com/chansuke/socium/issues/57",
+      "source": "docs/tickets/SOC-005-durable-turn-events.md",
+      "title": "SOC-005: 失敗したturnでも実行済み操作を逐次記録する",
+      "priority": "P1",
+      "phase": 2,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p1",
+        "bug",
+        "area:state",
+        "area:runtime",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-012",
+          "number": 64,
+          "reason": "intent/resultを耐久性のある保存基盤へ記録する"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-019",
+          "number": 71
+        },
+        {
+          "id": "SOC-020",
+          "number": 72
+        },
+        {
+          "id": "SOC-026",
+          "number": 78
+        },
+        {
+          "id": "SOC-031",
+          "number": 83
+        },
+        {
+          "id": "SOC-035",
+          "number": 87
+        },
+        {
+          "id": "SOC-038",
+          "number": 91
+        }
+      ]
+    },
+    {
+      "id": "SOC-006",
+      "number": 58,
+      "url": "https://github.com/chansuke/socium/issues/58",
+      "source": "docs/tickets/SOC-006-context-message-contract.md",
+      "title": "SOC-006: 要約・保持境界をproviderの会話契約に合わせる",
+      "priority": "P1",
+      "phase": 2,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p1",
+        "bug",
+        "area:context",
+        "area:provider",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": [
+        {
+          "id": "SOC-013",
+          "number": 65
+        },
+        {
+          "id": "SOC-017",
+          "number": 69
+        },
+        {
+          "id": "SOC-018",
+          "number": 70
+        },
+        {
+          "id": "SOC-038",
+          "number": 91
+        }
+      ]
+    },
+    {
+      "id": "SOC-007",
+      "number": 59,
+      "url": "https://github.com/chansuke/socium/issues/59",
+      "source": "docs/tickets/SOC-007-stream-completion.md",
+      "title": "SOC-007: stream終端とモデルの終了理由を検証する",
+      "priority": "P1",
+      "phase": 2,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p1",
+        "bug",
+        "area:provider",
+        "area:runtime",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": [
+        {
+          "id": "SOC-014",
+          "number": 66
+        },
+        {
+          "id": "SOC-019",
+          "number": 71
+        },
+        {
+          "id": "SOC-031",
+          "number": 83
+        },
+        {
+          "id": "SOC-038",
+          "number": 91
+        }
+      ]
+    },
+    {
+      "id": "SOC-008",
+      "number": 60,
+      "url": "https://github.com/chansuke/socium/issues/60",
+      "source": "docs/tickets/SOC-008-patch-mutation-plan.md",
+      "title": "SOC-008: patchの事前検証・preview・適用を同じ計画に統一する",
+      "priority": "P1",
+      "phase": 3,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p1",
+        "bug",
+        "area:tools",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-002",
+          "number": 54,
+          "reason": "新規作成・移動先を含む全pathの境界検査を共有する"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-009",
+          "number": 61
+        },
+        {
+          "id": "SOC-038",
+          "number": 91
+        },
+        {
+          "id": "SOC-039",
+          "number": 92
+        },
+        {
+          "id": "SOC-040",
+          "number": 93
+        }
+      ]
+    },
+    {
+      "id": "SOC-009",
+      "number": 61,
+      "url": "https://github.com/chansuke/socium/issues/61",
+      "source": "docs/tickets/SOC-009-unified-edit-history.md",
+      "title": "SOC-009: 全編集ツールの履歴と安全なundoを統一する",
+      "priority": "P2",
+      "phase": 3,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "bug",
+        "area:tools",
+        "area:state",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-008",
+          "number": 60,
+          "reason": "previewと適用が共有する変更計画から履歴を作る"
+        },
+        {
+          "id": "SOC-012",
+          "number": 64,
+          "reason": "undo journalを破損・writer競合から保護する"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-040",
+          "number": 93
+        }
+      ]
+    },
+    {
+      "id": "SOC-010",
+      "number": 62,
+      "url": "https://github.com/chansuke/socium/issues/62",
+      "source": "docs/tickets/SOC-010-scoped-git-commit.md",
+      "title": "SOC-010: Git commitの対象を明示し既存indexを保護する",
+      "priority": "P1",
+      "phase": 3,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p1",
+        "bug",
+        "area:tools",
+        "area:security",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-001",
+          "number": 53,
+          "reason": "commitの範囲を信頼された承認に結び付ける"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-038",
+          "number": 91
+        }
+      ]
+    },
+    {
+      "id": "SOC-011",
+      "number": 63,
+      "url": "https://github.com/chansuke/socium/issues/63",
+      "source": "docs/tickets/SOC-011-cancellation-and-worker-recovery.md",
+      "title": "SOC-011: TUIからの中断とworker終了時の回復を実装する",
+      "priority": "P1",
+      "phase": 1,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p1",
+        "bug",
+        "area:tui",
+        "area:runtime",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-004",
+          "number": 56,
+          "reason": "取消しを子孫processとpipe処理まで伝える"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-019",
+          "number": 71
+        },
+        {
+          "id": "SOC-031",
+          "number": 83
+        },
+        {
+          "id": "SOC-035",
+          "number": 87
+        },
+        {
+          "id": "SOC-038",
+          "number": 91
+        }
+      ]
+    },
+    {
+      "id": "SOC-012",
+      "number": 64,
+      "url": "https://github.com/chansuke/socium/issues/64",
+      "source": "docs/tickets/SOC-012-atomic-state-storage.md",
+      "title": "SOC-012: 状態保存を原子的にしwriter競合と破損から回復する",
+      "priority": "P2",
+      "phase": 2,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "bug",
+        "area:state",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": [
+        {
+          "id": "SOC-005",
+          "number": 57
+        },
+        {
+          "id": "SOC-009",
+          "number": 61
+        },
+        {
+          "id": "SOC-013",
+          "number": 65
+        },
+        {
+          "id": "SOC-026",
+          "number": 78
+        },
+        {
+          "id": "SOC-038",
+          "number": 91
+        }
+      ]
+    },
+    {
+      "id": "SOC-013",
+      "number": 65,
+      "url": "https://github.com/chansuke/socium/issues/65",
+      "source": "docs/tickets/SOC-013-stable-history-references.md",
+      "title": "SOC-013: 履歴切詰め後も要約範囲と会話単位を整合させる",
+      "priority": "P2",
+      "phase": 2,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "bug",
+        "area:state",
+        "area:context",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-006",
+          "number": 58,
+          "reason": "tool呼出/結果を分断しない会話単位を共有する"
+        },
+        {
+          "id": "SOC-012",
+          "number": 64,
+          "reason": "切詰めと参照更新を一貫して保存する"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-026",
+          "number": 78
+        }
+      ]
+    },
+    {
+      "id": "SOC-014",
+      "number": 66,
+      "url": "https://github.com/chansuke/socium/issues/66",
+      "source": "docs/tickets/SOC-014-provider-neutral-contract.md",
+      "title": "SOC-014: provider非依存のmessage・tool・response契約を定義する",
+      "priority": "P2",
+      "phase": 5,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "type:refactor",
+        "area:provider",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-007",
+          "number": 59,
+          "reason": "終了理由と不完全streamの契約をprovider共通型に含める"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-016",
+          "number": 68
+        },
+        {
+          "id": "SOC-021",
+          "number": 73
+        }
+      ]
+    },
+    {
+      "id": "SOC-015",
+      "number": 67,
+      "url": "https://github.com/chansuke/socium/issues/67",
+      "source": "docs/tickets/SOC-015-validated-model-config.md",
+      "title": "SOC-015: 起動時設定とmodel capabilitiesを一元化する",
+      "priority": "P2",
+      "phase": 4,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "type:refactor",
+        "area:provider",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": [
+        {
+          "id": "SOC-016",
+          "number": 68
+        },
+        {
+          "id": "SOC-017",
+          "number": 69
+        },
+        {
+          "id": "SOC-020",
+          "number": 72
+        },
+        {
+          "id": "SOC-022",
+          "number": 74
+        },
+        {
+          "id": "SOC-027",
+          "number": 79
+        },
+        {
+          "id": "SOC-031",
+          "number": 83
+        }
+      ]
+    },
+    {
+      "id": "SOC-016",
+      "number": 68,
+      "url": "https://github.com/chansuke/socium/issues/68",
+      "source": "docs/tickets/SOC-016-openai-compatible-provider.md",
+      "title": "SOC-016: OpenAI互換providerとlocal endpointを実装する",
+      "priority": "P2",
+      "phase": 5,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "enhancement",
+        "area:provider",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-014",
+          "number": 66,
+          "reason": "provider共通のmessage/tool/response型を使う"
+        },
+        {
+          "id": "SOC-015",
+          "number": 67,
+          "reason": "endpoint/model/capabilitiesの検証済み設定を使う"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-032",
+          "number": 84
+        },
+        {
+          "id": "SOC-033",
+          "number": 85
+        }
+      ]
+    },
+    {
+      "id": "SOC-017",
+      "number": 69,
+      "url": "https://github.com/chansuke/socium/issues/69",
+      "source": "docs/tickets/SOC-017-per-request-context-budget.md",
+      "title": "SOC-017: tool roundごとに実測補正付きcontext予算を確認する",
+      "priority": "P2",
+      "phase": 4,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "bug",
+        "area:context",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-006",
+          "number": 58,
+          "reason": "削除・要約後にも会話契約を守る"
+        },
+        {
+          "id": "SOC-015",
+          "number": 67,
+          "reason": "選択modelの上限を予算計算に使う"
+        },
+        {
+          "id": "SOC-023",
+          "number": 75,
+          "reason": "巨大tool結果の上限とartifact参照を使う"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-035",
+          "number": 87
+        }
+      ]
+    },
+    {
+      "id": "SOC-018",
+      "number": 70,
+      "url": "https://github.com/chansuke/socium/issues/70",
+      "source": "docs/tickets/SOC-018-summary-fidelity.md",
+      "title": "SOC-018: 要約で最新の決定・未解決事項・検証結果を保持する",
+      "priority": "P2",
+      "phase": 4,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "bug",
+        "area:context",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-006",
+          "number": 58,
+          "reason": "要約注入位置と保持境界の修正を前提に品質を評価する"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-019",
+      "number": 71,
+      "url": "https://github.com/chansuke/socium/issues/71",
+      "source": "docs/tickets/SOC-019-bounded-provider-retries.md",
+      "title": "SOC-019: API障害を分類し安全な範囲でretryする",
+      "priority": "P2",
+      "phase": 4,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "enhancement",
+        "area:provider",
+        "area:runtime",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-005",
+          "number": 57,
+          "reason": "retryの前後で完了済み副作用を識別する"
+        },
+        {
+          "id": "SOC-007",
+          "number": 59,
+          "reason": "完了/不完全streamを区別しretry可否を決める"
+        },
+        {
+          "id": "SOC-011",
+          "number": 63,
+          "reason": "backoffと待機中の取消しを伝える"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-020",
+      "number": 72,
+      "url": "https://github.com/chansuke/socium/issues/72",
+      "source": "docs/tickets/SOC-020-usage-and-observability.md",
+      "title": "SOC-020: 全attempt・tool・compactionの観測情報を記録する",
+      "priority": "P2",
+      "phase": 4,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "enhancement",
+        "area:runtime",
+        "area:provider",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-005",
+          "number": 57,
+          "reason": "attempt/toolの永続IDと記録境界を使う"
+        },
+        {
+          "id": "SOC-015",
+          "number": 67,
+          "reason": "実際に使ったmodel設定とusageを対応させる"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-021",
+          "number": 73
+        },
+        {
+          "id": "SOC-032",
+          "number": 84
+        }
+      ]
+    },
+    {
+      "id": "SOC-021",
+      "number": 73,
+      "url": "https://github.com/chansuke/socium/issues/73",
+      "source": "docs/tickets/SOC-021-prompt-cache-policy.md",
+      "title": "SOC-021: 安定したprompt prefixとcache設定を測定する",
+      "priority": "P2",
+      "phase": 6,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "type:research",
+        "area:provider",
+        "area:context",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-014",
+          "number": 66,
+          "reason": "provider別cache能力と共通request契約を使う"
+        },
+        {
+          "id": "SOC-020",
+          "number": 72,
+          "reason": "cache hit・使用量・費用を比較する"
+        },
+        {
+          "id": "SOC-022",
+          "number": 74,
+          "reason": "安定prefixに含める指示読込規約を固定する"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-022",
+      "number": 74,
+      "url": "https://github.com/chansuke/socium/issues/74",
+      "source": "docs/tickets/SOC-022-project-instructions-and-prompt.md",
+      "title": "SOC-022: 小さい作業規約とscope付きAGENTS.md読込を実装する",
+      "priority": "P2",
+      "phase": 4,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "enhancement",
+        "area:context",
+        "area:security",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-002",
+          "number": 54,
+          "reason": "scopeごとの指示ファイルをworkspace境界内で読む"
+        },
+        {
+          "id": "SOC-015",
+          "number": 67,
+          "reason": "読込設定と上限を一元化する"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-021",
+          "number": 73
+        }
+      ]
+    },
+    {
+      "id": "SOC-023",
+      "number": 75,
+      "url": "https://github.com/chansuke/socium/issues/75",
+      "source": "docs/tickets/SOC-023-structured-tool-output.md",
+      "title": "SOC-023: tool結果を構造化し大容量出力をartifact化する",
+      "priority": "P2",
+      "phase": 4,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "enhancement",
+        "area:tools",
+        "area:runtime",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-004",
+          "number": 56,
+          "reason": "process出力を有界に収集して構造化結果へ変換する"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-017",
+          "number": 69
+        },
+        {
+          "id": "SOC-027",
+          "number": 79
+        }
+      ]
+    },
+    {
+      "id": "SOC-024",
+      "number": 76,
+      "url": "https://github.com/chansuke/socium/issues/76",
+      "source": "docs/tickets/SOC-024-search-contract-and-limits.md",
+      "title": "SOC-024: 検索の引数・結果形式・fallback・資源上限を統一する",
+      "priority": "P2",
+      "phase": 4,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "bug",
+        "area:tools",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": [
+        {
+          "id": "SOC-025",
+          "number": 77
+        }
+      ]
+    },
+    {
+      "id": "SOC-025",
+      "number": 77,
+      "url": "https://github.com/chansuke/socium/issues/77",
+      "source": "docs/tickets/SOC-025-symbol-capability.md",
+      "title": "SOC-025: symbol検索の対応範囲を明示し必要な言語を評価する",
+      "priority": "P2",
+      "phase": 6,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "type:research",
+        "area:tools",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-024",
+          "number": 76,
+          "reason": "共通の検索結果・上限・fallback契約に揃える"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-026",
+      "number": 78,
+      "url": "https://github.com/chansuke/socium/issues/78",
+      "source": "docs/tickets/SOC-026-named-sessions-and-replay.md",
+      "title": "SOC-026: 複数sessionの作成・再開とtool履歴表示を実装する",
+      "priority": "P2",
+      "phase": 5,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "enhancement",
+        "area:state",
+        "area:tui",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-005",
+          "number": 57,
+          "reason": "再開時に実行済みtoolを正しく再表示する"
+        },
+        {
+          "id": "SOC-012",
+          "number": 64,
+          "reason": "session別ファイルの保存とwriter競合を扱う"
+        },
+        {
+          "id": "SOC-013",
+          "number": 65,
+          "reason": "保持範囲と要約の安定参照を再開時にも保つ"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-027",
+      "number": 79,
+      "url": "https://github.com/chansuke/socium/issues/79",
+      "source": "docs/tickets/SOC-027-tui-layout-and-output.md",
+      "title": "SOC-027: 小画面の会話領域とコマンド失敗表示を改善する",
+      "priority": "P2",
+      "phase": 6,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "bug",
+        "area:tui",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-015",
+          "number": 67,
+          "reason": "表示model等を実効設定と一致させる"
+        },
+        {
+          "id": "SOC-023",
+          "number": 75,
+          "reason": "失敗・切詰め・artifact参照をUIへ表示する"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-028",
+      "number": 80,
+      "url": "https://github.com/chansuke/socium/issues/80",
+      "source": "docs/tickets/SOC-028-unicode-terminal-width.md",
+      "title": "SOC-028: 日本語・結合文字・絵文字の入力と表示幅を修正する",
+      "priority": "P2",
+      "phase": 6,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "bug",
+        "area:tui",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": []
+    },
+    {
+      "id": "SOC-029",
+      "number": 81,
+      "url": "https://github.com/chansuke/socium/issues/81",
+      "source": "docs/tickets/SOC-029-runtime-packaging.md",
+      "title": "SOC-029: 配布物のgit・rg依存と対応環境を明確にする",
+      "priority": "P2",
+      "phase": 5,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "bug",
+        "area:delivery",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": []
+    },
+    {
+      "id": "SOC-030",
+      "number": 82,
+      "url": "https://github.com/chansuke/socium/issues/82",
+      "source": "docs/tickets/SOC-030-contract-and-fault-tests.md",
+      "title": "SOC-030: wire契約と故障注入の共通テスト基盤を整える",
+      "priority": "P2",
+      "phase": 2,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "type:testing",
+        "area:quality",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": [
+        {
+          "id": "SOC-032",
+          "number": 84
+        }
+      ]
+    },
+    {
+      "id": "SOC-031",
+      "number": 83,
+      "url": "https://github.com/chansuke/socium/issues/83",
+      "source": "docs/tickets/SOC-031-headless-jsonl.md",
+      "title": "SOC-031: 自動検証できるheadless JSONL実行経路を追加する",
+      "priority": "P2",
+      "phase": 5,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "enhancement",
+        "area:delivery",
+        "area:runtime",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-001",
+          "number": 53,
+          "reason": "対話UIがない場合の承認ポリシーを明示する"
+        },
+        {
+          "id": "SOC-005",
+          "number": 57,
+          "reason": "JSONLのeventを永続した実行履歴と対応させる"
+        },
+        {
+          "id": "SOC-007",
+          "number": 59,
+          "reason": "終了理由と完了/不完全の判定を機械向けに返す"
+        },
+        {
+          "id": "SOC-011",
+          "number": 63,
+          "reason": "signalによる中断をruntimeへ伝える"
+        },
+        {
+          "id": "SOC-015",
+          "number": 67,
+          "reason": "model/endpointの検証済みCLI設定を使う"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-032",
+          "number": 84
+        }
+      ]
+    },
+    {
+      "id": "SOC-032",
+      "number": 84,
+      "url": "https://github.com/chansuke/socium/issues/84",
+      "source": "docs/tickets/SOC-032-reproducible-agent-evaluation.md",
+      "title": "SOC-032: 固定taskと外部判定によるagent評価を構築する",
+      "priority": "P2",
+      "phase": 6,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "type:testing",
+        "area:quality",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-016",
+          "number": 68,
+          "reason": "同じtaskを複数provider/local endpointで実行する"
+        },
+        {
+          "id": "SOC-020",
+          "number": 72,
+          "reason": "成功率と一緒にattempt・時間・費用を測る"
+        },
+        {
+          "id": "SOC-030",
+          "number": 82,
+          "reason": "wireと故障注入fixtureで評価の前提を検証する"
+        },
+        {
+          "id": "SOC-031",
+          "number": 83,
+          "reason": "headless経路でtaskを反復・外部判定する"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-033",
+          "number": 85
+        },
+        {
+          "id": "SOC-036",
+          "number": 88
+        }
+      ]
+    },
+    {
+      "id": "SOC-033",
+      "number": 85,
+      "url": "https://github.com/chansuke/socium/issues/85",
+      "source": "docs/tickets/SOC-033-tool-profiles-local-quality.md",
+      "title": "SOC-033: tool構成とlocal model向けpromptを評価で選ぶ",
+      "priority": "P2",
+      "phase": 6,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "type:research",
+        "area:quality",
+        "area:provider",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-016",
+          "number": 68,
+          "reason": "local model/providerを同じ契約で切り替える"
+        },
+        {
+          "id": "SOC-032",
+          "number": 84,
+          "reason": "固定評価でtool構成とpromptを比較する"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-034",
+      "number": 86,
+      "url": "https://github.com/chansuke/socium/issues/86",
+      "source": "docs/tickets/SOC-034-backlog-reconciliation.md",
+      "title": "SOC-034: 既存改善計画とTODOを現在の実装・完了基準に合わせる",
+      "priority": "P2",
+      "phase": 0,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "documentation",
+        "area:docs",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": []
+    },
+    {
+      "id": "SOC-035",
+      "number": 87,
+      "url": "https://github.com/chansuke/socium/issues/87",
+      "source": "docs/tickets/SOC-035-steering-and-follow-up.md",
+      "title": "SOC-035: 実行中の方針修正とfollow-up入力を安全に受け付ける",
+      "priority": "P2",
+      "phase": 6,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p2",
+        "enhancement",
+        "area:tui",
+        "area:runtime",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-005",
+          "number": 57,
+          "reason": "実行中に届いた入力とtool結果の順序を保存する"
+        },
+        {
+          "id": "SOC-011",
+          "number": 63,
+          "reason": "steering時の停止/続行をcancel経路と整合させる"
+        },
+        {
+          "id": "SOC-017",
+          "number": 69,
+          "reason": "追加入力後にもrequestごとのcontext予算を守る"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-036",
+      "number": 88,
+      "url": "https://github.com/chansuke/socium/issues/88",
+      "source": "docs/tickets/SOC-036-extension-adoption-gate.md",
+      "title": "SOC-036: 追加拡張の需要と費用を評価して採否を決める",
+      "priority": "P3",
+      "phase": 7,
+      "labels_at_creation": [
+        "review:2026-11-11",
+        "priority:p3",
+        "type:research",
+        "area:quality",
+        "status:deferred"
+      ],
+      "status_at_creation": "deferred",
+      "depends_on": [
+        {
+          "id": "SOC-032",
+          "number": 84,
+          "reason": "固定taskの結果と費用を根拠に採否を判断する"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-037",
+      "number": 90,
+      "url": "https://github.com/chansuke/socium/issues/90",
+      "source": "docs/tickets/SOC-037-deepseek-web-search.md",
+      "title": "SOC-037: DeepSeek Search APIによるweb_search toolを追加する",
+      "priority": "P2",
+      "phase": 4,
+      "labels_at_creation": [
+        "enhancement",
+        "priority:p2",
+        "area:tools",
+        "status:ready"
+      ],
+      "status_at_creation": "ready",
+      "depends_on": [],
+      "blocks": []
+    },
+    {
+      "id": "SOC-038",
+      "number": 91,
+      "url": "https://github.com/chansuke/socium/issues/91",
+      "source": "docs/tickets/SOC-038-daily-reliability-acceptance.md",
+      "title": "SOC-038: 日常作業から中断・再起動・再開までの統合回帰シナリオ",
+      "priority": "P1",
+      "phase": 1,
+      "labels_at_creation": [
+        "testing",
+        "priority:p1",
+        "area:quality",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-001",
+          "number": 53,
+          "reason": "統合受け入れ条件の先行修正"
+        },
+        {
+          "id": "SOC-002",
+          "number": 54,
+          "reason": "統合受け入れ条件の先行修正"
+        },
+        {
+          "id": "SOC-004",
+          "number": 56,
+          "reason": "統合受け入れ条件の先行修正"
+        },
+        {
+          "id": "SOC-005",
+          "number": 57,
+          "reason": "統合受け入れ条件の先行修正"
+        },
+        {
+          "id": "SOC-006",
+          "number": 58,
+          "reason": "統合受け入れ条件の先行修正"
+        },
+        {
+          "id": "SOC-007",
+          "number": 59,
+          "reason": "統合受け入れ条件の先行修正"
+        },
+        {
+          "id": "SOC-008",
+          "number": 60,
+          "reason": "統合受け入れ条件の先行修正"
+        },
+        {
+          "id": "SOC-010",
+          "number": 62,
+          "reason": "統合受け入れ条件の先行修正"
+        },
+        {
+          "id": "SOC-011",
+          "number": 63,
+          "reason": "統合受け入れ条件の先行修正"
+        },
+        {
+          "id": "SOC-012",
+          "number": 64,
+          "reason": "統合受け入れ条件の先行修正"
+        },
+        {
+          "id": "SOC-039",
+          "number": 92,
+          "reason": "統合受け入れ条件の先行修正"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-039",
+      "number": 92,
+      "url": "https://github.com/chansuke/socium/issues/92",
+      "source": "docs/tickets/SOC-039-protected-workspace-metadata.md",
+      "title": "SOC-039: 通常の編集ツールからGit・セッション状態を保護する",
+      "priority": "P1",
+      "phase": 1,
+      "labels_at_creation": [
+        "bug",
+        "priority:p1",
+        "area:security",
+        "area:state",
+        "status:in-progress"
+      ],
+      "status_at_creation": "in-progress",
+      "depends_on": [
+        {
+          "id": "SOC-002",
+          "number": 54,
+          "reason": "正規化した変更計画で保護境界を統一する"
+        },
+        {
+          "id": "SOC-008",
+          "number": 60,
+          "reason": "正規化した変更計画で保護境界を統一する"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "SOC-038",
+          "number": 91
+        }
+      ]
+    },
+    {
+      "id": "SOC-040",
+      "number": 93,
+      "url": "https://github.com/chansuke/socium/issues/93",
+      "source": "docs/tickets/SOC-040-edit-file-metadata.md",
+      "title": "SOC-040: move・deleteのundoでfile modeと実行ビットを保持する",
+      "priority": "P2",
+      "phase": 3,
+      "labels_at_creation": [
+        "bug",
+        "priority:p2",
+        "area:tools",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-008",
+          "number": 60,
+          "reason": "変更計画にmetadataを接続する"
+        },
+        {
+          "id": "SOC-009",
+          "number": 61,
+          "reason": "undoの変更前後記録を拡張する"
+        }
+      ],
+      "blocks": []
+    }
+  ]
+}

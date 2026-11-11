@@ -88,6 +88,10 @@ pub(crate) fn init_git_repo(path: &Path) {
 
 pub(crate) fn run_git(path: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .args(args)
         .current_dir(path)
         .output()
@@ -103,6 +107,10 @@ pub(crate) fn run_git(path: &Path, args: &[&str]) {
 
 pub(crate) fn git_stdout(path: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .args(args)
         .current_dir(path)
         .output()

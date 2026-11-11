@@ -14,6 +14,9 @@ pub(crate) struct PendingSubmission {
 }
 
 pub(crate) struct PendingTask {
+    pub(crate) worker: Option<std::thread::JoinHandle<()>>,
+    pub(crate) control: socium_core::TaskControl,
+    pub(crate) approval_id: Option<u64>,
     pub(crate) progress_rx: UnboundedReceiver<AgentProgress>,
     pub(crate) result_rx: oneshot::Receiver<SubmitOutcome>,
     pub(crate) streamed_assistant_text: bool,
@@ -38,6 +41,9 @@ impl App {
         self.context_metrics = agent
             .context_metrics(&pending.user_input)
             .unwrap_or_default();
+        let control = agent.task_control();
+        control.reset_cancellation();
+        control.enable_interactive_approval();
         let (progress_tx, progress_rx) = unbounded_channel();
         let (result_tx, result_rx) = oneshot::channel();
         let PendingSubmission {
@@ -49,37 +55,47 @@ impl App {
         // current-thread runtime: the tool runtime is synchronous and
         // blocking (std::process, std::fs), so it must not occupy a worker
         // of the UI's tokio runtime.
-        std::thread::spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(err) => {
-                    let _ = result_tx.send(SubmitOutcome {
-                        agent,
-                        reply: TaskReply::Submission(Err(err.to_string())),
-                        latency_ms: started_at.elapsed().as_millis(),
-                    });
-                    return;
-                }
-            };
-            runtime.block_on(async move {
-                let reply = agent
-                    .submit_with_progress(user_input, |event| {
-                        let _ = progress_tx.send(event);
+        let worker = std::thread::Builder::new()
+            .name("socium-worker".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(err) => {
+                        let _ = result_tx.send(SubmitOutcome {
+                            agent,
+                            reply: TaskReply::Submission(Err(err.to_string())),
+                            latency_ms: started_at.elapsed().as_millis(),
+                        });
+                        return;
+                    }
+                };
+                let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(async {
+                        agent
+                            .submit_with_progress(user_input, |event| {
+                                let _ = progress_tx.send(event);
+                            })
+                            .await
+                            .map_err(|err| err.to_string())
                     })
-                    .await
-                    .map_err(|err| err.to_string());
+                }))
+                .unwrap_or_else(|_| {
+                    Err("Worker panicked; inspect saved tool outcomes before retrying".into())
+                });
                 let _ = result_tx.send(SubmitOutcome {
                     agent,
                     reply: TaskReply::Submission(reply),
                     latency_ms: started_at.elapsed().as_millis(),
                 });
-            });
-        });
+            })?;
 
         self.pending_task = Some(PendingTask {
+            worker: Some(worker),
+            control,
+            approval_id: None,
             progress_rx,
             result_rx,
             streamed_assistant_text: false,
@@ -95,37 +111,49 @@ impl App {
             return Err(eyre!("agent is unavailable while a request is running"));
         };
         let started_at = Instant::now();
+        let control = agent.task_control();
+        control.reset_cancellation();
         let (_progress_tx, progress_rx) = unbounded_channel();
         let (result_tx, result_rx) = oneshot::channel();
 
-        std::thread::spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(err) => {
-                    let _ = result_tx.send(SubmitOutcome {
-                        agent,
-                        reply: TaskReply::Compaction(Err(AgentError::State(
-                            std::io::Error::other(err.to_string()),
-                        ))),
-                        latency_ms: started_at.elapsed().as_millis(),
-                    });
-                    return;
-                }
-            };
-            runtime.block_on(async move {
-                let report = agent.compact().await;
+        let worker = std::thread::Builder::new()
+            .name("socium-worker".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(err) => {
+                        let _ = result_tx.send(SubmitOutcome {
+                            agent,
+                            reply: TaskReply::Compaction(Err(AgentError::State(
+                                std::io::Error::other(err.to_string()),
+                            ))),
+                            latency_ms: started_at.elapsed().as_millis(),
+                        });
+                        return;
+                    }
+                };
+                let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(agent.compact())
+                }))
+                .unwrap_or_else(|_| {
+                    Err(AgentError::State(std::io::Error::other(
+                        "Compaction worker panicked",
+                    )))
+                });
                 let _ = result_tx.send(SubmitOutcome {
                     agent,
                     reply: TaskReply::Compaction(report),
                     latency_ms: started_at.elapsed().as_millis(),
                 });
-            });
-        });
+            })?;
 
         self.pending_task = Some(PendingTask {
+            worker: Some(worker),
+            control,
+            approval_id: None,
             progress_rx,
             result_rx,
             streamed_assistant_text: false,
@@ -146,8 +174,15 @@ impl App {
                 progress_events.push(event);
             }
             streamed_assistant_text = Some(task.streamed_assistant_text);
-            if let Ok(outcome) = task.result_rx.try_recv() {
-                completed = Some(outcome);
+            match task.result_rx.try_recv() {
+                Ok(outcome) => completed = Some(outcome),
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    task.control.cancel();
+                    self.status =
+                        Some("Worker disconnected; restart to recover saved history".into());
+                    self.pending_task = None;
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {}
             }
         }
 
@@ -212,5 +247,48 @@ impl App {
                 self.status = Some("Compaction failed".to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn closed_worker_channel_leaves_pending_state() {
+        let (_progress, progress_rx) = unbounded_channel();
+        let (sender, result_rx) = oneshot::channel();
+        drop(sender);
+        let mut app = App {
+            agent: None,
+            input: String::new(),
+            character_index: 0,
+            input_mode: crate::app::InputMode::Editing,
+            messages: Vec::new(),
+            activity_log: Vec::new(),
+            last_command_output: None,
+            transcript_scroll: 0,
+            status: None,
+            workspace_label: "test".into(),
+            model_label: "test".into(),
+            context_metrics: Default::default(),
+            last_latency_ms: None,
+            pending_task: Some(PendingTask {
+                worker: None,
+                control: Default::default(),
+                approval_id: None,
+                progress_rx,
+                result_rx,
+                streamed_assistant_text: false,
+            }),
+            input_history: crate::input_history::InputSession {
+                history_path: std::path::PathBuf::new(),
+                entries: Vec::new(),
+            },
+            history_index: None,
+            history_draft: String::new(),
+        };
+        app.poll_pending_task();
+        assert!(app.pending_task.is_none());
+        assert!(app.status.as_ref().unwrap().contains("restart to recover"));
     }
 }

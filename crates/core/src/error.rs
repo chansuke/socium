@@ -7,6 +7,8 @@ use crate::providers::error::ProviderError;
 /// `is_error` tool result inside the turn, not a turn failure.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
+    #[error("Task cancelled; completed tool results have been saved")]
+    Cancelled,
     #[error(transparent)]
     Provider(#[from] ProviderError),
     #[error(transparent)]

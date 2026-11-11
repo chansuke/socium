@@ -54,6 +54,7 @@ pub struct AnthropicTextEditorToolDefinition {
 
 pub(crate) struct ToolContext<'a> {
     pub(crate) workspace_root: &'a Path,
+    pub(crate) control: &'a crate::TaskControl,
 }
 
 /// A built-in tool: its wire schema and its execution, colocated so the
@@ -94,6 +95,7 @@ pub(crate) fn run_tool_calls(workspace_root: &Path, blocks: &[ContentBlock]) -> 
     run_tool_calls_with_progress(workspace_root, blocks, &mut noop)
 }
 
+#[cfg(test)]
 pub(crate) fn run_tool_calls_with_progress<F>(
     workspace_root: &Path,
     blocks: &[ContentBlock],
@@ -128,6 +130,7 @@ pub(crate) fn run_tool_call(
     run_tool_call_with_progress(workspace_root, tool_use_id, name, input, &mut noop)
 }
 
+#[cfg(test)]
 pub(crate) fn run_tool_call_with_progress<F>(
     workspace_root: &Path,
     tool_use_id: &str,
@@ -138,17 +141,95 @@ pub(crate) fn run_tool_call_with_progress<F>(
 where
     F: FnMut(AgentProgress),
 {
+    run_tool_call_controlled(
+        workspace_root,
+        tool_use_id,
+        name,
+        input,
+        &crate::TaskControl::default(),
+        on_progress,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn run_tool_call_controlled<F>(
+    workspace_root: &Path,
+    tool_use_id: &str,
+    name: &str,
+    input: &Value,
+    control: &crate::TaskControl,
+    on_progress: &mut F,
+) -> ContentBlock
+where
+    F: FnMut(AgentProgress),
+{
+    run_tool_call_checkpointed(
+        workspace_root,
+        tool_use_id,
+        name,
+        input,
+        control,
+        on_progress,
+        &mut || Ok(()),
+    )
+}
+
+pub(crate) fn run_tool_call_checkpointed<F>(
+    workspace_root: &Path,
+    tool_use_id: &str,
+    name: &str,
+    input: &Value,
+    control: &crate::TaskControl,
+    on_progress: &mut F,
+    before_execute: &mut dyn FnMut() -> std::io::Result<()>,
+) -> ContentBlock
+where
+    F: FnMut(AgentProgress),
+{
     on_progress(AgentProgress::ToolCallStarted {
         name: name.to_string(),
     });
-    let result = match BUILTIN_TOOLS.iter().find(|tool| tool.name() == name) {
-        Some(tool) => {
-            let ctx = ToolContext { workspace_root };
-            let mut forward = |progress| on_progress(progress);
-            tool.run(&ctx, input, &mut forward)
+    let result = (|| -> Result<String, ToolError> {
+        if control.is_cancelled() {
+            return Err("Cancelled before execution".into());
         }
-        None => Err(ToolError::UnsupportedTool(name.to_string())),
-    };
+        if matches!(name, "run_command" | "git_commit") {
+            let review = if name == "git_commit" {
+                Some(git::commit_review(workspace_root, input)?)
+            } else {
+                None
+            };
+            let request = serde_json::json!({"workspace":workspace_root,"tool_call_id":tool_use_id,"arguments":input,"review":review});
+            if !control.approve(name, &request, on_progress) {
+                return Err("Host command denied: explicit human approval required; model approval/confirmed fields grant no authority".into());
+            }
+            if let Some(review) = review
+                && git::commit_review(workspace_root, input)? != review
+            {
+                return Err(
+                    "Repository changed during approval; commit refused, request a new review"
+                        .into(),
+                );
+            }
+        }
+        before_execute().map_err(|e| {
+            format!("Could not persist execution intent; tool was not started: {e}")
+        })?;
+        if control.is_cancelled() {
+            return Err("Cancelled before execution; no side effects".into());
+        }
+        match BUILTIN_TOOLS.iter().find(|tool| tool.name() == name) {
+            Some(tool) => tool.run(
+                &ToolContext {
+                    workspace_root,
+                    control,
+                },
+                input,
+                on_progress,
+            ),
+            None => Err(ToolError::UnsupportedTool(name.into())),
+        }
+    })();
     let is_error = result.is_err();
     on_progress(AgentProgress::ToolCallFinished {
         name: name.to_string(),

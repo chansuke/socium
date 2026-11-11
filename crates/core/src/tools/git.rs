@@ -1,14 +1,12 @@
 use crate::AgentProgress;
 use crate::tools::error::ToolError;
 use crate::tools::input::{
-    optional_bool_field, optional_bounded_usize_field, optional_string_field, require_object_input,
-    require_string_field,
+    optional_bounded_usize_field, optional_string_field, require_object_input, require_string_field,
 };
 use crate::tools::workspace::resolve_workspace_path;
 use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
 use std::path::Path;
-use std::process::Command;
 
 pub(crate) struct GitBranchTool;
 
@@ -155,7 +153,7 @@ impl Tool for GitCommitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::Custom(CustomToolDefinition {
             name: "git_commit".to_string(),
-            description: "Create a Git commit for the current workspace, but only when the caller explicitly confirms the intent."
+            description: "Commit staged changes by default, or only explicitly listed tracked files, after human approval. Unrelated staged, unstaged and untracked changes are preserved. Files already staged are rejected to protect partial staging."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -164,12 +162,9 @@ impl Tool for GitCommitTool {
                         "type": "string",
                         "description": "Commit message to use."
                     },
-                    "confirmed": {
-                        "type": "boolean",
-                        "description": "Must be true to confirm explicit user intent for the commit."
-                    }
+                    "paths": {"type":"array", "items":{"type":"string"}, "minItems":1, "description":"Exact file paths to commit; no directories, wildcards or implicit all-files scope."}
                 },
-                "required": ["message", "confirmed"],
+                "required": ["message"],
                 "additionalProperties": false
             }),
         })
@@ -182,7 +177,7 @@ impl Tool for GitCommitTool {
         on_progress: &mut dyn FnMut(AgentProgress),
     ) -> Result<String, ToolError> {
         let mut forward = |progress| on_progress(progress);
-        git_commit_from_workspace_with_progress(ctx.workspace_root, input, &mut forward)
+        git_commit_controlled(ctx.workspace_root, input, ctx.control, &mut forward)
     }
 }
 
@@ -208,21 +203,6 @@ impl GitLogInput {
         let max_count =
             optional_bounded_usize_field(input_object, "max_count", "git_log", 10, 100)?;
         Ok(Self { max_count })
-    }
-}
-
-struct GitCommitInput<'a> {
-    message: &'a str,
-    confirmed: bool,
-}
-
-impl<'a> GitCommitInput<'a> {
-    fn parse(input: &'a Value) -> Result<Self, ToolError> {
-        let input_object = require_object_input(input, "git_commit")?;
-        let message = require_string_field(input_object, "message", "git_commit")?;
-        let confirmed = optional_bool_field(input_object, "confirmed", "git_commit confirmed")?
-            .unwrap_or(false);
-        Ok(Self { message, confirmed })
     }
 }
 
@@ -273,7 +253,11 @@ pub(crate) fn git_diff_from_workspace(
     input: &Value,
 ) -> Result<String, ToolError> {
     let GitPathInput { path } = GitPathInput::parse(input, "git_diff", "git_diff path")?;
-    let mut args = vec!["diff".to_string()];
+    let mut args = vec![
+        "diff".to_string(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+    ];
     if let Some(path) = path {
         args.push("--".to_string());
         args.push(git_relative_path(workspace_root, path)?);
@@ -315,59 +299,158 @@ pub(crate) fn git_log_from_workspace(
     Ok(result.join("\n"))
 }
 
-#[cfg(test)]
-pub(crate) fn git_commit_from_workspace(
-    workspace_root: &Path,
-    input: &Value,
-) -> Result<String, ToolError> {
-    let mut noop = |_| {};
-    git_commit_from_workspace_with_progress(workspace_root, input, &mut noop)
+fn commit_paths(root: &Path, input: &Value) -> Result<Option<Vec<String>>, ToolError> {
+    let object = require_object_input(input, "git_commit")?;
+    if !object.contains_key("paths") {
+        return Ok(None);
+    }
+    let paths = crate::tools::input::require_string_array_field(object, "paths", "git_commit")?;
+    let canonical = root.canonicalize().map_err(|e| e.to_string())?;
+    let mut relative = Vec::new();
+    for path in paths {
+        let resolved =
+            crate::tools::workspace::resolve_workspace_path_for_create(&canonical, &path)?;
+        if resolved.is_dir() {
+            return Err("git_commit accepts files only".into());
+        }
+        let path = resolved
+            .strip_prefix(&canonical)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .into_owned();
+        if path.starts_with(".socium/") || path.starts_with(".git/") {
+            return Err("Cannot commit agent or Git state".into());
+        }
+        relative.push(path);
+    }
+    Ok(Some(relative))
 }
 
-pub(crate) fn git_commit_from_workspace_with_progress<F>(
+pub(crate) fn commit_review(root: &Path, input: &Value) -> Result<String, ToolError> {
+    let paths = commit_paths(root, input)?;
+    let mut diff_args = vec![
+        "--literal-pathspecs".to_string(),
+        "diff".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+        "--binary".into(),
+    ];
+    if let Some(paths) = paths {
+        diff_args.push("--".into());
+        diff_args.extend(paths);
+    } else {
+        diff_args.push("--cached".into());
+    }
+    let diff = stdout_to_string(&run_git_capture(root, &diff_args)?)?;
+    if diff.trim().is_empty() {
+        return Err("No changes in requested commit scope; stage new files explicitly before a staged-only commit".into());
+    }
+    let index = stdout_to_string(&run_git_capture(
+        root,
+        &[
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+        ],
+    )?)?;
+    let head = stdout_to_string(&run_git_capture(
+        root,
+        &["status", "--porcelain=v2", "--branch"],
+    )?)?;
+    Ok(format!(
+        "Repository state:\n{head}\nRequested diff:\n{diff}\nExisting staged diff:\n{index}"
+    ))
+}
+
+fn git_commit_controlled<F>(
     workspace_root: &Path,
     input: &Value,
-    on_progress: &mut F,
+    control: &crate::TaskControl,
+    _on_progress: &mut F,
 ) -> Result<String, ToolError>
 where
     F: FnMut(AgentProgress),
 {
-    let GitCommitInput { message, confirmed } = GitCommitInput::parse(input)?;
-    if !confirmed {
-        on_progress(AgentProgress::ApprovalRequired {
-            tool: "git_commit".to_string(),
-            reason: "explicit confirmation required".to_string(),
-        });
-        return Err(
-            "git_commit requires explicit confirmation. Rerun with confirmed set to true.".into(),
-        );
+    let object = require_object_input(input, "git_commit")?;
+    let message = require_string_field(object, "message", "git_commit")?;
+    if message.trim().is_empty() {
+        return Err("Empty commit message".into());
     }
-
-    let status_output = run_git_capture(workspace_root, &["status", "--porcelain"])?;
-    if status_output.stdout.is_empty() {
-        return Err("git_commit found no changes to commit".into());
+    let paths = commit_paths(workspace_root, input)?;
+    let mut args = vec![
+        "git".into(),
+        "--literal-pathspecs".into(),
+        "commit".into(),
+        "-m".into(),
+        message.into(),
+    ];
+    if let Some(paths) = paths {
+        let mut staged_args = vec![
+            "--literal-pathspecs".to_string(),
+            "diff".into(),
+            "--cached".into(),
+            "--name-only".into(),
+            "--".into(),
+        ];
+        staged_args.extend(paths.clone());
+        if !run_git_capture(workspace_root, &staged_args)?
+            .stdout
+            .is_empty()
+        {
+            return Err("Selected paths already have staged changes; use staged-only mode or resolve partial staging first".into());
+        }
+        args.extend(["--only".into(), "--".into()]);
+        args.extend(paths);
     }
-
-    run_git_capture(workspace_root, &["add", "-A"])?;
-    run_git_capture(
+    // --only preserves unrelated index entries and excludes unselected files.
+    // New untracked files require explicit intent-to-add before commit --only;
+    // do not mutate the user's index implicitly to make this work.
+    let output = crate::process::run(
+        &args,
         workspace_root,
-        &["commit".to_string(), "-m".to_string(), message.to_string()],
-    )?;
+        std::time::Duration::from_secs(60),
+        control,
+    )
+    .map_err(|e| e.to_string())?;
+    if output.cancelled || output.timed_out || !output.status.success() {
+        return Err(format!("Git commit incomplete (cancelled={}, timed_out={}): {}. Inspect HEAD and index before retrying.",output.cancelled,output.timed_out,String::from_utf8_lossy(&output.stderr)).into());
+    }
     let head = run_git_capture(workspace_root, &["rev-parse", "--short", "HEAD"])?;
-    let commit = stdout_to_string(&head)?.trim().to_string();
-
-    Ok(format!("Commit: {commit}\nMessage: {message}"))
+    Ok(format!(
+        "Commit: {}\nMessage: {message}",
+        stdout_to_string(&head)?.trim()
+    ))
 }
 
 fn run_git_capture<S>(workspace_root: &Path, args: &[S]) -> Result<std::process::Output, String>
 where
     S: AsRef<str> + std::fmt::Debug,
 {
-    let output = Command::new("git")
-        .args(args.iter().map(AsRef::as_ref))
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| format!("Failed to run git command {:?}: {e}", args))?;
+    let mut command = vec![
+        "git".to_string(),
+        "--no-pager".into(),
+        "--no-optional-locks".into(),
+        "-c".into(),
+        "core.fsmonitor=false".into(),
+    ];
+    command.extend(args.iter().map(|s| s.as_ref().to_string()));
+    let captured = crate::process::run(
+        &command,
+        workspace_root,
+        std::time::Duration::from_secs(5),
+        &crate::TaskControl::default(),
+    )
+    .map_err(|e| format!("Failed to run git command {:?}: {e}", args))?;
+    if captured.timed_out || captured.truncated {
+        return Err("Git output incomplete (timeout or capture limit); narrow the request".into());
+    }
+    let output = std::process::Output {
+        status: captured.status,
+        stdout: captured.stdout,
+        stderr: captured.stderr,
+    };
     if output.status.success() {
         return Ok(output);
     }
@@ -413,14 +496,8 @@ pub(crate) fn maybe_prepend_dirty_worktree_warning(
 }
 
 fn git_worktree_is_dirty(workspace_root: &Path) -> bool {
-    let Ok(output) = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(workspace_root)
-        .output()
-    else {
-        return false;
-    };
-    output.status.success() && !output.stdout.is_empty()
+    run_git_capture(workspace_root, &["status", "--porcelain"])
+        .is_ok_and(|output| !output.stdout.is_empty())
 }
 
 #[cfg(test)]
@@ -428,7 +505,6 @@ mod tests {
     use super::*;
     use crate::agent::types::ContentBlock;
     use crate::test_support::{git_stdout, init_git_repo, make_temp_dir};
-    use crate::tools::{run_tool_call, run_tool_call_with_progress};
     use serde_json::json;
     use std::fs;
 
@@ -484,95 +560,43 @@ mod tests {
     }
 
     #[test]
-    fn git_commit_requires_explicit_confirmation() {
-        let workspace = make_temp_dir("git-commit-confirm");
+    fn scoped_commit_preserves_unrelated_index_and_untracked_files() {
+        let workspace = make_temp_dir("scoped-commit");
         init_git_repo(workspace.path());
-        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
-
-        let result = run_tool_call(
+        fs::write(workspace.path().join("tracked.txt"), "agent change\n").unwrap();
+        fs::write(workspace.path().join("staged.txt"), "human staged\n").unwrap();
+        git_stdout(workspace.path(), &["add", "staged.txt"]);
+        fs::write(workspace.path().join("untracked.txt"), "human new\n").unwrap();
+        let control = crate::TaskControl::default();
+        control.enable_interactive_approval();
+        let result = crate::tools::run_tool_call_controlled(
             workspace.path(),
-            "tool_git_commit_denied",
+            "commit",
             "git_commit",
-            &json!({
-                "message": "save work"
-            }),
+            &json!({"message":"agent change","paths":["tracked.txt"]}),
+            &control,
+            &mut |e| {
+                if let AgentProgress::ApprovalRequested { request_id, .. } = e {
+                    control.answer_approval(request_id, true);
+                }
+            },
         );
-
-        match result {
-            ContentBlock::ToolResult {
-                content, is_error, ..
-            } => {
-                assert_eq!(is_error, Some(true));
-                assert!(content.contains("requires explicit confirmation"));
-            }
-            _ => panic!("expected tool_result"),
-        }
-
-        let head_message = git_stdout(workspace.path(), &["log", "-1", "--pretty=%s"]);
-        assert_eq!(head_message.trim(), "initial commit");
-    }
-
-    #[test]
-    fn git_commit_creates_commit_when_confirmed() {
-        let workspace = make_temp_dir("git-commit-ok");
-        init_git_repo(workspace.path());
-        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
-
-        let output = git_commit_from_workspace(
-            workspace.path(),
-            &json!({
-                "message": "save work",
-                "confirmed": true
-            }),
-        )
-        .unwrap();
-
-        assert!(output.contains("Commit:"));
-        assert!(output.contains("Message: save work"));
-
-        let head_message = git_stdout(workspace.path(), &["log", "-1", "--pretty=%s"]);
-        assert_eq!(head_message.trim(), "save work");
-
-        let status = git_stdout(workspace.path(), &["status", "--short"]);
-        assert!(status.trim().is_empty());
-    }
-
-    #[test]
-    fn git_commit_emits_approval_required_event_when_confirmation_is_missing() {
-        let workspace = make_temp_dir("git-commit-needs-confirmation");
-        init_git_repo(workspace.path());
-        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
-
-        let mut progress = Vec::new();
-        let result = run_tool_call_with_progress(
-            workspace.path(),
-            "tool_git_commit_needs_confirmation",
-            "git_commit",
-            &json!({
-                "message": "test commit"
-            }),
-            &mut |event| progress.push(event),
+        assert!(
+            matches!(result, ContentBlock::ToolResult { is_error: None, .. }),
+            "{result:?}"
         );
-
-        match result {
-            ContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, Some(true)),
-            _ => panic!("expected tool_result"),
-        }
         assert_eq!(
-            progress,
-            vec![
-                AgentProgress::ToolCallStarted {
-                    name: "git_commit".to_string(),
-                },
-                AgentProgress::ApprovalRequired {
-                    tool: "git_commit".to_string(),
-                    reason: "explicit confirmation required".to_string(),
-                },
-                AgentProgress::ToolCallFinished {
-                    name: "git_commit".to_string(),
-                    is_error: true,
-                },
-            ]
+            git_stdout(workspace.path(), &["diff", "--cached", "--name-only"]).trim(),
+            "staged.txt"
         );
+        assert_eq!(
+            git_stdout(
+                workspace.path(),
+                &["show", "--pretty=", "--name-only", "HEAD"]
+            )
+            .trim(),
+            "tracked.txt"
+        );
+        assert!(workspace.path().join("untracked.txt").exists());
     }
 }

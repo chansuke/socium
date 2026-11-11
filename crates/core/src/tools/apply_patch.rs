@@ -4,9 +4,12 @@ use crate::tools::error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{optional_bool_field, require_string_field};
 use crate::tools::text_file::read_utf8_file_with_limit;
-use crate::tools::workspace::{resolve_workspace_path, resolve_workspace_path_for_create};
+use crate::tools::workspace::{
+    resolve_workspace_mutation_path, resolve_workspace_path, resolve_workspace_path_for_create,
+};
 use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
+#[cfg(test)]
 use std::fs;
 use std::path::Path;
 
@@ -93,95 +96,146 @@ pub(crate) fn apply_patch_from_workspace(
 ) -> Result<String, ToolError> {
     let ApplyPatchInput { patch, dry_run } = ApplyPatchInput::parse(input)?;
     let actions = parse_patch_actions(patch)?;
+    let plan = plan_patch(workspace_root, &actions)?;
     if dry_run {
-        return preview_patch_actions(workspace_root, &actions);
+        return Ok(preview_plan(&plan));
     }
-    let mut results = Vec::new();
+    let report = actions
+        .iter()
+        .map(|a| match a {
+            PatchAction::Add { path, .. } => format!("Added file: {path}"),
+            PatchAction::Delete { path } => format!("Deleted file: {path}"),
+            PatchAction::Update {
+                path,
+                move_to: Some(to),
+                ..
+            } => format!("Moved file: {path} -> {to}\nUpdated file: {to}"),
+            PatchAction::Update { path, .. } => format!("Updated file: {path}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::tools::edit_history::apply_changes(workspace_root, plan)?;
+    Ok(maybe_prepend_dirty_worktree_warning(workspace_root, report))
+}
 
+fn plan_patch(
+    root: &Path,
+    actions: &[PatchAction],
+) -> Result<Vec<crate::tools::edit_history::Mutation>, ToolError> {
+    use crate::tools::edit_history::Mutation;
+    let mut plan = Vec::new();
+    let mut seen: Vec<std::path::PathBuf> = Vec::new();
     for action in actions {
         match action {
             PatchAction::Add { path, content } => {
-                let target_path = resolve_workspace_path_for_create(workspace_root, &path)?;
-                if target_path.exists() {
-                    return Err(format!("Cannot add file '{}': path already exists", path).into());
+                let target = resolve_workspace_path_for_create(root, path)?;
+                if target.exists() {
+                    return Err(format!("Cannot add file '{path}': path already exists").into());
                 }
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent).map_err(|e| {
-                        format!("Failed to create parent directories for '{}': {e}", path)
-                    })?;
-                }
-                fs::write(&target_path, content)
-                    .map_err(|e| format!("Failed to write new file '{}': {e}", path))?;
-                results.push(format!("Added file: {path}"));
+                plan.push(Mutation {
+                    path: path.clone(),
+                    before: None,
+                    after: Some(content.clone()),
+                });
             }
             PatchAction::Delete { path } => {
-                let target_path = resolve_workspace_path(workspace_root, &path)?;
-                let metadata = fs::metadata(&target_path)
-                    .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
-                if !metadata.is_file() {
-                    return Err(format!("Path is not a file: '{}'", path).into());
-                }
-                fs::remove_file(&target_path)
-                    .map_err(|e| format!("Failed to delete file '{}': {e}", path))?;
-                results.push(format!("Deleted file: {path}"));
+                let target = resolve_workspace_path(root, path)?;
+                let content = read_utf8_file_with_limit(&target, path, MAX_READ_FILE_BYTES)?;
+                plan.push(Mutation {
+                    path: path.clone(),
+                    before: Some(content),
+                    after: None,
+                });
             }
             PatchAction::Update {
                 path,
                 move_to,
                 hunks,
             } => {
-                let source_path = resolve_workspace_path(workspace_root, &path)?;
-                let metadata = fs::metadata(&source_path)
-                    .map_err(|e| format!("Failed to inspect file '{}': {e}", path))?;
-                if !metadata.is_file() {
-                    return Err(format!("Path is not a file: '{}'", path).into());
-                }
-                let content = read_utf8_file_with_limit(&source_path, &path, MAX_READ_FILE_BYTES)?;
-                let updated = apply_patch_hunks_to_text(&content, &path, &hunks)?;
-                let target_display = move_to.clone().unwrap_or_else(|| path.clone());
-                let target_path = if let Some(move_to) = &move_to {
-                    let target_path = resolve_workspace_path_for_create(workspace_root, move_to)?;
-                    if move_to != &path && target_path.exists() {
-                        return Err(format!(
-                            "Cannot move file '{}' to '{}': destination already exists",
-                            path, move_to
-                        )
-                        .into());
+                let source = resolve_workspace_path(root, path)?;
+                let content = read_utf8_file_with_limit(&source, path, MAX_READ_FILE_BYTES)?;
+                let updated = apply_patch_hunks_to_text(&content, path, hunks)?;
+                if let Some(destination) = move_to {
+                    let target = resolve_workspace_path_for_create(root, destination)?;
+                    if target == source {
+                        return Err("Move source and destination are the same file".into());
                     }
-                    target_path
-                } else {
-                    source_path.clone()
-                };
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent).map_err(|e| {
-                        format!(
-                            "Failed to create parent directories for '{}': {e}",
-                            target_display
-                        )
-                    })?;
-                }
-                fs::write(&target_path, updated).map_err(|e| {
-                    format!("Failed to write updated file '{}': {e}", target_display)
-                })?;
-                if let Some(move_to) = move_to {
-                    if move_to != path {
-                        fs::remove_file(&source_path).map_err(|e| {
-                            format!("Failed to remove moved source file '{}': {e}", path)
-                        })?;
-                        results.push(format!("Moved file: {path} -> {move_to}"));
+                    if target.exists() {
+                        return Err(
+                            format!("Cannot move '{path}': destination already exists").into()
+                        );
                     }
-                    results.push(format!("Updated file: {move_to}"));
+                    plan.push(Mutation {
+                        path: path.clone(),
+                        before: Some(content),
+                        after: None,
+                    });
+                    plan.push(Mutation {
+                        path: destination.clone(),
+                        before: None,
+                        after: Some(updated),
+                    });
                 } else {
-                    results.push(format!("Updated file: {path}"));
+                    plan.push(Mutation {
+                        path: path.clone(),
+                        before: Some(content),
+                        after: Some(updated),
+                    });
                 }
             }
         }
     }
+    for change in &plan {
+        if change
+            .after
+            .as_ref()
+            .is_some_and(|s| s.len() > MAX_READ_FILE_BYTES)
+        {
+            return Err("Patched file exceeds supported file size limit".into());
+        }
+        let path = resolve_workspace_mutation_path(root, &change.path)?;
+        if seen
+            .iter()
+            .any(|p| p.starts_with(&path) || path.starts_with(p))
+        {
+            return Err("Overlapping patch paths; split the patch".into());
+        }
+        seen.push(path);
+    }
+    Ok(plan)
+}
 
-    Ok(maybe_prepend_dirty_worktree_warning(
-        workspace_root,
-        results.join("\n"),
-    ))
+fn preview_plan(plan: &[crate::tools::edit_history::Mutation]) -> String {
+    // A full before/after diff preserves duplicates, line order and exact CRLF
+    // bytes. It deliberately makes no minimal-diff claim.
+    let mut out = String::from("Preview: true\n");
+    for change in plan {
+        out.push_str(&format!(
+            "--- {}\n+++ {}\n@@ full file replacement @@\n",
+            if change.before.is_some() {
+                &change.path
+            } else {
+                "/dev/null"
+            },
+            if change.after.is_some() {
+                &change.path
+            } else {
+                "/dev/null"
+            }
+        ));
+        for (prefix, text) in [("-", &change.before), ("+", &change.after)] {
+            if let Some(text) = text {
+                for line in text.split_inclusive('\n') {
+                    out.push_str(prefix);
+                    out.push_str(line);
+                }
+                if !text.is_empty() && !text.ends_with('\n') {
+                    out.push_str("\n\\ No newline at end of file\n");
+                }
+            }
+        }
+    }
+    out
 }
 
 fn parse_patch_actions(patch: &str) -> Result<Vec<PatchAction>, String> {
@@ -315,6 +369,13 @@ fn apply_patch_hunks_to_text(
     path: &str,
     hunks: &[PatchHunk],
 ) -> Result<String, String> {
+    let crlf = content.contains("\r\n");
+    let normalized = if crlf {
+        content.replace("\r\n", "\n")
+    } else {
+        content.to_string()
+    };
+    let content = normalized.as_str();
     let trailing_newline = content.ends_with('\n');
     let stripped = content.strip_suffix('\n').unwrap_or(content);
     let mut lines = if stripped.is_empty() {
@@ -347,7 +408,11 @@ fn apply_patch_hunks_to_text(
     if trailing_newline && !updated.is_empty() {
         updated.push('\n');
     }
-    Ok(updated)
+    Ok(if crlf {
+        updated.replace("\n", "\r\n")
+    } else {
+        updated
+    })
 }
 
 fn find_hunk_position(lines: &[String], needle: &[String], search_start: usize) -> Option<usize> {
@@ -355,58 +420,14 @@ fn find_hunk_position(lines: &[String], needle: &[String], search_start: usize) 
         return None;
     }
 
-    (search_start..=lines.len().saturating_sub(needle.len()))
-        .find(|start| lines[*start..*start + needle.len()] == *needle)
-}
-
-fn preview_patch_actions(
-    workspace_root: &Path,
-    actions: &[PatchAction],
-) -> Result<String, ToolError> {
-    let mut lines = vec!["Preview: true".to_string()];
-    for action in actions {
-        match action {
-            PatchAction::Add { path, content } => {
-                lines.push(format!("*** Add File: {path}"));
-                lines.push(format!("+++ {path}"));
-                lines.extend(content.lines().map(|line| format!("+{line}")));
-            }
-            PatchAction::Delete { path } => {
-                let target_path = resolve_workspace_path(workspace_root, path)?;
-                let content = read_utf8_file_with_limit(&target_path, path, MAX_READ_FILE_BYTES)?;
-                lines.push(format!("*** Delete File: {path}"));
-                lines.push(format!("--- {path}"));
-                lines.extend(content.lines().map(|line| format!("-{line}")));
-            }
-            PatchAction::Update {
-                path,
-                move_to,
-                hunks,
-            } => {
-                let target = move_to.as_deref().unwrap_or(path);
-                lines.push(format!("*** Update File: {path}"));
-                if let Some(move_to) = move_to {
-                    lines.push(format!("*** Move to: {move_to}"));
-                }
-                lines.push(format!("--- {path}"));
-                lines.push(format!("+++ {target}"));
-                for hunk in hunks {
-                    lines.push("@@".to_string());
-                    for old_line in &hunk.old_lines {
-                        if !hunk.new_lines.contains(old_line) {
-                            lines.push(format!("-{old_line}"));
-                        }
-                    }
-                    for new_line in &hunk.new_lines {
-                        if !hunk.old_lines.contains(new_line) {
-                            lines.push(format!("+{new_line}"));
-                        }
-                    }
-                }
-            }
-        }
+    let mut matches = (search_start..=lines.len().saturating_sub(needle.len()))
+        .filter(|start| lines[*start..*start + needle.len()] == *needle);
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        None
+    } else {
+        Some(first)
     }
-    Ok(lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -416,6 +437,41 @@ mod tests {
     use crate::test_support::{init_git_repo, make_temp_dir};
     use crate::tools::run_tool_call;
     use serde_json::json;
+
+    #[test]
+    fn invalid_later_action_and_dry_run_have_no_side_effects() {
+        let workspace = make_temp_dir("patch-atomic-validation");
+        let patch = "*** Begin Patch\n*** Add File: first\n+hello\n*** Update File: missing\n@@\n-old\n+new\n*** End Patch";
+        for dry_run in [true, false] {
+            assert!(
+                apply_patch_from_workspace(
+                    workspace.path(),
+                    &json!({"patch":patch,"dry_run":dry_run})
+                )
+                .is_err()
+            );
+        }
+        assert!(!workspace.path().join("first").exists());
+        assert!(!workspace.path().join(".socium").exists());
+    }
+    #[test]
+    fn ambiguous_hunks_are_refused_and_move_undo_is_grouped() {
+        let workspace = make_temp_dir("patch-move");
+        fs::write(workspace.path().join("f"), "same\nsame\n").unwrap();
+        assert!(apply_patch_from_workspace(workspace.path(),&json!({"patch":"*** Begin Patch\n*** Update File: f\n@@\n-same\n+new\n*** End Patch"})).is_err());
+        fs::write(workspace.path().join("f"), "old\r\n").unwrap();
+        apply_patch_from_workspace(workspace.path(),&json!({"patch":"*** Begin Patch\n*** Update File: f\n*** Move to: g\n@@\n-old\n+new\n*** End Patch"})).unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("g")).unwrap(),
+            "new\r\n"
+        );
+        crate::tools::edit_history::undo(workspace.path(), "g").unwrap();
+        assert!(!workspace.path().join("g").exists());
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("f")).unwrap(),
+            "old\r\n"
+        );
+    }
 
     #[test]
     fn apply_patch_updates_multiple_hunks_in_one_file() {

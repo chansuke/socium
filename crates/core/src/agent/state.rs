@@ -6,7 +6,13 @@ use std::path::Path;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ConversationState {
+    #[serde(default)]
+    pub schema_version: u32,
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub events: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub summary_state: Option<ConversationSummaryState>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
@@ -23,13 +29,24 @@ pub(crate) struct ConversationSummary {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ConversationStateRef<'a> {
+    pub schema_version: u32,
     pub messages: &'a [Message],
+    pub events: &'a [serde_json::Value],
+    pub summary_state: &'a ConversationSummaryState,
 }
 
-pub(crate) fn load_json_file<T>(path: &Path) -> io::Result<T>
+pub fn load_json_file<T>(path: &Path) -> io::Result<T>
 where
     T: for<'de> Deserialize<'de> + Default,
 {
+    if let Ok(metadata) = fs::metadata(path)
+        && (!metadata.is_file() || metadata.len() > 64 * 1024 * 1024)
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "State must be a regular file of at most 64 MiB; preserve it before manual recovery",
+        ));
+    }
     match fs::read_to_string(path) {
         Ok(content) => serde_json::from_str(&content).map_err(|err| {
             Error::new(
@@ -42,7 +59,7 @@ where
     }
 }
 
-pub(crate) fn save_json_file<T>(path: &Path, value: &T) -> io::Result<()>
+pub fn save_json_file<T>(path: &Path, value: &T) -> io::Result<()>
 where
     T: Serialize,
 {
@@ -55,7 +72,84 @@ where
             path.display()
         ))
     })?;
-    fs::write(path, serialized)
+    if serialized.len() > 64 * 1024 * 1024 {
+        return Err(Error::other(
+            "State exceeds 64 MiB limit; archive the session before continuing",
+        ));
+    }
+    atomic_write(path, serialized.as_bytes())
+}
+
+/// Write a same-directory temporary file, sync it, then atomically replace the
+/// destination. Failed serialization/writes never truncate the previous state.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_with_checkpoint(path, bytes, &mut |_| Ok(()))
+}
+fn atomic_write_with_checkpoint(
+    path: &Path,
+    bytes: &[u8],
+    checkpoint: &mut dyn FnMut(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::other("missing parent"))?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(
+        ".socium-{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut created = false;
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        created = true;
+        checkpoint("created")?;
+        if let Ok(metadata) = fs::metadata(path) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.write_all(bytes)?;
+        checkpoint("written")?;
+        file.sync_all()?;
+        checkpoint("synced")?;
+        fs::rename(&temporary, path)?;
+        checkpoint("renamed")?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if created {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+pub(crate) fn lock_workspace(root: &Path) -> io::Result<fs::File> {
+    let path =
+        crate::tools::workspace::resolve_workspace_path_for_create(root, ".socium/session.lock")
+            .map_err(|e| Error::other(e.to_string()))?;
+    fs::create_dir_all(path.parent().unwrap())?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    file.try_lock().map_err(|e| {
+        Error::other(format!(
+            "Workspace session is already in use (or cannot be locked): {e}"
+        ))
+    })?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -68,6 +162,32 @@ mod tests {
     #[derive(Debug, Serialize, Deserialize, Default)]
     struct InputHistoryState {
         entries: Vec<String>,
+    }
+
+    #[test]
+    fn failures_at_atomic_save_boundaries_leave_old_or_new_snapshot() {
+        for boundary in ["created", "written", "synced", "renamed"] {
+            let root = make_temp_dir("atomic-fault");
+            let path = root.path().join("state.json");
+            fs::write(&path, b"{\"generation\":1}").unwrap();
+            assert!(
+                atomic_write_with_checkpoint(&path, b"{\"generation\":2}", &mut |stage| if stage
+                    == boundary
+                {
+                    Err(Error::other("injected failure"))
+                } else {
+                    Ok(())
+                })
+                .is_err()
+            );
+            let state: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(
+                state["generation"],
+                if boundary == "renamed" { 2 } else { 1 }
+            );
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        }
     }
 
     #[test]

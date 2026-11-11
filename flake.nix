@@ -24,7 +24,7 @@
             cargoLock.lockFile = ./Cargo.lock;
 
             nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
-            nativeCheckInputs = [ pkgs.git ];
+            nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
             buildInputs = [ pkgs.openssl ]
               ++ lib.optionals pkgs.stdenv.isDarwin [
                 pkgs.darwin.apple_sdk.frameworks.Security
@@ -35,6 +35,7 @@
 
             postFixup = ''
               wrapProgram "$out/bin/socium-tui" \
+                --prefix PATH : "${lib.makeBinPath [ pkgs.git pkgs.ripgrep ]}" \
                 --set-default SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" \
                 --set-default NIX_SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
             '';
@@ -61,6 +62,7 @@
               pkgs.rustfmt
               pkgs.rust-analyzer
               pkgs.git
+              pkgs.ripgrep
               pkgs.cacert
               pkgs.openssl
               pkgs.pkg-config

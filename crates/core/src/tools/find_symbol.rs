@@ -5,7 +5,7 @@ use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_string_field,
 };
 use crate::tools::ripgrep::{
-    SearchExecution, SearchMode, format_search_results, search_with_ripgrep_fallback,
+    SearchExecution, SearchMode, format_search_results, search_with_ripgrep,
 };
 use crate::tools::workspace::resolve_workspace_path;
 use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
@@ -52,7 +52,7 @@ impl Tool for FindSymbolTool {
         input: &Value,
         _on_progress: &mut dyn FnMut(AgentProgress),
     ) -> Result<String, ToolError> {
-        find_symbol_in_workspace(ctx.workspace_root, input)
+        find_symbol_controlled(ctx.workspace_root, input, ctx.control)
     }
 }
 
@@ -84,9 +84,17 @@ impl<'a> FindSymbolInput<'a> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn find_symbol_in_workspace(
     workspace_root: &Path,
     input: &Value,
+) -> Result<String, ToolError> {
+    find_symbol_controlled(workspace_root, input, &crate::TaskControl::default())
+}
+fn find_symbol_controlled(
+    workspace_root: &Path,
+    input: &Value,
+    control: &crate::TaskControl,
 ) -> Result<String, ToolError> {
     let FindSymbolInput {
         symbol,
@@ -95,29 +103,28 @@ pub(crate) fn find_symbol_in_workspace(
     } = FindSymbolInput::parse(input)?;
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
 
-    let execution = search_with_ripgrep_fallback(
+    let execution = search_with_ripgrep(
         workspace_root,
         &resolved_path,
         symbol,
         Some("*.rs"),
         SearchMode::FixedCaseSensitive,
-        "rg",
-        "find_symbol",
+        control,
     )?;
     let SearchExecution {
         matches,
         status_code,
-        used_ripgrep,
+        truncated,
     } = execution;
     let matches = matches
         .into_iter()
         .filter(|entry| looks_like_rust_symbol_declaration(&entry.text, symbol))
         .collect::<Vec<_>>();
-    let formatted =
+    let mut formatted =
         format_search_results("Symbol", symbol, path, Some("*.rs"), max_results, matches);
 
-    if !used_ripgrep {
-        return Ok(formatted);
+    if truncated {
+        formatted.push_str("\n(truncated at 256 KiB capture limit; narrow the search)");
     }
 
     match status_code {

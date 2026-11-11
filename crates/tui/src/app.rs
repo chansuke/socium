@@ -53,7 +53,7 @@ enum SubmitAction {
 }
 
 impl App {
-    pub(crate) fn new(agent: AgentService) -> Self {
+    pub(crate) fn new(agent: AgentService) -> Result<Self> {
         let model_label = env::var("MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let workspace_label = format_workspace_path(env::current_dir().ok());
         let messages = transcript_entries_to_chat_entries(agent.transcript_entries());
@@ -62,14 +62,9 @@ impl App {
             .unwrap_or_default()
             .join(".socium")
             .join(INPUT_HISTORY_FILE_NAME);
-        let input_history = input_history::InputSession::load(history_path.clone()).unwrap_or(
-            input_history::InputSession {
-                history_path,
-                entries: Vec::new(),
-            },
-        );
+        let input_history = input_history::InputSession::load(history_path)?;
 
-        Self {
+        Ok(Self {
             agent: Some(agent),
             input: String::new(),
             character_index: 0,
@@ -87,7 +82,7 @@ impl App {
             input_history,
             history_index: None,
             history_draft: String::new(),
-        }
+        })
     }
 
     fn move_cursor_left(&mut self) {
@@ -245,6 +240,31 @@ impl App {
             }
 
             if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press
+                    && let Some(task) = self.pending_task.as_mut()
+                {
+                    if key.code == KeyCode::Esc
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL))
+                        || (matches!(self.input_mode, InputMode::Normal)
+                            && key.code == KeyCode::Char('q'))
+                    {
+                        task.control.cancel();
+                        task.approval_id = None;
+                        self.status =
+                            Some("Cancelling; waiting for cleanup and saved results…".into());
+                        continue;
+                    }
+                    if let Some(id) = task.approval_id {
+                        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('n')) {
+                            task.control
+                                .answer_approval(id, key.code == KeyCode::Char('y'));
+                            task.approval_id = None;
+                            self.status = Some("Approval answered".into());
+                        }
+                        continue;
+                    }
+                }
                 match self.input_mode {
                     InputMode::Normal if key.kind == KeyEventKind::Press => match key.code {
                         KeyCode::Char('e') | KeyCode::Enter => {
@@ -374,4 +394,15 @@ fn format_workspace_path(path: Option<PathBuf>) -> String {
     }
 
     path.display().to_string()
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(mut task) = self.pending_task.take() {
+            task.control.cancel();
+            if let Some(worker) = task.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
 }

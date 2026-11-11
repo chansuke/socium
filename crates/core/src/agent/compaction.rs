@@ -26,7 +26,8 @@ pub(crate) fn compaction_threshold_tokens(context_window_tokens: u32) -> u32 {
 /// tool_result, or the API rejects the request.
 pub(crate) fn retention_boundary(messages: &[Message], retain_recent: usize) -> usize {
     let mut boundary = messages.len().saturating_sub(retain_recent);
-    while boundary > 0 && starts_with_tool_result(&messages[boundary]) {
+    while boundary > 0 && boundary < messages.len() && starts_with_tool_result(&messages[boundary])
+    {
         boundary -= 1;
     }
     boundary

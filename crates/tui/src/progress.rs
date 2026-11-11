@@ -6,6 +6,25 @@ use socium_core::AgentProgress;
 impl App {
     pub(crate) fn apply_progress(&mut self, event: AgentProgress) {
         match event {
+            AgentProgress::CommandOutput {
+                stdout_bytes,
+                stderr_bytes,
+            } => {
+                self.status = Some(format!(
+                    "Command running: stdout {stdout_bytes} bytes, stderr {stderr_bytes} bytes"
+                ));
+            }
+            AgentProgress::ApprovalRequested {
+                request_id,
+                tool,
+                input,
+            } => {
+                if let Some(task) = self.pending_task.as_mut() {
+                    task.approval_id = Some(request_id);
+                }
+                self.push_message(Speaker::System, format!("Approve host command (full user permissions): {tool} {input}\n[y] allow once / [n] deny / [Esc] cancel"));
+                self.status = Some("Human approval required: y / n".into());
+            }
             AgentProgress::ModelRequestStarted { round, provider } => {
                 self.push_activity(format!("Model request round {round} via {provider}"));
                 self.status = Some(model_request_status(round, &provider));

@@ -48,7 +48,7 @@ impl Tool for ListFilesTool {
         input: &Value,
         _on_progress: &mut dyn FnMut(AgentProgress),
     ) -> Result<String, ToolError> {
-        list_files_from_workspace(ctx.workspace_root, input)
+        list_files_controlled(ctx.workspace_root, input, ctx.control)
     }
 }
 
@@ -85,6 +85,13 @@ pub(crate) fn list_files_from_workspace(
     workspace_root: &Path,
     input: &Value,
 ) -> Result<String, ToolError> {
+    list_files_controlled(workspace_root, input, &crate::TaskControl::default())
+}
+fn list_files_controlled(
+    workspace_root: &Path,
+    input: &Value,
+    control: &crate::TaskControl,
+) -> Result<String, ToolError> {
     let ListFilesInput {
         path,
         recursive,
@@ -112,102 +119,73 @@ pub(crate) fn list_files_from_workspace(
         return Err(format!("Path is neither a file nor directory: '{}'", path).into());
     }
 
-    let entries = if recursive || glob.is_some() {
-        collect_filtered_file_entries(&resolved_path, glob, recursive)?
-    } else {
-        collect_directory_entries(&resolved_path)?
-    };
+    if glob.is_some_and(|g| g.len() > 512) {
+        return Err("Glob exceeds 512 bytes".into());
+    }
+    let entries = collect_entries(&resolved_path, glob, recursive, control)?;
     Ok(format_list_file_entries(path, glob, recursive, entries)?)
 }
-
-fn collect_directory_entries(resolved_path: &Path) -> Result<Vec<(String, String)>, String> {
-    let read_dir = fs::read_dir(resolved_path).map_err(|e| {
-        format!(
-            "Failed to list directory '{}': {e}",
-            resolved_path.display()
-        )
-    })?;
-    let mut entries = Vec::new();
-
-    for entry_result in read_dir {
-        let entry = entry_result.map_err(|e| format!("Failed to read directory entry: {e}"))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("Failed to inspect directory entry type: {e}"))?;
-        let (sort_key, line) = if file_type.is_symlink() {
-            (name.clone(), format!("[lnk] {name}"))
-        } else if file_type.is_dir() {
-            (name.clone(), format!("[dir] {name}/"))
-        } else {
-            (name.clone(), format!("[file] {name}"))
-        };
-        entries.push((sort_key, line));
-    }
-
-    Ok(entries)
-}
-
-fn collect_filtered_file_entries(
-    resolved_path: &Path,
-    glob: Option<&str>,
-    recursive: bool,
-) -> Result<Vec<(String, String)>, String> {
-    let mut entries = Vec::new();
-    collect_filtered_file_entries_inner(
-        resolved_path,
-        resolved_path,
-        glob,
-        recursive,
-        &mut entries,
-    )?;
-    Ok(entries)
-}
-
-fn collect_filtered_file_entries_inner(
+fn collect_entries(
     root: &Path,
-    current: &Path,
     glob: Option<&str>,
     recursive: bool,
-    entries: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    let read_dir = fs::read_dir(current)
-        .map_err(|e| format!("Failed to list directory '{}': {e}", current.display()))?;
-
-    for entry_result in read_dir {
-        let entry = entry_result.map_err(|e| format!("Failed to read directory entry: {e}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("Failed to inspect directory entry type: {e}"))?;
-        let path = entry.path();
-        if file_type.is_dir() {
-            if recursive {
-                collect_filtered_file_entries_inner(root, &path, glob, recursive, entries)?;
+    control: &crate::TaskControl,
+) -> Result<Vec<(String, String)>, String> {
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut entries = Vec::new();
+    let mut inspected = 0;
+    let start = std::time::Instant::now();
+    while let Some((directory, depth)) = stack.pop() {
+        if depth > 64 {
+            return Err("Directory depth exceeds 64; narrow scope".into());
+        }
+        for entry in fs::read_dir(&directory).map_err(|e| e.to_string())? {
+            inspected += 1;
+            if control.is_cancelled() {
+                return Err("Listing cancelled".into());
             }
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|e| format!("Failed to normalize path '{}': {e}", path.display()))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        let matches = glob.is_none_or(|pattern| {
-            glob_matches(pattern, &relative)
-                || Path::new(&relative)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|file_name| glob_matches(pattern, file_name))
-        });
-        if matches {
-            entries.push((relative.clone(), format!("[file] {relative}")));
+            if inspected > 100000 || start.elapsed() > std::time::Duration::from_secs(5) {
+                return Err("Listing scan limit reached; narrow scope".into());
+            }
+            let entry = entry.map_err(|e| e.to_string())?;
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if kind.is_dir() && recursive {
+                stack.push((path.clone(), depth + 1));
+            }
+            if recursive || glob.is_some() {
+                if !kind.is_file() {
+                    continue;
+                }
+                let matched = glob.is_none_or(|g| {
+                    glob_matches(g, &relative)
+                        || glob_matches(g, &entry.file_name().to_string_lossy())
+                });
+                if matched {
+                    entries.push((relative.clone(), format!("[file] {relative}")));
+                }
+            } else {
+                let tag = if kind.is_symlink() {
+                    "lnk"
+                } else if kind.is_dir() {
+                    "dir"
+                } else {
+                    "file"
+                };
+                let suffix = if kind.is_dir() { "/" } else { "" };
+                entries.push((relative.clone(), format!("[{tag}] {relative}{suffix}")));
+            }
+            if entries.len() > MAX_LIST_ENTRIES {
+                return Ok(entries);
+            }
         }
     }
-
-    Ok(())
+    Ok(entries)
 }
 
 fn format_list_file_entries(

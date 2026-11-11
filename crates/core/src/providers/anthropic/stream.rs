@@ -20,9 +20,11 @@ enum AnthropicStreamEvent {
     #[serde(rename = "content_block_delta")]
     ContentBlockDelta { index: usize, delta: StreamDelta },
     #[serde(rename = "content_block_stop")]
-    ContentBlockStop,
+    ContentBlockStop { index: usize },
     #[serde(rename = "message_delta")]
     MessageDelta {
+        #[serde(default)]
+        delta: Option<StopDelta>,
         #[serde(default)]
         usage: Option<StreamUsage>,
     },
@@ -32,6 +34,11 @@ enum AnthropicStreamEvent {
     Ping,
     #[serde(rename = "error")]
     Error { error: AnthropicErrorPayload },
+}
+
+#[derive(Debug, Deserialize)]
+struct StopDelta {
+    stop_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +105,11 @@ enum StreamDelta {
 #[derive(Default)]
 pub(super) struct StreamingMessageBuilder {
     blocks: Vec<Option<StreamingContentBlock>>,
+    received_bytes: usize,
+    started: bool,
+    stopped: bool,
+    active: Option<usize>,
+    stop_reason: Option<String>,
     text_block_count: usize,
     pub(super) streamed_text: bool,
     pub(super) usage: Option<TokenUsage>,
@@ -132,21 +144,62 @@ impl StreamingMessageBuilder {
         raw_event: &str,
         on_delta: &mut impl FnMut(DeltaEvent),
     ) -> Result<(), ProviderError> {
+        self.received_bytes = self.received_bytes.saturating_add(raw_event.len());
+        if self.received_bytes > 8 * 1024 * 1024 {
+            return Err(ProviderError::Stream("Response exceeded 8 MiB".into()));
+        }
         let event: AnthropicStreamEvent = serde_json::from_str(raw_event)?;
+        if self.stopped && !matches!(event, AnthropicStreamEvent::Ping) {
+            return Err(ProviderError::Stream("Event after message_stop".into()));
+        }
+        if !self.started
+            && !matches!(
+                event,
+                AnthropicStreamEvent::MessageStart { .. }
+                    | AnthropicStreamEvent::Ping
+                    | AnthropicStreamEvent::Error { .. }
+            )
+        {
+            return Err(ProviderError::Stream("Missing message_start".into()));
+        }
         match event {
             AnthropicStreamEvent::MessageStart { message } => {
+                if self.started {
+                    return Err(ProviderError::Stream("Duplicate message_start".into()));
+                }
+                self.started = true;
                 if let Some(usage) = message.and_then(|m| m.usage) {
                     self.merge_usage(usage);
                 }
             }
-            AnthropicStreamEvent::MessageDelta { usage } => {
+            AnthropicStreamEvent::MessageDelta { usage, delta } => {
+                if self.active.is_some() {
+                    return Err(ProviderError::Stream(
+                        "message_delta before content_block_stop".into(),
+                    ));
+                }
+                if let Some(reason) = delta.and_then(|d| d.stop_reason) {
+                    self.stop_reason = Some(reason);
+                }
                 if let Some(usage) = usage {
                     self.merge_usage(usage);
                 }
             }
-            AnthropicStreamEvent::ContentBlockStop
-            | AnthropicStreamEvent::MessageStop
-            | AnthropicStreamEvent::Ping => {}
+            AnthropicStreamEvent::ContentBlockStop { index } => {
+                if self.active != Some(index) {
+                    return Err(ProviderError::Stream(
+                        "Invalid content_block_stop index".into(),
+                    ));
+                }
+                self.active = None;
+            }
+            AnthropicStreamEvent::MessageStop => {
+                if self.active.is_some() || self.stop_reason.is_none() {
+                    return Err(ProviderError::Stream("Incomplete message_stop".into()));
+                }
+                self.stopped = true;
+            }
+            AnthropicStreamEvent::Ping => {}
             AnthropicStreamEvent::Error { error } => {
                 return Err(ProviderError::Stream(format!(
                     "Anthropic streaming error: {}",
@@ -156,8 +209,20 @@ impl StreamingMessageBuilder {
             AnthropicStreamEvent::ContentBlockStart {
                 index,
                 content_block,
-            } => self.start_block(index, content_block, on_delta),
+            } => {
+                if self.active.is_some() || index != self.blocks.len() || self.stop_reason.is_some()
+                {
+                    return Err(ProviderError::Stream(
+                        "Invalid content_block_start sequence".into(),
+                    ));
+                }
+                self.active = Some(index);
+                self.start_block(index, content_block, on_delta);
+            }
             AnthropicStreamEvent::ContentBlockDelta { index, delta } => {
+                if self.active != Some(index) {
+                    return Err(ProviderError::Stream("Delta for inactive block".into()));
+                }
                 self.apply_delta(index, delta, on_delta)?
             }
         }
@@ -184,6 +249,24 @@ impl StreamingMessageBuilder {
     }
 
     pub(super) fn finish(self) -> Result<AgentMessageResponse, ProviderError> {
+        if !self.started || !self.stopped {
+            return Err(ProviderError::Stream(
+                "Incomplete response: missing message_stop".into(),
+            ));
+        }
+        let has_tools = self
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Some(StreamingContentBlock::ToolUse(_))));
+        match self.stop_reason.as_deref() {
+            Some("tool_use") if has_tools => {}
+            Some("end_turn" | "stop_sequence") if !has_tools => {}
+            reason => {
+                return Err(ProviderError::Stream(format!(
+                    "Response stopped without safe completion: {reason:?}"
+                )));
+            }
+        }
         let mut content = Vec::with_capacity(self.blocks.len());
         for block in self.blocks {
             let Some(block) = block else {
@@ -289,7 +372,11 @@ impl StreamingMessageBuilder {
             (StreamingContentBlock::ToolUse(state), StreamDelta::InputJson { partial_json }) => {
                 state.input_json.push_str(&partial_json);
             }
-            _ => {}
+            _ => {
+                return Err(ProviderError::Stream(
+                    "Delta type does not match content block".into(),
+                ));
+            }
         }
 
         Ok(())
@@ -320,134 +407,78 @@ fn append_text_to_state(state: &mut TextBlockState, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::StreamingMessageBuilder;
-    use crate::agent::types::ContentBlock;
-    use crate::providers::DeltaEvent;
+    use super::*;
     use serde_json::json;
-
-    fn text_deltas(events: &[DeltaEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|e| match e {
-                DeltaEvent::Text(t) => Some(t.clone()),
-                DeltaEvent::Thinking(_) => None,
-            })
-            .collect()
+    fn apply(b: &mut StreamingMessageBuilder, e: Value) -> Result<(), ProviderError> {
+        b.apply_event(&e.to_string(), &mut |_| {})
     }
-
+    fn start() -> StreamingMessageBuilder {
+        let mut b = StreamingMessageBuilder::default();
+        apply(
+            &mut b,
+            json!({"type":"message_start", "message":{"usage":{"input_tokens":12}}}),
+        )
+        .unwrap();
+        b
+    }
+    fn tool(b: &mut StreamingMessageBuilder) {
+        apply(b, json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"apply_patch","input":{}}})).unwrap();
+        apply(b, json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"patch\":\"test\"}"}})).unwrap();
+    }
+    fn stop(b: &mut StreamingMessageBuilder, reason: &str) {
+        apply(b, json!({"type":"content_block_stop","index":0})).unwrap();
+        apply(b,json!({"type":"message_delta","delta":{"stop_reason":reason},"usage":{"output_tokens":7}})).unwrap();
+        apply(b, json!({"type":"message_stop"})).unwrap();
+    }
     #[test]
-    fn streaming_builder_collects_text_and_tool_use_blocks() {
-        let mut builder = StreamingMessageBuilder::default();
-        let mut events = Vec::new();
-
-        builder
-            .apply_event(
-                "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"Hello\"}}",
-                &mut |e| events.push(e),
-            )
-            .unwrap();
-        builder
-            .apply_event(
-                "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}",
-                &mut |e| events.push(e),
-            )
-            .unwrap();
-        builder
-            .apply_event(
-                "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"read_file\",\"input\":{}}}",
-                &mut |e| events.push(e),
-            )
-            .unwrap();
-        builder
-            .apply_event(
-                "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"src/main.rs\\\"}\"}}",
-                &mut |e| events.push(e),
-            )
-            .unwrap();
-
-        let response = builder.finish().unwrap();
-
-        assert_eq!(
-            text_deltas(&events),
-            vec!["Hello".to_string(), " world".to_string()]
-        );
-        assert_eq!(
-            response.content,
-            vec![
-                ContentBlock::Text {
-                    text: "Hello world".to_string(),
-                },
-                ContentBlock::ToolUse {
-                    id: "tool-1".to_string(),
-                    name: "read_file".to_string(),
-                    input: json!({ "path": "src/main.rs" }),
-                },
-            ]
+    fn complete_tool_and_usage_are_restored() {
+        let mut b = start();
+        tool(&mut b);
+        stop(&mut b, "tool_use");
+        assert_eq!(b.usage.as_ref().unwrap().output_tokens, 7);
+        assert_eq!(b.usage.as_ref().unwrap().input_tokens, 12);
+        assert!(
+            matches!(&b.finish().unwrap().content[0], ContentBlock::ToolUse {input,..} if input["patch"] == "test")
         );
     }
-
     #[test]
-    fn streaming_builder_collects_usage_from_message_start_and_delta() {
-        let mut builder = StreamingMessageBuilder::default();
-        let mut sink = |_e| {};
-
-        builder
-            .apply_event(
-                "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":1,\"cache_creation_input_tokens\":300,\"cache_read_input_tokens\":4500}}}",
-                &mut sink,
-            )
-            .unwrap();
-        builder
-            .apply_event(
-                "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":87}}",
-                &mut sink,
-            )
-            .unwrap();
-
-        let usage = builder.usage.expect("usage should be captured");
-        assert_eq!(usage.input_tokens, 1200);
-        assert_eq!(usage.output_tokens, 87);
-        assert_eq!(usage.cache_creation_input_tokens, 300);
-        assert_eq!(usage.cache_read_input_tokens, 4500);
-        assert_eq!(usage.total_input_tokens(), 6000);
+    fn eof_and_token_limit_never_release_tool_calls() {
+        let mut b = start();
+        tool(&mut b);
+        assert!(b.finish().is_err());
+        let mut b = start();
+        tool(&mut b);
+        stop(&mut b, "max_tokens");
+        assert!(b.finish().unwrap_err().to_string().contains("max_tokens"));
     }
-
     #[test]
-    fn streaming_builder_reports_no_usage_when_events_omit_it() {
-        let mut builder = StreamingMessageBuilder::default();
-        let mut sink = |_e| {};
-
-        builder
-            .apply_event("{\"type\":\"message_start\"}", &mut sink)
-            .unwrap();
-        builder
-            .apply_event("{\"type\":\"message_delta\"}", &mut sink)
-            .unwrap();
-
-        assert!(builder.usage.is_none());
+    fn rejects_unbounded_indices_duplicate_blocks_and_wrong_deltas() {
+        let mut b = start();
+        assert!(apply(&mut b,json!({"type":"content_block_start","index":999999999,"content_block":{"type":"text","text":"x"}})).is_err());
+        tool(&mut b);
+        assert!(apply(&mut b,json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"bad"}})).is_err());
+        assert!(apply(&mut b, json!({"type":"content_block_stop","index":1})).is_err());
     }
-
     #[test]
-    fn streaming_builder_inserts_separator_between_text_blocks() {
-        let mut builder = StreamingMessageBuilder::default();
-        let mut events = Vec::new();
-
-        builder
-            .apply_event(
-                "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"First\"}}",
-                &mut |e| events.push(e),
-            )
-            .unwrap();
-        builder
-            .apply_event(
-                "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"Second\"}}",
-                &mut |e| events.push(e),
-            )
-            .unwrap();
-
-        assert_eq!(
-            text_deltas(&events),
-            vec!["First".to_string(), "\nSecond".to_string()]
+    fn text_and_thinking_stream_normally() {
+        let mut b = start();
+        let mut deltas = Vec::new();
+        for event in [
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"reason"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":"answer"}}),
+            json!({"type":"content_block_stop","index":1}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+            json!({"type":"message_stop"}),
+        ] {
+            b.apply_event(&event.to_string(), &mut |d| deltas.push(d))
+                .unwrap();
+        }
+        assert!(b.streamed_text);
+        assert_eq!(deltas.len(), 2);
+        assert!(
+            matches!(&b.finish().unwrap().content[0],ContentBlock::Thinking{signature,..} if signature=="sig")
         );
     }
 }
