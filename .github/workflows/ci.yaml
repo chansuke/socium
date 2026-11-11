@@ -29,6 +29,27 @@ jobs:
         with:
           cachix-auth-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.CACHIX_AUTH_TOKEN || '' }}
 
+      # Ubuntu's default userns restriction denies capabilities inside a new
+      # namespace for binaries without a profile, including Nix's bwrap path.
+      # Permit only our pinned backend; do not disable AppArmor or its sysctl.
+      - name: Permit sandbox backend user namespaces
+        run: |
+          if [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] &&
+             [[ $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns) != 0 ]]; then
+            sandbox_backend=$(readlink -f "$(nix develop --command sh -c 'command -v bwrap')")
+            case "$sandbox_backend" in
+              /nix/store/*-bubblewrap-0.12.0/bin/bwrap) ;;
+              *) echo "Unexpected sandbox backend: $sandbox_backend" >&2; exit 1 ;;
+            esac
+            printf '%s\n' \
+              'abi <abi/4.0>,' \
+              'include <tunables/global>' \
+              "profile socium-ci-bwrap \"$sandbox_backend\" flags=(unconfined) {" \
+              '  userns,' \
+              '}' > "$RUNNER_TEMP/socium-ci-bwrap.apparmor"
+            sudo apparmor_parser -r "$RUNNER_TEMP/socium-ci-bwrap.apparmor"
+          fi
+
       - name: Verify formatting
         uses: ./.github/actions/run-fmt
 
@@ -40,3 +61,10 @@ jobs:
 
       - name: Build Nix package
         run: nix build .#default
+
+      - name: Remove CI sandbox backend profile
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/socium-ci-bwrap.apparmor" ]]; then
+            sudo apparmor_parser -R "$RUNNER_TEMP/socium-ci-bwrap.apparmor"
+          fi

@@ -9,7 +9,7 @@ tracks live status. Do not maintain a second completion checklist here.
 
 | Old ID | Topic | Current behavior and remaining work |
 |---|---|---|
-| TODO-01 | Commands and approvals | SOC-001 / SOC-004 / SOC-011 implemented. Commands require human approval and use host permissions. OS isolation remains SOC-003; there are no safe/read-only command classes. |
+| TODO-01 | Commands and approvals | SOC-001 / SOC-004 / SOC-011 implemented. Commands require human approval and Linux OS isolation (SOC-003). Read-only helpers and approved mutations have separate enforced policies; command names do not grant authority. |
 | TODO-02 | Search and navigation | SOC-024 implemented with bounded rg search. Symbol search is heuristic; SOC-025 remains. |
 | TODO-03 | Editing | SOC-008 / SOC-009 implemented with shared preview, history and conflict-aware undo. File mode restoration remains SOC-040. Multi-file changes are not atomic. |
 | TODO-04 | Git | SOC-010 implemented with scoped commits and index preservation. Dirty warnings are informational, not a concurrency lock. |

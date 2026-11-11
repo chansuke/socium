@@ -199,9 +199,14 @@ where
             } else {
                 None
             };
-            let request = serde_json::json!({"workspace":workspace_root,"tool_call_id":tool_use_id,"arguments":input,"review":review});
+            let permissions = if name == "git_commit" {
+                "Linux sandbox: workspace and Git metadata writable; agent state hidden; network denied"
+            } else {
+                "Linux sandbox: workspace writable; existing Git metadata read-only; agent state hidden; network denied"
+            };
+            let request = serde_json::json!({"workspace":workspace_root,"tool_call_id":tool_use_id,"arguments":input,"review":review,"permissions":permissions});
             if !control.approve(name, &request, on_progress) {
-                return Err("Host command denied: explicit human approval required; model approval/confirmed fields grant no authority".into());
+                return Err("Sandbox command denied: explicit human approval required; model approval/confirmed fields grant no authority".into());
             }
             if let Some(review) = review
                 && git::commit_review(workspace_root, input)? != review

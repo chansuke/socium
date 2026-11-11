@@ -71,7 +71,7 @@ impl App {
             activity_log: Vec::new(),
             last_command_output: None,
             transcript_scroll: 0,
-            status: Some("Ready".to_string()),
+            status: Some(socium_core::SANDBOX_DESCRIPTION.to_string()),
             workspace_label,
             model_label,
             context_metrics,

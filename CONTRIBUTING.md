@@ -3,8 +3,10 @@
 Socium is an early Rust coding agent. Anthropic is currently the only implemented
 provider; other providers and Web search are tracked work, not available features.
 
-Use a Unix environment with Rust, Git, and ripgrep. The pinned Nix development
-shell supplies the compiler and native dependencies used by CI:
+Use Linux with Rust, Git, ripgrep, bubblewrap 0.12+, and working unprivileged user
+namespaces. The pinned Nix development shell supplies the compiler and native
+dependencies used by CI. Sandbox enforcement tests fail if the backend is not
+available; they must not be silently skipped or run without isolation:
 
 ```sh
 nix develop

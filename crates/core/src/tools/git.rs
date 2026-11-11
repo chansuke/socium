@@ -407,11 +407,18 @@ where
     // --only preserves unrelated index entries and excludes unselected files.
     // New untracked files require explicit intent-to-add before commit --only;
     // do not mutate the user's index implicitly to make this work.
-    let output = crate::process::run(
+    let policy = crate::execution::ExecutionPolicy::new(
+        workspace_root,
+        crate::execution::WorkspaceAccess::GitCommit,
+    )
+    .map_err(|e| e.to_string())?;
+    let output = crate::process::run_observed(
         &args,
         workspace_root,
         std::time::Duration::from_secs(60),
         control,
+        &mut |_, _| Ok(()),
+        &policy,
     )
     .map_err(|e| e.to_string())?;
     if output.cancelled || output.timed_out || !output.status.success() {
@@ -444,7 +451,7 @@ where
     ];
     // Even status/diff can run clean/process filters. Inspect configuration
     // without invoking them and fail closed rather than silently change Git's
-    // normalization semantics. The user can approve a host command explicitly.
+    // normalization semantics. The user can explicitly approve a command within the sandbox policy.
     let mut config = command.clone();
     config.extend([
         "config".into(),
@@ -462,6 +469,7 @@ where
     .map_err(|e| format!("Cannot inspect Git filter configuration: {e}"))?;
     if configured.timed_out
         || configured.truncated
+        || !configured.stderr.is_empty()
         || configured.status.code().is_none()
         || !matches!(configured.status.code(), Some(0 | 1))
     {

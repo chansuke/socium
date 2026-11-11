@@ -1,5 +1,7 @@
 # 公開準備・セキュリティ確認
 
+この文書はPR #96時点の公開準備記録。後続のOS隔離（#55）の現在の仕様は[Linux sandbox guide](linux-sandbox.md)を参照。
+
 確認日: 2026-11-11。基準commit: `a392ec7`（PR #94）。Linux上でのコードレビュー、ローカルfixture、依存関係・秘密情報の検査を実施した。公開設定の変更や実モデルAPIへの送信は行っていない。
 
 ## 整理したもの
@@ -42,7 +44,7 @@ nix build .#default
 
 これは安全性の証明ではなく、上記範囲の検証結果。秘密情報検出は既知pattern中心で、GitHub上のIssue・添付物・Actionsログ・他サービスはスキャン対象外。
 
-OS sandboxは未実装（#55）。承認済みコマンドはhost権限を持ち、同じOSユーザーによる並行path差替えを防ぐrace-freeな隔離ではない。workspace本文からのprompt injectionもモデル任せで完全に防止できない。信頼したworkspaceで使い、コマンド・diffを確認する。
+PR #96時点ではOS sandboxは未実装（後続の#55で対応）。当時の承認済みコマンドはhost権限を持ち、同じOSユーザーによる並行path差替えを防ぐrace-freeな隔離ではない。workspace本文からのprompt injectionもモデル任せで完全に防止できない。信頼したworkspaceで使い、コマンド・diffを確認する。
 
 状態・出力は平文。実モデル通信、macOS、Windowsは今回検証していない。move/deleteのundoにおけるfile mode復元は#93で未完了。リポジトリを実際に公開する前には、GitHubの公開範囲・private vulnerability reporting・required checksも所有者の設定として確認する。
 

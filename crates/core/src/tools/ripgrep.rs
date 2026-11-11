@@ -91,18 +91,27 @@ pub(crate) fn search_with_ripgrep(
     if output.timed_out {
         return Err("Search exceeded the 5 second deadline; narrow the scope".into());
     }
-    if output.status.code() != Some(0) && output.status.code() != Some(1) {
-        return Err(format!(
-            "ripgrep failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
+    check_search_status(&output)?;
     let matches = parse_matches(workspace_root, &output.stdout, output.truncated)?;
     Ok(SearchExecution {
         matches,
         status_code: output.status.code(),
         truncated: output.truncated,
     })
+}
+
+fn check_search_status(output: &crate::process::ProcessOutput) -> Result<(), String> {
+    // Exit 1 means "no matches" only for a successfully started rg. The
+    // sandbox backend also uses 1 for setup failures, with a diagnostic.
+    // Never turn that failure (or incomplete output with a diagnostic) into
+    // a successful empty search result.
+    if !matches!(output.status.code(), Some(0 | 1)) || !output.stderr.is_empty() {
+        return Err(format!(
+            "Search process or sandbox failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
 }
 fn parse_matches(root: &Path, bytes: &[u8], truncated: bool) -> Result<Vec<SearchMatch>, String> {
     let mut matches = Vec::new();
@@ -173,6 +182,22 @@ pub(crate) fn glob_matches(pattern: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn backend_setup_failure_is_not_reported_as_no_matches() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut output = crate::process::ProcessOutput {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            timed_out: false,
+            cancelled: false,
+            truncated: false,
+        };
+        assert!(check_search_status(&output).is_ok());
+        output.stderr = b"bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted".to_vec();
+        assert!(check_search_status(&output).unwrap_err().contains("bwrap:"));
+    }
     #[test]
     fn hyphen_pattern_colon_filename_and_ignore_rules() {
         let root = tempfile::tempdir().unwrap();

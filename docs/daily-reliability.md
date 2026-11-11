@@ -1,6 +1,6 @@
 # Daily workflow reliability
 
-This change implements the first reliability milestone: read, search, edit, run
+The first reliability milestone covers: read, search, edit, run
 tests, cancel, and continue after restarting. The offline acceptance scenario is
 in `crates/core/src/reliability_tests.rs`; it uses a scripted provider and temporary
 Git repositories, with no API keys or paid requests.
@@ -10,20 +10,20 @@ Git repositories, with no API keys or paid requests.
 - File tools accept relative workspace paths. Missing path components are
   normalized and existing symlinks are resolved before any directories are made.
   `.git` and `.socium` are protected from file mutations, including undo and aliases.
-- Commands run **with host-user permissions**, after a human approves the exact
-  request in the TUI. There is no restricted OS sandbox. Approval is single use,
-  expires after 120 seconds, and cannot be supplied by model arguments. Headless
-  callers without an approval handler deny commands. The default child environment
-  omits `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `DEEPSEEK_API_KEY`.
+- Commands run in a required **Linux OS sandbox**, after a human approves the
+  exact request and displayed policy in the TUI. Approval is single use, expires
+  after 120 seconds, and cannot be supplied by model arguments. Headless callers
+  without an approval handler deny commands. Children receive a fixed environment
+  allowlist, private HOME, and no network access. See the [sandbox guide](linux-sandbox.md).
 - Esc or Ctrl+C cancels a running request, approval wait, search, or command. The
   TUI waits for cleanup before accepting another submission. Ctrl+C when idle exits.
   A worker panic returns an error; a closed result channel tells the user to restart.
-- Unix process groups terminate ordinary subprocess descendants. Memory capture is
+- Cancellation terminates the sandbox PID namespace, including detached descendants. Memory capture is
   capped at 256 KiB per stream. `run_command` also saves up to 8 MiB per stream under
   `.socium/outputs/`, reports truncation, and shows byte-count progress while running.
-  Timeout cleanup drains for at most another 200 ms. Deliberately detached processes
-  and OS-level uninterruptible I/O require stronger OS isolation; they are not
-  covered by the process-group guarantee. Non-Unix command execution is rejected.
+  Timeout cleanup drains for at most another 200 ms. OS-level uninterruptible I/O
+  can still delay kernel cleanup. Unsupported platforms and unavailable sandbox
+  backends are rejected; there is no host fallback.
 - Search uses `rg --no-config --json`, preserving regex/smart-case, glob, Git ignore,
   default hidden-file, and no-follow-symlink behavior. `-e` separates the pattern
   from options. Search fails explicitly if rg is absent, its regex is invalid, its
@@ -52,7 +52,8 @@ Git read-only tools reject configurations containing external content filters;
 status/diff can otherwise launch those programs without command approval.
 External diff/text conversion, signature helpers and fsmonitor are disabled,
 submodule worktrees are ignored, and lazy object fetches are disabled. Use an
-explicitly approved host command for those repository-specific features.
+explicitly approved sandboxed command for those features, within its declared
+filesystem and network scope. Global/system Git configuration is not loaded.
 
 `git_commit` defaults to the existing staged changes. Optional `paths` commits only
 those tracked files and preserves unrelated index entries. Explicit paths with
@@ -61,12 +62,14 @@ reviewing the index. New files must be staged explicitly. Socium never runs
 `git add -A` as part of `git_commit`. Approval displays the requested diff and
 existing index; changes during the approval wait invalidate the request. Failed or
 cancelled Git commands require checking HEAD/index before retrying because hooks
-can have external side effects.
+can modify workspace files within the sandbox. Networked hooks and external
+metadata are unsupported.
 
 Content checks detect ordinary external edits before apply/undo. They do not
 provide a race-free filesystem sandbox against a process concurrently swapping
 symlinks or writing between the final check and rename. Avoid concurrent edits to
-the same files. OS enforcement remains tracked in SOC-003 / issue #55.
+the same files. The command sandbox does not isolate concurrent host processes
+or change these in-process file-tool guarantees.
 
 ## Save and resume
 
@@ -91,8 +94,8 @@ These offsets remain stable because raw history is not truncated at the front.
 `/clear` begins a fresh conversation and clears its event sequence. Summaries only
 change the model's context projection; full tool results remain in the transcript.
 
-A forcibly killed Socium process may leave a host command running; inspect and stop
-it explicitly before retrying. A crash after intent but before a saved result produces an **unknown outcome** on
+Bubblewrap ties subprocess lifetime to Socium and isolates descendants in a PID
+namespace. A crash after intent but before a saved result still produces an **unknown outcome** on
 restart. Socium does not re-execute that tool automatically. Inspect the files,
 command output artifacts, Git HEAD/index, and any external system before asking
 for a retry. Exactly-once external side effects cannot be guaranteed across a crash.

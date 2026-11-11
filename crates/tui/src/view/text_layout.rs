@@ -49,7 +49,7 @@ pub(crate) fn command_output_preview_lines(
 }
 
 pub(crate) fn help_text() -> &'static str {
-    "/help    Show available commands\n/clear   Clear the current conversation\n/compact Summarize old conversation context to free tokens\n/exit    Quit Socium\nEsc / Ctrl+C   Cancel a running task\ny / n          Allow once / deny a pending host command"
+    "/help    Show available commands\n/clear   Clear the current conversation\n/compact Summarize old conversation context to free tokens\n/exit    Quit Socium\nEsc / Ctrl+C   Cancel a running task\ny / n          Allow once / deny a pending sandboxed command\nSandbox        Linux; network denied; private HOME; no host fallback"
 }
 
 pub(crate) fn slice_chars(value: &str, start: usize, end: usize) -> String {

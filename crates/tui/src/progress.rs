@@ -22,7 +22,7 @@ impl App {
                 if let Some(task) = self.pending_task.as_mut() {
                     task.approval_id = Some(request_id);
                 }
-                self.push_message(Speaker::System, format!("Approve host command (full user permissions): {tool} {input}\n[y] allow once / [n] deny / [Esc] cancel"));
+                self.push_message(Speaker::System, format!("Approve sandboxed command: {tool}\n{input}\n[y] allow once / [n] deny / [Esc] cancel"));
                 self.status = Some("Human approval required: y / n".into());
             }
             AgentProgress::ModelRequestStarted { round, provider } => {

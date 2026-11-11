@@ -2,8 +2,10 @@ pub use crate::agent::state::{
     load_json_file as load_local_state, save_json_file as save_local_state, workspace_state_path,
 };
 mod control;
+mod execution;
 mod process;
 pub use control::TaskControl;
+pub use execution::SANDBOX_DESCRIPTION;
 pub mod agent;
 pub mod constants;
 pub mod error;
@@ -187,6 +189,23 @@ impl AgentService {
                 )
             })?;
         let client = provider_http_client()?;
+
+        // Check actual enforcement before advertising a usable agent. A missing
+        // backend or disabled namespaces is a startup error, never a downgrade.
+        let probe = crate::process::run(
+            &["true".into()],
+            &workspace_root,
+            Duration::from_secs(5),
+            &TaskControl::default(),
+        )
+        .map_err(|e| Error::other(format!("OS sandbox initialization failed: {e}")))?;
+        if !probe.status.success() || probe.timed_out {
+            return Err(Error::other(format!(
+                "OS sandbox initialization failed; no host fallback: {}",
+                String::from_utf8_lossy(&probe.stderr)
+            ))
+            .into());
+        }
 
         let mut service = Self::with_provider(workspace_root, provider, model, max_tokens, client);
         service.restore_state()?;

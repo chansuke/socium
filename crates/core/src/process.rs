@@ -1,10 +1,10 @@
-//! Bounded command execution. Unix process groups cover ordinary descendants;
-//! programs that deliberately detach require an OS sandbox, not this runner.
+//! Bounded output capture and cancellation, always behind the OS executor.
 use crate::control::TaskControl;
+use crate::execution::{ExecutionPolicy, SandboxExecutor, WorkspaceAccess};
 use std::{
     io,
     path::Path,
-    process::{Command, ExitStatus, Stdio},
+    process::{ExitStatus, Stdio},
     time::{Duration, Instant},
 };
 
@@ -23,7 +23,8 @@ pub(crate) fn run(
     timeout: Duration,
     control: &TaskControl,
 ) -> io::Result<ProcessOutput> {
-    run_observed(command, cwd, timeout, control, &mut |_, _| Ok(()))
+    let policy = ExecutionPolicy::new(cwd, WorkspaceAccess::ReadOnly)?;
+    run_observed(command, cwd, timeout, control, &mut |_, _| Ok(()), &policy)
 }
 
 #[cfg(unix)]
@@ -33,6 +34,7 @@ pub(crate) fn run_observed(
     timeout: Duration,
     control: &TaskControl,
     observer: &mut dyn FnMut(bool, &[u8]) -> io::Result<()>,
+    policy: &ExecutionPolicy,
 ) -> io::Result<ProcessOutput> {
     use std::{
         io::Read,
@@ -97,41 +99,12 @@ pub(crate) fn run_observed(
             "Command cancelled before spawn",
         ));
     }
-    let program = command
-        .first()
-        .ok_or_else(|| io::Error::other("empty command"))?;
-    let mut builder = Command::new(program);
+    let mut builder = SandboxExecutor::command(policy, command, cwd)?;
     builder
-        .args(&command[1..])
-        .current_dir(cwd)
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("DEEPSEEK_API_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    if Path::new(program)
-        .file_name()
-        .is_some_and(|name| name == "git")
-    {
-        // A read-only Git query must not fetch missing partial-clone objects.
-        builder.env("GIT_NO_LAZY_FETCH", "1");
-        #[cfg(test)]
-        crate::test_support::isolate_git_config(&mut builder);
-        // Git hooks set these for their own repository/index. They must not
-        // redirect a workspace tool (or a temporary-repository regression test).
-        for name in [
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_INDEX_FILE",
-            "GIT_COMMON_DIR",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        ] {
-            builder.env_remove(name);
-        }
-    }
     let mut child = ChildGuard(builder.spawn()?);
     let mut stdout = child.0.stdout.take().expect("piped stdout");
     let mut stderr = child.0.stderr.take().expect("piped stderr");
@@ -189,10 +162,11 @@ pub(crate) fn run_observed(
     _: Duration,
     _: &TaskControl,
     _: &mut dyn FnMut(bool, &[u8]) -> io::Result<()>,
+    _: &ExecutionPolicy,
 ) -> io::Result<ProcessOutput> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "managed command execution currently requires Unix process groups",
+        "OS sandbox unavailable: command execution requires Linux and bubblewrap; no host fallback",
     ))
 }
 
@@ -200,9 +174,10 @@ pub(crate) fn run_observed(
 mod tests {
     use super::*;
     fn shell(script: &str, timeout: u64, control: &TaskControl) -> ProcessOutput {
+        let workspace = tempfile::tempdir().unwrap();
         run(
             &["sh".into(), "-c".into(), script.into()],
-            Path::new("/tmp"),
+            workspace.path(),
             Duration::from_millis(timeout),
             control,
         )
@@ -224,9 +199,19 @@ mod tests {
     #[test]
     fn inherited_pipes_and_cancel_have_bounded_cleanup() {
         let start = Instant::now();
-        let out = shell("sleep 30 & exit 0", 50, &TaskControl::default());
-        assert!(out.timed_out);
+        // The namespace reaper now kills descendants when the main command
+        // exits, so inherited pipes close without waiting for the deadline.
+        // Allow setup time; a 50ms timeout raced with successful sandbox exit.
+        let out = shell("sleep 30 & exit 0", 1000, &TaskControl::default());
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.timed_out);
         assert!(start.elapsed() < Duration::from_secs(2));
+        let out = shell("sleep 30 & wait", 50, &TaskControl::default());
+        assert!(out.timed_out);
         let control = TaskControl::default();
         control.cancel();
         assert!(

@@ -61,9 +61,12 @@ impl TaskControl {
             request_id: id,
             tool: tool.into(),
             input: format!(
-                "Workspace: {}\nTool call: {}\nArguments:\n{}\n{}",
+                "Workspace: {}\nTool call: {}\nPermissions: {}\nArguments:\n{}\n{}",
                 input["workspace"],
                 input["tool_call_id"],
+                input["permissions"]
+                    .as_str()
+                    .unwrap_or("No execution authority"),
                 serde_json::to_string_pretty(&input["arguments"]).unwrap_or_default(),
                 input["review"].as_str().unwrap_or("")
             ),

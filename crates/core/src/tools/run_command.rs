@@ -1,5 +1,6 @@
 use crate::AgentProgress;
 use crate::constants::*;
+use crate::execution::{ExecutionPolicy, WorkspaceAccess};
 use crate::tools::error::ToolError;
 use crate::tools::input::{optional_string_field, optional_timeout_ms, require_string_array_field};
 use crate::tools::text_file::truncate_by_characters;
@@ -19,7 +20,7 @@ impl Tool for RunCommandTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::Custom(CustomToolDefinition {
             name: "run_command".to_string(),
-            description: "Run a workspace command for search, build, test, lint, or local execution. Commands are passed as an array of executable plus arguments, not as a shell string. Commands run with host-user authority after explicit human approval through the application. No filesystem or network sandbox is implied."
+            description: "Run an explicitly human-approved command in the Linux OS sandbox. Pass executable and arguments as an array. Workspace files are writable; existing Git metadata is read-only and agent state is hidden. System runtimes are read-only. Network, host HOME, credentials and other host paths are unavailable. No unconfined fallback. Use git_commit for approved commits."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -212,7 +213,9 @@ fn execute_command(
         }
         Ok(())
     };
-    let output=crate::process::run_observed(command,cwd,Duration::from_millis(timeout_ms),control,&mut observer)
+    let policy =
+        ExecutionPolicy::new(workspace_root, WorkspaceAccess::Write).map_err(|e| e.to_string())?;
+    let output=crate::process::run_observed(command,cwd,Duration::from_millis(timeout_ms),control,&mut observer, &policy)
         .map_err(|e|format!("Command failed or output capture failed: {e}; partial artifacts: {stem}.stdout / {stem}.stderr"))?;
     for file in &files {
         file.sync_all()
@@ -273,7 +276,7 @@ fn format_command_execution(execution: &CommandExecution) -> String {
     };
 
     format!(
-        "Command: {}\nCwd: {}\nPermission: approved host command\nStop reason: {}\nArtifacts: {}\nTimeout: {} ms\nTimed out: {}\nExit code: {}\nStdout:\n{}\nStderr:\n{}",
+        "Command: {}\nCwd: {}\nPermission: approved Linux sandbox; workspace-write, Git read-only, network denied\nStop reason: {}\nArtifacts: {}\nTimeout: {} ms\nTimed out: {}\nExit code: {}\nStdout:\n{}\nStderr:\n{}",
         execution.command_display,
         execution.cwd_display,
         execution.stop_reason,

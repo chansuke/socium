@@ -5,6 +5,7 @@ Start with the [README](../README.md) for installation and everyday use.
 ## Current behavior
 
 - [Reliability and recovery](daily-reliability.md): permissions, editing, cancellation, saved state, and recovery.
+- [Linux sandbox](linux-sandbox.md): enforced execution policy, installation, limits, and tests.
 - [Security policy](../SECURITY.md): trust boundaries and private vulnerability reporting.
 - [Public release review](public-release-review.md): cleanup, security findings, checks, and remaining limits.
 - [Contributing](../CONTRIBUTING.md): development and verification.
