@@ -2,6 +2,9 @@
 name = "socium-core"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/chansuke/socium"
+description = "Core runtime for the Socium coding agent"
 
 [dependencies]
 async-trait = "0.1"

@@ -1,10 +1,13 @@
 /target
-
-
-# Added by cargo
-#
-# already existing elements were commented out
-
-#/target
+/result
+/result-*
+/analystic_target/
+# Local research drafts are not part of the public documentation.
+/docs/analysis-*.md
+/docs/README.md
+.env
+.env.*
+!.env.example
 .envrc
 .socium/
+*.bak

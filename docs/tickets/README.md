@@ -2,11 +2,11 @@
 
 [2026-11-11の詳細レビュー](../review-socium-pi-dsh-2026-11-11.md)を実施可能な単位に分解したローカルのMarkdownチケット。元レポートと再現証拠を保持し、36件をGitHub Issueとして起票済み。親Issueは [#52](https://github.com/chansuke/socium/issues/52)。
 
-全40件（P1: 10件、P2: 25件、P3: 1件）。起票時は着手可能12件・前提待ち23件・評価待ち1件。35件は未着手、SOC-036は評価待ちの保留。チケット作成は実装完了を意味しない。基準となる実装はレビュー時点の `de374125a5ff00cc54b8f94da020250b3ab6b46c`。
+全40件（P1: 12件、P2: 27件、P3: 1件）。元36件に日常信頼性・Web検索の4件を追加した。現在の完了状態はGitHubを参照する。基準となるレビューは `de374125a5ff00cc54b8f94da020250b3ab6b46c` 時点の記録であり、現行コードの未修正事項一覧ではない。
 
 **GitHubでの進め方**
 
-- [進捗・依存関係・着手順 #52](https://github.com/chansuke/socium/issues/52)に40件の子Issueと49本の必須依存を登録済み。
+- [進捗・依存関係・着手順 #52](https://github.com/chansuke/socium/issues/52)に40件の子Issueと必須依存を登録済み。
 - [ラベルと運用規約](github-workflow.md): 状態遷移、前提と関連参照の区別、完了時の更新手順。
 - [機械可読のIssue対応表](github-issues.json): 安定ID、Issue番号、URL、起票時ラベル、依存理由、後続。最新状態はGitHubから取得する。
 

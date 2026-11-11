@@ -115,6 +115,10 @@ pub(crate) fn run_observed(
         .file_name()
         .is_some_and(|name| name == "git")
     {
+        // A read-only Git query must not fetch missing partial-clone objects.
+        builder.env("GIT_NO_LAZY_FETCH", "1");
+        #[cfg(test)]
+        crate::test_support::isolate_git_config(&mut builder);
         // Git hooks set these for their own repository/index. They must not
         // redirect a workspace tool (or a temporary-repository regression test).
         for name in [

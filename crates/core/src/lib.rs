@@ -1,5 +1,5 @@
 pub use crate::agent::state::{
-    load_json_file as load_local_state, save_json_file as save_local_state,
+    load_json_file as load_local_state, save_json_file as save_local_state, workspace_state_path,
 };
 mod control;
 mod process;
@@ -131,6 +131,14 @@ pub struct AgentService {
     last_measured_usage: Option<TokenUsage>,
 }
 
+fn provider_http_client() -> Result<reqwest::Client, ProviderError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(ProviderError::Http)
+}
+
 impl AgentService {
     pub fn from_current_dir() -> Result<Self, AgentError> {
         Self::from_env(env::current_dir().map_err(AgentError::State)?)
@@ -178,10 +186,7 @@ impl AgentService {
                     format!("MAX_TOKENS must be an unsigned integer: {e}"),
                 )
             })?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(90))
-            .build()
-            .map_err(ProviderError::Http)?;
+        let client = provider_http_client()?;
 
         let mut service = Self::with_provider(workspace_root, provider, model, max_tokens, client);
         service.restore_state()?;
@@ -201,11 +206,7 @@ impl AgentService {
 
     fn restore_state(&mut self) -> std::io::Result<()> {
         self.ensure_state_lock()?;
-        crate::tools::workspace::resolve_workspace_path_for_create(
-            &self.workspace_root,
-            &format!("{STATE_DIR_NAME}/{CONVERSATION_STATE_FILE_NAME}"),
-        )
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        workspace_state_path(&self.workspace_root, CONVERSATION_STATE_FILE_NAME)?;
         let state = load_json_file::<ConversationState>(&self.conversation_path)?;
         if state.schema_version > 1 {
             return Err(std::io::Error::other(format!(
@@ -486,6 +487,9 @@ impl AgentService {
 
 #[cfg(test)]
 mod test_support;
+
+#[cfg(test)]
+mod security_tests;
 
 #[cfg(test)]
 mod tests {

@@ -48,6 +48,12 @@ Patch and text-editor changes share undo: undo restores the entire recorded edit
 only when current contents match the expected post-edit contents. An incomplete
 edit or undo requires inspection; it is never silently rolled back over newer work.
 
+Git read-only tools reject configurations containing external content filters;
+status/diff can otherwise launch those programs without command approval.
+External diff/text conversion, signature helpers and fsmonitor are disabled,
+submodule worktrees are ignored, and lazy object fetches are disabled. Use an
+explicitly approved host command for those repository-specific features.
+
 `git_commit` defaults to the existing staged changes. Optional `paths` commits only
 those tracked files and preserves unrelated index entries. Explicit paths with
 staged changes are rejected to protect partial staging; use staged-only mode after
@@ -63,6 +69,13 @@ symlinks or writing between the final check and rename. Avoid concurrent edits t
 the same files. OS enforcement remains tracked in SOC-003 / issue #55.
 
 ## Save and resume
+
+State directories and files must not be symlinks; state files must be regular,
+singly linked files owned by the current user. On Unix `.socium` directories
+use mode 0700 and newly saved state uses 0600, including migrated snapshots.
+These permissions do not encrypt data or protect it from the same OS user.
+Pre-existing linked state now fails startup: back it up, inspect it, and copy
+validated contents into ordinary files/directories before resuming.
 
 One Socium process owns a workspace session through an OS file lock held for the
 service lifetime. The lock file can remain after exit: the OS lock, not file

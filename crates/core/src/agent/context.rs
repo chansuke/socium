@@ -2,9 +2,8 @@ use crate::agent::state::{ConversationSummary, ConversationSummaryState};
 use crate::agent::turn::extract_text;
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
 use crate::constants::{
-    DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_NON_ANTHROPIC_CONTEXT_WINDOW_TOKENS,
-    MAX_SUMMARY_CHARACTERS, MAX_SUMMARY_LINE_CHARACTERS, MAX_SUMMARY_LINES,
-    MIN_RECENT_CONTEXT_MESSAGES, TARGET_RECENT_CONTEXT_MESSAGES,
+    DEFAULT_CONTEXT_WINDOW_TOKENS, MAX_SUMMARY_CHARACTERS, MAX_SUMMARY_LINE_CHARACTERS,
+    MAX_SUMMARY_LINES, MIN_RECENT_CONTEXT_MESSAGES, TARGET_RECENT_CONTEXT_MESSAGES,
 };
 use crate::providers::ProviderKind;
 use crate::tools::ToolDefinition;
@@ -348,7 +347,6 @@ fn infer_context_window_tokens(provider: ProviderKind, model: &str) -> u32 {
     }
     match provider {
         ProviderKind::Anthropic => DEFAULT_CONTEXT_WINDOW_TOKENS,
-        ProviderKind::Codex | ProviderKind::Opencode => DEFAULT_NON_ANTHROPIC_CONTEXT_WINDOW_TOKENS,
     }
 }
 

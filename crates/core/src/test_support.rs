@@ -87,7 +87,9 @@ pub(crate) fn init_git_repo(path: &Path) {
 }
 
 pub(crate) fn run_git(path: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    isolate_git_config(&mut command);
+    let output = command
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -105,8 +107,23 @@ pub(crate) fn run_git(path: &Path, args: &[&str]) {
     );
 }
 
+/// Fixtures exercise their own local configuration, not a developer's signing,
+/// filter, or CI runner setup. Do not mutate the process-wide environment.
+pub(crate) fn isolate_git_config(command: &mut std::process::Command) {
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_PARAMETERS");
+}
+
 pub(crate) fn git_stdout(path: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    isolate_git_config(&mut command);
+    let output = command
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")

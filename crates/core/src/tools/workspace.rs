@@ -130,8 +130,13 @@ pub(crate) fn resolve_workspace_mutation_path(
 ) -> Result<PathBuf, ToolError> {
     let resolved = resolve_workspace_path_for_create(root, requested)?;
     let root = root.canonicalize().map_err(|e| e.to_string())?;
-    let relative = resolved.strip_prefix(root).map_err(|e| e.to_string())?;
+    let relative = resolved.strip_prefix(&root).map_err(|e| e.to_string())?;
     if matches!(relative.components().next(), Some(Component::Normal(name)) if name == ".git" || name == ".socium")
+        || [".git", ".socium"].iter().any(|name| {
+            root.join(name)
+                .canonicalize()
+                .is_ok_and(|metadata| resolved.starts_with(metadata))
+        })
     {
         return Err(
             "Git metadata and Socium session state cannot be modified by file tools".into(),

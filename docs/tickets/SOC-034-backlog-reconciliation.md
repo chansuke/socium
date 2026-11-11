@@ -7,7 +7,7 @@
 | 起票時ラベル | `review:2026-11-11`、`priority:p2`、`documentation`、`area:docs`、`status:ready` |
 | GitHub前提 | なし |
 | GitHub後続 | なし |
-| 状態 | 未着手 |
+| 状態 | 実装・検証済み（マージ状態はGitHubを参照） |
 | 優先度 | P2 |
 | 起票日 | 2026-11-11 |
 | 出典 | [詳細レビュー](../review-socium-pi-dsh-2026-11-11.md) — 既存の改善計画への批判 |
@@ -28,10 +28,10 @@
 
 **受け入れ条件**
 
-- [ ] 旧path/旧構造を現在の実装の根拠として参照しない。
-- [ ] approval/workspace/context/dirty warning/undoの完了状態が実際の保証と一致する。
-- [ ] 入力履歴や既存ScriptedProvider試験を未実装として重複計画しない。
-- [ ] 既存task ID→SOC IDの対応と、維持・置換・完了の根拠を追跡できる。
+- [x] 旧path/旧構造を現在の実装の根拠として参照しない。
+- [x] approval/workspace/context/dirty warning/undoの完了状態が実際の保証と一致する。
+- [x] 入力履歴や既存ScriptedProvider試験を未実装として重複計画しない。
+- [x] 既存task ID→SOC IDの対応と、維持・置換・完了の根拠を追跡できる。
 
 **根拠・再現条件**
 
@@ -47,7 +47,7 @@
 
 - [docs/improvement-plan.md](../../docs/improvement-plan.md)
 - [docs/todo.md](../../docs/todo.md)
-- [docs/README.md](../../docs/README.md)
+- [docs/index.md](../index.md)
 
 **対象外・境界**
 
@@ -55,7 +55,7 @@
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-11: 旧PLAN-01〜15、TODO-01〜17を保持して現コードとSOC IDへ対応付けた。古い実装案を除去し、実装済み・部分実装・未着手・保留を区別。公開用indexを追加し、現在の状態はGitHubへ統一。入力履歴・ScriptedProviderを新規作業と誤記せず、OS隔離・context精度・undo metadataの未完了も明記。公開準備PRで検証・マージを追跡する。
 
 [一覧へ戻る](README.md)
 

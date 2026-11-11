@@ -1,13 +1,9 @@
 pub mod anthropic;
-pub mod codex;
 pub mod error;
-pub mod opencode;
 
 use crate::agent::types::{AgentMessageRequest, AgentMessageResponse};
 use crate::providers::anthropic::AnthropicProvider;
-use crate::providers::codex::CodexProvider;
 use crate::providers::error::ProviderError;
-use crate::providers::opencode::OpencodeProvider;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fmt;
@@ -42,8 +38,6 @@ pub struct ProviderCapabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Anthropic,
-    Codex,
-    Opencode,
 }
 
 pub(crate) struct ProviderResponse {
@@ -67,11 +61,9 @@ impl ProviderKind {
     fn parse(raw: &str) -> io::Result<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "anthropic" => Ok(Self::Anthropic),
-            "codex" => Ok(Self::Codex),
-            "opencode" => Ok(Self::Opencode),
             other => Err(Error::new(
                 ErrorKind::InvalidInput,
-                format!("Unsupported provider '{other}'. Valid values: anthropic, codex, opencode"),
+                format!("Unsupported provider '{other}'. Currently supported: anthropic"),
             )),
         }
     }
@@ -81,8 +73,6 @@ impl fmt::Display for ProviderKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::Anthropic => "anthropic",
-            Self::Codex => "codex",
-            Self::Opencode => "opencode",
         };
         write!(f, "{name}")
     }
@@ -105,7 +95,5 @@ pub(crate) trait Provider: Send + Sync {
 pub(crate) fn provider_from_env() -> Result<Box<dyn Provider>, ProviderError> {
     match ProviderKind::from_env()? {
         ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::from_env()?)),
-        ProviderKind::Codex => Ok(Box::new(CodexProvider)),
-        ProviderKind::Opencode => Ok(Box::new(OpencodeProvider)),
     }
 }

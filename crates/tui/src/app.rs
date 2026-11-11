@@ -58,10 +58,8 @@ impl App {
         let workspace_label = format_workspace_path(env::current_dir().ok());
         let messages = transcript_entries_to_chat_entries(agent.transcript_entries());
         let context_metrics = agent.context_metrics("").unwrap_or_default();
-        let history_path = env::current_dir()
-            .unwrap_or_default()
-            .join(".socium")
-            .join(INPUT_HISTORY_FILE_NAME);
+        let history_path =
+            socium_core::workspace_state_path(&env::current_dir()?, INPUT_HISTORY_FILE_NAME)?;
         let input_history = input_history::InputSession::load(history_path)?;
 
         Ok(Self {

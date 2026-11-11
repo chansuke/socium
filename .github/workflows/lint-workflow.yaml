@@ -2,6 +2,8 @@ name: Workflow lint
 on:
   pull_request:
     paths: ['.github/workflows/*.yml', '.github/workflows/*.yaml']
+permissions:
+  contents: read
 defaults:
   run:
     shell: bash
@@ -15,6 +17,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Run actionlint
         run: |
           docker run --rm -v "$(pwd):$(pwd)" -w "$(pwd)" rhysd/actionlint@sha256:6f03470d0152251d7f07f7c4dc019dbe7024c72cd952f839544c7798843efa8f # v1.7.11

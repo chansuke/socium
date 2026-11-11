@@ -70,20 +70,22 @@ impl Provider for AnthropicProvider {
                 "budget_tokens": budget
             });
         }
+        let mut key = reqwest::header::HeaderValue::from_str(&self.api_key)
+            .map_err(|_| ProviderError::Api("Invalid API key header".into()))?;
+        key.set_sensitive(true);
         let mut response = client
             .post(ANTHROPIC_MESSAGES_API)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", key)
             .header("anthropic-version", &self.anthropic_version)
             .json(&body)
             .send()
             .await?;
         let status = response.status();
         if !status.is_success() {
-            let error_body = response.text().await?;
-            return Err(ProviderError::Api(format!(
-                "Anthropic API error {status}: {error_body}"
-            )));
+            // Do not buffer arbitrary error bodies or reflect server-supplied
+            // credentials/request text into the UI and persisted transcript.
+            return Err(ProviderError::Api(format!("Anthropic API error {status}")));
         }
 
         let mut parser = SseParser::default();

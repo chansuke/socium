@@ -46,8 +46,6 @@ Anthropic以外のproviderはNotImplemented。local modelや第二実providerで
 **主な関連ファイル**
 
 - [crates/core/src/providers/mod.rs](../../crates/core/src/providers/mod.rs)
-- [crates/core/src/providers/codex.rs](../../crates/core/src/providers/codex.rs)
-- [crates/core/src/providers/opencode.rs](../../crates/core/src/providers/opencode.rs)
 - [crates/core/src/agent/turn.rs](../../crates/core/src/agent/turn.rs)
 
 **対象外・境界**
@@ -60,3 +58,5 @@ Anthropic以外のproviderはNotImplemented。local modelや第二実providerで
 
 [一覧へ戻る](README.md)
 
+
+公開準備時に未動作のCodex/Opencode雛形を削除した。実装は現行のProvider traitから開始する。

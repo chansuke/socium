@@ -180,12 +180,11 @@ fn execute_command(
         NEXT.fetch_add(1, Ordering::Relaxed)
     );
     let open = |suffix: &str| -> Result<std::fs::File, String> {
-        let path = crate::tools::workspace::resolve_workspace_path_for_create(
+        let path = crate::agent::state::workspace_state_path(
             workspace_root,
-            &format!("{stem}.{suffix}"),
+            &format!("{}.{suffix}", stem.strip_prefix(".socium/").unwrap()),
         )
         .map_err(|e| e.to_string())?;
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]

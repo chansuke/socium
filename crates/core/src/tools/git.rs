@@ -430,11 +430,46 @@ where
 {
     let mut command = vec![
         "git".to_string(),
+        "--literal-pathspecs".into(),
         "--no-pager".into(),
         "--no-optional-locks".into(),
         "-c".into(),
         "core.fsmonitor=false".into(),
+        "-c".into(),
+        "log.showSignature=false".into(),
+        "-c".into(),
+        "diff.ignoreSubmodules=all".into(),
+        "-c".into(),
+        "status.submoduleSummary=false".into(),
     ];
+    // Even status/diff can run clean/process filters. Inspect configuration
+    // without invoking them and fail closed rather than silently change Git's
+    // normalization semantics. The user can approve a host command explicitly.
+    let mut config = command.clone();
+    config.extend([
+        "config".into(),
+        "--null".into(),
+        "--name-only".into(),
+        "--get-regexp".into(),
+        "^filter\\..*\\.(clean|smudge|process)$".into(),
+    ]);
+    let configured = crate::process::run(
+        &config,
+        workspace_root,
+        std::time::Duration::from_secs(5),
+        &crate::TaskControl::default(),
+    )
+    .map_err(|e| format!("Cannot inspect Git filter configuration: {e}"))?;
+    if configured.timed_out
+        || configured.truncated
+        || configured.status.code().is_none()
+        || !matches!(configured.status.code(), Some(0 | 1))
+    {
+        return Err("Cannot safely inspect Git filter configuration".into());
+    }
+    if !configured.stdout.is_empty() {
+        return Err("Git content filters are configured; use an explicitly approved run_command to inspect this repository".into());
+    }
     command.extend(args.iter().map(|s| s.as_ref().to_string()));
     let captured = crate::process::run(
         &command,

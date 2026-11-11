@@ -2,11 +2,13 @@
 name = "socium-tui"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/chansuke/socium"
+description = "Terminal interface for the Socium coding agent"
 
 [dependencies]
 socium-core = { path = "../core" }
 ratatui = "0.30.0"
 color-eyre = "0.6.5"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"

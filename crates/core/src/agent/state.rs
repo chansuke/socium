@@ -1,8 +1,94 @@
 use crate::agent::types::Message;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Error, ErrorKind};
-use std::path::Path;
+use std::io::{self, Error, ErrorKind, Read};
+use std::path::{Component, Path, PathBuf};
+
+const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Reject existing state links, including links inside the workspace. Recheck
+/// every operation; this is not isolation against concurrent host-user races.
+pub fn workspace_state_path(root: &Path, relative: &str) -> io::Result<PathBuf> {
+    if relative.is_empty()
+        || !Path::new(relative)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+    {
+        return Err(Error::other("Invalid relative state path"));
+    }
+    let path = root.canonicalize()?.join(".socium").join(relative);
+    prepare_state_path(&path, true)?;
+    Ok(path)
+}
+
+fn check_state_file(metadata: &fs::Metadata) -> io::Result<()> {
+    if !metadata.is_file() || metadata.len() > MAX_STATE_BYTES {
+        return Err(Error::other(
+            "State must be a regular file of at most 64 MiB",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no arguments or memory preconditions.
+        if metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(Error::other(
+                "State must be owned by the current user and not hard-linked",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn prepare_state_path(path: &Path, create: bool) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::other("Missing state parent"))?;
+    let mut private = false;
+    for directory in parent.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        private |= directory.file_name().is_some_and(|name| name == ".socium");
+        if !private {
+            continue;
+        }
+        if create {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(directory) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+        match fs::symlink_metadata(directory) {
+            Ok(metadata) => {
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(Error::other("State directories must not be symlinks"));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                    // SAFETY: geteuid has no arguments or memory preconditions.
+                    if metadata.uid() != unsafe { libc::geteuid() } {
+                        return Err(Error::other("State directory belongs to another user"));
+                    }
+                    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+                }
+            }
+            Err(e) if !create && e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => check_state_file(&metadata)?,
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    Ok(())
+}
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ConversationState {
@@ -39,21 +125,30 @@ pub fn load_json_file<T>(path: &Path) -> io::Result<T>
 where
     T: for<'de> Deserialize<'de> + Default,
 {
-    if let Ok(metadata) = fs::metadata(path)
-        && (!metadata.is_file() || metadata.len() > 64 * 1024 * 1024)
+    prepare_state_path(path, false)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
     {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            "State must be a regular file of at most 64 MiB; preserve it before manual recovery",
-        ));
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    match fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).map_err(|err| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("Invalid JSON in '{}': {err}", path.display()),
-            )
-        }),
+    match options.open(path) {
+        Ok(file) => {
+            check_state_file(&file.metadata()?)?;
+            let mut content = String::new();
+            file.take(MAX_STATE_BYTES + 1)
+                .read_to_string(&mut content)?;
+            if content.len() as u64 > MAX_STATE_BYTES {
+                return Err(Error::other("State exceeds 64 MiB limit"));
+            }
+            serde_json::from_str(&content).map_err(|err| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Invalid JSON in '{}': {err}", path.display()),
+                )
+            })
+        }
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(T::default()),
         Err(err) => Err(err),
     }
@@ -63,6 +158,7 @@ pub fn save_json_file<T>(path: &Path, value: &T) -> io::Result<()>
 where
     T: Serialize,
 {
+    prepare_state_path(path, true)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -77,7 +173,7 @@ where
             "State exceeds 64 MiB limit; archive the session before continuing",
         ));
     }
-    atomic_write(path, serialized.as_bytes())
+    atomic_write_impl(path, serialized.as_bytes(), false, &mut |_| Ok(()))
 }
 
 /// Write a same-directory temporary file, sync it, then atomically replace the
@@ -88,6 +184,15 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 fn atomic_write_with_checkpoint(
     path: &Path,
     bytes: &[u8],
+    checkpoint: &mut dyn FnMut(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    atomic_write_impl(path, bytes, true, checkpoint)
+}
+
+fn atomic_write_impl(
+    path: &Path,
+    bytes: &[u8],
+    preserve_permissions: bool,
     checkpoint: &mut dyn FnMut(&str) -> io::Result<()>,
 ) -> io::Result<()> {
     use std::io::Write;
@@ -114,7 +219,7 @@ fn atomic_write_with_checkpoint(
         let mut file = options.open(&temporary)?;
         created = true;
         checkpoint("created")?;
-        if let Ok(metadata) = fs::metadata(path) {
+        if preserve_permissions && let Ok(metadata) = fs::metadata(path) {
             file.set_permissions(metadata.permissions())?;
         }
         file.write_all(bytes)?;
@@ -134,16 +239,18 @@ fn atomic_write_with_checkpoint(
 }
 
 pub(crate) fn lock_workspace(root: &Path) -> io::Result<fs::File> {
-    let path =
-        crate::tools::workspace::resolve_workspace_path_for_create(root, ".socium/session.lock")
-            .map_err(|e| Error::other(e.to_string()))?;
-    fs::create_dir_all(path.parent().unwrap())?;
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path)?;
+    let path = workspace_state_path(root, "session.lock")?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    check_state_file(&file.metadata()?)?;
     file.try_lock().map_err(|e| {
         Error::other(format!(
             "Workspace session is already in use (or cannot be locked): {e}"

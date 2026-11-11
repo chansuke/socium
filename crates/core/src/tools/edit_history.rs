@@ -24,7 +24,7 @@ struct EditHistoryState {
     records: Vec<EditRecord>,
 }
 fn history_path(root: &Path) -> Result<PathBuf, String> {
-    resolve_workspace_path_for_create(root, ".socium/edit_history.json").map_err(|e| e.to_string())
+    crate::agent::state::workspace_state_path(root, "edit_history.json").map_err(|e| e.to_string())
 }
 fn current(path: &Path) -> Result<Option<String>, String> {
     match std::fs::metadata(path) {

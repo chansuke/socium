@@ -1,12 +1,8 @@
 /// Error type for provider transport and streaming.
 ///
-/// Invariant: `Display` output must stay identical to the strings the
-/// previous `Box<dyn Error>`/`io::Error` values produced, because the TUI
-/// surfaces provider failures via `to_string()`.
+/// Display output is user-visible; never include credentials or raw HTTP bodies.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
-    #[error("Provider '{0}' is not implemented yet")]
-    NotImplemented(&'static str),
     #[error(transparent)]
     Http(#[from] reqwest::Error),
     #[error(transparent)]

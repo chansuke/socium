@@ -1,4 +1,5 @@
-export ANTHROAPI_KEYAPI_KEY='your-api-key-here'
-export VERSION=''
-export MODEL=''
-export MAX_TOKENS=''
+# Keep ANTHROPIC_API_KEY in your shell or secret manager, not in this file.
+# Copy to .envrc only if you use direnv; .envrc is ignored by Git.
+export MODEL='claude-opus-5-5'
+export COMPACT_MODEL='claude-haiku-4-5'
+export MAX_TOKENS='1000'
