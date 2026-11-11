@@ -9,6 +9,7 @@ use ratatui::{
     DefaultTerminal,
     crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
 };
+use socium_core::constants::DEFAULT_MODEL;
 use socium_core::{AgentService, ContextMetrics};
 use std::{
     env,
@@ -53,7 +54,7 @@ enum SubmitAction {
 
 impl App {
     pub(crate) fn new(agent: AgentService) -> Self {
-        let model_label = env::var("MODEL").unwrap_or_else(|_| "socium-default".to_string());
+        let model_label = env::var("MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let workspace_label = format_workspace_path(env::current_dir().ok());
         let messages = transcript_entries_to_chat_entries(agent.transcript_entries());
         let context_metrics = agent.context_metrics("").unwrap_or_default();

@@ -198,7 +198,7 @@ impl AgentService {
         }
 
         let provider = provider_from_env()?;
-        let model = env::var("MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
+        let model = env::var("MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let max_tokens = env::var("MAX_TOKENS")
             .unwrap_or_else(|_| "1000".to_string())
             .parse::<u32>()

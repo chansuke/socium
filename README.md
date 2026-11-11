@@ -12,3 +12,7 @@ A minimal AI agent for multiple platforms.
 ```bash
 cargo run -p socium-tui
 ```
+
+Set `ANTHROPIC_API_KEY` before starting. The default model is Claude Opus 5.5
+(`claude-opus-5-5`); set `MODEL` to override it at startup. `COMPACT_MODEL`
+separately controls the summarization model, which defaults to `claude-haiku-4-5`.
