@@ -14,18 +14,22 @@ resume work.
 ## Run
 
 ```bash
-cargo run --locked -p socium-tui
+nix develop -c cargo run --locked -p socium-tui
 ```
 
-For the pinned development environment, use `nix develop`. To build and run the
-packaged application, use `nix run .`. Execution currently requires Linux
+`nix develop` provides the pinned toolchain and bubblewrap 0.12.0. To build and
+run the packaged application, use `nix run .`. Plain `cargo run` outside the
+development shell uses the host `bwrap`, and distribution packages older than
+0.12.0 (for example Ubuntu's 0.9.0) are refused at startup. On Ubuntu, the
+Nix-provided `bwrap` also needs an AppArmor `userns` profile; see the
+[Linux sandbox guide](docs/linux-sandbox.md). Execution currently requires Linux
 (x86_64 or aarch64), bubblewrap, and unprivileged user namespaces. The TUI checks
 the sandbox at startup and refuses to run if isolation cannot be established.
 macOS and Windows execution are unsupported; there is no unsandboxed fallback.
 
 Set `ANTHROPIC_API_KEY` before starting. The default model is Claude Opus 5.5
 (`claude-opus-5-5`); set `MODEL` to override it at startup. `COMPACT_MODEL`
-separately controls the summarization model, which defaults to `claude-haiku-4-5`.
+separately controls the summarization model, which defaults to `claude-haiku-5-5`.
 Anthropic is currently the only supported provider. Other providers and Web
 search are planned. Model names must be available to your API account.
 

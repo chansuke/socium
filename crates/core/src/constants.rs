@@ -29,7 +29,7 @@ pub const MAX_SUMMARY_CHARACTERS: usize = 4_000;
 // the emergency budget-based trimming path for uncompacted overflow.
 pub const COMPACTION_TRIGGER_RATIO: f32 = 0.8;
 pub const COMPACTION_RETAIN_RECENT_MESSAGES: usize = 16;
-pub const DEFAULT_COMPACTION_MODEL: &str = "claude-haiku-4-5";
+pub const DEFAULT_COMPACTION_MODEL: &str = "claude-haiku-5-5";
 pub const COMPACTION_MAX_OUTPUT_TOKENS: u32 = 1_500;
 pub const COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS: usize = 600;
 pub const COMPACTION_SYSTEM_PROMPT: &str = "You compact the conversation history of Socium, a coding agent. You receive the transcript of an agent session, possibly preceded by a summary of even earlier conversation in <previous_summary>. Merge everything into one summary with exactly these five sections:\n1. User request\n2. Files touched (use path:line where known)\n3. Decisions\n4. Errors and unresolved issues\n5. Immediate next step\nBe specific and concise. Preserve exact file paths, command names, identifiers, and error messages. Output only the five numbered sections, with no preamble and no commentary.";
