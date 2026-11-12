@@ -621,6 +621,19 @@ mod tests {
     }
 
     #[test]
+    fn bare_exit_quits_but_longer_messages_do_not() {
+        let mut app = App::for_test();
+        type_text(&mut app, "exit");
+        assert!(matches!(app.begin_submit().unwrap(), SubmitAction::Exit));
+
+        type_text(&mut app, "exit the loop early");
+        assert!(matches!(
+            app.begin_submit().unwrap(),
+            SubmitAction::Pending(_)
+        ));
+    }
+
+    #[test]
     fn message_starting_with_a_path_is_still_sent_to_the_model() {
         let mut app = App::for_test();
         type_text(&mut app, "/usr/bin is missing rg");

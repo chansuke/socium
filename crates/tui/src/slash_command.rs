@@ -42,11 +42,6 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Quit Socium",
         action: SlashAction::Exit,
     },
-    SlashCommand {
-        name: "quit",
-        description: "Quit Socium",
-        action: SlashAction::Exit,
-    },
 ];
 
 /// Returns the slash command token being typed, or `None` once the input is
@@ -66,8 +61,13 @@ pub(crate) fn matching_commands(input: &str) -> Vec<&'static SlashCommand> {
         .collect()
 }
 
+/// Resolves a submitted command. A bare `exit` also quits, as in Claude Code.
 pub(crate) fn find(input: &str) -> Option<&'static SlashCommand> {
-    let token = command_token(input)?;
+    let token = if input == "exit" {
+        "exit"
+    } else {
+        command_token(input)?
+    };
     SLASH_COMMANDS.iter().find(|command| command.name == token)
 }
 
@@ -128,7 +128,11 @@ mod tests {
 
     #[test]
     fn find_requires_an_exact_name() {
-        assert_eq!(find("/quit").map(|c| c.action), Some(SlashAction::Exit));
+        assert_eq!(find("/exit").map(|c| c.action), Some(SlashAction::Exit));
+        assert_eq!(find("exit").map(|c| c.action), Some(SlashAction::Exit));
+        assert!(find("/quit").is_none());
+        assert!(find("exit now").is_none());
+        assert!(find("clear").is_none());
         assert_eq!(find("/clear").map(|c| c.action), Some(SlashAction::Clear));
         assert!(find("/cle").is_none());
         assert!(find("/clear now").is_none());

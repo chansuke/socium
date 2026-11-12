@@ -50,7 +50,7 @@ pub(crate) fn command_output_preview_lines(
 
 pub(crate) fn help_text() -> String {
     format!(
-        "{}\n\n/              Show command suggestions; Up/Down select, Tab completes\nEsc / Ctrl+C   Cancel a running task\ny / n          Allow once / deny a pending sandboxed command\nSandbox        Linux; network denied; private HOME; no host fallback",
+        "{}\n\nexit           Quit Socium (same as /exit)\n/              Show command suggestions; Up/Down select, Tab completes\nEsc / Ctrl+C   Cancel a running task\ny / n          Allow once / deny a pending sandboxed command\nSandbox        Linux; network denied; private HOME; no host fallback",
         crate::slash_command::command_list_text()
     )
 }
