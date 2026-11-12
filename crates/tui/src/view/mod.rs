@@ -12,6 +12,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph},
 };
+use unicode_width::UnicodeWidthChar;
 
 const SLASH_POPUP_MAX_ROWS: usize = 8;
 
@@ -188,8 +189,8 @@ impl App {
     }
 
     fn draw_composer(&self, frame: &mut Frame, area: Rect) {
-        let available_chars = area.width.saturating_sub(2) as usize;
-        let (visible_input, visible_cursor) = self.visible_input_window(available_chars);
+        let available_cells = area.width.saturating_sub(2) as usize;
+        let (visible_input, visible_cursor) = self.visible_input_window(available_cells);
 
         let line = if self.input.is_empty() {
             Line::from(vec![
@@ -297,19 +298,38 @@ impl App {
             return (String::new(), 0);
         }
 
-        let char_count = self.input.chars().count();
-        if char_count <= width {
-            return (self.input.clone(), self.character_index);
+        // Terminal cells, not chars: CJK and other wide characters take two
+        // cells, and the cursor must land on the cell after the preceding text.
+        let widths = self
+            .input
+            .chars()
+            .map(|c| c.width().unwrap_or(0))
+            .collect::<Vec<_>>();
+        let cursor = self.character_index.min(widths.len());
+        let cursor_cell = |end: usize| widths.get(end).copied().unwrap_or(1).max(1);
+
+        // Scroll just far enough that the text before the cursor plus the
+        // cursor cell itself fits in the window.
+        let mut start = 0;
+        let mut before_cursor = widths[..cursor].iter().sum::<usize>();
+        while start < cursor && before_cursor + cursor_cell(cursor) > width {
+            before_cursor -= widths[start];
+            start += 1;
         }
 
-        let start = self.character_index.saturating_sub(width);
+        let mut used = 0;
         let visible = self
             .input
             .chars()
+            .zip(&widths)
             .skip(start)
-            .take(width)
+            .take_while(|(_, w)| {
+                used += **w;
+                used <= width
+            })
+            .map(|(c, _)| c)
             .collect::<String>();
-        (visible, self.character_index.saturating_sub(start))
+        (visible, before_cursor)
     }
 
     fn visible_transcript(&self, width: usize, height: usize) -> Text<'static> {
@@ -377,6 +397,41 @@ mod tests {
         assert!(rows[composer - 3].contains("› /clear     Clear the current conversation"));
         assert!(rows[composer - 2].contains("  /compact"));
         assert!(rows[composer - 1].starts_with('└'));
+    }
+
+    fn composer_cursor(app: &App) -> (u16, String) {
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = (0..buffer.area.width)
+            .map(|x| buffer[(x, cursor.y)].symbol())
+            .collect::<String>();
+        (cursor.x, row)
+    }
+
+    #[test]
+    fn cursor_follows_display_width_of_wide_characters() {
+        let mut app = App::for_test();
+        app.input = "このプロジェクト".into();
+        app.character_index = 8;
+        let (x, row) = composer_cursor(&app);
+        assert!(row.replace(' ', "").starts_with(">このプロジェクト"));
+        assert_eq!(x, 2 + 16);
+
+        app.character_index = 2;
+        assert_eq!(composer_cursor(&app).0, 2 + 4);
+    }
+
+    #[test]
+    fn long_wide_input_scrolls_to_keep_cursor_visible() {
+        let mut app = App::for_test();
+        app.input = "あ".repeat(60);
+        app.character_index = 60;
+        let (x, row) = composer_cursor(&app);
+        // 78 cells wide; 38 wide chars (76 cells) plus the cursor cell fit.
+        assert_eq!(x, 2 + 76);
+        assert!(row.trim_end().ends_with('あ'));
     }
 
     #[test]
