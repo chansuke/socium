@@ -48,8 +48,11 @@ pub(crate) fn command_output_preview_lines(
     lines.into_iter().take(max_lines).collect()
 }
 
-pub(crate) fn help_text() -> &'static str {
-    "/help    Show available commands\n/clear   Clear the current conversation\n/compact Summarize old conversation context to free tokens\n/exit    Quit Socium\nEsc / Ctrl+C   Cancel a running task\ny / n          Allow once / deny a pending sandboxed command\nSandbox        Linux; network denied; private HOME; no host fallback"
+pub(crate) fn help_text() -> String {
+    format!(
+        "{}\n\n/              Show command suggestions; Up/Down select, Tab completes\nEsc / Ctrl+C   Cancel a running task\ny / n          Allow once / deny a pending sandboxed command\nSandbox        Linux; network denied; private HOME; no host fallback",
+        crate::slash_command::command_list_text()
+    )
 }
 
 pub(crate) fn slice_chars(value: &str, start: usize, end: usize) -> String {
@@ -415,6 +418,7 @@ mod tests {
         assert!(help.contains("/help"));
         assert!(help.contains("/clear"));
         assert!(help.contains("/exit"));
+        assert!(help.contains("/commands"));
     }
 
     #[test]

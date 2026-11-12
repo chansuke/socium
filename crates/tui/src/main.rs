@@ -2,6 +2,7 @@ mod agent_task;
 mod app;
 mod input_history;
 mod progress;
+mod slash_command;
 mod transcript;
 mod view;
 

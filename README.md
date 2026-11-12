@@ -45,6 +45,8 @@ are not yet supported.
   or `n` to deny. Commands can write workspace files, but cannot access the host
   home or network. Existing Git metadata is read-only except during `git_commit`;
   Socium's state is hidden from all child processes.
+- Type `/` to show command suggestions: Up/Down select, Tab completes, Enter
+  runs, Esc closes. `/commands` lists every command; `/help` adds key bindings.
 - Press Esc or Ctrl+C during a task to cancel and wait for cleanup.
 - Restart in the same workspace to load saved conversation and tool results.
   Interrupted operations with no saved result are marked unknown, never replayed.

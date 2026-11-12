@@ -1,5 +1,6 @@
 use crate::agent_task::{PendingSubmission, PendingTask};
 use crate::input_history;
+use crate::slash_command::{self, SlashAction, SlashCommand};
 use crate::transcript::{
     ChatEntry, CommandOutputState, Speaker, transcript_entries_to_chat_entries,
 };
@@ -37,6 +38,8 @@ pub(crate) struct App {
     pub(crate) input_history: input_history::InputSession,
     pub(crate) history_index: Option<usize>,
     pub(crate) history_draft: String,
+    pub(crate) slash_selection: usize,
+    slash_popup_dismissed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -80,7 +83,37 @@ impl App {
             input_history,
             history_index: None,
             history_draft: String::new(),
+            slash_selection: 0,
+            slash_popup_dismissed: false,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            agent: None,
+            input: String::new(),
+            character_index: 0,
+            input_mode: InputMode::Editing,
+            messages: Vec::new(),
+            activity_log: Vec::new(),
+            last_command_output: None,
+            transcript_scroll: 0,
+            status: None,
+            workspace_label: "test".into(),
+            model_label: "test".into(),
+            context_metrics: Default::default(),
+            last_latency_ms: None,
+            pending_task: None,
+            input_history: input_history::InputSession {
+                history_path: PathBuf::new(),
+                entries: Vec::new(),
+            },
+            history_index: None,
+            history_draft: String::new(),
+            slash_selection: 0,
+            slash_popup_dismissed: false,
+        }
     }
 
     fn move_cursor_left(&mut self) {
@@ -95,6 +128,7 @@ impl App {
         let index = self.byte_index();
         self.input.insert(index, new_char);
         self.move_cursor_right();
+        self.reset_slash_popup();
         self.refresh_context_metrics();
     }
 
@@ -116,6 +150,7 @@ impl App {
         let after_char_to_delete = self.input.chars().skip(current_index);
         self.input = before_char_to_delete.chain(after_char_to_delete).collect();
         self.move_cursor_left();
+        self.reset_slash_popup();
         self.refresh_context_metrics();
     }
 
@@ -162,6 +197,64 @@ impl App {
         }
     }
 
+    fn reset_slash_popup(&mut self) {
+        self.slash_selection = 0;
+        self.slash_popup_dismissed = false;
+    }
+
+    /// Commands offered while a bare `/name` is being typed. Recalled history
+    /// entries keep Up/Down for history navigation, so they show no popup.
+    pub(crate) fn slash_suggestions(&self) -> Vec<&'static SlashCommand> {
+        if self.slash_popup_dismissed
+            || self.pending_task.is_some()
+            || self.history_index.is_some()
+            || !matches!(self.input_mode, InputMode::Editing)
+        {
+            return Vec::new();
+        }
+        slash_command::matching_commands(&self.input)
+    }
+
+    fn move_slash_selection(&mut self, len: usize, forward: bool) {
+        self.slash_selection = if forward {
+            (self.slash_selection + 1) % len
+        } else {
+            (self.slash_selection + len - 1) % len
+        };
+    }
+
+    fn complete_slash_command(&mut self, command: &SlashCommand) {
+        self.input = format!("/{}", command.name);
+        self.character_index = self.input.chars().count();
+        self.slash_selection = 0;
+        self.refresh_context_metrics();
+    }
+
+    /// Handles keys owned by the open completion popup. Returns `true` when the
+    /// key was consumed; Enter only completes here and is submitted by the caller.
+    fn handle_slash_popup_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let suggestions = self.slash_suggestions();
+        if suggestions.is_empty() {
+            return false;
+        }
+        let selected = suggestions[self.slash_selection.min(suggestions.len() - 1)];
+        let control = modifiers.contains(KeyModifiers::CONTROL);
+        match code {
+            KeyCode::Up => self.move_slash_selection(suggestions.len(), false),
+            KeyCode::Char('p') if control => self.move_slash_selection(suggestions.len(), false),
+            KeyCode::Down => self.move_slash_selection(suggestions.len(), true),
+            KeyCode::Char('n') if control => self.move_slash_selection(suggestions.len(), true),
+            KeyCode::Tab => self.complete_slash_command(selected),
+            KeyCode::Esc => self.slash_popup_dismissed = true,
+            KeyCode::Enter => {
+                self.complete_slash_command(selected);
+                return false;
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn begin_submit(&mut self) -> Result<SubmitAction> {
         if self.pending_task.is_some() {
             self.status = Some("Request already in progress".to_string());
@@ -181,29 +274,16 @@ impl App {
             return Ok(SubmitAction::None);
         }
 
-        match user_input.as_str() {
-            "/quit" | "/exit" => return Ok(SubmitAction::Exit),
-            "/help" => {
-                self.push_message(Speaker::System, help_text());
-                self.status = Some("Help".to_string());
-                return Ok(SubmitAction::None);
-            }
-            "/clear" => {
-                self.agent_mut()?.clear()?;
-                self.messages.clear();
-                self.activity_log.clear();
-                self.last_command_output = None;
-                self.last_latency_ms = None;
-                self.status = Some("Conversation cleared".to_string());
-                self.refresh_context_metrics();
-                return Ok(SubmitAction::None);
-            }
-            "/compact" => {
-                self.push_message(Speaker::System, "Compacting conversation context…");
-                self.status = Some("Compacting".to_string());
-                return Ok(SubmitAction::Compact);
-            }
-            _ => {}
+        if let Some(command) = slash_command::find(&user_input) {
+            return self.run_slash_command(command.action);
+        }
+        if slash_command::command_token(&user_input).is_some() {
+            self.push_message(
+                Speaker::System,
+                format!("Unknown command: {user_input}. Type /commands to list commands."),
+            );
+            self.status = Some("Unknown command".to_string());
+            return Ok(SubmitAction::None);
         }
 
         self.push_message(Speaker::User, user_input.clone());
@@ -220,6 +300,35 @@ impl App {
             user_input,
             started_at: Instant::now(),
         }))
+    }
+
+    fn run_slash_command(&mut self, action: SlashAction) -> Result<SubmitAction> {
+        match action {
+            SlashAction::Exit => return Ok(SubmitAction::Exit),
+            SlashAction::Help => {
+                self.push_message(Speaker::System, help_text());
+                self.status = Some("Help".to_string());
+            }
+            SlashAction::Commands => {
+                self.push_message(Speaker::System, slash_command::command_list_text());
+                self.status = Some("Commands".to_string());
+            }
+            SlashAction::Clear => {
+                self.agent_mut()?.clear()?;
+                self.messages.clear();
+                self.activity_log.clear();
+                self.last_command_output = None;
+                self.last_latency_ms = None;
+                self.status = Some("Conversation cleared".to_string());
+                self.refresh_context_metrics();
+            }
+            SlashAction::Compact => {
+                self.push_message(Speaker::System, "Compacting conversation context…");
+                self.status = Some("Compacting".to_string());
+                return Ok(SubmitAction::Compact);
+            }
+        }
+        Ok(SubmitAction::None)
     }
 
     fn agent_mut(&mut self) -> Result<&mut AgentService> {
@@ -262,6 +371,12 @@ impl App {
                         }
                         continue;
                     }
+                }
+                if key.kind == KeyEventKind::Press
+                    && matches!(self.input_mode, InputMode::Editing)
+                    && self.handle_slash_popup_key(key.code, key.modifiers)
+                {
+                    continue;
                 }
                 match self.input_mode {
                     InputMode::Normal if key.kind == KeyEventKind::Press => match key.code {
@@ -402,5 +517,118 @@ impl Drop for App {
                 let _ = worker.join();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn type_text(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            app.enter_char(ch);
+        }
+    }
+
+    fn suggestion_names(app: &App) -> Vec<&'static str> {
+        app.slash_suggestions()
+            .into_iter()
+            .map(|command| command.name)
+            .collect()
+    }
+
+    #[test]
+    fn typing_a_slash_opens_suggestions_and_prefix_filters_them() {
+        let mut app = App::for_test();
+        type_text(&mut app, "/");
+        assert_eq!(
+            suggestion_names(&app).len(),
+            slash_command::SLASH_COMMANDS.len()
+        );
+
+        type_text(&mut app, "co");
+        assert_eq!(suggestion_names(&app), ["commands", "compact"]);
+
+        app.delete_char();
+        app.delete_char();
+        type_text(&mut app, "x");
+        assert!(suggestion_names(&app).is_empty());
+    }
+
+    #[test]
+    fn arrows_wrap_and_tab_completes_the_selected_command() {
+        let mut app = App::for_test();
+        type_text(&mut app, "/co");
+
+        assert!(app.handle_slash_popup_key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(app.handle_slash_popup_key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.slash_selection, 0);
+        assert!(app.handle_slash_popup_key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.slash_selection, 1);
+
+        assert!(app.handle_slash_popup_key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.input, "/compact");
+        assert_eq!(app.character_index, "/compact".len());
+    }
+
+    #[test]
+    fn enter_runs_the_selected_command_instead_of_the_partial_input() {
+        let mut app = App::for_test();
+        type_text(&mut app, "/comm");
+
+        assert!(!app.handle_slash_popup_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.input, "/commands");
+        assert!(matches!(app.begin_submit().unwrap(), SubmitAction::None));
+        assert_eq!(
+            app.messages.last().unwrap().body,
+            slash_command::command_list_text()
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_popup_until_the_input_changes() {
+        let mut app = App::for_test();
+        type_text(&mut app, "/c");
+
+        assert!(app.handle_slash_popup_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.slash_suggestions().is_empty());
+        assert!(matches!(app.input_mode, InputMode::Editing));
+
+        type_text(&mut app, "l");
+        assert_eq!(suggestion_names(&app), ["clear"]);
+    }
+
+    #[test]
+    fn recalled_history_keeps_arrow_keys_for_history() {
+        let mut app = App::for_test();
+        app.input_history.entries = vec!["/clear".into(), "/compact".into()];
+
+        app.history_prev();
+        assert_eq!(app.input, "/compact");
+        assert!(app.slash_suggestions().is_empty());
+        assert!(!app.handle_slash_popup_key(KeyCode::Up, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn unknown_command_is_reported_instead_of_sent_to_the_model() {
+        let mut app = App::for_test();
+        type_text(&mut app, "/model");
+
+        assert!(matches!(app.begin_submit().unwrap(), SubmitAction::None));
+        let reply = &app.messages.last().unwrap().body;
+        assert!(reply.contains("Unknown command: /model"));
+        assert!(reply.contains("/commands"));
+    }
+
+    #[test]
+    fn message_starting_with_a_path_is_still_sent_to_the_model() {
+        let mut app = App::for_test();
+        type_text(&mut app, "/usr/bin is missing rg");
+
+        assert!(app.slash_suggestions().is_empty());
+        assert!(matches!(
+            app.begin_submit().unwrap(),
+            SubmitAction::Pending(_)
+        ));
     }
 }

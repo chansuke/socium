@@ -8,10 +8,12 @@ use crate::view::theme::*;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Position, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Clear, Paragraph},
 };
+
+const SLASH_POPUP_MAX_ROWS: usize = 8;
 
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
@@ -41,6 +43,65 @@ impl App {
         self.draw_command_output(frame, command_output_area);
         self.draw_composer(frame, composer_area);
         self.draw_footer(frame, footer_area);
+        self.draw_slash_popup(frame, composer_area);
+    }
+
+    /// Overlays command suggestions directly above the composer.
+    fn draw_slash_popup(&self, frame: &mut Frame, composer_area: Rect) {
+        let suggestions = self.slash_suggestions();
+        if suggestions.is_empty() {
+            return;
+        }
+        let max_rows = SLASH_POPUP_MAX_ROWS.min(composer_area.y.saturating_sub(2) as usize);
+        if max_rows == 0 {
+            return;
+        }
+        let selected = self.slash_selection.min(suggestions.len() - 1);
+        let rows = suggestions.len().min(max_rows);
+        let start = selected.saturating_sub(rows - 1);
+        let name_width = suggestions
+            .iter()
+            .map(|command| command.name.len() + 1)
+            .max()
+            .unwrap_or(0);
+        let lines = suggestions
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(rows)
+            .map(|(index, command)| {
+                let (marker, name_style, description_style) = if index == selected {
+                    (
+                        "› ",
+                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                        Style::default().fg(TEXT),
+                    )
+                } else {
+                    ("  ", Style::default().fg(BLUE), Style::default().fg(MUTED))
+                };
+                Line::from(vec![
+                    Span::styled(marker, Style::default().fg(LILAC)),
+                    Span::styled(
+                        format!("{:<name_width$}  ", format!("/{}", command.name)),
+                        name_style,
+                    ),
+                    Span::styled(command.description, description_style),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let height = rows as u16 + 2;
+        let area = Rect::new(
+            composer_area.x,
+            composer_area.y - height,
+            composer_area.width,
+            height,
+        );
+        let block = Block::bordered()
+            .title(" commands · ↑↓ select · Tab complete · Enter run · Esc close ")
+            .border_style(Style::default().fg(CODE_BORDER))
+            .style(Style::default().bg(BG));
+        frame.render_widget(Clear, area);
+        frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
@@ -281,5 +342,47 @@ impl App {
 
         let start = transcript_window_start(lines.len(), height.max(1), self.transcript_scroll);
         Text::from(lines.into_iter().skip(start).collect::<Vec<_>>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::App;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn render(app: &App) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn slash_popup_sits_above_the_composer_with_selection_marker() {
+        let mut app = App::for_test();
+        app.input = "/c".into();
+        app.character_index = 2;
+        app.slash_selection = 1;
+        let rows = render(&app);
+        let composer = rows.iter().position(|row| row.starts_with("> /c")).unwrap();
+
+        assert!(rows[composer - 5].contains(" commands "));
+        assert!(rows[composer - 4].contains("  /commands  List available slash commands"));
+        assert!(rows[composer - 3].contains("› /clear     Clear the current conversation"));
+        assert!(rows[composer - 2].contains("  /compact"));
+        assert!(rows[composer - 1].starts_with('└'));
+    }
+
+    #[test]
+    fn no_popup_for_ordinary_input() {
+        let mut app = App::for_test();
+        app.input = "hello".into();
+        assert!(!render(&app).iter().any(|row| row.contains(" commands ")));
     }
 }

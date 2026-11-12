@@ -258,35 +258,15 @@ mod tests {
         let (_progress, progress_rx) = unbounded_channel();
         let (sender, result_rx) = oneshot::channel();
         drop(sender);
-        let mut app = App {
-            agent: None,
-            input: String::new(),
-            character_index: 0,
-            input_mode: crate::app::InputMode::Editing,
-            messages: Vec::new(),
-            activity_log: Vec::new(),
-            last_command_output: None,
-            transcript_scroll: 0,
-            status: None,
-            workspace_label: "test".into(),
-            model_label: "test".into(),
-            context_metrics: Default::default(),
-            last_latency_ms: None,
-            pending_task: Some(PendingTask {
-                worker: None,
-                control: Default::default(),
-                approval_id: None,
-                progress_rx,
-                result_rx,
-                streamed_assistant_text: false,
-            }),
-            input_history: crate::input_history::InputSession {
-                history_path: std::path::PathBuf::new(),
-                entries: Vec::new(),
-            },
-            history_index: None,
-            history_draft: String::new(),
-        };
+        let mut app = App::for_test();
+        app.pending_task = Some(PendingTask {
+            worker: None,
+            control: Default::default(),
+            approval_id: None,
+            progress_rx,
+            result_rx,
+            streamed_assistant_text: false,
+        });
         app.poll_pending_task();
         assert!(app.pending_task.is_none());
         assert!(app.status.as_ref().unwrap().contains("restart to recover"));
