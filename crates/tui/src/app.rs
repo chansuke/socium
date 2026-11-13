@@ -2,6 +2,7 @@ use crate::activity::ActivityModel;
 use crate::agent_task::{PendingSubmission, PendingTask};
 use crate::approval::ApprovalPrompt;
 use crate::input_history;
+use crate::model_picker::{ModelPicker, model_label};
 use crate::slash_command::{self, SlashAction, SlashCommand};
 use crate::transcript::{ChatEntry, Speaker, transcript_entries_to_chat_entries};
 use crate::view::text_layout::{help_text, truncate_text};
@@ -10,7 +11,6 @@ use ratatui::{
     DefaultTerminal,
     crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
 };
-use socium_core::constants::DEFAULT_MODEL;
 use socium_core::{AgentService, ContextMetrics};
 use std::{
     env,
@@ -35,6 +35,7 @@ pub(crate) struct App {
     pub(crate) last_latency_ms: Option<u128>,
     pub(crate) pending_task: Option<PendingTask>,
     pub(crate) approval: Option<ApprovalPrompt>,
+    pub(crate) model_picker: Option<ModelPicker>,
     pub(crate) input_history: input_history::InputSession,
     pub(crate) history_index: Option<usize>,
     pub(crate) history_draft: String,
@@ -57,7 +58,7 @@ enum SubmitAction {
 
 impl App {
     pub(crate) fn new(agent: AgentService) -> Result<Self> {
-        let model_label = env::var("MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let model_label = model_label(&agent.active_model());
         let workspace_label = format_workspace_path(env::current_dir().ok());
         let mut messages = transcript_entries_to_chat_entries(agent.transcript_entries());
         messages.extend(agent.startup_warnings().into_iter().map(|body| ChatEntry {
@@ -88,6 +89,7 @@ impl App {
             last_latency_ms: None,
             pending_task: None,
             approval: None,
+            model_picker: None,
             input_history,
             history_index: None,
             history_draft: String::new(),
@@ -113,6 +115,7 @@ impl App {
             last_latency_ms: None,
             pending_task: None,
             approval: None,
+            model_picker: None,
             input_history: input_history::InputSession {
                 history_path: PathBuf::new(),
                 entries: Vec::new(),
@@ -340,8 +343,9 @@ impl App {
             return Ok(SubmitAction::None);
         }
 
-        if let Some(command) = slash_command::find(&user_input) {
-            return self.run_slash_command(command.action);
+        if let Some((command, argument)) = slash_command::find(&user_input) {
+            let argument = argument.map(str::to_string);
+            return self.run_slash_command(command.action, argument);
         }
         if slash_command::command_token(&user_input).is_some() {
             self.push_message(
@@ -368,7 +372,11 @@ impl App {
         }))
     }
 
-    fn run_slash_command(&mut self, action: SlashAction) -> Result<SubmitAction> {
+    fn run_slash_command(
+        &mut self,
+        action: SlashAction,
+        argument: Option<String>,
+    ) -> Result<SubmitAction> {
         match action {
             SlashAction::Exit => return Ok(SubmitAction::Exit),
             SlashAction::Help => {
@@ -387,6 +395,17 @@ impl App {
                 self.status = Some("Conversation cleared".to_string());
                 self.refresh_context_metrics();
             }
+            SlashAction::Model => match argument {
+                Some(alias) => {
+                    if self.switch_model(&alias) {
+                        return Ok(SubmitAction::Compact);
+                    }
+                }
+                None => {
+                    let choices = self.agent_mut()?.available_models();
+                    self.open_model_picker(choices);
+                }
+            },
             SlashAction::Compact => {
                 self.push_message(Speaker::System, "Compacting conversation context…");
                 self.status = Some("Compacting".to_string());
@@ -412,6 +431,13 @@ impl App {
             }
 
             if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press && self.model_picker.is_some() {
+                    if self.handle_model_picker_key(key.code) {
+                        terminal.draw(|frame| self.draw(frame))?;
+                        self.start_compact_task()?;
+                    }
+                    continue;
+                }
                 if key.kind == KeyEventKind::Press
                     && self.handle_activity_key(key.code, key.modifiers)
                 {
@@ -459,6 +485,9 @@ impl App {
                         _ => {}
                     },
                     InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
+                        KeyCode::Tab => {
+                            self.complete_model_alias();
+                        }
                         KeyCode::Enter => match self.begin_submit()? {
                             SubmitAction::None => {}
                             SubmitAction::Exit => return Ok(()),
@@ -677,11 +706,11 @@ mod tests {
     #[test]
     fn unknown_command_is_reported_instead_of_sent_to_the_model() {
         let mut app = App::for_test();
-        type_text(&mut app, "/model");
+        type_text(&mut app, "/frobnicate");
 
         assert!(matches!(app.begin_submit().unwrap(), SubmitAction::None));
         let reply = &app.messages.last().unwrap().body;
-        assert!(reply.contains("Unknown command: /model"));
+        assert!(reply.contains("Unknown command: /frobnicate"));
         assert!(reply.contains("/commands"));
     }
 

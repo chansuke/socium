@@ -86,7 +86,21 @@ static BUILTIN_TOOLS: &[&dyn Tool] = &[
 ];
 
 pub fn default_tools() -> Vec<ToolDefinition> {
-    BUILTIN_TOOLS.iter().map(|tool| tool.definition()).collect()
+    tools_for_model(true)
+}
+
+/// Tool definitions for a model. Without the native text editor, the text
+/// editor is sent as an ordinary schema tool of the same name and input.
+pub(crate) fn tools_for_model(native_text_editor: bool) -> Vec<ToolDefinition> {
+    BUILTIN_TOOLS
+        .iter()
+        .map(|tool| match tool.definition() {
+            ToolDefinition::AnthropicTextEditor(_) if !native_text_editor => {
+                text_editor::portable_text_editor_definition()
+            }
+            definition => definition,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -435,5 +449,28 @@ mod tests {
             }
             _ => panic!("expected tool_result"),
         }
+    }
+
+    #[test]
+    fn models_without_the_native_editor_get_a_schema_tool_of_the_same_name() {
+        let native = tools_for_model(true);
+        let portable = tools_for_model(false);
+        assert_eq!(native.len(), portable.len());
+        assert!(
+            portable
+                .iter()
+                .all(|tool| matches!(tool, ToolDefinition::Custom(_)))
+        );
+        let editor = portable
+            .iter()
+            .find_map(|tool| match tool {
+                ToolDefinition::Custom(custom) if custom.name == TEXT_EDITOR_TOOL_NAME => {
+                    Some(custom)
+                }
+                _ => None,
+            })
+            .expect("portable text editor");
+        assert_eq!(editor.input_schema["required"], json!(["command", "path"]));
+        assert!(editor.input_schema["properties"]["insert_text"].is_object());
     }
 }

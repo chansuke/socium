@@ -141,6 +141,9 @@ pub(crate) struct ConversationState {
     pub events: Vec<serde_json::Value>,
     #[serde(default)]
     pub summary_state: Option<ConversationSummaryState>,
+    /// Alias chosen with `/model`; `None` for the startup default.
+    #[serde(default)]
+    pub active_model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
@@ -161,6 +164,8 @@ pub(crate) struct ConversationStateRef<'a> {
     pub messages: &'a [Message],
     pub events: &'a [serde_json::Value],
     pub summary_state: &'a ConversationSummaryState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_model: Option<&'a str>,
 }
 
 pub fn load_json_file<T>(path: &Path) -> io::Result<T>

@@ -1,0 +1,73 @@
+# Socium model registry. Copy to ~/.config/socium/models.toml
+# (or $XDG_CONFIG_HOME/socium/models.toml, or the path in SOCIUM_MODELS_FILE).
+#
+# Never write keys here: api_key_env names the environment variable that
+# holds each key. Built-in models (opus, sonnet, haiku on Anthropic) are
+# always available; entries below are added to them, and an entry with a
+# built-in alias replaces it. Model IDs were checked against each
+# provider's documentation on 2026-11-13.
+
+# Model selected when neither /model nor MODEL chose one.
+default = "opus"
+
+# DeepSeek: https://platform.deepseek.com (API Keys; prepaid balance).
+# The Anthropic-compatible endpoint accepts x-api-key or Bearer.
+[providers.deepseek]
+wire = "anthropic"
+base_url = "https://api.deepseek.com/anthropic"
+api_key_env = "DEEPSEEK_API_KEY"
+auth = "bearer"
+
+# Z.ai (GLM): https://z.ai/manage-apikey/apikey-list
+# A Standard API key works with this endpoint and needs a balance
+# ([1113] Insufficient balance otherwise). Coding Plan keys are created
+# separately, under API Keys -> Personal Coding Plan.
+[providers.zai]
+wire = "anthropic"
+base_url = "https://api.z.ai/api/anthropic"
+api_key_env = "ZAI_API_KEY"
+auth = "bearer"
+
+# DeepSeek-V4.1-Flash. DeepSeek rejects unknown non-Claude names with 400.
+[[models]]
+alias = "ds-flash"
+provider = "deepseek"
+id = "deepseek-flash"
+description = "DeepSeek-V4.1-Flash, fast and inexpensive"
+features = ["effort"]
+context_window = 1000000
+max_output_tokens = 32000
+
+[[models]]
+alias = "ds-pro"
+provider = "deepseek"
+id = "deepseek-v4-pro"
+description = "DeepSeek-V4-Pro for harder tasks"
+features = ["effort"]
+context_window = 1000000
+max_output_tokens = 32000
+
+# GLM-5.3 always reasons; 1M context, up to 128K output.
+[[models]]
+alias = "glm"
+provider = "zai"
+id = "glm-5.3"
+description = "GLM-5.3, always reasons"
+context_window = 1000000
+max_output_tokens = 32000
+
+# Optional fields:
+#   description = "..."
+#     One line shown in the /model picker.
+#   features = ["adaptive_thinking", "effort", "eager_input_streaming", "anthropic_text_editor"]
+#     Anthropic extensions to send; omit for compatible endpoints.
+#   compact_model = "<alias>"
+#     Model that summarizes history; defaults to this model.
+#
+# A local server speaking the Anthropic Messages format (http is allowed
+# only on localhost):
+#
+# [providers.local]
+# wire = "anthropic"
+# base_url = "http://localhost:11434"
+# api_key_env = "LOCAL_API_KEY"

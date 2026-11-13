@@ -95,6 +95,27 @@ impl Message {
     }
 }
 
+/// Removes thinking blocks, whose signatures only the model that produced
+/// them accepts. Returns how many were removed. An assistant message left
+/// empty keeps a placeholder so the history stays well-formed.
+pub(crate) fn strip_thinking(messages: &mut [Message]) -> usize {
+    let mut removed = 0;
+    for message in messages {
+        let MessageContent::Blocks(blocks) = &mut message.content else {
+            continue;
+        };
+        let before = blocks.len();
+        blocks.retain(|block| !matches!(block, ContentBlock::Thinking { .. }));
+        removed += before - blocks.len();
+        if blocks.is_empty() && before > 0 {
+            blocks.push(ContentBlock::Text {
+                text: "(reasoning omitted)".to_string(),
+            });
+        }
+    }
+    removed
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub(crate) enum MessageContent {
@@ -112,7 +133,7 @@ pub(crate) enum Role {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentMessageRequest, Message};
+    use super::{AgentMessageRequest, ContentBlock, Message, MessageContent, strip_thinking};
     use crate::constants::DEFAULT_SYSTEM_PROMPT;
     use crate::tools::default_tools;
 
@@ -126,5 +147,42 @@ mod tests {
 
         assert_eq!(value["system"], DEFAULT_SYSTEM_PROMPT);
         assert!(value["system"].as_str().unwrap().contains("path:line"));
+    }
+
+    #[test]
+    fn strip_thinking_keeps_other_blocks_and_never_leaves_a_message_empty() {
+        let thinking = || ContentBlock::Thinking {
+            thinking: "plan".into(),
+            signature: "sig".into(),
+        };
+        let mut messages = vec![
+            Message::user_text("hi".into()),
+            Message::assistant_blocks(vec![
+                thinking(),
+                ContentBlock::Text {
+                    text: "answer".into(),
+                },
+            ]),
+            Message::assistant_blocks(vec![thinking()]),
+        ];
+
+        assert_eq!(strip_thinking(&mut messages), 2);
+        let blocks = |message: &Message| match &message.content {
+            MessageContent::Blocks(blocks) => blocks.clone(),
+            MessageContent::Text(_) => panic!("expected blocks"),
+        };
+        assert_eq!(
+            blocks(&messages[1]),
+            [ContentBlock::Text {
+                text: "answer".into()
+            }]
+        );
+        assert_eq!(
+            blocks(&messages[2]),
+            [ContentBlock::Text {
+                text: "(reasoning omitted)".into()
+            }]
+        );
+        assert_eq!(strip_thinking(&mut messages), 0);
     }
 }

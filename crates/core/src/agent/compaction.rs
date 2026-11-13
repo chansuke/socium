@@ -2,7 +2,7 @@ use crate::agent::turn::extract_text;
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
 use crate::constants::{
     COMPACTION_MAX_OUTPUT_TOKENS, COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS,
-    COMPACTION_SYSTEM_PROMPT, COMPACTION_TRIGGER_RATIO, DEFAULT_COMPACTION_MODEL,
+    COMPACTION_SYSTEM_PROMPT, COMPACTION_TRIGGER_RATIO,
 };
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, ProviderEvent};
@@ -52,15 +52,12 @@ pub(crate) struct CompactionRequest<'a> {
     pub messages: &'a [Message],
 }
 
-pub(crate) fn compaction_model() -> String {
-    env::var("COMPACT_MODEL").unwrap_or_else(|_| DEFAULT_COMPACTION_MODEL.to_string())
-}
-
 /// Summarize conversation history with a dedicated (cheap) model. Returns
 /// an error on transport failure or an empty completion; callers fall back
 /// to the deterministic summarizer.
 pub(crate) async fn summarize_with_llm(
     provider: &dyn Provider,
+    model: &str,
     client: &reqwest::Client,
     request: &CompactionRequest<'_>,
 ) -> Result<String, ProviderError> {
@@ -75,10 +72,9 @@ pub(crate) async fn summarize_with_llm(
     prompt.push_str(&transcript);
     prompt.push_str("\n</transcript>");
 
-    let model = compaction_model();
     let messages = [Message::user_text(prompt)];
     let message_request = AgentMessageRequest::with_system_prompt(
-        &model,
+        model,
         COMPACTION_MAX_OUTPUT_TOKENS,
         COMPACTION_SYSTEM_PROMPT,
         &messages,
@@ -174,7 +170,7 @@ fn truncate_for_transcript(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::{CompactionRequest, render_transcript_for_compaction, summarize_with_llm};
     use crate::agent::types::{ContentBlock, Message};
-    use crate::constants::COMPACTION_SYSTEM_PROMPT;
+    use crate::constants::{COMPACTION_SYSTEM_PROMPT, DEFAULT_COMPACTION_MODEL};
     use crate::test_support::{ScriptedProvider, text_provider_response};
     use serde_json::json;
 
@@ -264,7 +260,7 @@ mod tests {
             messages: &messages,
         };
 
-        let summary = summarize_with_llm(&provider, &client, &request)
+        let summary = summarize_with_llm(&provider, DEFAULT_COMPACTION_MODEL, &client, &request)
             .await
             .unwrap();
         assert_eq!(summary, "1. User request: fix the bug");
@@ -288,7 +284,8 @@ mod tests {
             messages: &messages,
         };
 
-        let result = summarize_with_llm(&provider, &client, &request).await;
+        let result =
+            summarize_with_llm(&provider, DEFAULT_COMPACTION_MODEL, &client, &request).await;
 
         assert!(result.is_err());
     }

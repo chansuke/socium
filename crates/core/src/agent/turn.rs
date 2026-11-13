@@ -15,6 +15,7 @@ pub(crate) struct TurnContext<'a> {
     pub(crate) provider: &'a dyn Provider,
     pub(crate) client: &'a reqwest::Client,
     pub(crate) model: &'a str,
+    pub(crate) context_window: Option<u32>,
     pub(crate) max_tokens: u32,
     pub(crate) tools: &'a [ToolDefinition],
     pub(crate) control: &'a crate::TaskControl,
@@ -51,7 +52,7 @@ where
         };
         on_progress(AgentProgress::ModelRequestStarted {
             round: round_number,
-            provider: ctx.provider.kind().to_string(),
+            provider: ctx.provider.label(),
         });
         emit(
             on_progress,
@@ -60,11 +61,8 @@ where
             },
         );
         validate_protocol(messages)?;
-        let budget = crate::agent::context::resolve_context_budget(
-            ctx.provider.kind(),
-            ctx.model,
-            ctx.max_tokens,
-        )?;
+        let budget =
+            crate::agent::context::resolve_context_budget(ctx.context_window, ctx.max_tokens)?;
         if crate::agent::context::estimate_request_tokens(
             ctx.model,
             ctx.max_tokens,

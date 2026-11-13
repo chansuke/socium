@@ -3,6 +3,7 @@ mod agent_task;
 mod app;
 mod approval;
 mod input_history;
+mod model_picker;
 mod progress;
 mod slash_command;
 mod transcript;

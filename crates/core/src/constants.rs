@@ -1,4 +1,3 @@
-pub const ANTHROPIC_MESSAGES_API: &str = "https://api.anthropic.com/v1/messages";
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 // Thinking cannot be turned off on the default model and counts toward
 // max_tokens, so leave room for it as well as the visible answer.

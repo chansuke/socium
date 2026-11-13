@@ -5,6 +5,7 @@ pub mod activity;
 mod activity_log;
 mod control;
 mod execution;
+mod models;
 mod process;
 pub use control::TaskControl;
 pub use execution::SANDBOX_DESCRIPTION;
@@ -24,22 +25,111 @@ use crate::agent::compaction::{
     CompactionRequest, compaction_threshold_tokens, retention_boundary, summarize_with_llm,
 };
 use crate::agent::context::{
-    context_metrics_for_input, prepare_context_messages, resolve_context_budget, summarize_messages,
+    context_metrics_for_input, history_input_tokens, prepare_context_messages,
+    resolve_context_budget, summarize_messages,
 };
 use crate::agent::state::{
     ConversationState, ConversationStateRef, ConversationSummary, ConversationSummaryState,
     load_json_file, save_json_file,
 };
 use crate::agent::turn::{TurnContext, run_agent_turn};
-use crate::agent::types::Message;
+use crate::agent::types::{Message, strip_thinking};
 use crate::constants::*;
+use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::error::ProviderError;
-use crate::providers::{Provider, TokenUsage, provider_from_env};
-use crate::tools::{ToolDefinition, default_tools};
+use crate::providers::{Provider, TokenUsage, build_provider};
+use crate::tools::{ToolDefinition, tools_for_model};
 use std::env;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+
+/// Reads configuration and API keys. Injected so tests never touch the
+/// process environment.
+type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// A registered model as `/model` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    pub alias: String,
+    pub provider: String,
+    pub model_id: String,
+    /// One line for the picker, from `description` in models.toml.
+    pub description: Option<String>,
+    pub active: bool,
+    /// Why the model cannot be selected now, such as a missing API key.
+    pub unavailable: Option<String>,
+}
+
+/// Result of `/model <alias>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSwitch {
+    pub model: ModelChoice,
+    /// Settings the new model ignores, a compaction model that could not
+    /// be reached, or a history too large for the new model.
+    pub warnings: Vec<String>,
+    /// The history reaches the new model's compaction threshold; compact
+    /// before the next turn instead of trimming it.
+    pub needs_compaction: bool,
+}
+
+/// Everything that changes together when the model changes.
+struct ModelTarget {
+    model: ModelConfig,
+    provider: Box<dyn Provider>,
+    /// `None` summarizes with `provider`.
+    compaction_provider: Option<Box<dyn Provider>>,
+    compaction_model: String,
+    warnings: Vec<String>,
+}
+
+impl ModelTarget {
+    fn build(
+        registry: &ModelRegistry,
+        model: ModelConfig,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, ProviderError> {
+        let provider_config = registry.provider(&model.provider).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("Unknown provider '{}'", model.provider),
+            )
+        })?;
+        let provider = build_provider(provider_config, &model, lookup)?;
+        let mut warnings = Vec::new();
+        let compact = model
+            .compact_model
+            .as_deref()
+            .filter(|alias| *alias != model.alias)
+            .and_then(|alias| registry.find(alias));
+        let (compaction_provider, compaction_model) = match compact {
+            None => (None, model.id.clone()),
+            Some(compact) => match registry
+                .provider(&compact.provider)
+                .ok_or_else(|| format!("unknown provider '{}'", compact.provider))
+                .and_then(|config| {
+                    build_provider(config, compact, lookup).map_err(|err| err.to_string())
+                }) {
+                Ok(provider) => (Some(provider), compact.id.clone()),
+                Err(err) => {
+                    warnings.push(format!(
+                        "Compaction model '{}' is unavailable ({err}); summarizing with '{}'",
+                        compact.alias, model.alias
+                    ));
+                    (None, model.id.clone())
+                }
+            },
+        };
+        Ok(Self {
+            model,
+            provider,
+            compaction_provider,
+            compaction_model,
+            warnings,
+        })
+    }
+}
 
 pub struct AgentReply {
     pub text: String,
@@ -142,11 +232,22 @@ pub struct AgentService {
     messages: Vec<Message>,
     events: Vec<serde_json::Value>,
     summary_state: ConversationSummaryState,
+    registry: ModelRegistry,
+    active_model: ModelConfig,
+    /// Alias chosen with `/model` and saved with the conversation. `None`
+    /// leaves the choice to `MODEL` and the registry default.
+    selected_model: Option<String>,
     provider: Box<dyn Provider>,
-    model: String,
+    compaction_provider: Option<Box<dyn Provider>>,
+    compaction_model: String,
+    env: EnvLookup,
+    /// `MAX_TOKENS`, used when the model sets no `max_output_tokens`.
+    max_tokens_override: Option<u32>,
     max_tokens: u32,
     tools: Vec<ToolDefinition>,
     client: reqwest::Client,
+    /// Configuration problems found while choosing the startup model.
+    warnings: Vec<String>,
     /// Usage measured on the most recent model call. Volatile: not
     /// persisted, so the first turn after a restart falls back to the
     /// heuristic estimate.
@@ -169,6 +270,7 @@ impl AgentService {
     /// Construction seam that takes the provider and HTTP client directly,
     /// so tests can inject a mock `Provider` without touching the
     /// environment or the network.
+    #[cfg(test)]
     pub(crate) fn with_provider(
         workspace_root: PathBuf,
         provider: Box<dyn Provider>,
@@ -176,10 +278,35 @@ impl AgentService {
         max_tokens: u32,
         client: reqwest::Client,
     ) -> Self {
+        let target = ModelTarget {
+            model: ModelConfig::ad_hoc(&model),
+            provider,
+            compaction_provider: None,
+            compaction_model: DEFAULT_COMPACTION_MODEL.to_string(),
+            warnings: Vec::new(),
+        };
+        Self::new(
+            workspace_root,
+            ModelRegistry::builtin(),
+            target,
+            Arc::new(|_| None),
+            Some(max_tokens),
+            client,
+        )
+    }
+
+    fn new(
+        workspace_root: PathBuf,
+        registry: ModelRegistry,
+        target: ModelTarget,
+        env: EnvLookup,
+        max_tokens_override: Option<u32>,
+        client: reqwest::Client,
+    ) -> Self {
         let conversation_path = workspace_root
             .join(STATE_DIR_NAME)
             .join(CONVERSATION_STATE_FILE_NAME);
-        Self {
+        let mut service = Self {
             control: TaskControl::default(),
             state_lock: None,
             workspace_root,
@@ -187,27 +314,37 @@ impl AgentService {
             messages: Vec::new(),
             events: Vec::new(),
             summary_state: ConversationSummaryState::default(),
-            provider,
-            model,
-            max_tokens,
-            tools: default_tools(),
+            registry,
+            active_model: target.model,
+            selected_model: None,
+            provider: target.provider,
+            compaction_provider: target.compaction_provider,
+            compaction_model: target.compaction_model,
+            env,
+            max_tokens_override,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            tools: Vec::new(),
             client,
+            warnings: target.warnings,
             last_measured_usage: None,
-        }
+        };
+        service.apply_model_limits();
+        service
     }
 
     pub fn from_env(workspace_root: PathBuf) -> Result<Self, AgentError> {
-        let provider = provider_from_env()?;
-        let model = env::var("MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        let max_tokens = env::var("MAX_TOKENS")
-            .unwrap_or_else(|_| DEFAULT_MAX_TOKENS.to_string())
-            .parse::<u32>()
-            .map_err(|e| {
-                Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("MAX_TOKENS must be an unsigned integer: {e}"),
-                )
-            })?;
+        let lookup: EnvLookup = Arc::new(|key| env::var(key).ok());
+        let registry = ModelRegistry::load(lookup.as_ref())?;
+        let max_tokens_override = lookup("MAX_TOKENS")
+            .map(|raw| {
+                raw.parse::<u32>().map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        format!("MAX_TOKENS must be an unsigned integer: {e}"),
+                    )
+                })
+            })
+            .transpose()?;
         let client = provider_http_client()?;
 
         // Check actual enforcement before advertising a usable agent. A missing
@@ -227,9 +364,229 @@ impl AgentService {
             .into());
         }
 
-        let mut service = Self::with_provider(workspace_root, provider, model, max_tokens, client);
-        service.restore_state()?;
+        Self::open(
+            workspace_root,
+            registry,
+            lookup,
+            max_tokens_override,
+            client,
+        )
+    }
+
+    /// Restores the workspace conversation and selects its model: the
+    /// alias saved with `/model`, then `MODEL`, then the registry default.
+    /// A candidate that cannot be built is skipped with a warning; only the
+    /// last one is fatal. History is stripped of thinking when the model
+    /// differs from the saved one.
+    pub(crate) fn open(
+        workspace_root: PathBuf,
+        registry: ModelRegistry,
+        lookup: EnvLookup,
+        max_tokens_override: Option<u32>,
+        client: reqwest::Client,
+    ) -> Result<Self, AgentError> {
+        let state_lock = crate::agent::state::lock_workspace(&workspace_root)?;
+        let state = load_json_file::<ConversationState>(&workspace_state_path(
+            &workspace_root,
+            CONVERSATION_STATE_FILE_NAME,
+        )?)?;
+
+        let mut warnings = Vec::new();
+        if lookup("COMPACT_MODEL").is_some() {
+            warnings.push(
+                "COMPACT_MODEL is no longer supported and is ignored; set compact_model for the model in models.toml"
+                    .to_string(),
+            );
+        }
+        let saved = state.active_model.clone();
+        let mut candidates = Vec::new();
+        if let Some(alias) = &saved {
+            match registry.find(alias) {
+                Some(model) => candidates.push(model.clone()),
+                None => warnings.push(format!(
+                    "Saved model '{alias}' is no longer registered; using the default"
+                )),
+            }
+        }
+        if let Some(value) = lookup("MODEL").filter(|value| !value.trim().is_empty()) {
+            candidates.push(registry.resolve_env_model(value.trim()));
+        }
+        candidates.push(registry.default_model().clone());
+        candidates.dedup();
+
+        let last = candidates.len() - 1;
+        let mut target = None;
+        for (index, model) in candidates.into_iter().enumerate() {
+            let alias = model.alias.clone();
+            match ModelTarget::build(&registry, model, lookup.as_ref()) {
+                Ok(built) => {
+                    target = Some(built);
+                    break;
+                }
+                Err(err) if index < last => {
+                    warnings.push(format!("Model '{alias}' is unavailable: {err}"))
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        let mut target = target.expect("the last candidate either builds or returns");
+        warnings.append(&mut target.warnings);
+        target.warnings = warnings;
+
+        let mut service = Self::new(
+            workspace_root,
+            registry,
+            target,
+            lookup,
+            max_tokens_override,
+            client,
+        );
+        service.state_lock = Some(state_lock);
+        service.apply_state(state)?;
+        if let Some(alias) = saved {
+            if alias == service.active_model.alias {
+                service.selected_model = Some(alias);
+            } else {
+                strip_thinking(&mut service.messages);
+            }
+        }
+        service.persist_state()?;
         Ok(service)
+    }
+
+    /// Makes `target` current and returns the previous one, so a failed
+    /// switch can be undone.
+    fn install(&mut self, mut target: ModelTarget) -> ModelTarget {
+        std::mem::swap(&mut self.active_model, &mut target.model);
+        std::mem::swap(&mut self.provider, &mut target.provider);
+        std::mem::swap(
+            &mut self.compaction_provider,
+            &mut target.compaction_provider,
+        );
+        std::mem::swap(&mut self.compaction_model, &mut target.compaction_model);
+        self.apply_model_limits();
+        target
+    }
+
+    fn apply_model_limits(&mut self) {
+        self.max_tokens = self
+            .active_model
+            .max_output_tokens
+            .or(self.max_tokens_override)
+            .unwrap_or(DEFAULT_MAX_TOKENS);
+        self.tools = tools_for_model(self.active_model.features.anthropic_text_editor);
+    }
+
+    fn model_choice(&self, model: &ModelConfig) -> ModelChoice {
+        let unavailable = match self.registry.provider(&model.provider) {
+            None => Some(format!("unknown provider '{}'", model.provider)),
+            Some(provider) => (self.env)(&provider.api_key_env)
+                .filter(|key| !key.is_empty())
+                .is_none()
+                .then(|| format!("{} is not set", provider.api_key_env)),
+        };
+        ModelChoice {
+            alias: model.alias.clone(),
+            provider: model.provider.clone(),
+            model_id: model.id.clone(),
+            description: model.description.clone(),
+            active: *model == self.active_model,
+            unavailable,
+        }
+    }
+
+    pub fn active_model(&self) -> ModelChoice {
+        let mut choice = self.model_choice(&self.active_model);
+        choice.unavailable = None;
+        choice
+    }
+
+    /// Registered models in registry order, plus the current model when it
+    /// came from `MODEL` rather than the registry.
+    pub fn available_models(&self) -> Vec<ModelChoice> {
+        let mut choices = self
+            .registry
+            .models
+            .iter()
+            .map(|model| self.model_choice(model))
+            .collect::<Vec<_>>();
+        if !self.registry.is_registered(&self.active_model) {
+            choices.push(self.active_model());
+        }
+        choices
+    }
+
+    /// Switches the conversation to a registered model between turns. The
+    /// choice is saved with the conversation, and thinking from the
+    /// previous model is removed from history.
+    pub fn switch_model(&mut self, alias: &str) -> Result<ModelSwitch, AgentError> {
+        self.ensure_state_lock()?;
+        let model = self.registry.find(alias).cloned().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("Unknown model '{alias}'; type /model to list models"),
+            )
+        })?;
+        if model == self.active_model {
+            // Choosing the current model still records the choice.
+            if self.selected_model.as_deref() != Some(alias) {
+                let previous = self.selected_model.replace(alias.to_string());
+                if let Err(err) = self.persist_state() {
+                    self.selected_model = previous;
+                    return Err(err.into());
+                }
+            }
+            return Ok(ModelSwitch {
+                model: self.active_model(),
+                warnings: Vec::new(),
+                needs_compaction: false,
+            });
+        }
+        let mut target = ModelTarget::build(&self.registry, model, self.env.as_ref())?;
+        let mut warnings = std::mem::take(&mut target.warnings);
+        let original_messages = self.messages.clone();
+        strip_thinking(&mut self.messages);
+        let previous = self.install(target);
+        let previous_selection = self.selected_model.replace(alias.to_string());
+        if let Err(err) = self.persist_state() {
+            self.messages = original_messages;
+            self.install(previous);
+            self.selected_model = previous_selection;
+            return Err(err.into());
+        }
+        // The last measurement described another model's prompt.
+        self.last_measured_usage = None;
+        warnings.extend(self.provider.startup_warnings());
+        let needs_compaction = match self.history_pressure()? {
+            Some((history, budget)) => {
+                warnings.push(format!(
+                    "History is about {history} tokens, near or over {alias}'s input budget of {budget}; compact it before continuing"
+                ));
+                true
+            }
+            None => false,
+        };
+        Ok(ModelSwitch {
+            model: self.active_model(),
+            warnings,
+            needs_compaction,
+        })
+    }
+
+    /// The estimated history and input budget when the history reaches the
+    /// compaction threshold of the current model.
+    fn history_pressure(&self) -> std::io::Result<Option<(u32, u32)>> {
+        let budget = resolve_context_budget(self.active_model.context_window, self.max_tokens)?;
+        let history = history_input_tokens(
+            &self.messages,
+            &self.summary_state,
+            &self.active_model.id,
+            budget,
+            &self.tools,
+        );
+        let input_budget = budget.input_budget_tokens();
+        Ok((history >= compaction_threshold_tokens(input_budget))
+            .then_some((history, input_budget)))
     }
 
     pub fn task_control(&self) -> TaskControl {
@@ -243,10 +600,16 @@ impl AgentService {
         Ok(())
     }
 
+    #[cfg(test)]
     fn restore_state(&mut self) -> std::io::Result<()> {
         self.ensure_state_lock()?;
         workspace_state_path(&self.workspace_root, CONVERSATION_STATE_FILE_NAME)?;
         let state = load_json_file::<ConversationState>(&self.conversation_path)?;
+        self.apply_state(state)?;
+        self.persist_state()
+    }
+
+    fn apply_state(&mut self, state: ConversationState) -> std::io::Result<()> {
         if state.schema_version > 1 {
             return Err(std::io::Error::other(format!(
                 "Unsupported conversation schema {}; original file preserved",
@@ -269,7 +632,7 @@ impl AgentService {
                 "Summary coverage exceeds conversation history; original state preserved",
             ));
         }
-        self.persist_state()
+        Ok(())
     }
 
     pub fn clear(&mut self) -> std::io::Result<()> {
@@ -304,7 +667,9 @@ impl AgentService {
 
     /// Tolerated configuration problems to show once at startup.
     pub fn startup_warnings(&self) -> Vec<String> {
-        self.provider.startup_warnings()
+        let mut warnings = self.warnings.clone();
+        warnings.extend(self.provider.startup_warnings());
+        warnings
     }
 
     pub fn transcript_entries(&self) -> Vec<TranscriptEntry> {
@@ -409,8 +774,8 @@ impl AgentService {
         let prepared_context = prepare_context_messages(
             &self.messages,
             &self.summary_state,
-            self.provider.kind(),
-            &self.model,
+            self.active_model.context_window,
+            &self.active_model.id,
             self.max_tokens,
             &self.tools,
         )?;
@@ -419,7 +784,8 @@ impl AgentService {
         let turn_context = TurnContext {
             provider: self.provider.as_ref(),
             client: &self.client,
-            model: &self.model,
+            model: &self.active_model.id,
+            context_window: self.active_model.context_window,
             max_tokens: self.max_tokens,
             tools: &self.tools,
             workspace_root: &self.workspace_root,
@@ -427,6 +793,7 @@ impl AgentService {
             clock,
         };
         let raw_len = self.messages.len();
+        let active_model = self.selected_model.clone();
         self.summary_state = prepared_context.summary_state;
         let path = &self.conversation_path;
         let raw_messages = &mut self.messages;
@@ -445,6 +812,7 @@ impl AgentService {
                     messages: raw_messages,
                     events,
                     summary_state: summary,
+                    active_model: active_model.as_deref(),
                 },
             )
         };
@@ -484,8 +852,8 @@ impl AgentService {
             &self.messages,
             pending_user_input,
             &self.summary_state,
-            self.provider.kind(),
-            &self.model,
+            self.active_model.context_window,
+            &self.active_model.id,
             self.max_tokens,
             &self.tools,
         )?;
@@ -508,7 +876,7 @@ impl AgentService {
         let Some(usage) = self.last_measured_usage else {
             return Ok(false);
         };
-        let budget = resolve_context_budget(self.provider.kind(), &self.model, self.max_tokens)?;
+        let budget = resolve_context_budget(self.active_model.context_window, self.max_tokens)?;
         let threshold = compaction_threshold_tokens(budget.input_budget_tokens());
         Ok(usage.total_input_tokens() >= threshold)
     }
@@ -537,7 +905,12 @@ impl AgentService {
         let summary_result = tokio::select! {
             biased;
             _ = self.control.cancelled() => return Err(AgentError::Cancelled),
-            result = summarize_with_llm(self.provider.as_ref(), &self.client, &compaction_request) => result,
+            result = summarize_with_llm(
+                self.compaction_provider.as_deref().unwrap_or(self.provider.as_ref()),
+                &self.compaction_model,
+                &self.client,
+                &compaction_request,
+            ) => result,
         };
         let (text, used_llm) = match summary_result {
             Ok(text) => (text, true),
@@ -575,6 +948,7 @@ impl AgentService {
                 messages: &self.messages,
                 events: &self.events,
                 summary_state: &self.summary_state,
+                active_model: self.selected_model.as_deref(),
             },
         )
     }
@@ -588,13 +962,11 @@ mod security_tests;
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::state::ConversationSummaryState;
     use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
     use crate::constants::{CONVERSATION_STATE_FILE_NAME, STATE_DIR_NAME};
     use crate::providers::TokenUsage;
     use crate::providers::anthropic::AnthropicProvider;
     use crate::test_support::{ScriptedProvider, make_temp_dir, text_provider_response};
-    use crate::tools::default_tools;
     use crate::{AgentService, TranscriptEntry, TranscriptRole};
     use serde_json::json;
 
@@ -633,21 +1005,15 @@ mod tests {
             },
         ];
 
-        let service = AgentService {
-            control: crate::TaskControl::default(),
-            state_lock: None,
-            workspace_root: workspace.path().to_path_buf(),
-            conversation_path,
-            messages,
-            events: Vec::new(),
-            summary_state: ConversationSummaryState::default(),
-            provider: Box::new(AnthropicProvider::with_credentials("test", "2023-06-01")),
-            model: "test-model".to_string(),
-            max_tokens: 128,
-            tools: default_tools(),
-            client: reqwest::Client::builder().build().unwrap(),
-            last_measured_usage: None,
-        };
+        let mut service = AgentService::with_provider(
+            workspace.path().to_path_buf(),
+            Box::new(AnthropicProvider::with_credentials("test", "2023-06-01")),
+            "test-model".to_string(),
+            128,
+            reqwest::Client::builder().build().unwrap(),
+        );
+        service.conversation_path = conversation_path;
+        service.messages = messages;
 
         let entries = service.transcript_entries();
         assert_eq!(entries.len(), 3);
@@ -867,7 +1233,323 @@ mod tests {
         let metrics_after = service.context_metrics("").unwrap();
         assert_eq!(metrics_after.measured_input_tokens, Some(1_500));
     }
+
+    mod model_switching {
+        use super::*;
+        use crate::models::ModelRegistry;
+        use crate::tools::ToolDefinition;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        const MODELS: &str = r#"
+[providers.deepseek]
+wire = "anthropic"
+base_url = "https://api.deepseek.com/anthropic"
+api_key_env = "DEEPSEEK_API_KEY"
+auth = "bearer"
+
+[[models]]
+alias = "ds-flash"
+provider = "deepseek"
+id = "deepseek-flash"
+context_window = 1000000
+max_output_tokens = 32000
+"#;
+
+        fn lookup(pairs: &[(&str, &str)]) -> super::super::EnvLookup {
+            let map = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<HashMap<_, _>>();
+            Arc::new(move |key| map.get(key).cloned())
+        }
+
+        fn open(root: &std::path::Path, env: &[(&str, &str)]) -> AgentService {
+            AgentService::open(
+                root.to_path_buf(),
+                ModelRegistry::from_toml(MODELS).unwrap(),
+                lookup(env),
+                None,
+                reqwest::Client::new(),
+            )
+            .unwrap()
+        }
+
+        const KEYS: [(&str, &str); 2] = [("ANTHROPIC_API_KEY", "a"), ("DEEPSEEK_API_KEY", "d")];
+
+        fn with_model(model: &str) -> Vec<(&str, &str)> {
+            let mut env = KEYS.to_vec();
+            env.push(("MODEL", model));
+            env
+        }
+
+        fn saved_state(root: &std::path::Path) -> serde_json::Value {
+            let path = root.join(STATE_DIR_NAME).join(CONVERSATION_STATE_FILE_NAME);
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        }
+
+        fn thinking_turn() -> Vec<Message> {
+            vec![
+                Message::user_text("hi".into()),
+                Message::assistant_blocks(vec![
+                    ContentBlock::Thinking {
+                        thinking: "plan".into(),
+                        signature: "sig".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "answer".into(),
+                    },
+                ]),
+            ]
+        }
+
+        fn has_thinking(messages: &[Message]) -> bool {
+            messages.iter().any(|message| {
+                matches!(&message.content, MessageContent::Blocks(blocks)
+                    if blocks.iter().any(|b| matches!(b, ContentBlock::Thinking { .. })))
+            })
+        }
+
+        #[test]
+        fn startup_uses_model_env_then_the_registry_default() {
+            let root = make_temp_dir("model_startup");
+            let service = open(root.path(), &with_model("sonnet"));
+            assert_eq!(service.active_model().alias, "sonnet");
+            assert!(saved_state(root.path()).get("active_model").is_none());
+            drop(service);
+
+            // Only a /model choice is saved, so a changed MODEL takes effect.
+            let service = open(root.path(), &KEYS);
+            assert_eq!(service.active_model().alias, "opus");
+            assert_eq!(service.compaction_model, "claude-haiku-5-5");
+            assert!(service.compaction_provider.is_some());
+        }
+
+        #[test]
+        fn a_switch_is_saved_and_wins_over_model_env_after_restart() {
+            let root = make_temp_dir("model_saved");
+            let mut service = open(root.path(), &with_model("sonnet"));
+            service.messages = thinking_turn();
+            let switched = service.switch_model("ds-flash").unwrap();
+            assert_eq!(switched.model.model_id, "deepseek-flash");
+            assert!(switched.model.active);
+            assert!(!has_thinking(&service.messages));
+            let state = saved_state(root.path());
+            assert_eq!(state["active_model"], "ds-flash");
+            assert!(!state.to_string().contains("\"thinking\""));
+            drop(service);
+
+            let service = open(root.path(), &with_model("sonnet"));
+            assert_eq!(service.active_model().alias, "ds-flash");
+            assert!(service.startup_warnings().is_empty());
+        }
+
+        #[test]
+        fn an_unavailable_saved_model_falls_back_with_a_warning_and_strips_thinking() {
+            let root = make_temp_dir("model_fallback");
+            let mut service = open(root.path(), &KEYS);
+            service.switch_model("ds-flash").unwrap();
+            service.messages = thinking_turn();
+            service.persist_state().unwrap();
+            drop(service);
+
+            let service = open(
+                root.path(),
+                &[("ANTHROPIC_API_KEY", "a"), ("MODEL", "sonnet")],
+            );
+            assert_eq!(service.active_model().alias, "sonnet");
+            let warnings = service.startup_warnings();
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("'ds-flash'"));
+            assert!(warnings[0].contains("DEEPSEEK_API_KEY is not set"));
+            assert!(!has_thinking(&service.messages));
+            assert!(saved_state(root.path()).get("active_model").is_none());
+        }
+
+        #[test]
+        fn switching_to_a_smaller_window_asks_for_compaction() {
+            let root = make_temp_dir("model_small_window");
+            let registry = ModelRegistry::from_toml(
+                r#"
+[[models]]
+alias = "small"
+provider = "anthropic"
+id = "claude-small"
+context_window = 20000
+max_output_tokens = 4000
+"#,
+            )
+            .unwrap();
+            let mut service = AgentService::open(
+                root.path().to_path_buf(),
+                registry,
+                lookup(&KEYS),
+                None,
+                reqwest::Client::new(),
+            )
+            .unwrap();
+            service.messages = (0..40)
+                .map(|i| Message::user_text(format!("{i} {}", "word ".repeat(400))))
+                .collect();
+
+            let small = service.switch_model("small").unwrap();
+            assert!(small.needs_compaction);
+            assert!(
+                small
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("small's input budget of 16000"))
+            );
+
+            let large = service.switch_model("opus").unwrap();
+            assert!(!large.needs_compaction);
+            assert!(large.warnings.is_empty(), "{:?}", large.warnings);
+        }
+
+        #[test]
+        fn choosing_the_current_model_saves_the_choice() {
+            let root = make_temp_dir("model_same");
+            let mut service = open(root.path(), &with_model("sonnet"));
+            service.messages = thinking_turn();
+            service.switch_model("sonnet").unwrap();
+            assert!(has_thinking(&service.messages));
+            assert_eq!(saved_state(root.path())["active_model"], "sonnet");
+        }
+
+        #[test]
+        fn ignored_settings_are_warned_about_once() {
+            let root = make_temp_dir("model_warn_once");
+            let mut env = KEYS.to_vec();
+            env.extend([("EFFORT", "high"), ("MODEL", "ds-flash")]);
+            let mut service = open(root.path(), &env);
+            let warnings = service.startup_warnings();
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("EFFORT is ignored for ds-flash"));
+
+            service.switch_model("opus").unwrap();
+            let back = service.switch_model("ds-flash").unwrap();
+            assert_eq!(back.warnings.len(), 1, "{:?}", back.warnings);
+        }
+
+        #[test]
+        fn a_saved_alias_removed_from_the_registry_is_reported() {
+            let root = make_temp_dir("model_removed");
+            let mut service = open(root.path(), &KEYS);
+            service.switch_model("ds-flash").unwrap();
+            drop(service);
+
+            let service = AgentService::open(
+                root.path().to_path_buf(),
+                ModelRegistry::builtin(),
+                lookup(&KEYS),
+                None,
+                reqwest::Client::new(),
+            )
+            .unwrap();
+            assert_eq!(service.active_model().alias, "opus");
+            assert!(service.startup_warnings()[0].contains("'ds-flash' is no longer registered"));
+        }
+
+        #[test]
+        fn the_last_candidate_failing_is_a_startup_error() {
+            let root = make_temp_dir("model_no_key");
+            let err = AgentService::open(
+                root.path().to_path_buf(),
+                ModelRegistry::builtin(),
+                lookup(&[]),
+                None,
+                reqwest::Client::new(),
+            )
+            .err()
+            .unwrap();
+            assert!(err.to_string().contains("ANTHROPIC_API_KEY is not set"));
+        }
+
+        #[test]
+        fn switching_applies_the_models_limits_tools_and_compaction() {
+            let root = make_temp_dir("model_limits");
+            let mut service = open(root.path(), &KEYS);
+            assert!(
+                service
+                    .tools
+                    .iter()
+                    .any(|tool| matches!(tool, ToolDefinition::AnthropicTextEditor(_)))
+            );
+            service.last_measured_usage = Some(TokenUsage::default());
+
+            service.switch_model("ds-flash").unwrap();
+            assert_eq!(service.max_tokens, 32_000);
+            assert!(
+                service
+                    .tools
+                    .iter()
+                    .all(|tool| matches!(tool, ToolDefinition::Custom(_)))
+            );
+            assert_eq!(service.compaction_model, "deepseek-flash");
+            assert!(service.compaction_provider.is_none());
+            assert!(service.last_measured_usage.is_none());
+            assert_eq!(
+                service.context_metrics("").unwrap().context_window_tokens,
+                1_000_000
+            );
+        }
+
+        #[test]
+        fn unknown_or_unavailable_models_leave_the_current_one() {
+            let root = make_temp_dir("model_reject");
+            let mut service = open(root.path(), &[("ANTHROPIC_API_KEY", "a")]);
+            service.messages = thinking_turn();
+
+            let unknown = service.switch_model("gpt-9").err().unwrap();
+            assert!(unknown.to_string().contains("Unknown model 'gpt-9'"));
+            let missing = service.switch_model("ds-flash").err().unwrap();
+            assert!(missing.to_string().contains("DEEPSEEK_API_KEY is not set"));
+
+            assert_eq!(service.active_model().alias, "opus");
+            assert!(has_thinking(&service.messages));
+        }
+
+        #[test]
+        fn the_model_list_marks_the_active_model_and_missing_keys() {
+            let root = make_temp_dir("model_list");
+            let service = open(root.path(), &[("ANTHROPIC_API_KEY", "a")]);
+            let choices = service.available_models();
+            let aliases = choices.iter().map(|c| c.alias.as_str()).collect::<Vec<_>>();
+            assert_eq!(aliases, ["opus", "sonnet", "haiku", "ds-flash"]);
+            assert!(choices[0].active && choices[0].unavailable.is_none());
+            assert_eq!(
+                choices[3].unavailable.as_deref(),
+                Some("DEEPSEEK_API_KEY is not set")
+            );
+        }
+
+        #[test]
+        fn an_ad_hoc_model_env_is_listed_but_not_saved() {
+            let root = make_temp_dir("model_ad_hoc");
+            let service = open(root.path(), &with_model("claude-future-1"));
+            assert_eq!(service.active_model().model_id, "claude-future-1");
+            assert!(
+                service
+                    .available_models()
+                    .last()
+                    .is_some_and(|choice| choice.active && choice.alias == "claude-future-1")
+            );
+            assert!(saved_state(root.path()).get("active_model").is_none());
+        }
+
+        #[test]
+        fn compact_model_env_is_reported_as_unsupported() {
+            let root = make_temp_dir("model_compact_env");
+            let mut env = KEYS.to_vec();
+            env.push(("COMPACT_MODEL", "claude-haiku-5-5"));
+            let service = open(root.path(), &env);
+            assert!(service.startup_warnings()[0].contains("COMPACT_MODEL is no longer supported"));
+        }
+    }
 }
+
+#[cfg(test)]
+mod live_tests;
 
 #[cfg(test)]
 mod reliability_tests;

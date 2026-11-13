@@ -28,16 +28,81 @@ the sandbox at startup and refuses to run if isolation cannot be established.
 macOS and Windows execution are unsupported; there is no unsandboxed fallback.
 
 Set `ANTHROPIC_API_KEY` before starting. The default model is Claude Opus 5.5
-(`claude-opus-5-5`); set `MODEL` to override it at startup. `COMPACT_MODEL`
-separately controls the summarization model, which defaults to `claude-haiku-5-5`.
-Thinking is always adaptive. `THINKING_DISPLAY` chooses what the API returns as
-text: `summarized` (default; reasoning summaries and progress updates),
-`updates` (progress updates between tool calls only), or `omitted`. `EFFORT`
-(`low`, `medium`, `high`, `xhigh`, `max`) sets thinking depth; when unset the
-model's default applies. `THINKING_BUDGET_TOKENS` is no longer supported.
-`MAX_TOKENS` caps each response, thinking included, and defaults to 64000.
-Anthropic is currently the only supported provider. Other providers and Web
-search are planned. Model names must be available to your API account.
+(`claude-opus-5-5`); set `MODEL` to a model alias or ID to choose another at
+startup. Thinking is adaptive on Claude models. `THINKING_DISPLAY` chooses what
+the API returns as text: `summarized` (default; reasoning summaries and progress
+updates), `updates` (progress updates between tool calls only), or `omitted`.
+`EFFORT` (`low`, `medium`, `high`, `xhigh`, `max`) sets thinking depth; when
+unset the model's default applies. `THINKING_BUDGET_TOKENS` and `COMPACT_MODEL`
+are no longer supported. `MAX_TOKENS` caps each response, thinking included, and
+defaults to 64000 unless the model sets `max_output_tokens`. Model names must be
+available to your API account.
+
+### Models
+
+`/model` opens a numbered list of the registered models in place of the
+composer, with a check on the current one; choose with the arrow keys and Enter,
+or press its number. `/model <alias>` switches at once, and Tab completes the
+alias. Switching is allowed between turns only, removes earlier
+thinking blocks from the history (their signatures only work with the model
+that produced them), and is saved with the conversation, so a restart resumes
+the same model. At startup the saved choice wins over `MODEL`, which wins over
+the registry default.
+
+The built-in registry has `opus`, `sonnet`, and `haiku` on Anthropic. Add other
+endpoints that speak the Anthropic Messages format in
+`~/.config/socium/models.toml` (or `$XDG_CONFIG_HOME/socium/models.toml`, or the
+file named by `SOCIUM_MODELS_FILE`); start from
+[`models.toml.example`](models.toml.example). The file names the environment
+variable that holds each key, never the key itself:
+
+```toml
+default = "opus"
+
+[providers.deepseek]
+wire = "anthropic"
+base_url = "https://api.deepseek.com/anthropic"
+api_key_env = "DEEPSEEK_API_KEY"
+auth = "bearer"            # or "x-api-key" (default)
+
+[providers.zai]
+wire = "anthropic"
+base_url = "https://api.z.ai/api/anthropic"
+api_key_env = "ZAI_API_KEY"
+auth = "bearer"
+
+[[models]]
+alias = "ds-flash"
+provider = "deepseek"
+id = "deepseek-flash"        # DeepSeek-V4.1-Flash; deepseek-v4-pro is the larger model
+description = "DeepSeek-V4.1-Flash, fast and inexpensive"  # shown in /model
+features = ["effort"]
+context_window = 1000000
+max_output_tokens = 32000
+# compact_model = "ds-flash" # alias that summarizes history; defaults to this model
+
+[[models]]
+alias = "glm"
+provider = "zai"
+id = "glm-5.3"               # always reasons; 1M context, up to 128K output
+context_window = 1000000
+max_output_tokens = 32000
+```
+
+`base_url` must use HTTPS, except on localhost. Anthropic extensions (adaptive
+thinking, effort, eager tool input streaming, and the built-in text editor tool
+type) are sent only to models whose `features` list them; built-in Claude
+models list all four (`adaptive_thinking`, `effort`, `eager_input_streaming`,
+`anthropic_text_editor`), and other models get none, receiving the text editor
+as an ordinary JSON-schema tool. Model IDs above were checked against the
+DeepSeek and Z.ai documentation on 2026-11-13; DeepSeek rejects unknown
+non-Claude names with 400. To check a registered model against its real API
+(this costs money), run
+`SOCIUM_LIVE_MODEL=<alias> nix develop -c cargo test -p socium-core live_ -- --ignored`.
+OpenAI endpoints (including GPT-5, Ollama
+Cloud, and OpenRouter) are planned; see
+[ADR 6](docs/adr/0006-モデルを接続形式と接続先の組で登録しmodelコマンドで切り替える.md).
+Web search is also planned.
 
 Install Git, ripgrep (`rg`), and bubblewrap (`bwrap`, version 0.12 or newer).
 The Linux Nix package includes them on its runtime PATH. Use a project directory

@@ -10,12 +10,47 @@ use crate::tools::text_file::{
     truncate_by_characters,
 };
 use crate::tools::workspace::{resolve_workspace_path, resolve_workspace_path_for_create};
-use crate::tools::{AnthropicTextEditorToolDefinition, Tool, ToolContext, ToolDefinition};
+use crate::tools::{
+    AnthropicTextEditorToolDefinition, CustomToolDefinition, Tool, ToolContext, ToolDefinition,
+};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 
 pub(crate) struct TextEditorTool;
+
+/// The text editor as an ordinary JSON-schema tool with the same name and
+/// input, for models that do not know Anthropic's built-in tool type.
+pub(crate) fn portable_text_editor_definition() -> ToolDefinition {
+    ToolDefinition::Custom(CustomToolDefinition {
+        name: TEXT_EDITOR_TOOL_NAME.to_string(),
+        description: "View, create, and edit text files in the workspace. \
+view: show a file, or list a directory; view_range [start, end] limits the lines shown. \
+create: write file_text to a new file. \
+str_replace: replace the single exact occurrence of old_str with new_str. \
+insert: insert insert_text after line insert_line (0 inserts at the top)."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "enum": ["view", "create", "str_replace", "insert"]},
+                "path": {"type": "string", "description": "Workspace-relative path"},
+                "view_range": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "minItems": 2,
+                    "maxItems": 2
+                },
+                "file_text": {"type": "string"},
+                "old_str": {"type": "string"},
+                "new_str": {"type": "string"},
+                "insert_line": {"type": "integer", "minimum": 0},
+                "insert_text": {"type": "string"}
+            },
+            "required": ["command", "path"]
+        }),
+    })
+}
 
 impl Tool for TextEditorTool {
     fn name(&self) -> &'static str {

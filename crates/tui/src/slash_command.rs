@@ -6,6 +6,7 @@ pub(crate) enum SlashAction {
     Commands,
     Clear,
     Compact,
+    Model,
     Exit,
 }
 
@@ -14,6 +15,8 @@ pub(crate) struct SlashCommand {
     pub(crate) name: &'static str,
     pub(crate) description: &'static str,
     pub(crate) action: SlashAction,
+    /// Whether text may follow the name, as in `/model opus`.
+    pub(crate) takes_argument: bool,
 }
 
 pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
@@ -21,26 +24,37 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "help",
         description: "Show commands, key bindings, and sandbox policy",
         action: SlashAction::Help,
+        takes_argument: false,
     },
     SlashCommand {
         name: "commands",
         description: "List available slash commands",
         action: SlashAction::Commands,
+        takes_argument: false,
     },
     SlashCommand {
         name: "clear",
         description: "Clear the current conversation",
         action: SlashAction::Clear,
+        takes_argument: false,
     },
     SlashCommand {
         name: "compact",
         description: "Summarize old conversation context to free tokens",
         action: SlashAction::Compact,
+        takes_argument: false,
+    },
+    SlashCommand {
+        name: "model",
+        description: "Choose the model; /model <alias> switches directly",
+        action: SlashAction::Model,
+        takes_argument: true,
     },
     SlashCommand {
         name: "exit",
         description: "Quit Socium",
         action: SlashAction::Exit,
+        takes_argument: false,
     },
 ];
 
@@ -61,14 +75,40 @@ pub(crate) fn matching_commands(input: &str) -> Vec<&'static SlashCommand> {
         .collect()
 }
 
-/// Resolves a submitted command. A bare `exit` also quits, as in Claude Code.
-pub(crate) fn find(input: &str) -> Option<&'static SlashCommand> {
-    let token = if input == "exit" {
-        "exit"
+/// Resolves a submitted command and its argument. A bare `exit` also quits,
+/// as in Claude Code. Text after a command that takes no argument makes the
+/// input an ordinary message.
+pub(crate) fn find(input: &str) -> Option<(&'static SlashCommand, Option<&str>)> {
+    let (token, argument) = if input == "exit" {
+        ("exit", None)
     } else {
-        command_token(input)?
+        let rest = input.strip_prefix('/')?;
+        match rest.split_once(char::is_whitespace) {
+            Some((token, argument)) => (token, Some(argument.trim())),
+            None => (rest, None),
+        }
     };
-    SLASH_COMMANDS.iter().find(|command| command.name == token)
+    let command = SLASH_COMMANDS
+        .iter()
+        .find(|command| command.name == token)?;
+    match argument.filter(|argument| !argument.is_empty()) {
+        Some(_) if !command.takes_argument => None,
+        argument => Some((command, argument)),
+    }
+}
+
+/// Length in chars of a fully typed command name at the start of `input`,
+/// such as `/model` in `/model glm`, so the composer can highlight it. Text
+/// after a command that takes no argument makes the input a message, so
+/// nothing is highlighted then.
+pub(crate) fn typed_command_len(input: &str) -> Option<usize> {
+    let rest = input.strip_prefix('/')?;
+    let (name, argument) = match rest.split_once(char::is_whitespace) {
+        Some((name, argument)) => (name, argument.trim()),
+        None => (rest, ""),
+    };
+    let command = SLASH_COMMANDS.iter().find(|command| command.name == name)?;
+    (argument.is_empty() || command.takes_argument).then(|| 1 + name.chars().count())
 }
 
 pub(crate) fn command_list_text() -> String {
@@ -113,6 +153,7 @@ mod tests {
     #[test]
     fn prefix_narrows_candidates() {
         assert_eq!(names("/c"), ["commands", "clear", "compact"]);
+        assert_eq!(names("/m"), ["model"]);
         assert_eq!(names("/co"), ["commands", "compact"]);
         assert_eq!(names("/cl"), ["clear"]);
         assert!(names("/zzz").is_empty());
@@ -128,14 +169,39 @@ mod tests {
 
     #[test]
     fn find_requires_an_exact_name() {
-        assert_eq!(find("/exit").map(|c| c.action), Some(SlashAction::Exit));
-        assert_eq!(find("exit").map(|c| c.action), Some(SlashAction::Exit));
+        let action = |input| find(input).map(|(command, _)| command.action);
+        assert_eq!(action("/exit"), Some(SlashAction::Exit));
+        assert_eq!(action("exit"), Some(SlashAction::Exit));
         assert!(find("/quit").is_none());
         assert!(find("exit now").is_none());
         assert!(find("clear").is_none());
-        assert_eq!(find("/clear").map(|c| c.action), Some(SlashAction::Clear));
+        assert_eq!(action("/clear"), Some(SlashAction::Clear));
         assert!(find("/cle").is_none());
         assert!(find("/clear now").is_none());
+    }
+
+    #[test]
+    fn only_a_complete_command_name_is_highlighted() {
+        assert_eq!(typed_command_len("/model"), Some(6));
+        assert_eq!(typed_command_len("/model glm"), Some(6));
+        assert_eq!(typed_command_len("/clear"), Some(6));
+        assert_eq!(typed_command_len("/mod"), None);
+        assert_eq!(typed_command_len("/models"), None);
+        assert_eq!(typed_command_len("/clear now"), None);
+        assert_eq!(typed_command_len("model"), None);
+        assert_eq!(typed_command_len("/usr/bin is missing"), None);
+    }
+
+    #[test]
+    fn model_takes_an_optional_alias() {
+        let parsed = |input| find(input).map(|(command, argument)| (command.action, argument));
+        assert_eq!(parsed("/model"), Some((SlashAction::Model, None)));
+        assert_eq!(parsed("/model   "), Some((SlashAction::Model, None)));
+        assert_eq!(
+            parsed("/model  ds-flash "),
+            Some((SlashAction::Model, Some("ds-flash")))
+        );
+        assert!(find("/models").is_none());
     }
 
     #[test]

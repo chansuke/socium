@@ -2,12 +2,11 @@ pub mod anthropic;
 pub mod error;
 
 use crate::agent::types::{AgentMessageRequest, AgentMessageResponse};
+use crate::models::{ModelConfig, ProviderConfig, Wire};
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::error::ProviderError;
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::fmt;
-use std::io::{self, Error, ErrorKind};
 
 /// Token counts reported by the provider for a single model call.
 /// Mirrors the Anthropic `usage` payload; providers that do not report
@@ -89,23 +88,6 @@ pub(crate) enum ProviderEvent {
     },
 }
 
-impl ProviderKind {
-    pub fn from_env() -> io::Result<Self> {
-        let raw = env::var("PROVIDER").unwrap_or_else(|_| "anthropic".to_string());
-        Self::parse(&raw)
-    }
-
-    fn parse(raw: &str) -> io::Result<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "anthropic" => Ok(Self::Anthropic),
-            other => Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("Unsupported provider '{other}'. Currently supported: anthropic"),
-            )),
-        }
-    }
-}
-
 impl fmt::Display for ProviderKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
@@ -120,6 +102,10 @@ impl fmt::Display for ProviderKind {
 #[async_trait::async_trait]
 pub(crate) trait Provider: Send + Sync {
     fn kind(&self) -> ProviderKind;
+    /// Name shown in progress and errors: the registry provider name.
+    fn label(&self) -> String {
+        self.kind().to_string()
+    }
     fn capabilities(&self) -> ProviderCapabilities;
     /// Configuration problems that were tolerated at construction and
     /// should be shown to the user once.
@@ -134,8 +120,16 @@ pub(crate) trait Provider: Send + Sync {
     ) -> Result<ProviderResponse, ProviderError>;
 }
 
-pub(crate) fn provider_from_env() -> Result<Box<dyn Provider>, ProviderError> {
-    match ProviderKind::from_env()? {
-        ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::from_env()?)),
+/// Builds the provider for `model`, reading its API key through `lookup`
+/// so a missing key is reported before the first request.
+pub(crate) fn build_provider(
+    provider: &ProviderConfig,
+    model: &ModelConfig,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Box<dyn Provider>, ProviderError> {
+    match provider.wire {
+        Wire::Anthropic => Ok(Box::new(AnthropicProvider::from_config(
+            provider, model, lookup,
+        )?)),
     }
 }

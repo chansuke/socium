@@ -4,6 +4,7 @@ pub(crate) mod theme;
 
 use crate::app::{App, InputMode};
 use crate::approval::{ApprovalChoice, ApprovalPrompt};
+use crate::model_picker::{ModelPicker, model_label};
 use crate::transcript::transcript_window_start;
 use crate::view::text_layout::*;
 use crate::view::theme::*;
@@ -15,11 +16,12 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph},
 };
 use socium_core::activity::Phase;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const SLASH_POPUP_MAX_ROWS: usize = 8;
 const COMPOSER_ROWS: u16 = 2;
 const APPROVAL_SUMMARY_MAX_ROWS: usize = 3;
+const MODEL_PICKER_MAX_ROWS: usize = 8;
 /// Terminal width from which the Activity pane becomes a right-hand column.
 const WIDE_LAYOUT_COLUMNS: u16 = 140;
 /// Terminal height from which the logo header is shown.
@@ -100,13 +102,95 @@ fn approval_lines(prompt: &ApprovalPrompt, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
+/// The model picker's contents inside its border, laid out like Claude
+/// Code's: a description, numbered models with a check on the current one,
+/// then the key help.
+fn model_picker_lines(picker: &ModelPicker, width: u16) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(4) as usize;
+    let label = |index: usize, choice: &socium_core::ModelChoice| {
+        let check = if choice.active { " ✔" } else { "" };
+        format!("{}. {}{check}", index + 1, choice.alias)
+    };
+    let label_width = picker
+        .choices
+        .iter()
+        .enumerate()
+        .map(|(index, choice)| label(index, choice).width())
+        .max()
+        .unwrap_or(0);
+    let start = picker
+        .selected
+        .saturating_sub(MODEL_PICKER_MAX_ROWS - 1)
+        .min(picker.choices.len().saturating_sub(MODEL_PICKER_MAX_ROWS));
+    let mut lines = vec![
+        Line::from(Span::styled(
+            truncate_text(
+                " Switch the model for this conversation. The choice is saved with it.",
+                inner,
+            ),
+            Style::default().fg(MUTED),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(
+        picker
+            .choices
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(MODEL_PICKER_MAX_ROWS)
+            .map(|(index, choice)| {
+                let selected = index == picker.selected;
+                let marker = if selected { "❯" } else { " " };
+                let label = label(index, choice);
+                let head = format!(
+                    " {marker} {label}{}  ",
+                    " ".repeat(label_width - label.width())
+                );
+                let detail = match (&choice.unavailable, &choice.description) {
+                    (Some(reason), _) => reason.clone(),
+                    (None, Some(description)) => {
+                        format!("{description} · {}", model_label(choice))
+                    }
+                    (None, None) => model_label(choice),
+                };
+                let detail = truncate_text(&detail, inner.saturating_sub(head.width()));
+                let (head_style, detail_style) = if choice.unavailable.is_some() {
+                    (Style::default().fg(SOFT), Style::default().fg(SOFT))
+                } else if selected {
+                    (
+                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                        Style::default().fg(TEXT),
+                    )
+                } else {
+                    (Style::default().fg(TEXT), Style::default().fg(MUTED))
+                };
+                Line::from(vec![
+                    Span::styled(head, head_style),
+                    Span::styled(detail, detail_style),
+                ])
+            }),
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Enter to confirm · 1-9 to choose · Esc to exit",
+        Style::default().fg(MUTED),
+    )));
+    lines
+}
+
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
         frame.render_widget(Block::new().style(Style::default().bg(BG)), frame.area());
 
-        let composer_rows = self.approval.as_ref().map_or(COMPOSER_ROWS, |prompt| {
-            approval_lines(prompt, frame.area().width).len() as u16 + 2
-        });
+        let width = frame.area().width;
+        let composer_rows = if let Some(prompt) = &self.approval {
+            approval_lines(prompt, width).len() as u16 + 2
+        } else if let Some(picker) = &self.model_picker {
+            model_picker_lines(picker, width).len() as u16 + 2
+        } else {
+            COMPOSER_ROWS
+        };
         let areas = layout(frame.area(), self.activity.fullscreen, composer_rows);
 
         self.draw_header(frame, areas.header);
@@ -264,8 +348,23 @@ impl App {
             );
             return;
         }
+        if let Some(picker) = &self.model_picker {
+            let block = Block::bordered()
+                .title(Span::styled(
+                    " Select model ",
+                    Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                ))
+                .border_style(Style::default().fg(LILAC))
+                .style(Style::default().bg(BG));
+            frame.render_widget(
+                Paragraph::new(model_picker_lines(picker, area.width)).block(block),
+                area,
+            );
+            return;
+        }
         let available_cells = area.width.saturating_sub(2) as usize;
-        let (visible_input, visible_cursor) = self.visible_input_window(available_cells);
+        let (visible_input, visible_cursor, visible_start) =
+            self.visible_input_window(available_cells);
 
         let line = if self.input.is_empty() {
             Line::from(vec![
@@ -276,9 +375,22 @@ impl App {
                 ),
             ])
         } else {
+            // A fully typed command name stands out, as in Claude Code.
+            let highlighted = crate::slash_command::typed_command_len(&self.input)
+                .unwrap_or(0)
+                .saturating_sub(visible_start);
+            let split = visible_input
+                .char_indices()
+                .nth(highlighted)
+                .map_or(visible_input.len(), |(index, _)| index);
+            let (command, rest) = visible_input.split_at(split);
             Line::from(vec![
                 Span::styled("> ", Style::default().fg(MUTED)),
-                Span::styled(visible_input, Style::default().fg(MUTED)),
+                Span::styled(
+                    command.to_string(),
+                    Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(rest.to_string(), Style::default().fg(MUTED)),
             ])
         };
 
@@ -368,9 +480,11 @@ impl App {
         );
     }
 
-    fn visible_input_window(&self, width: usize) -> (String, usize) {
+    /// The visible slice of the input, the cursor's cell within it, and the
+    /// index of its first char in the whole input.
+    fn visible_input_window(&self, width: usize) -> (String, usize, usize) {
         if width == 0 {
-            return (String::new(), 0);
+            return (String::new(), 0, 0);
         }
 
         // Terminal cells, not chars: CJK and other wide characters take two
@@ -404,7 +518,7 @@ impl App {
             })
             .map(|(c, _)| c)
             .collect::<String>();
-        (visible, before_cursor)
+        (visible, before_cursor, start)
     }
 
     fn visible_transcript(&self, width: usize, height: usize) -> Text<'static> {
@@ -480,6 +594,67 @@ mod tests {
         let rows = render(&app);
         assert!(rows[top + 3].starts_with("│   1. Allow once"));
         assert!(rows[top + 4].starts_with("│ ❯ 2. Deny"));
+    }
+
+    #[test]
+    fn model_picker_lists_numbered_models_like_claude_code() {
+        let mut app = App::for_test();
+        let choice = |alias: &str, description: Option<&str>, active, unavailable: Option<&str>| {
+            socium_core::ModelChoice {
+                alias: alias.into(),
+                provider: "deepseek".into(),
+                model_id: format!("{alias}-id"),
+                description: description.map(str::to_string),
+                active,
+                unavailable: unavailable.map(str::to_string),
+            }
+        };
+        app.open_model_picker(vec![
+            choice("opus", Some("Opus for complex work"), true, None),
+            choice("ds-flash", None, false, None),
+            choice("glm", None, false, Some("ZAI_API_KEY is not set")),
+        ]);
+        let rows = render(&app);
+        let top = rows
+            .iter()
+            .position(|row| row.starts_with("┌ Select model "))
+            .unwrap();
+
+        assert!(rows[top + 1].starts_with("│ Switch the model for this conversation."));
+        assert!(
+            rows[top + 3].starts_with("│ ❯ 1. opus ✔    Opus for complex work · deepseek/opus-id")
+        );
+        assert!(rows[top + 4].starts_with("│   2. ds-flash  deepseek/ds-flash-id"));
+        assert!(rows[top + 5].starts_with("│   3. glm       ZAI_API_KEY is not set"));
+        assert!(rows[top + 7].contains("Enter to confirm · 1-9 to choose · Esc to exit"));
+        assert!(rows[top + 8].starts_with('└'));
+        assert_eq!(top + 9, rows.len() - 1, "the footer stays on the last row");
+    }
+
+    #[test]
+    fn a_fully_typed_command_is_highlighted_in_the_composer() {
+        use crate::view::theme::{LILAC, MUTED};
+
+        let colors = |input: &str| {
+            let mut app = App::for_test();
+            app.input = input.into();
+            app.character_index = input.chars().count();
+            let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let y = (0..buffer.area.height)
+                .find(|&y| buffer[(0, y)].symbol() == ">" && buffer[(2, y)].symbol() == "/")
+                .unwrap();
+            (2..2 + input.chars().count() as u16)
+                .map(|x| buffer[(x, y)].fg)
+                .collect::<Vec<_>>()
+        };
+
+        let typed = colors("/model glm");
+        assert!(typed[..6].iter().all(|&fg| fg == LILAC), "{typed:?}");
+        assert!(typed[6..].iter().all(|&fg| fg == MUTED), "{typed:?}");
+        assert!(colors("/mod").iter().all(|&fg| fg == MUTED));
+        assert!(colors("/clear now").iter().all(|&fg| fg == MUTED));
     }
 
     #[test]

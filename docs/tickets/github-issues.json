@@ -646,6 +646,10 @@
         {
           "id": "SOC-021",
           "number": 73
+        },
+        {
+          "id": "SOC-042",
+          "number": 107
         }
       ]
     },
@@ -729,6 +733,10 @@
         {
           "id": "SOC-033",
           "number": 85
+        },
+        {
+          "id": "SOC-042",
+          "number": 107
         }
       ]
     },
@@ -1520,6 +1528,64 @@
           "id": "SOC-009",
           "number": 61,
           "reason": "undoの変更前後記録を拡張する"
+        }
+      ],
+      "blocks": []
+    },
+    {
+      "id": "SOC-041",
+      "number": 106,
+      "url": "https://github.com/chansuke/socium/issues/106",
+      "source": "docs/tickets/SOC-041-model-switching.md",
+      "title": "SOC-041: model registryと/modelでAnthropic形式の接続先を切り替える",
+      "priority": "P2",
+      "phase": 5,
+      "labels_at_creation": [
+        "enhancement",
+        "priority:p2",
+        "area:provider",
+        "area:tui",
+        "status:in-progress"
+      ],
+      "status_at_creation": "in-progress",
+      "depends_on": [],
+      "blocks": [
+        {
+          "id": "SOC-042",
+          "number": 107
+        }
+      ]
+    },
+    {
+      "id": "SOC-042",
+      "number": 107,
+      "url": "https://github.com/chansuke/socium/issues/107",
+      "source": "docs/tickets/SOC-042-openai-responses.md",
+      "title": "SOC-042: OpenAI Responses APIでGPT-5のreasoningをtool往復をまたいで保つ",
+      "priority": "P2",
+      "phase": 5,
+      "labels_at_creation": [
+        "enhancement",
+        "priority:p2",
+        "area:provider",
+        "status:blocked"
+      ],
+      "status_at_creation": "blocked",
+      "depends_on": [
+        {
+          "id": "SOC-014",
+          "number": 66,
+          "reason": "message・tool・reasoningの共通表現を使う"
+        },
+        {
+          "id": "SOC-016",
+          "number": 68,
+          "reason": "OpenAI系の認証・エラー・stream基盤を使う"
+        },
+        {
+          "id": "SOC-041",
+          "number": 106,
+          "reason": "model registryと切り替えを使う"
         }
       ],
       "blocks": []

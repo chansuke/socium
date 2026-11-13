@@ -1,5 +1,5 @@
-# Keep ANTHROPIC_API_KEY in your shell or secret manager, not in this file.
+# Keep ANTHROPIC_API_KEY and other provider keys in your shell or secret manager,
+# not in this file. Register other models in ~/.config/socium/models.toml.
 # Copy to .envrc only if you use direnv; .envrc is ignored by Git.
 export MODEL='claude-opus-5-5'
-export COMPACT_MODEL='claude-haiku-5-5'
 export MAX_TOKENS='1000'

@@ -5,7 +5,6 @@ use crate::constants::{
     DEFAULT_CONTEXT_WINDOW_TOKENS, MAX_SUMMARY_CHARACTERS, MAX_SUMMARY_LINE_CHARACTERS,
     MAX_SUMMARY_LINES, MIN_RECENT_CONTEXT_MESSAGES, TARGET_RECENT_CONTEXT_MESSAGES,
 };
-use crate::providers::ProviderKind;
 use crate::tools::ToolDefinition;
 use std::env;
 use std::io::{self, Error, ErrorKind};
@@ -60,9 +59,10 @@ pub(crate) struct PreparedContext {
     pub metrics: ContextMetrics,
 }
 
+/// `CONTEXT_WINDOW_TOKENS` overrides the model's configured window, which
+/// defaults to `DEFAULT_CONTEXT_WINDOW_TOKENS`.
 pub(crate) fn resolve_context_budget(
-    provider: ProviderKind,
-    model: &str,
+    configured_window: Option<u32>,
     max_output_tokens: u32,
 ) -> io::Result<ContextBudget> {
     let context_window_tokens = match env::var("CONTEXT_WINDOW_TOKENS") {
@@ -72,7 +72,7 @@ pub(crate) fn resolve_context_budget(
                 format!("CONTEXT_WINDOW_TOKENS must be an unsigned integer: {e}"),
             )
         })?,
-        Err(_) => infer_context_window_tokens(provider, model),
+        Err(_) => configured_window.unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS),
     };
 
     Ok(ContextBudget {
@@ -84,12 +84,12 @@ pub(crate) fn resolve_context_budget(
 pub(crate) fn prepare_context_messages(
     raw_messages: &[Message],
     summary_state: &ConversationSummaryState,
-    provider: ProviderKind,
+    context_window: Option<u32>,
     model: &str,
     max_output_tokens: u32,
     tools: &[ToolDefinition],
 ) -> io::Result<PreparedContext> {
-    let budget = resolve_context_budget(provider, model, max_output_tokens)?;
+    let budget = resolve_context_budget(context_window, max_output_tokens)?;
     let prepared = prepare_context_with_budget(raw_messages, summary_state, model, budget, tools);
     if prepared.metrics.estimated_input_tokens > budget.input_budget_tokens() {
         return Err(Error::new(
@@ -104,7 +104,7 @@ pub(crate) fn context_metrics_for_input(
     raw_messages: &[Message],
     pending_user_input: &str,
     summary_state: &ConversationSummaryState,
-    provider: ProviderKind,
+    context_window: Option<u32>,
     model: &str,
     max_output_tokens: u32,
     tools: &[ToolDefinition],
@@ -114,11 +114,41 @@ pub(crate) fn context_metrics_for_input(
     if !trimmed.is_empty() {
         candidate_messages.push(Message::user_text(trimmed.to_string()));
     }
-    let budget = resolve_context_budget(provider, model, max_output_tokens)?;
+    let budget = resolve_context_budget(context_window, max_output_tokens)?;
     Ok(
         prepare_context_with_budget(&candidate_messages, summary_state, model, budget, tools)
             .metrics,
     )
+}
+
+/// Estimated prompt size of the whole history, after an earlier compaction
+/// but before any budget trimming, so a smaller window can be noticed.
+pub(crate) fn history_input_tokens(
+    raw_messages: &[Message],
+    summary_state: &ConversationSummaryState,
+    model: &str,
+    budget: ContextBudget,
+    tools: &[ToolDefinition],
+) -> u32 {
+    if raw_messages.is_empty() {
+        return 0;
+    }
+    let compacted_covered = summary_state
+        .summary
+        .as_ref()
+        .map(|summary| summary.covered_messages)
+        .unwrap_or(0)
+        .min(raw_messages.len());
+    compose_context(
+        raw_messages,
+        summary_state,
+        compacted_covered,
+        model,
+        budget,
+        tools,
+    )
+    .metrics
+    .estimated_input_tokens
 }
 
 fn prepare_context_with_budget(
@@ -340,16 +370,6 @@ fn chars_per_token_for_model(model: &str) -> f32 {
     }
 }
 
-fn infer_context_window_tokens(provider: ProviderKind, model: &str) -> u32 {
-    let normalized = model.trim().to_ascii_lowercase();
-    if normalized.contains("claude") {
-        return DEFAULT_CONTEXT_WINDOW_TOKENS;
-    }
-    match provider {
-        ProviderKind::Anthropic => DEFAULT_CONTEXT_WINDOW_TOKENS,
-    }
-}
-
 pub(crate) fn summarize_messages(messages: &[Message]) -> String {
     let mut lines = messages
         .iter()
@@ -487,7 +507,6 @@ mod tests {
     use super::{ContextBudget, context_metrics_for_input, prepare_context_with_budget};
     use crate::agent::state::ConversationSummaryState;
     use crate::agent::types::{ContentBlock, Message};
-    use crate::providers::ProviderKind;
     use crate::tools::default_tools;
     use serde_json::json;
 
@@ -583,7 +602,7 @@ mod tests {
             &messages,
             "new pending input",
             &ConversationSummaryState::default(),
-            ProviderKind::Anthropic,
+            None,
             "claude-sonnet-4-5",
             1_000,
             &default_tools(),

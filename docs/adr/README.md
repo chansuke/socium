@@ -3,3 +3,4 @@
 * [3. adaptive thinkingの表示を既定でsummarizedにしTHINKING_BUDGET_TOKENSを廃止する](0003-adaptive-thinkingの表示を既定でsummarizedにしthinking-budget-tokensを廃止する.md)
 * [4. Activityの記録をセッション単位のJSONLに保存し起動時に再生する](0004-activityの記録をセッション単位のjsonlに保存し起動時に再生する.md)
 * [5. 実行の事実から導いたシグナルでエージェントの状態をActivity欄に示す](0005-実行の事実から導いたシグナルでエージェントの状態をactivity欄に示す.md)
+* [6. モデルを接続形式と接続先の組で登録し/modelコマンドで切り替える](0006-モデルを接続形式と接続先の組で登録しmodelコマンドで切り替える.md)

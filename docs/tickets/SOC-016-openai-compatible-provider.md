@@ -22,7 +22,7 @@ Anthropic以外のproviderはNotImplemented。local modelや第二実providerで
 
 **対応範囲**
 
-- 最初に対応するOpenAI互換API方式を明示し、設定可能なendpoint/auth/modelで接続する。
+- 最初に対応するOpenAI互換API方式を明示し、設定可能なendpoint/auth/modelで接続する。[ADR 6](../adr/0006-モデルを接続形式と接続先の組で登録しmodelコマンドで切り替える.md)に従い、Chat Completionsを `wire = "openai-chat"` としてSOC-041のmodel registryへ追加し、OpenAI本家のGPT-5を最初の接続先とする。Ollama Cloud・OpenRouterは同じwireの別endpointとして扱う。
 - streaming、tool calling、usage、終了理由、HTTPエラーを共通表現へ変換する。
 - remote/localの能力差を扱い、Codex製品連携とOpenAI互換APIを設定・名称上で混同しない。
 
