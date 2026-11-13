@@ -23,16 +23,19 @@ impl App {
             AgentProgress::ApprovalRequested {
                 request_id,
                 tool,
+                summary,
                 input,
             } => {
-                if let Some(task) = self.pending_task.as_mut() {
-                    task.approval_id = Some(request_id);
-                }
                 self.pop_thinking_message();
-                self.push_message(Speaker::System, format!("Approve sandboxed command: {tool}\n{input}\n[y] allow once / [n] deny / [Esc] cancel"));
-                self.status = Some("Human approval required: y / n".into());
+                self.push_message(
+                    Speaker::System,
+                    format!("Approve sandboxed command: {tool}\n{input}"),
+                );
+                self.open_approval(request_id, tool, summary);
             }
-            AgentProgress::ApprovalResolved { .. } => {}
+            AgentProgress::ApprovalResolved { request_id, .. } => {
+                self.close_unanswered_approval(request_id);
+            }
             AgentProgress::ModelRequestStarted { round, provider } => {
                 self.show_thinking_indicator();
                 self.status = Some(model_request_status(round, &provider));

@@ -3,6 +3,7 @@ pub(crate) mod text_layout;
 pub(crate) mod theme;
 
 use crate::app::{App, InputMode};
+use crate::approval::{ApprovalChoice, ApprovalPrompt};
 use crate::transcript::transcript_window_start;
 use crate::view::text_layout::*;
 use crate::view::theme::*;
@@ -17,6 +18,8 @@ use socium_core::activity::Phase;
 use unicode_width::UnicodeWidthChar;
 
 const SLASH_POPUP_MAX_ROWS: usize = 8;
+const COMPOSER_ROWS: u16 = 2;
+const APPROVAL_SUMMARY_MAX_ROWS: usize = 3;
 /// Terminal width from which the Activity pane becomes a right-hand column.
 const WIDE_LAYOUT_COLUMNS: u16 = 140;
 /// Terminal height from which the logo header is shown.
@@ -33,7 +36,7 @@ pub(crate) struct Areas {
 /// Splits the screen. Wide terminals put Activity beside the transcript;
 /// narrower ones stack it below, sized to the screen. Full screen gives the
 /// Activity pane the transcript's space as well.
-pub(crate) fn layout(area: Rect, activity_fullscreen: bool) -> Areas {
+pub(crate) fn layout(area: Rect, activity_fullscreen: bool, composer_rows: u16) -> Areas {
     let header_rows = if area.height >= HEADER_MIN_ROWS {
         10
     } else {
@@ -42,7 +45,7 @@ pub(crate) fn layout(area: Rect, activity_fullscreen: bool) -> Areas {
     let [header, body, composer, footer] = Layout::vertical([
         Constraint::Length(header_rows),
         Constraint::Min(1),
-        Constraint::Length(2),
+        Constraint::Length(composer_rows),
         Constraint::Length(1),
     ])
     .areas(area);
@@ -68,11 +71,43 @@ pub(crate) fn layout(area: Rect, activity_fullscreen: bool) -> Areas {
     }
 }
 
+/// The approval picker's contents inside its border.
+fn approval_lines(prompt: &ApprovalPrompt, width: u16) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(4) as usize;
+    let mut lines = wrap_multiline(&prompt.summary, inner, inner)
+        .into_iter()
+        .take(APPROVAL_SUMMARY_MAX_ROWS)
+        .map(|row| Line::from(Span::styled(format!(" {row}"), Style::default().fg(TEXT))))
+        .collect::<Vec<_>>();
+    lines.push(Line::from(""));
+    for (index, choice) in ApprovalChoice::ALL.into_iter().enumerate() {
+        let selected = choice == prompt.choice;
+        let (marker, style) = if selected {
+            ("❯", Style::default().fg(LILAC).add_modifier(Modifier::BOLD))
+        } else {
+            (" ", Style::default().fg(SOFT))
+        };
+        lines.push(Line::from(Span::styled(
+            format!(" {marker} {}. {}", index + 1, choice.label()),
+            style,
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " ↑↓ select · Enter confirm · Esc cancel task",
+        Style::default().fg(MUTED),
+    )));
+    lines
+}
+
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
         frame.render_widget(Block::new().style(Style::default().bg(BG)), frame.area());
 
-        let areas = layout(frame.area(), self.activity.fullscreen);
+        let composer_rows = self.approval.as_ref().map_or(COMPOSER_ROWS, |prompt| {
+            approval_lines(prompt, frame.area().width).len() as u16 + 2
+        });
+        let areas = layout(frame.area(), self.activity.fullscreen, composer_rows);
 
         self.draw_header(frame, areas.header);
         self.draw_transcript(frame, areas.transcript);
@@ -218,6 +253,17 @@ impl App {
     }
 
     fn draw_composer(&self, frame: &mut Frame, area: Rect) {
+        if let Some(prompt) = &self.approval {
+            let block = Block::bordered()
+                .title(format!(" Approve {} ", prompt.tool))
+                .border_style(Style::default().fg(LILAC))
+                .style(Style::default().bg(BG));
+            frame.render_widget(
+                Paragraph::new(approval_lines(prompt, area.width)).block(block),
+                area,
+            );
+            return;
+        }
         let available_cells = area.width.saturating_sub(2) as usize;
         let (visible_input, visible_cursor) = self.visible_input_window(available_cells);
 
@@ -410,6 +456,30 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn approval_picker_replaces_the_composer_and_marks_the_choice() {
+        let mut app = App::for_test();
+        app.open_approval(1, "run_command".into(), "cargo test".into());
+        let rows = render(&app);
+        let top = rows
+            .iter()
+            .position(|row| row.starts_with("┌ Approve run_command "))
+            .unwrap();
+
+        assert!(rows[top + 1].starts_with("│ cargo test "));
+        assert!(rows[top + 3].starts_with("│ ❯ 1. Allow once"));
+        assert!(rows[top + 4].starts_with("│   2. Deny"));
+        assert!(rows[top + 6].contains("↑↓ select · Enter confirm · Esc cancel task"));
+        assert!(rows[top + 7].starts_with('└'));
+        assert_eq!(top + 8, rows.len() - 1, "the footer stays on the last row");
+        assert!(!rows.iter().any(|row| row.starts_with("> ")));
+
+        app.handle_approval_key(ratatui::crossterm::event::KeyCode::Down);
+        let rows = render(&app);
+        assert!(rows[top + 3].starts_with("│   1. Allow once"));
+        assert!(rows[top + 4].starts_with("│ ❯ 2. Deny"));
     }
 
     #[test]

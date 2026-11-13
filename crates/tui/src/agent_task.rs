@@ -16,7 +16,6 @@ pub(crate) struct PendingSubmission {
 pub(crate) struct PendingTask {
     pub(crate) worker: Option<std::thread::JoinHandle<()>>,
     pub(crate) control: socium_core::TaskControl,
-    pub(crate) approval_id: Option<u64>,
     pub(crate) progress_rx: UnboundedReceiver<AgentProgress>,
     pub(crate) result_rx: oneshot::Receiver<SubmitOutcome>,
     pub(crate) streamed_assistant_text: bool,
@@ -95,7 +94,6 @@ impl App {
         self.pending_task = Some(PendingTask {
             worker: Some(worker),
             control,
-            approval_id: None,
             progress_rx,
             result_rx,
             streamed_assistant_text: false,
@@ -153,7 +151,6 @@ impl App {
         self.pending_task = Some(PendingTask {
             worker: Some(worker),
             control,
-            approval_id: None,
             progress_rx,
             result_rx,
             streamed_assistant_text: false,
@@ -181,6 +178,7 @@ impl App {
                     self.status =
                         Some("Worker disconnected; restart to recover saved history".into());
                     self.pending_task = None;
+                    self.approval = None;
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {}
             }
@@ -195,6 +193,7 @@ impl App {
         };
         let streamed_assistant_text = streamed_assistant_text.unwrap_or(false);
         self.pending_task = None;
+        self.approval = None;
         self.agent = Some(outcome.agent);
         self.refresh_context_metrics();
         self.last_latency_ms = Some(outcome.latency_ms);
@@ -262,7 +261,6 @@ mod tests {
         app.pending_task = Some(PendingTask {
             worker: None,
             control: Default::default(),
-            approval_id: None,
             progress_rx,
             result_rx,
             streamed_assistant_text: false,

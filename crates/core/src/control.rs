@@ -60,6 +60,7 @@ impl TaskControl {
         progress(crate::AgentProgress::ApprovalRequested {
             request_id: id,
             tool: tool.into(),
+            summary: crate::activity::summarize_tool_input(tool, &input["arguments"]),
             input: format!(
                 "Workspace: {}\nTool call: {}\nPermissions: {}\nArguments:\n{}\n{}",
                 input["workspace"],
@@ -119,5 +120,22 @@ mod tests {
             Duration::ZERO
         ));
         assert!(!c.answer_approval(0, true));
+    }
+    #[test]
+    fn approval_requests_carry_a_one_line_summary_of_the_arguments() {
+        let c = TaskControl::default();
+        c.enable_interactive_approval();
+        let mut summary = None;
+        c.approve_with_timeout(
+            "run_command",
+            &serde_json::json!({"arguments": {"command": ["cargo", "test"]}}),
+            &mut |e| {
+                if let crate::AgentProgress::ApprovalRequested { summary: s, .. } = e {
+                    summary = Some(s);
+                }
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(summary.as_deref(), Some("cargo test"));
     }
 }

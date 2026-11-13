@@ -1,6 +1,7 @@
 mod activity;
 mod agent_task;
 mod app;
+mod approval;
 mod input_history;
 mod progress;
 mod slash_command;

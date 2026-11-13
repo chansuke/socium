@@ -1,5 +1,6 @@
 use crate::activity::ActivityModel;
 use crate::agent_task::{PendingSubmission, PendingTask};
+use crate::approval::ApprovalPrompt;
 use crate::input_history;
 use crate::slash_command::{self, SlashAction, SlashCommand};
 use crate::transcript::{ChatEntry, Speaker, transcript_entries_to_chat_entries};
@@ -33,6 +34,7 @@ pub(crate) struct App {
     pub(crate) context_metrics: ContextMetrics,
     pub(crate) last_latency_ms: Option<u128>,
     pub(crate) pending_task: Option<PendingTask>,
+    pub(crate) approval: Option<ApprovalPrompt>,
     pub(crate) input_history: input_history::InputSession,
     pub(crate) history_index: Option<usize>,
     pub(crate) history_draft: String,
@@ -85,6 +87,7 @@ impl App {
             context_metrics,
             last_latency_ms: None,
             pending_task: None,
+            approval: None,
             input_history,
             history_index: None,
             history_draft: String::new(),
@@ -109,6 +112,7 @@ impl App {
             context_metrics: Default::default(),
             last_latency_ms: None,
             pending_task: None,
+            approval: None,
             input_history: input_history::InputSession {
                 history_path: PathBuf::new(),
                 entries: Vec::new(),
@@ -286,7 +290,7 @@ impl App {
                 KeyCode::PageUp => view.scroll += 10,
                 KeyCode::PageDown => view.scroll = view.scroll.saturating_sub(10),
                 KeyCode::Char('c') if control => return false,
-                KeyCode::Char('y' | 'n') if self.pending_task.is_some() => return false,
+                KeyCode::Char('y' | 'n' | '1' | '2') if self.approval.is_some() => return false,
                 _ => {}
             }
             return true;
@@ -311,7 +315,7 @@ impl App {
                 }
             }
             KeyCode::Char('c') if control => return false,
-            KeyCode::Char('y' | 'n') if self.pending_task.is_some() => return false,
+            KeyCode::Char('y' | 'n' | '1' | '2') if self.approval.is_some() => return false,
             _ => {}
         }
         true
@@ -423,18 +427,13 @@ impl App {
                             && key.code == KeyCode::Char('q'))
                     {
                         task.control.cancel();
-                        task.approval_id = None;
+                        self.approval = None;
                         self.status =
                             Some("Cancelling; waiting for cleanup and saved results…".into());
                         continue;
                     }
-                    if let Some(id) = task.approval_id {
-                        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('n')) {
-                            task.control
-                                .answer_approval(id, key.code == KeyCode::Char('y'));
-                            task.approval_id = None;
-                            self.status = Some("Approval answered".into());
-                        }
+                    if self.approval.is_some() {
+                        self.handle_approval_key(key.code);
                         continue;
                     }
                 }

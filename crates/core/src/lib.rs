@@ -78,6 +78,8 @@ pub enum AgentProgress {
     ApprovalRequested {
         request_id: u64,
         tool: String,
+        /// The tool's main argument on one line, such as the command.
+        summary: String,
         input: String,
     },
     ApprovalRequired {
