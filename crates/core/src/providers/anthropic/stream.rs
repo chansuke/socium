@@ -1,6 +1,6 @@
 use crate::agent::types::{AgentMessageResponse, ContentBlock};
 use crate::providers::error::ProviderError;
-use crate::providers::{DeltaEvent, TokenUsage};
+use crate::providers::{BlockKind, ProviderEvent, TokenUsage};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -142,7 +142,7 @@ impl StreamingMessageBuilder {
     pub(super) fn apply_event(
         &mut self,
         raw_event: &str,
-        on_delta: &mut impl FnMut(DeltaEvent),
+        on_delta: &mut impl FnMut(ProviderEvent),
     ) -> Result<(), ProviderError> {
         self.received_bytes = self.received_bytes.saturating_add(raw_event.len());
         if self.received_bytes > 8 * 1024 * 1024 {
@@ -192,12 +192,20 @@ impl StreamingMessageBuilder {
                     ));
                 }
                 self.active = None;
+                on_delta(ProviderEvent::BlockFinished { index });
             }
             AnthropicStreamEvent::MessageStop => {
-                if self.active.is_some() || self.stop_reason.is_none() {
+                let Some(stop_reason) = self.stop_reason.clone() else {
+                    return Err(ProviderError::Stream("Incomplete message_stop".into()));
+                };
+                if self.active.is_some() {
                     return Err(ProviderError::Stream("Incomplete message_stop".into()));
                 }
                 self.stopped = true;
+                on_delta(ProviderEvent::MessageFinished {
+                    stop_reason,
+                    usage: self.usage,
+                });
             }
             AnthropicStreamEvent::Ping => {}
             AnthropicStreamEvent::Error { error } => {
@@ -299,9 +307,20 @@ impl StreamingMessageBuilder {
         &mut self,
         index: usize,
         content_block: StreamContentBlockStart,
-        on_delta: &mut impl FnMut(DeltaEvent),
+        on_delta: &mut impl FnMut(ProviderEvent),
     ) {
         ensure_block_capacity(&mut self.blocks, index);
+        on_delta(ProviderEvent::BlockStarted {
+            index,
+            kind: match &content_block {
+                StreamContentBlockStart::Text { .. } => BlockKind::Text,
+                StreamContentBlockStart::Thinking { .. } => BlockKind::Thinking,
+                StreamContentBlockStart::ToolUse { id, name, .. } => BlockKind::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                },
+            },
+        });
         let block = match content_block {
             StreamContentBlockStart::Text { text } => {
                 let separator_pending = self.text_block_count > 0;
@@ -314,14 +333,20 @@ impl StreamingMessageBuilder {
                     let emitted = append_text_to_state(&mut state, &text);
                     if !emitted.is_empty() {
                         self.streamed_text = true;
-                        on_delta(DeltaEvent::Text(emitted));
+                        on_delta(ProviderEvent::TextDelta {
+                            index,
+                            text: emitted,
+                        });
                     }
                 }
                 StreamingContentBlock::Text(state)
             }
             StreamContentBlockStart::Thinking { thinking } => {
                 if !thinking.is_empty() {
-                    on_delta(DeltaEvent::Thinking(thinking.clone()));
+                    on_delta(ProviderEvent::ThinkingDelta {
+                        index,
+                        text: thinking.clone(),
+                    });
                 }
                 StreamingContentBlock::Thinking(ThinkingBlockState {
                     thinking,
@@ -344,7 +369,7 @@ impl StreamingMessageBuilder {
         &mut self,
         index: usize,
         delta: StreamDelta,
-        on_delta: &mut impl FnMut(DeltaEvent),
+        on_delta: &mut impl FnMut(ProviderEvent),
     ) -> Result<(), ProviderError> {
         let Some(block) = self.blocks.get_mut(index).and_then(Option::as_mut) else {
             return Err(ProviderError::Stream(format!(
@@ -357,13 +382,19 @@ impl StreamingMessageBuilder {
                 let emitted = append_text_to_state(state, &text);
                 if !emitted.is_empty() {
                     self.streamed_text = true;
-                    on_delta(DeltaEvent::Text(emitted));
+                    on_delta(ProviderEvent::TextDelta {
+                        index,
+                        text: emitted,
+                    });
                 }
             }
             (StreamingContentBlock::Thinking(state), StreamDelta::Thinking { thinking }) => {
                 state.thinking.push_str(&thinking);
                 if !thinking.is_empty() {
-                    on_delta(DeltaEvent::Thinking(thinking));
+                    on_delta(ProviderEvent::ThinkingDelta {
+                        index,
+                        text: thinking,
+                    });
                 }
             }
             (StreamingContentBlock::Thinking(state), StreamDelta::Signature { signature }) => {
@@ -371,6 +402,12 @@ impl StreamingMessageBuilder {
             }
             (StreamingContentBlock::ToolUse(state), StreamDelta::InputJson { partial_json }) => {
                 state.input_json.push_str(&partial_json);
+                if !partial_json.is_empty() {
+                    on_delta(ProviderEvent::ToolInputDelta {
+                        index,
+                        partial_json,
+                    });
+                }
             }
             _ => {
                 return Err(ProviderError::Stream(
@@ -460,6 +497,44 @@ mod tests {
         assert!(apply(&mut b, json!({"type":"content_block_stop","index":1})).is_err());
     }
     #[test]
+    fn tool_input_fragments_stream_but_only_complete_json_is_released() {
+        let mut b = start();
+        let mut deltas = Vec::new();
+        for event in [
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"read_file","input":{}}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"a.rs\""}}),
+        ] {
+            b.apply_event(&event.to_string(), &mut |d| deltas.push(d))
+                .unwrap();
+        }
+        assert_eq!(
+            deltas,
+            vec![
+                ProviderEvent::BlockStarted {
+                    index: 0,
+                    kind: BlockKind::ToolUse {
+                        id: "t1".into(),
+                        name: "read_file".into()
+                    }
+                },
+                ProviderEvent::ToolInputDelta {
+                    index: 0,
+                    partial_json: "{\"path\":".into()
+                },
+                ProviderEvent::ToolInputDelta {
+                    index: 0,
+                    partial_json: "\"a.rs\"".into()
+                },
+            ]
+        );
+        // The model stopped mid-object: the fragments were shown, but no
+        // tool call is released.
+        stop(&mut b, "tool_use");
+        assert!(b.finish().is_err());
+    }
+
+    #[test]
     fn text_and_thinking_stream_normally() {
         let mut b = start();
         let mut deltas = Vec::new();
@@ -476,7 +551,36 @@ mod tests {
                 .unwrap();
         }
         assert!(b.streamed_text);
-        assert_eq!(deltas.len(), 2);
+        assert_eq!(
+            deltas,
+            vec![
+                ProviderEvent::BlockStarted {
+                    index: 0,
+                    kind: BlockKind::Thinking
+                },
+                ProviderEvent::ThinkingDelta {
+                    index: 0,
+                    text: "reason".into()
+                },
+                ProviderEvent::BlockFinished { index: 0 },
+                ProviderEvent::BlockStarted {
+                    index: 1,
+                    kind: BlockKind::Text
+                },
+                ProviderEvent::TextDelta {
+                    index: 1,
+                    text: "answer".into()
+                },
+                ProviderEvent::BlockFinished { index: 1 },
+                ProviderEvent::MessageFinished {
+                    stop_reason: "end_turn".into(),
+                    usage: Some(TokenUsage {
+                        input_tokens: 12,
+                        ..TokenUsage::default()
+                    })
+                },
+            ]
+        );
         assert!(
             matches!(&b.finish().unwrap().content[0],ContentBlock::Thinking{signature,..} if signature=="sig")
         );

@@ -1,9 +1,8 @@
+use crate::activity::ActivityModel;
 use crate::agent_task::{PendingSubmission, PendingTask};
 use crate::input_history;
 use crate::slash_command::{self, SlashAction, SlashCommand};
-use crate::transcript::{
-    ChatEntry, CommandOutputState, Speaker, transcript_entries_to_chat_entries,
-};
+use crate::transcript::{ChatEntry, Speaker, transcript_entries_to_chat_entries};
 use crate::view::text_layout::{help_text, truncate_text};
 use color_eyre::{Result, eyre::eyre};
 use ratatui::{
@@ -26,8 +25,7 @@ pub(crate) struct App {
     pub(crate) character_index: usize,
     pub(crate) input_mode: InputMode,
     pub(crate) messages: Vec<ChatEntry>,
-    pub(crate) activity_log: Vec<String>,
-    pub(crate) last_command_output: Option<CommandOutputState>,
+    pub(crate) activity: ActivityModel,
     pub(crate) transcript_scroll: usize,
     pub(crate) status: Option<String>,
     pub(crate) workspace_label: String,
@@ -59,8 +57,16 @@ impl App {
     pub(crate) fn new(agent: AgentService) -> Result<Self> {
         let model_label = env::var("MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let workspace_label = format_workspace_path(env::current_dir().ok());
-        let messages = transcript_entries_to_chat_entries(agent.transcript_entries());
+        let mut messages = transcript_entries_to_chat_entries(agent.transcript_entries());
+        messages.extend(agent.startup_warnings().into_iter().map(|body| ChatEntry {
+            speaker: Speaker::System,
+            body,
+        }));
         let context_metrics = agent.context_metrics("").unwrap_or_default();
+        let mut activity = ActivityModel::default();
+        for event in agent.recent_activity() {
+            activity.apply_replayed(event);
+        }
         let history_path =
             socium_core::workspace_state_path(&env::current_dir()?, INPUT_HISTORY_FILE_NAME)?;
         let input_history = input_history::InputSession::load(history_path)?;
@@ -71,8 +77,7 @@ impl App {
             character_index: 0,
             input_mode: InputMode::Editing,
             messages,
-            activity_log: Vec::new(),
-            last_command_output: None,
+            activity,
             transcript_scroll: 0,
             status: Some(socium_core::SANDBOX_DESCRIPTION.to_string()),
             workspace_label,
@@ -96,8 +101,7 @@ impl App {
             character_index: 0,
             input_mode: InputMode::Editing,
             messages: Vec::new(),
-            activity_log: Vec::new(),
-            last_command_output: None,
+            activity: ActivityModel::default(),
             transcript_scroll: 0,
             status: None,
             workspace_label: "test".into(),
@@ -255,6 +259,64 @@ impl App {
         true
     }
 
+    /// Keys owned by the Activity pane. Ctrl+A toggles focus from anywhere;
+    /// while focused, navigation keys are consumed here and Esc returns to
+    /// the input instead of cancelling. Cancel (Ctrl+C) and approval (y / n)
+    /// still reach the task handling.
+    fn handle_activity_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let control = modifiers.contains(KeyModifiers::CONTROL);
+        if control && code == KeyCode::Char('a') {
+            self.activity.toggle_focus();
+            self.status = Some(if self.activity.focused {
+                "Activity: Up/Down select · Ctrl+L top · Enter expand · r raw · z full screen · Esc back"
+                    .to_string()
+            } else {
+                "Ready".to_string()
+            });
+            return true;
+        }
+        if !self.activity.focused {
+            return false;
+        }
+        if let Some(view) = self.activity.raw_view.as_mut() {
+            match code {
+                KeyCode::Esc | KeyCode::Char('r') => self.activity.raw_view = None,
+                KeyCode::Up | KeyCode::Char('k') => view.scroll += 1,
+                KeyCode::Down | KeyCode::Char('j') => view.scroll = view.scroll.saturating_sub(1),
+                KeyCode::PageUp => view.scroll += 10,
+                KeyCode::PageDown => view.scroll = view.scroll.saturating_sub(10),
+                KeyCode::Char('c') if control => return false,
+                KeyCode::Char('y' | 'n') if self.pending_task.is_some() => return false,
+                _ => {}
+            }
+            return true;
+        }
+        match code {
+            KeyCode::Esc => {
+                self.activity.toggle_focus();
+                self.status = Some("Ready".to_string());
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.activity.select_by(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.activity.select_by(1),
+            KeyCode::PageUp => self.activity.select_by(-10),
+            KeyCode::PageDown => self.activity.select_by(10),
+            KeyCode::Char('l') if control => self.activity.select_first(),
+            KeyCode::Home | KeyCode::Char('g') => self.activity.select_first(),
+            KeyCode::End | KeyCode::Char('G') => self.activity.select_last(),
+            KeyCode::Enter => self.activity.toggle_expanded(),
+            KeyCode::Char('z') => self.activity.fullscreen = !self.activity.fullscreen,
+            KeyCode::Char('r') => {
+                if let Err(reason) = self.activity.open_raw_view() {
+                    self.status = Some(reason.to_string());
+                }
+            }
+            KeyCode::Char('c') if control => return false,
+            KeyCode::Char('y' | 'n') if self.pending_task.is_some() => return false,
+            _ => {}
+        }
+        true
+    }
+
     fn begin_submit(&mut self) -> Result<SubmitAction> {
         if self.pending_task.is_some() {
             self.status = Some("Request already in progress".to_string());
@@ -316,8 +378,7 @@ impl App {
             SlashAction::Clear => {
                 self.agent_mut()?.clear()?;
                 self.messages.clear();
-                self.activity_log.clear();
-                self.last_command_output = None;
+                self.activity.clear();
                 self.last_latency_ms = None;
                 self.status = Some("Conversation cleared".to_string());
                 self.refresh_context_metrics();
@@ -347,6 +408,11 @@ impl App {
             }
 
             if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press
+                    && self.handle_activity_key(key.code, key.modifiers)
+                {
+                    continue;
+                }
                 if key.kind == KeyEventKind::Press
                     && let Some(task) = self.pending_task.as_mut()
                 {
@@ -643,5 +709,43 @@ mod tests {
             app.begin_submit().unwrap(),
             SubmitAction::Pending(_)
         ));
+    }
+
+    #[test]
+    fn ctrl_a_focuses_activity_and_esc_returns_without_cancelling() {
+        let mut app = App::for_test();
+        for event in crate::activity::tests::sample_turn() {
+            app.activity.apply(event);
+        }
+
+        assert!(!app.handle_activity_key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(app.handle_activity_key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(app.activity.focused);
+
+        assert!(app.handle_activity_key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(app.activity.selected.is_some());
+        assert!(app.handle_activity_key(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert!(app.activity.fullscreen);
+        // Cancel still reaches the task handling while focused.
+        assert!(!app.handle_activity_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(app.handle_activity_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.activity.focused);
+        assert!(!app.activity.fullscreen);
+    }
+
+    #[test]
+    fn ctrl_l_moves_the_activity_selection_to_the_top() {
+        let mut app = App::for_test();
+        for event in crate::activity::tests::sample_turn() {
+            app.activity.apply(event);
+        }
+
+        assert!(!app.handle_activity_key(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        app.handle_activity_key(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        app.activity.select_last();
+
+        assert!(app.handle_activity_key(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert_eq!(app.activity.selected, Some(0));
     }
 }

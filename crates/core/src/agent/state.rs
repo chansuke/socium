@@ -90,6 +90,48 @@ fn prepare_state_path(path: &Path, create: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// Opens a private state file for appending, creating it with owner-only
+/// permissions. The same symlink, ownership, and link-count checks as the
+/// snapshot files apply.
+pub(crate) fn open_state_append(path: &Path) -> io::Result<fs::File> {
+    prepare_state_path(path, true)?;
+    let mut options = fs::OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    check_state_file(&file.metadata()?)?;
+    Ok(file)
+}
+
+/// Reads a private state file of at most `limit` bytes. `None` when it does
+/// not exist.
+pub(crate) fn read_state_bytes(path: &Path, limit: u64) -> io::Result<Option<Vec<u8>>> {
+    prepare_state_path(path, false)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    check_state_file(&file.metadata()?)?;
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(Error::other("State file exceeds its size limit"));
+    }
+    Ok(Some(bytes))
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ConversationState {
     #[serde(default)]

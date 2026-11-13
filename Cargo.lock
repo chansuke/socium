@@ -2259,6 +2259,7 @@ dependencies = [
  "color-eyre",
  "ratatui",
  "serde",
+ "serde_json",
  "socium-core",
  "tokio",
  "unicode-width",

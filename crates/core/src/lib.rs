@@ -1,6 +1,8 @@
 pub use crate::agent::state::{
     load_json_file as load_local_state, save_json_file as save_local_state, workspace_state_path,
 };
+pub mod activity;
+mod activity_log;
 mod control;
 mod execution;
 mod process;
@@ -12,9 +14,12 @@ pub mod error;
 pub mod providers;
 pub mod tools;
 
+pub use crate::activity::{ActivityEvent, ActivityKind, ThoughtRole};
 pub use crate::agent::context::ContextMetrics;
 pub use crate::error::AgentError;
 
+use crate::activity::ActivityClock;
+use crate::activity_log::{ACTIVITY_LOG_FILE_NAME, ActivityRecorder};
 use crate::agent::compaction::{
     CompactionRequest, compaction_threshold_tokens, retention_boundary, summarize_with_llm,
 };
@@ -78,6 +83,19 @@ pub enum AgentProgress {
     ApprovalRequired {
         tool: String,
         reason: String,
+    },
+    /// The human answered, the request timed out, or the task was cancelled.
+    ApprovalResolved {
+        request_id: u64,
+        approved: bool,
+    },
+    /// Structured record of the turn for the Activity pane.
+    Activity(ActivityEvent),
+    /// One provider stream event as received. Shown on request, never saved.
+    RawProviderEvent {
+        turn_id: usize,
+        round: usize,
+        json: String,
     },
     AssistantText {
         text: String,
@@ -180,7 +198,7 @@ impl AgentService {
         let provider = provider_from_env()?;
         let model = env::var("MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let max_tokens = env::var("MAX_TOKENS")
-            .unwrap_or_else(|_| "1000".to_string())
+            .unwrap_or_else(|_| DEFAULT_MAX_TOKENS.to_string())
             .parse::<u32>()
             .map_err(|e| {
                 Error::new(
@@ -254,6 +272,7 @@ impl AgentService {
 
     pub fn clear(&mut self) -> std::io::Result<()> {
         self.ensure_state_lock()?;
+        crate::activity_log::rotate(&self.activity_log_path())?;
         let old_messages = std::mem::take(&mut self.messages);
         let old_events = std::mem::take(&mut self.events);
         let old_summary = self.summary_state.clone();
@@ -265,6 +284,25 @@ impl AgentService {
             return Err(err);
         }
         Ok(())
+    }
+
+    /// Activity of the most recent saved turns, oldest first.
+    pub fn recent_activity(&self) -> Vec<ActivityEvent> {
+        crate::activity_log::load_recent(
+            &self.activity_log_path(),
+            crate::activity_log::REPLAY_TURNS,
+        )
+    }
+
+    fn activity_log_path(&self) -> PathBuf {
+        self.workspace_root
+            .join(STATE_DIR_NAME)
+            .join(ACTIVITY_LOG_FILE_NAME)
+    }
+
+    /// Tolerated configuration problems to show once at startup.
+    pub fn startup_warnings(&self) -> Vec<String> {
+        self.provider.startup_warnings()
     }
 
     pub fn transcript_entries(&self) -> Vec<TranscriptEntry> {
@@ -322,16 +360,44 @@ impl AgentService {
         self.ensure_state_lock()?;
         crate::agent::turn::repair_incomplete_tools(&mut self.messages);
         let turn_id = self.messages.len();
+        let clock = ActivityClock::start(turn_id);
+        let mut recorder = ActivityRecorder::new(self.activity_log_path());
+        let mut on_progress = move |event: AgentProgress| {
+            let warning = match &event {
+                AgentProgress::Activity(activity) => recorder.observe(activity),
+                _ => None,
+            };
+            on_progress(event);
+            if let Some(message) = warning {
+                on_progress(AgentProgress::Activity(
+                    clock.event(0, ActivityKind::Warning { message }),
+                ));
+            }
+        };
+        let emit = |on_progress: &mut dyn FnMut(AgentProgress), kind: ActivityKind| {
+            on_progress(AgentProgress::Activity(clock.event(0, kind)));
+        };
         self.events.push(serde_json::json!({"type":"turn_started","turn_id":turn_id,"sequence":self.events.len()}));
         self.messages.push(Message::user_text(user_input));
         self.persist_state()?;
+        emit(&mut on_progress, ActivityKind::TurnStarted);
         if self.should_auto_compact()? {
             on_progress(AgentProgress::CompactionStarted);
+            emit(&mut on_progress, ActivityKind::CompactionStarted);
             match self.run_compaction().await {
-                Ok(report) => on_progress(AgentProgress::CompactionFinished {
-                    covered_messages: report.covered_messages,
-                    used_llm: report.used_llm,
-                }),
+                Ok(report) => {
+                    on_progress(AgentProgress::CompactionFinished {
+                        covered_messages: report.covered_messages,
+                        used_llm: report.used_llm,
+                    });
+                    emit(
+                        &mut on_progress,
+                        ActivityKind::CompactionFinished {
+                            covered_messages: report.covered_messages,
+                            used_llm: report.used_llm,
+                        },
+                    );
+                }
                 // Compaction must never block the conversation; the
                 // budget-based trimming below still bounds the prompt.
                 Err(AgentError::NothingToCompact) => {}
@@ -356,6 +422,7 @@ impl AgentService {
             tools: &self.tools,
             workspace_root: &self.workspace_root,
             control: &self.control,
+            clock,
         };
         let raw_len = self.messages.len();
         self.summary_state = prepared_context.summary_state;
@@ -387,6 +454,13 @@ impl AgentService {
         )
         .await;
         self.events.push(serde_json::json!({"type":if result.is_ok(){"turn_finished"}else{"turn_failed"},"sequence":self.events.len(),"turn_id":turn_id,"error":result.as_ref().err().map(ToString::to_string)}));
+        on_progress(AgentProgress::Activity(clock.event(
+            0,
+            ActivityKind::TurnFinished {
+                ok: result.is_ok(),
+                error: result.as_ref().err().map(ToString::to_string),
+            },
+        )));
         if let Err(error) = self.persist_state() {
             return Err(std::io::Error::other(format!(
                 "Cannot persist turn completion: {error}; previous failure: {:?}",
@@ -433,7 +507,7 @@ impl AgentService {
             return Ok(false);
         };
         let budget = resolve_context_budget(self.provider.kind(), &self.model, self.max_tokens)?;
-        let threshold = compaction_threshold_tokens(budget.context_window_tokens);
+        let threshold = compaction_threshold_tokens(budget.input_budget_tokens());
         Ok(usage.total_input_tokens() >= threshold)
     }
 
@@ -665,6 +739,32 @@ mod tests {
                 .covered_messages,
             15
         );
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_threshold_leaves_room_for_the_output_allowance() {
+        let workspace = make_temp_dir("auto_compact_output_room");
+        // 200k window - 64k output = 136k input budget; 80% of that is
+        // 108.8k. This prompt fits the budget now but not for long.
+        let near_budget = TokenUsage {
+            input_tokens: 120_000,
+            ..TokenUsage::default()
+        };
+        let provider = ScriptedProvider::new(vec![
+            Ok(text_provider_response("1. User request: summary", None)),
+            Ok(text_provider_response("turn answer", None)),
+        ]);
+        let mut service = service_with_scripted_provider(
+            workspace.path(),
+            provider,
+            plain_user_messages(30),
+            Some(near_budget),
+        );
+        service.max_tokens = 64_000;
+
+        service.submit("next".to_string()).await.unwrap();
+
+        assert!(service.summary_state.summary.is_some());
     }
 
     #[tokio::test]

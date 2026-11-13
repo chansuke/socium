@@ -10,6 +10,11 @@ Start with the [README](../README.md) for installation and everyday use.
 - [Public release review](public-release-review.md): cleanup, security findings, checks, and remaining limits.
 - [Contributing](../CONTRIBUTING.md): development and verification.
 
+## Design decisions
+
+- [Architecture decision records](adr/README.md): decisions and the options they were weighed against.
+- [Activity stream design](design-agent-activity-stream.md): showing model reasoning and agent execution in the Activity pane.
+
 ## Work tracking
 
 - [Improvement tickets](tickets/README.md) and [GitHub tracker #52](https://github.com/chansuke/socium/issues/52).

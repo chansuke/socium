@@ -50,7 +50,7 @@ pub(crate) fn command_output_preview_lines(
 
 pub(crate) fn help_text() -> String {
     format!(
-        "{}\n\nexit           Quit Socium (same as /exit)\n/              Show command suggestions; Up/Down select, Tab completes\nEsc / Ctrl+C   Cancel a running task\ny / n          Allow once / deny a pending sandboxed command\nSandbox        Linux; network denied; private HOME; no host fallback",
+        "{}\n\nexit           Quit Socium (same as /exit)\n/              Show command suggestions; Up/Down select, Tab completes\nEsc / Ctrl+C   Cancel a running task\ny / n          Allow once / deny a pending sandboxed command\nCtrl+A         Focus the activity pane; Up/Down select, Ctrl+L goes to\n               the top, Enter expands, z fills the screen, Esc returns\nSandbox        Linux; network denied; private HOME; no host fallback",
         crate::slash_command::command_list_text()
     )
 }
@@ -67,64 +67,23 @@ pub(crate) fn render_entry(entry: &ChatEntry, width: usize) -> Vec<Line<'static>
     match entry.speaker {
         Speaker::User => render_wrapped_text(&entry.body, width, "> ", "  ", MUTED, MUTED, None),
         Speaker::Socium => render_socium_entry(entry, width),
-        Speaker::Thinking => render_thinking_card(&entry.body, width),
+        Speaker::Thinking => render_thinking_indicator(),
         Speaker::System => render_wrapped_text(&entry.body, width, "! ", "  ", PINK, TEXT, None),
     }
 }
 
-fn render_thinking_card(text: &str, width: usize) -> Vec<Line<'static>> {
-    let card_width = width.saturating_sub(4).max(32);
-    let inner_width = card_width.saturating_sub(4);
-    let wrapped = wrap_multiline(text, inner_width, inner_width);
-    let mut lines = vec![Line::from(vec![
-        Span::styled("  ", Style::default().fg(MUTED)),
-        Span::styled(
-            format!("┌{}┐", "─".repeat(card_width.saturating_sub(2))),
-            Style::default().fg(CODE_BORDER),
-        ),
-    ])];
-
-    let title = "↪ SociumAgent";
-    let subtitle = wrapped
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "Working on it".to_string());
-    lines.push(card_line(&format!("{title} {subtitle}"), card_width));
-
-    for line in wrapped.into_iter().skip(1) {
-        lines.push(card_line(&line, card_width));
-    }
-
-    lines.push(Line::from(vec![
-        Span::styled("  ", Style::default().fg(MUTED)),
-        Span::styled(
-            format!("└{}┘", "─".repeat(card_width.saturating_sub(2))),
-            Style::default().fg(CODE_BORDER),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(": ", Style::default().fg(MUTED)),
-        Span::styled("Socium is thinking", Style::default().fg(LILAC)),
-        Span::styled(" (esc to cancel)", Style::default().fg(MUTED)),
-    ]));
-    lines.push(Line::from(""));
-    lines
-}
-
-fn card_line(content: &str, card_width: usize) -> Line<'static> {
-    let inner_width = card_width.saturating_sub(4);
-    let visible = content.chars().take(inner_width).collect::<String>();
-    let padding = inner_width.saturating_sub(visible.chars().count());
-
-    Line::from(vec![
-        Span::styled("  ", Style::default().fg(MUTED)),
-        Span::styled("│ ", Style::default().fg(CODE_BORDER)),
-        Span::styled(visible, Style::default().fg(CODE_TEXT)),
-        Span::styled(
-            format!("{} │", " ".repeat(padding)),
-            Style::default().fg(CODE_BORDER),
-        ),
-    ])
+fn render_thinking_indicator() -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            Span::styled("✦ ", Style::default().fg(LILAC)),
+            Span::styled("Socium is thinking", Style::default().fg(LILAC)),
+            Span::styled(
+                " · Ctrl+A to follow in activity · esc to cancel",
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Line::from(""),
+    ]
 }
 
 fn render_socium_entry(entry: &ChatEntry, width: usize) -> Vec<Line<'static>> {

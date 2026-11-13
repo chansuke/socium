@@ -94,6 +94,14 @@ These offsets remain stable because raw history is not truncated at the front.
 `/clear` begins a fresh conversation and clears its event sequence. Summaries only
 change the model's context projection; full tool results remain in the transcript.
 
+The Activity pane's record is appended to `.socium/activity.jsonl`, separate from
+the snapshot, and the most recent 20 turns are shown again at startup. It holds
+reasoning summaries, tool inputs, one-line result summaries, timings and token
+use, but never full tool output or raw provider events. A failed append shows a
+warning and does not fail the turn; a line cut off by a crash is skipped on
+replay. At 16 MiB, and on `/clear`, the file moves to `activity.1.jsonl`,
+replacing the previous one.
+
 Bubblewrap ties subprocess lifetime to Socium and isolates descendants in a PID
 namespace. A crash after intent but before a saved result still produces an **unknown outcome** on
 restart. Socium does not re-execute that tool automatically. Inspect the files,

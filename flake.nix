@@ -28,6 +28,32 @@
             license = pkgs.lib.licenses.lgpl21Plus;
           };
         });
+      # The pinned nixpkgs contains 0.6.2, which ignores `no_edit` and drops
+      # non-ASCII titles from ADR file names. Build the release CI checks with.
+      adrs =
+        pkgs:
+        pkgs.rustPlatform.buildRustPackage (finalAttrs: {
+          pname = "adrs";
+          version = "0.13.0";
+          src = pkgs.fetchFromGitHub {
+            owner = "joshrotenberg";
+            repo = "adrs";
+            tag = "v${finalAttrs.version}";
+            hash = "sha256-XBSGK63MEpCy2jNqn2XPUmKXgmmRAYFKPupoRvG5R+8=";
+          };
+          cargoHash = "sha256-sdkUYSC2OmVIL8b3u6q0Lv9yWRiijTzI7l7ch3tszsc=";
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = [ pkgs.oniguruma ];
+          meta = {
+            description = "Command-line tool for managing Architectural Decision Records";
+            homepage = "https://github.com/joshrotenberg/adrs";
+            license = with pkgs.lib.licenses; [
+              mit
+              asl20
+            ];
+            mainProgram = "adrs";
+          };
+        });
     in
     {
       formatter = forAllSystems (pkgs: pkgs.nixfmt);
@@ -81,6 +107,7 @@
                 --set-default NIX_SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
             '';
           };
+          adrs = adrs pkgs;
         }
       );
 
@@ -111,6 +138,7 @@
               pkgs.pkg-config
               pkgs.nixfmt
               pkgs.pre-commit
+              (adrs pkgs)
             ]
             ++ lib.optionals pkgs.stdenv.isLinux [
               (sandboxBackend pkgs)

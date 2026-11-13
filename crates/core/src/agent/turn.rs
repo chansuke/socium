@@ -1,11 +1,15 @@
 use crate::AgentProgress;
+use crate::activity::{
+    ActivityClock, ActivityKind, RoundActivity, summarize_tool_input, summarize_tool_result,
+};
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message};
 use crate::constants::MAX_TOOL_ROUNDS;
 use crate::error::AgentError;
-use crate::providers::{DeltaEvent, Provider, TokenUsage};
+use crate::providers::{Provider, ProviderEvent, TokenUsage};
 use crate::tools::ToolDefinition;
 use crate::tools::run_tool_call_checkpointed;
 use std::path::Path;
+use std::time::Instant;
 
 pub(crate) struct TurnContext<'a> {
     pub(crate) provider: &'a dyn Provider,
@@ -15,6 +19,7 @@ pub(crate) struct TurnContext<'a> {
     pub(crate) tools: &'a [ToolDefinition],
     pub(crate) control: &'a crate::TaskControl,
     pub(crate) workspace_root: &'a Path,
+    pub(crate) clock: ActivityClock,
 }
 
 pub(crate) struct TurnOutcome {
@@ -38,11 +43,22 @@ where
     let mut assistant_text_chunks = Vec::new();
     let mut last_usage = None;
     let max_rounds = if supports_tools { MAX_TOOL_ROUNDS } else { 1 };
+    let clock = ctx.clock;
     for round in 0..max_rounds {
+        let round_number = round + 1;
+        let emit = |on_progress: &mut F, kind: ActivityKind| {
+            on_progress(AgentProgress::Activity(clock.event(round_number, kind)));
+        };
         on_progress(AgentProgress::ModelRequestStarted {
-            round: round + 1,
+            round: round_number,
             provider: ctx.provider.kind().to_string(),
         });
+        emit(
+            on_progress,
+            ActivityKind::RoundStarted {
+                model: ctx.model.to_string(),
+            },
+        );
         validate_protocol(messages)?;
         let budget = crate::agent::context::resolve_context_budget(
             ctx.provider.kind(),
@@ -63,15 +79,37 @@ where
         }
         let message_request =
             AgentMessageRequest::new(ctx.model, ctx.max_tokens, messages, ctx.tools);
-        let mut on_delta = |event: DeltaEvent| match event {
-            DeltaEvent::Text(text) => on_progress(AgentProgress::AssistantText { text }),
-            DeltaEvent::Thinking(text) => on_progress(AgentProgress::ThinkingText { text }),
+        let mut round_activity = RoundActivity::start();
+        let mut on_delta = |event: ProviderEvent| {
+            match &event {
+                ProviderEvent::TextDelta { text, .. } => {
+                    on_progress(AgentProgress::AssistantText { text: text.clone() })
+                }
+                ProviderEvent::ThinkingDelta { text, .. } => {
+                    on_progress(AgentProgress::ThinkingText { text: text.clone() })
+                }
+                ProviderEvent::Raw { json } => on_progress(AgentProgress::RawProviderEvent {
+                    turn_id: clock.turn_id(),
+                    round: round_number,
+                    json: json.clone(),
+                }),
+                _ => {}
+            }
+            for kind in round_activity.apply(event) {
+                on_progress(AgentProgress::Activity(clock.event(round_number, kind)));
+            }
         };
-        let response = tokio::select! {
+        let result = tokio::select! {
             biased;
-            _ = ctx.control.cancelled() => return Err(AgentError::Cancelled),
-            result = ctx.provider.send_message(ctx.client, &message_request, &mut on_delta) => result?,
+            _ = ctx.control.cancelled() => Err(AgentError::Cancelled),
+            result = ctx.provider.send_message(ctx.client, &message_request, &mut on_delta) => result.map_err(AgentError::from),
         };
+        // A response that ended without message_stop (an error, a
+        // cancellation, or a provider that does not stream) closes here.
+        for kind in round_activity.finish(None, result.as_ref().ok().and_then(|r| r.usage)) {
+            emit(on_progress, kind);
+        }
+        let response = result?;
         if response.usage.is_some() {
             last_usage = response.usage;
         }
@@ -122,6 +160,47 @@ where
         for (id, name, input) in calls {
             let call_id = id.clone();
             let tool_name = name.clone();
+            let tool_started = Instant::now();
+            emit(
+                on_progress,
+                ActivityKind::ToolStarted {
+                    call_id: id.clone(),
+                    name: name.clone(),
+                    input_summary: summarize_tool_input(&name, &input),
+                },
+            );
+            let mut approval_started = None;
+            let mut tool_progress = |event: AgentProgress| {
+                let kind = match &event {
+                    AgentProgress::ApprovalRequested { tool, .. } => {
+                        approval_started = Some(Instant::now());
+                        Some(ActivityKind::ApprovalWaiting {
+                            call_id: call_id.clone(),
+                            tool: tool.clone(),
+                        })
+                    }
+                    AgentProgress::ApprovalResolved { approved, .. } => {
+                        Some(ActivityKind::ApprovalResolved {
+                            call_id: call_id.clone(),
+                            approved: *approved,
+                            waited_ms: approval_started.take().map_or(0, elapsed_ms),
+                        })
+                    }
+                    AgentProgress::CommandOutput {
+                        stdout_bytes,
+                        stderr_bytes,
+                    } => Some(ActivityKind::CommandOutput {
+                        call_id: call_id.clone(),
+                        stdout_bytes: *stdout_bytes,
+                        stderr_bytes: *stderr_bytes,
+                    }),
+                    _ => None,
+                };
+                on_progress(event);
+                if let Some(kind) = kind {
+                    on_progress(AgentProgress::Activity(clock.event(round_number, kind)));
+                }
+            };
             let result = if ctx.control.is_cancelled() {
                 ContentBlock::ToolResult {
                     tool_use_id: id,
@@ -135,7 +214,7 @@ where
                     &name,
                     &input,
                     ctx.control,
-                    on_progress,
+                    &mut tool_progress,
                     &mut || {
                         checkpoint(
                             messages,
@@ -151,6 +230,18 @@ where
                     ..
                 }
             );
+            if let ContentBlock::ToolResult { content, .. } = &result {
+                emit(
+                    on_progress,
+                    ActivityKind::ToolFinished {
+                        call_id: call_id.clone(),
+                        name: tool_name.clone(),
+                        is_error: failed,
+                        elapsed_ms: elapsed_ms(tool_started),
+                        summary: summarize_tool_result(content),
+                    },
+                );
+            }
             results.push(result);
             *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
             checkpoint(messages,serde_json::json!({"type":"tool_finished","round":round+1,"attempt":1,"tool_call_id":call_id,"tool":tool_name,"is_error":failed,"result_index":results.len()-1})).map_err(|e|std::io::Error::other(format!("Tool finished but its result could not be saved; outcome may be unknown after restart: {e}")))?;
@@ -167,6 +258,10 @@ where
         assistant_text_chunks,
         last_usage,
     })
+}
+
+fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn validate_protocol(messages: &[Message]) -> Result<(), AgentError> {

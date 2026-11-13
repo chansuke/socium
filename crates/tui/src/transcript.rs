@@ -32,7 +32,7 @@ impl App {
     }
 
     pub(crate) fn push_activity(&mut self, line: impl Into<String>) {
-        self.activity_log.push(line.into());
+        self.activity.push_note(line);
     }
 
     pub(crate) fn append_streamed_assistant_text(&mut self, text: &str) {
@@ -50,26 +50,16 @@ impl App {
         }
     }
 
-    pub(crate) fn append_streamed_thinking_text(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        if let Some(entry) = self.messages.last_mut()
-            && entry.speaker == Speaker::Thinking
+    /// Shows the one-line thinking indicator; the thoughts themselves are
+    /// in the Activity pane.
+    pub(crate) fn show_thinking_indicator(&mut self) {
+        if self
+            .messages
+            .last()
+            .is_none_or(|entry| entry.speaker != Speaker::Thinking)
         {
-            // プレースホルダーが入っている場合は実際の思考内容で置き換える
-            if entry.body.starts_with("Preparing response for:") {
-                entry.body = text.to_string();
-            } else {
-                entry.body.push_str(text);
-            }
-        } else {
-            self.messages.push(ChatEntry {
-                speaker: Speaker::Thinking,
-                body: text.to_string(),
-            });
+            self.push_message(Speaker::Thinking, String::new());
         }
-        self.transcript_scroll = 0;
     }
 }
 
@@ -111,19 +101,11 @@ pub(crate) fn transcript_window_start(total_lines: usize, height: usize, scroll:
     max_start.saturating_sub(scroll.min(max_start))
 }
 
-pub(crate) fn recent_activity_lines(entries: &[String], max_lines: usize) -> Vec<String> {
-    if max_lines == 0 {
-        return Vec::new();
-    }
-    let start = entries.len().saturating_sub(max_lines);
-    entries[start..].to_vec()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatEntry, Speaker, append_streamed_assistant_text, recent_activity_lines,
-        transcript_entries_to_chat_entries, transcript_window_start,
+        ChatEntry, Speaker, append_streamed_assistant_text, transcript_entries_to_chat_entries,
+        transcript_window_start,
     };
     use socium_core::{TranscriptEntry, TranscriptRole};
 
@@ -158,22 +140,6 @@ mod tests {
         assert_eq!(transcript_window_start(20, 5, 3), 12);
         assert_eq!(transcript_window_start(20, 5, 99), 0);
         assert_eq!(transcript_window_start(3, 10, 5), 0);
-    }
-
-    #[test]
-    fn recent_activity_lines_keeps_latest_entries() {
-        let entries = vec![
-            "one".to_string(),
-            "two".to_string(),
-            "three".to_string(),
-            "four".to_string(),
-        ];
-
-        assert_eq!(
-            recent_activity_lines(&entries, 2),
-            vec!["three".to_string(), "four".to_string()]
-        );
-        assert_eq!(recent_activity_lines(&entries, 0), Vec::<String>::new());
     }
 
     #[test]

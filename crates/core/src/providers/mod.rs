@@ -47,9 +47,46 @@ pub(crate) struct ProviderResponse {
     pub usage: Option<TokenUsage>,
 }
 
-pub(crate) enum DeltaEvent {
-    Text(String),
-    Thinking(String),
+/// What a streamed content block holds, known when the block opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BlockKind {
+    Text,
+    Thinking,
+    ToolUse { id: String, name: String },
+}
+
+/// Incremental view of a streaming response. Text and thinking deltas are
+/// what the UI shows; tool input deltas are display-only, and the complete,
+/// validated input still arrives in the final response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProviderEvent {
+    BlockStarted {
+        index: usize,
+        kind: BlockKind,
+    },
+    TextDelta {
+        index: usize,
+        text: String,
+    },
+    ThinkingDelta {
+        index: usize,
+        text: String,
+    },
+    ToolInputDelta {
+        index: usize,
+        partial_json: String,
+    },
+    BlockFinished {
+        index: usize,
+    },
+    MessageFinished {
+        stop_reason: String,
+        usage: Option<TokenUsage>,
+    },
+    /// One provider stream event exactly as received, for inspection.
+    Raw {
+        json: String,
+    },
 }
 
 impl ProviderKind {
@@ -84,11 +121,16 @@ impl fmt::Display for ProviderKind {
 pub(crate) trait Provider: Send + Sync {
     fn kind(&self) -> ProviderKind;
     fn capabilities(&self) -> ProviderCapabilities;
+    /// Configuration problems that were tolerated at construction and
+    /// should be shown to the user once.
+    fn startup_warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
     async fn send_message(
         &self,
         client: &reqwest::Client,
         request: &AgentMessageRequest<'_>,
-        on_delta: &mut (dyn FnMut(DeltaEvent) + Send),
+        on_delta: &mut (dyn FnMut(ProviderEvent) + Send),
     ) -> Result<ProviderResponse, ProviderError>;
 }
 

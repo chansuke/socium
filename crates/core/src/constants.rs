@@ -1,5 +1,8 @@
 pub const ANTHROPIC_MESSAGES_API: &str = "https://api.anthropic.com/v1/messages";
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
+// Thinking cannot be turned off on the default model and counts toward
+// max_tokens, so leave room for it as well as the visible answer.
+pub const DEFAULT_MAX_TOKENS: u32 = 64_000;
 pub const MAX_READ_FILE_BYTES: usize = 200 * 1024;
 pub const MAX_TOOL_ROUNDS: usize = 20;
 pub const MAX_LIST_ENTRIES: usize = 1000;
@@ -23,7 +26,7 @@ pub const MAX_SUMMARY_CHARACTERS: usize = 4_000;
 // Compaction: summarize old conversation with a cheap dedicated model so
 // long sessions stop resending their full history on every call.
 // Auto-compaction fires when the last measured prompt size exceeds
-// COMPACTION_TRIGGER_RATIO of the context window (override with the
+// COMPACTION_TRIGGER_RATIO of the input budget (override with the
 // COMPACTION_TOKEN_THRESHOLD env var). COMPACTION_RETAIN_RECENT_MESSAGES
 // messages are kept verbatim; TARGET/MIN_RECENT_CONTEXT_MESSAGES remain
 // the emergency budget-based trimming path for uncompacted overflow.

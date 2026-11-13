@@ -77,7 +77,14 @@ impl TaskControl {
             let answer = pending.as_ref().and_then(|(_, a)| *a);
             if self.is_cancelled() || start.elapsed() >= timeout || answer.is_some() {
                 *pending = None;
-                return !self.is_cancelled() && start.elapsed() < timeout && answer == Some(true);
+                drop(pending);
+                let approved =
+                    !self.is_cancelled() && start.elapsed() < timeout && answer == Some(true);
+                progress(crate::AgentProgress::ApprovalResolved {
+                    request_id: id,
+                    approved,
+                });
+                return approved;
             }
             drop(pending);
             std::thread::sleep(Duration::from_millis(20));

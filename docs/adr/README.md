@@ -1,0 +1,5 @@
+* [1. Record architecture decisions](0001-record-architecture-decisions.md)
+* [2. Activity欄でLLMの思考とエージェントの実行を構造化したイベントとして表示する](0002-activity欄でllmの思考とエージェントの実行を構造化したイベントとして表示する.md)
+* [3. adaptive thinkingの表示を既定でsummarizedにしTHINKING_BUDGET_TOKENSを廃止する](0003-adaptive-thinkingの表示を既定でsummarizedにしthinking-budget-tokensを廃止する.md)
+* [4. Activityの記録をセッション単位のJSONLに保存し起動時に再生する](0004-activityの記録をセッション単位のjsonlに保存し起動時に再生する.md)
+* [5. 実行の事実から導いたシグナルでエージェントの状態をActivity欄に示す](0005-実行の事実から導いたシグナルでエージェントの状態をactivity欄に示す.md)

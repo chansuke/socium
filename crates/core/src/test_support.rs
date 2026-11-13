@@ -1,7 +1,7 @@
 use crate::agent::types::{AgentMessageRequest, AgentMessageResponse, ContentBlock};
 use crate::providers::error::ProviderError;
 use crate::providers::{
-    DeltaEvent, Provider, ProviderCapabilities, ProviderKind, ProviderResponse, TokenUsage,
+    Provider, ProviderCapabilities, ProviderEvent, ProviderKind, ProviderResponse, TokenUsage,
 };
 use std::collections::VecDeque;
 use std::fs;
@@ -52,7 +52,7 @@ impl Provider for ScriptedProvider {
         &self,
         _client: &reqwest::Client,
         request: &AgentMessageRequest<'_>,
-        _on_delta: &mut (dyn FnMut(DeltaEvent) + Send),
+        _on_delta: &mut (dyn FnMut(ProviderEvent) + Send),
     ) -> Result<ProviderResponse, ProviderError> {
         self.recorded_requests
             .lock()

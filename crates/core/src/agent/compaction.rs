@@ -5,18 +5,20 @@ use crate::constants::{
     COMPACTION_SYSTEM_PROMPT, COMPACTION_TRIGGER_RATIO, DEFAULT_COMPACTION_MODEL,
 };
 use crate::providers::error::ProviderError;
-use crate::providers::{DeltaEvent, Provider};
+use crate::providers::{Provider, ProviderEvent};
 use std::env;
 
 /// Prompt-token level at which auto-compaction fires. The env override
-/// takes precedence; otherwise a fixed ratio of the context window.
-pub(crate) fn compaction_threshold_tokens(context_window_tokens: u32) -> u32 {
+/// takes precedence; otherwise a fixed ratio of the input budget, the
+/// context window minus the output allowance, so compaction runs before a
+/// request in the tool loop outgrows the budget.
+pub(crate) fn compaction_threshold_tokens(input_budget_tokens: u32) -> u32 {
     if let Ok(value) = env::var("COMPACTION_TOKEN_THRESHOLD")
         && let Ok(threshold) = value.trim().parse::<u32>()
     {
         return threshold;
     }
-    (context_window_tokens as f32 * COMPACTION_TRIGGER_RATIO) as u32
+    (input_budget_tokens as f32 * COMPACTION_TRIGGER_RATIO) as u32
 }
 
 /// Index separating messages to compact (before) from messages kept
@@ -82,7 +84,7 @@ pub(crate) async fn summarize_with_llm(
         &messages,
         &[],
     );
-    let mut discard_deltas = |_event: DeltaEvent| {};
+    let mut discard_deltas = |_event: ProviderEvent| {};
     let response = provider
         .send_message(client, &message_request, &mut discard_deltas)
         .await?;

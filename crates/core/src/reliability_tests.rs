@@ -1,7 +1,7 @@
 //! Offline acceptance scenarios for everyday work, not provider-quality evals.
 use super::*;
 use crate::agent::types::{AgentMessageResponse, ContentBlock, MessageContent};
-use crate::providers::{DeltaEvent, ProviderCapabilities, ProviderKind, ProviderResponse};
+use crate::providers::{ProviderCapabilities, ProviderEvent, ProviderKind, ProviderResponse};
 use crate::test_support::{ScriptedProvider, git_stdout, init_git_repo, text_provider_response};
 use serde_json::json;
 
@@ -186,7 +186,7 @@ impl Provider for WaitingProvider {
         &self,
         _: &reqwest::Client,
         _: &crate::agent::types::AgentMessageRequest<'_>,
-        _: &mut (dyn FnMut(DeltaEvent) + Send),
+        _: &mut (dyn FnMut(ProviderEvent) + Send),
     ) -> Result<ProviderResponse, ProviderError> {
         std::future::pending().await
     }
@@ -502,4 +502,104 @@ fn session_lock_rejects_a_second_process() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[tokio::test]
+async fn activity_records_rounds_tools_and_turn_outcome_in_order() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("notes.txt"), "first line\nsecond\n").unwrap();
+    let mut agent = service(
+        root.path(),
+        vec![
+            Ok(response(&[
+                ("read_file", json!({"path":"notes.txt"})),
+                ("read_file", json!({"path":"missing.txt"})),
+            ])),
+            Ok(text_provider_response("done", None)),
+        ],
+    );
+    let mut activity = Vec::new();
+    agent
+        .submit_with_progress("read it".into(), |event| {
+            if let AgentProgress::Activity(event) = event {
+                activity.push(event);
+            }
+        })
+        .await
+        .unwrap();
+
+    let turn_id = activity[0].turn_id;
+    assert!(activity.iter().all(|event| event.turn_id == turn_id));
+    assert!(activity.windows(2).all(|w| w[0].at_ms <= w[1].at_ms));
+    let shape = activity
+        .iter()
+        .map(|event| match &event.kind {
+            ActivityKind::TurnStarted => format!("{} turn", event.round),
+            ActivityKind::RoundStarted { .. } => format!("{} round", event.round),
+            ActivityKind::RoundFinished { stop_reason, .. } => {
+                format!("{} round done {stop_reason:?}", event.round)
+            }
+            ActivityKind::ToolStarted {
+                name,
+                input_summary,
+                ..
+            } => format!("{} {name} {input_summary}", event.round),
+            ActivityKind::ToolFinished {
+                is_error, summary, ..
+            } => format!(
+                "{} done error={is_error} {}",
+                event.round,
+                !summary.is_empty()
+            ),
+            ActivityKind::TurnFinished { ok, .. } => format!("{} turn ok={ok}", event.round),
+            other => format!("unexpected {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shape,
+        [
+            "0 turn",
+            "1 round",
+            "1 round done None",
+            "1 read_file notes.txt",
+            "1 done error=false true",
+            "1 read_file missing.txt",
+            "1 done error=true true",
+            "2 round",
+            "2 round done None",
+            "0 turn ok=true",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn activity_is_saved_replayed_after_restart_and_rotated_by_clear() {
+    let root = tempfile::tempdir().unwrap();
+    let mut agent = service(
+        root.path(),
+        vec![Ok(text_provider_response("first answer", None))],
+    );
+    let mut live = Vec::new();
+    agent
+        .submit_with_progress("hello".into(), |event| {
+            if let AgentProgress::Activity(event) = event {
+                live.push(event);
+            }
+        })
+        .await
+        .unwrap();
+    drop(agent);
+
+    let mut restarted = service(root.path(), vec![]);
+    restarted.restore_state().unwrap();
+    assert_eq!(restarted.recent_activity(), live);
+    assert!(
+        !live
+            .iter()
+            .any(|e| matches!(e.kind, ActivityKind::Warning { .. }))
+    );
+
+    restarted.clear().unwrap();
+    assert!(restarted.recent_activity().is_empty());
+    assert!(root.path().join(".socium/activity.1.jsonl").is_file());
 }

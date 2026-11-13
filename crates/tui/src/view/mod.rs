@@ -1,8 +1,9 @@
+pub(crate) mod activity;
 pub(crate) mod text_layout;
 pub(crate) mod theme;
 
 use crate::app::{App, InputMode};
-use crate::transcript::{recent_activity_lines, transcript_window_start};
+use crate::transcript::transcript_window_start;
 use crate::view::text_layout::*;
 use crate::view::theme::*;
 use ratatui::{
@@ -12,39 +13,73 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph},
 };
+use socium_core::activity::Phase;
 use unicode_width::UnicodeWidthChar;
 
 const SLASH_POPUP_MAX_ROWS: usize = 8;
+/// Terminal width from which the Activity pane becomes a right-hand column.
+const WIDE_LAYOUT_COLUMNS: u16 = 140;
+/// Terminal height from which the logo header is shown.
+const HEADER_MIN_ROWS: u16 = 40;
+
+pub(crate) struct Areas {
+    pub(crate) header: Rect,
+    pub(crate) transcript: Rect,
+    pub(crate) activity: Rect,
+    pub(crate) composer: Rect,
+    pub(crate) footer: Rect,
+}
+
+/// Splits the screen. Wide terminals put Activity beside the transcript;
+/// narrower ones stack it below, sized to the screen. Full screen gives the
+/// Activity pane the transcript's space as well.
+pub(crate) fn layout(area: Rect, activity_fullscreen: bool) -> Areas {
+    let header_rows = if area.height >= HEADER_MIN_ROWS {
+        10
+    } else {
+        0
+    };
+    let [header, body, composer, footer] = Layout::vertical([
+        Constraint::Length(header_rows),
+        Constraint::Min(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    let (transcript, activity) = if activity_fullscreen {
+        (Rect::new(body.x, body.y, body.width, 0), body)
+    } else if area.width >= WIDE_LAYOUT_COLUMNS {
+        let [transcript, activity] =
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(body);
+        (transcript, activity)
+    } else {
+        let activity_rows = (body.height * 35 / 100).clamp(6.min(body.height), 24);
+        let [transcript, activity] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(activity_rows)]).areas(body);
+        (transcript, activity)
+    };
+    Areas {
+        header,
+        transcript,
+        activity,
+        composer,
+        footer,
+    }
+}
 
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
         frame.render_widget(Block::new().style(Style::default().bg(BG)), frame.area());
 
-        let vertical = Layout::vertical([
-            Constraint::Length(10),
-            Constraint::Min(8),
-            Constraint::Length(8),
-            Constraint::Length(2),
-            Constraint::Length(1),
-        ]);
-        let [
-            header_area,
-            transcript_area,
-            lower_area,
-            composer_area,
-            footer_area,
-        ] = vertical.areas(frame.area());
-        let [activity_area, command_output_area] =
-            Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
-                .areas(lower_area);
+        let areas = layout(frame.area(), self.activity.fullscreen);
 
-        self.draw_header(frame, header_area);
-        self.draw_transcript(frame, transcript_area);
-        self.draw_activity(frame, activity_area);
-        self.draw_command_output(frame, command_output_area);
-        self.draw_composer(frame, composer_area);
-        self.draw_footer(frame, footer_area);
-        self.draw_slash_popup(frame, composer_area);
+        self.draw_header(frame, areas.header);
+        self.draw_transcript(frame, areas.transcript);
+        self.draw_activity(frame, areas.activity);
+        self.draw_composer(frame, areas.composer);
+        self.draw_footer(frame, areas.footer);
+        self.draw_slash_popup(frame, areas.composer);
     }
 
     /// Overlays command suggestions directly above the composer.
@@ -136,54 +171,48 @@ impl App {
     }
 
     fn draw_activity(&self, frame: &mut Frame, area: Rect) {
-        let lines =
-            recent_activity_lines(&self.activity_log, area.height.saturating_sub(2) as usize);
-        let block = Block::bordered()
-            .title(" activity ")
-            .border_style(Style::default().fg(CODE_BORDER))
-            .style(Style::default().bg(BG));
-        let text = if lines.is_empty() {
-            Text::from(vec![Line::from(Span::styled(
-                "No tool activity yet",
-                Style::default().fg(SOFT),
-            ))])
+        let focused = self.activity.focused;
+        let raw_title;
+        let title = if let Some(view) = &self.activity.raw_view {
+            raw_title = format!(
+                " raw stream · round {} · ↑↓ scroll · r / Esc back ",
+                view.round
+            );
+            raw_title.as_str()
         } else {
-            Text::from(
-                lines
-                    .into_iter()
-                    .map(|line| {
-                        Line::from(vec![
-                            Span::styled("• ", Style::default().fg(PINK)),
-                            Span::styled(line, Style::default().fg(TEXT)),
-                        ])
-                    })
-                    .collect::<Vec<_>>(),
-            )
+            let phase = match self.activity.phase() {
+                Phase::Idle => String::new(),
+                phase => format!(" · {}", phase.label()),
+            };
+            raw_title = if focused {
+                format!(" activity{phase} · ↑↓ select · Enter expand · r raw · z full · Esc back ")
+            } else {
+                format!(" activity{phase} · Ctrl+A focus ")
+            };
+            raw_title.as_str()
         };
-        frame.render_widget(Paragraph::new(text).block(block), area);
-    }
-
-    fn draw_command_output(&self, frame: &mut Frame, area: Rect) {
         let block = Block::bordered()
-            .title(" last command ")
-            .border_style(Style::default().fg(CODE_BORDER))
+            .title(title)
+            .border_style(Style::default().fg(if focused { LILAC } else { CODE_BORDER }))
             .style(Style::default().bg(BG));
-        let text = if let Some(output) = &self.last_command_output {
-            Text::from(
-                command_output_preview_lines(
-                    output,
-                    area.width.saturating_sub(2) as usize,
-                    area.height.saturating_sub(2) as usize,
-                )
-                .into_iter()
-                .map(|line| Line::from(Span::styled(line, Style::default().fg(TEXT))))
-                .collect::<Vec<_>>(),
-            )
-        } else {
+        let text = if let Some(view) = &self.activity.raw_view {
+            Text::from(activity::raw_lines(
+                &self.activity,
+                view,
+                area.width.saturating_sub(2) as usize,
+                area.height.saturating_sub(2) as usize,
+            ))
+        } else if self.activity.is_empty() {
             Text::from(vec![Line::from(Span::styled(
-                "No command output yet",
+                "Thoughts, tool calls, and token use appear here",
                 Style::default().fg(SOFT),
             ))])
+        } else {
+            Text::from(activity::activity_lines(
+                &self.activity,
+                area.width.saturating_sub(2) as usize,
+                area.height.saturating_sub(2) as usize,
+            ))
         };
         frame.render_widget(Paragraph::new(text).block(block), area);
     }
@@ -432,6 +461,124 @@ mod tests {
         // 78 cells wide; 38 wide chars (76 cells) plus the cursor cell fit.
         assert_eq!(x, 2 + 76);
         assert!(row.trim_end().ends_with('あ'));
+    }
+
+    fn render_at(app: &App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn app_with_activity() -> App {
+        let mut app = App::for_test();
+        app.push_message(crate::transcript::Speaker::User, "explain the view");
+        for event in crate::activity::tests::sample_turn() {
+            app.activity.apply(event);
+        }
+        app
+    }
+
+    #[test]
+    fn small_terminal_keeps_input_transcript_and_activity_visible() {
+        let rows = render_at(&app_with_activity(), 80, 24);
+
+        // Footer on the last row, the two-row composer above it.
+        assert!(rows[21].starts_with("> "), "composer row: {:?}", rows[21]);
+        assert!(rows.iter().any(|row| row.contains("> explain the view")));
+        let top = rows
+            .iter()
+            .position(|row| row.contains(" activity "))
+            .unwrap();
+        assert!(top < 21);
+        assert!(
+            rows[top..21]
+                .iter()
+                .any(|row| row.contains("response · 312 chars"))
+        );
+    }
+
+    #[test]
+    fn wide_terminal_places_activity_in_a_right_column() {
+        let rows = render_at(&app_with_activity(), 160, 40);
+
+        let header = rows.iter().find(|row| row.contains(" activity ")).unwrap();
+        let column = header.chars().position(|c| c == '┌').unwrap();
+        assert!(column >= 90, "activity starts at column {column}");
+        assert!(rows.iter().any(|row| row.contains("⚙ read_file")));
+        assert!(rows.iter().any(|row| row.contains("> explain the view")));
+    }
+
+    #[test]
+    fn focused_full_screen_activity_marks_the_selection() {
+        let mut app = app_with_activity();
+        app.activity.focused = true;
+        app.activity.fullscreen = true;
+        app.activity.select_first();
+        let rows = render_at(&app, 80, 24);
+
+        assert!(rows[0].contains("Esc back"));
+        assert!(rows[1].contains("› ━ turn 1"));
+        assert!(!rows.iter().any(|row| row.contains("> explain the view")));
+    }
+
+    #[test]
+    #[ignore = "prints a frame for manual inspection"]
+    fn print_activity_frame() {
+        let mut app = app_with_activity();
+        app.activity.focused = true;
+        app.activity.selected = Some(3);
+        for row in render_at(&app, 110, 30) {
+            println!("{row}");
+        }
+    }
+
+    #[test]
+    fn title_shows_the_phase_and_signals_are_listed() {
+        use socium_core::ActivityKind;
+        let mut app = App::for_test();
+        let event = |kind| socium_core::ActivityEvent {
+            turn_id: 1,
+            round: 1,
+            at_ms: 0,
+            kind,
+        };
+        app.activity.apply(event(ActivityKind::TurnStarted));
+        app.activity
+            .apply(event(ActivityKind::RoundStarted { model: "m".into() }));
+        for _ in 0..3 {
+            app.activity.apply(event(ActivityKind::ToolStarted {
+                call_id: "c".into(),
+                name: "search_text".into(),
+                input_summary: "push_activity".into(),
+            }));
+        }
+        let rows = render_at(&app, 100, 30);
+
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(" activity · investigating · Ctrl+A focus "))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("◇ Repeating: search_text push_activity started 3 times"))
+        );
+    }
+
+    #[test]
+    fn layouts_survive_tiny_terminals() {
+        for (width, height) in [(1, 1), (20, 5), (80, 8), (200, 3)] {
+            let mut app = app_with_activity();
+            render_at(&app, width, height);
+            app.activity.fullscreen = true;
+            render_at(&app, width, height);
+        }
     }
 
     #[test]
