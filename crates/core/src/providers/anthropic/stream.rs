@@ -269,10 +269,22 @@ impl StreamingMessageBuilder {
         match self.stop_reason.as_deref() {
             Some("tool_use") if has_tools => {}
             Some("end_turn" | "stop_sequence") if !has_tools => {}
-            reason => {
+            Some("max_tokens") => {
+                return Err(ProviderError::Stream(
+                    "Response stopped at the output token limit (stop reason: max_tokens); \
+                     raise MAX_TOKENS to allow longer responses"
+                        .into(),
+                ));
+            }
+            Some(reason) => {
                 return Err(ProviderError::Stream(format!(
-                    "Response stopped without safe completion: {reason:?}"
+                    "Response stopped without safe completion (stop reason: {reason})"
                 )));
+            }
+            None => {
+                return Err(ProviderError::Stream(
+                    "Response ended without a stop reason".into(),
+                ));
             }
         }
         let mut content = Vec::with_capacity(self.blocks.len());
@@ -487,6 +499,23 @@ mod tests {
         tool(&mut b);
         stop(&mut b, "max_tokens");
         assert!(b.finish().unwrap_err().to_string().contains("max_tokens"));
+    }
+    #[test]
+    fn unsafe_stops_are_reported_without_debug_formatting() {
+        let finish_with = |reason: &str| {
+            let mut b = start();
+            tool(&mut b);
+            stop(&mut b, reason);
+            b.finish().unwrap_err().to_string()
+        };
+        assert_eq!(
+            finish_with("max_tokens"),
+            "Response stopped at the output token limit (stop reason: max_tokens); raise MAX_TOKENS to allow longer responses"
+        );
+        assert_eq!(
+            finish_with("end_turn"),
+            "Response stopped without safe completion (stop reason: end_turn)"
+        );
     }
     #[test]
     fn rejects_unbounded_indices_duplicate_blocks_and_wrong_deltas() {

@@ -4,6 +4,7 @@ use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
+use unicode_width::UnicodeWidthChar;
 
 enum Segment {
     Text(String),
@@ -311,9 +312,8 @@ fn render_code_block(label: &str, code_lines: &[String], width: usize) -> Vec<Li
     let outer_width = width.saturating_sub(2).max(24);
     let inner_width = outer_width.saturating_sub(2);
     let title = format!(" {} ", if label.is_empty() { "snippet" } else { label });
-    let title_chars = title.chars().count().min(inner_width);
-    let title_text = title.chars().take(title_chars).collect::<String>();
-    let fill = inner_width.saturating_sub(title_text.chars().count());
+    let (title_text, title_width) = take_width(&title, inner_width);
+    let fill = inner_width.saturating_sub(title_width);
 
     let mut lines = vec![Line::from(vec![
         Span::styled("  ", Style::default().fg(MUTED)),
@@ -324,11 +324,8 @@ fn render_code_block(label: &str, code_lines: &[String], width: usize) -> Vec<Li
     ])];
 
     for raw_line in code_lines {
-        let visible = raw_line
-            .chars()
-            .take(inner_width.saturating_sub(2))
-            .collect::<String>();
-        let padding = inner_width.saturating_sub(2 + visible.chars().count());
+        let (visible, visible_width) = take_width(raw_line, inner_width.saturating_sub(2));
+        let padding = inner_width.saturating_sub(2 + visible_width);
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default().fg(MUTED)),
             Span::styled("│ ", Style::default().fg(CODE_BORDER)),
@@ -352,6 +349,22 @@ fn render_code_block(label: &str, code_lines: &[String], width: usize) -> Vec<Li
     lines
 }
 
+/// The longest prefix of `text` that fits in `max_width` terminal columns,
+/// with its width.
+fn take_width(text: &str, max_width: usize) -> (String, usize) {
+    let mut taken = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        taken.push(ch);
+        width += ch_width;
+    }
+    (taken, width)
+}
+
 pub(crate) fn truncate_text(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
@@ -367,7 +380,7 @@ pub(crate) fn truncate_text(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::command_output_preview_lines;
+    use super::{command_output_preview_lines, render_code_block};
     use crate::transcript::CommandOutputState;
 
     #[test]
@@ -396,5 +409,18 @@ mod tests {
         assert_eq!(lines[1], "status: exit 0");
         assert!(lines.contains(&"stdout:".to_string()));
         assert!(lines.contains(&"stderr:".to_string()));
+    }
+
+    #[test]
+    fn code_block_borders_align_with_wide_characters() {
+        let code = [
+            "search_text  → (変化なし)".to_string(),
+            "ascii only".to_string(),
+            "全角".repeat(40),
+        ];
+        let lines = render_code_block("日本語の見出し", &code, 40);
+        let boxed = &lines[..lines.len() - 1];
+
+        assert!(boxed.iter().all(|line| line.width() == 40), "{boxed:#?}");
     }
 }
