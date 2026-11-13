@@ -101,15 +101,22 @@ itself (`https://api.openai.com/v1`), Ollama Cloud (`https://ollama.com/v1`),
 OpenRouter, or a local server such as Ollama (`http://localhost:11434/v1`).
 They use Bearer authentication, and only the `effort` feature applies, sent as
 `reasoning_effort`. Reasoning text that some servers stream is shown in the
-Activity pane but not kept in the history. Model IDs above were checked against the
-DeepSeek and Z.ai documentation on 2026-11-13; DeepSeek rejects unknown
+Activity pane but not kept in the history.
+
+Providers with `wire = "openai-responses"` speak the OpenAI Responses API
+(`https://api.openai.com/v1`), which lets reasoning models such as GPT-6 Astra
+call tools; Chat Completions rejects tools with reasoning on that model. The
+`effort` feature marks a reasoning model: its reasoning summaries are shown in
+the Activity pane, `EFFORT` is sent as `reasoning.effort`, and its encrypted
+reasoning is sent back with the next request so it carries across tool calls.
+Nothing is stored on the server (`store: false`).
+
+Model IDs above were checked against the DeepSeek and Z.ai documentation on 2026-11-13; DeepSeek rejects unknown
 non-Claude names with 400. To check a registered model against its real API
 (this costs money), run
 `SOCIUM_LIVE_MODEL=<alias> nix develop -c cargo test -p socium-core live_ -- --ignored`.
-The OpenAI Responses API, which keeps
-reasoning across tool calls, is planned; see
+Web search is planned; see
 [ADR 6](docs/adr/0006-モデルを接続形式と接続先の組で登録しmodelコマンドで切り替える.md).
-Web search is also planned.
 
 Install Git, ripgrep (`rg`), and bubblewrap (`bwrap`, version 0.12 or newer).
 The Linux Nix package includes them on its runtime PATH. Use a project directory

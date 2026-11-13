@@ -10,7 +10,7 @@ use crate::providers::anthropic::request_options::RequestOptions;
 use crate::providers::error::{ProviderError, api_error};
 use crate::providers::sse::SseParser;
 use crate::providers::{
-    Provider, ProviderCapabilities, ProviderEvent, ProviderKind, ProviderResponse,
+    Provider, ProviderCapabilities, ProviderEvent, ProviderKind, ProviderResponse, bearer,
 };
 use crate::tools::ToolDefinition;
 use serde_json::{Value, json};
@@ -56,12 +56,9 @@ impl OpenAiChatProvider {
         request: &AgentMessageRequest<'_>,
     ) -> Result<reqwest::RequestBuilder, ProviderError> {
         let body = request_body(request, self.features, &self.options)?;
-        let mut key = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.api_key))
-            .map_err(|_| ProviderError::Api("Invalid API key header".into()))?;
-        key.set_sensitive(true);
         Ok(client
             .post(&self.completions_url)
-            .header(reqwest::header::AUTHORIZATION, key)
+            .header(reqwest::header::AUTHORIZATION, bearer(&self.api_key)?)
             .json(&body))
     }
 }
@@ -236,6 +233,7 @@ fn append_message(messages: &mut Vec<Value>, message: &Message) {
 mod tests {
     use super::*;
     use crate::models::ModelRegistry;
+    use crate::providers::test_server::serve_once;
     use crate::tools::tools_for_model;
 
     const OPENAI: &str = r#"
@@ -379,49 +377,6 @@ features = ["effort"]
         )
         .unwrap_err();
         assert!(err.to_string().contains("Anthropic built-in tool"));
-    }
-
-    /// Serves one HTTP response on a loopback port and returns the request.
-    async fn serve_once(
-        status: &'static str,
-        body: String,
-    ) -> (String, tokio::task::JoinHandle<String>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let handle = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 4096];
-            loop {
-                let read = socket.read(&mut buffer).await.unwrap();
-                request.extend_from_slice(&buffer[..read]);
-                let text = String::from_utf8_lossy(&request);
-                if let Some(end) = text.find("\r\n\r\n") {
-                    let length = text[..end]
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|value| value.trim().parse::<usize>().unwrap())
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= end + 4 + length {
-                        break;
-                    }
-                }
-                if read == 0 {
-                    break;
-                }
-            }
-            let response = format!(
-                "HTTP/1.1 {status}\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
-            String::from_utf8_lossy(&request).into_owned()
-        });
-        (base_url, handle)
     }
 
     fn local_provider(base_url: &str) -> OpenAiChatProvider {

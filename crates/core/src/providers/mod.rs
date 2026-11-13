@@ -1,13 +1,17 @@
 pub mod anthropic;
 pub mod error;
 pub(crate) mod openai_chat;
+pub(crate) mod openai_responses;
 pub(crate) mod sse;
+#[cfg(test)]
+pub(crate) mod test_server;
 
 use crate::agent::types::{AgentMessageRequest, AgentMessageResponse};
 use crate::models::{ModelConfig, ProviderConfig, Wire};
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::error::ProviderError;
 use crate::providers::openai_chat::OpenAiChatProvider;
+use crate::providers::openai_responses::OpenAiResponsesProvider;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -41,6 +45,7 @@ pub struct ProviderCapabilities {
 pub enum ProviderKind {
     Anthropic,
     OpenAiChat,
+    OpenAiResponses,
 }
 
 pub(crate) struct ProviderResponse {
@@ -97,6 +102,7 @@ impl fmt::Display for ProviderKind {
         let name = match self {
             Self::Anthropic => "anthropic",
             Self::OpenAiChat => "openai-chat",
+            Self::OpenAiResponses => "openai-responses",
         };
         write!(f, "{name}")
     }
@@ -139,5 +145,16 @@ pub(crate) fn build_provider(
         Wire::OpenAiChat => Ok(Box::new(OpenAiChatProvider::from_config(
             provider, model, lookup,
         )?)),
+        Wire::OpenAiResponses => Ok(Box::new(OpenAiResponsesProvider::from_config(
+            provider, model, lookup,
+        )?)),
     }
+}
+
+/// `Authorization: Bearer <key>`, marked sensitive so it is never logged.
+pub(crate) fn bearer(api_key: &str) -> Result<reqwest::header::HeaderValue, ProviderError> {
+    let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}"))
+        .map_err(|_| ProviderError::Api("Invalid API key header".into()))?;
+    value.set_sensitive(true);
+    Ok(value)
 }

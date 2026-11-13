@@ -98,6 +98,70 @@ async fn live_schema_tool_call_round_trips_its_input() {
 
 #[tokio::test]
 #[ignore = "calls a paid API; set SOCIUM_LIVE_MODEL and run with --ignored"]
+async fn live_tool_result_round_trip_completes_the_turn() {
+    // A prompt that needs reasoning before the call, so reasoning models
+    // produce reasoning that the second request must carry back.
+    let (model, provider) = live_target();
+    let tools = tools_for_model(model.features.anthropic_text_editor);
+    let mut messages = vec![Message::user_text(
+        "Let n be the number of primes between 1000 and 1100. Work it out carefully, then \
+         call read_file with the path \"notes/n<n>.md\" (for example notes/n3.md). Call the \
+         tool before answering, then reply with the file's first heading."
+            .to_string(),
+    )];
+    let client = crate::provider_http_client().unwrap();
+    let mut ignore = |_| {};
+    let first = {
+        let request = AgentMessageRequest::new(&model.id, LIVE_MAX_TOKENS, &messages, &tools);
+        provider
+            .send_message(&client, &request, &mut ignore)
+            .await
+            .unwrap_or_else(|err| panic!("{} first request: {err}", model.alias))
+    };
+    let call_id = first
+        .message
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::ToolUse { id, name, .. } if name == "read_file" => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{}: no read_file call", model.alias));
+    let thinking = first
+        .message
+        .content
+        .iter()
+        .filter(|block| matches!(block, ContentBlock::Thinking { .. }))
+        .count();
+    messages.push(Message::assistant_blocks(first.message.content));
+    messages.push(Message::user_blocks(vec![ContentBlock::ToolResult {
+        tool_use_id: call_id,
+        content: "# Prime Notes\n\nNothing else here.".into(),
+        is_error: None,
+    }]));
+    let request = AgentMessageRequest::new(&model.id, LIVE_MAX_TOKENS, &messages, &tools);
+    let second = provider
+        .send_message(&client, &request, &mut ignore)
+        .await
+        .unwrap_or_else(|err| panic!("{} second request: {err}", model.alias));
+    let text = second
+        .message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    eprintln!(
+        "{}: {thinking} thinking block(s) sent back; usage {:?} then {:?}",
+        model.alias, first.usage, second.usage
+    );
+    assert!(text.contains("Prime Notes"), "{}: {text:?}", model.alias);
+}
+
+#[tokio::test]
+#[ignore = "calls a paid API; set SOCIUM_LIVE_MODEL and run with --ignored"]
 async fn live_text_editor_call_uses_the_editor_input() {
     let (model, response) = ask(&format!(
         "Use the {TEXT_EDITOR_TOOL_NAME} tool with the view command to show README.md. Do not answer in text."

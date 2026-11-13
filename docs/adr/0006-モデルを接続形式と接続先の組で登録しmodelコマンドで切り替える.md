@@ -84,7 +84,7 @@ Anthropic 固有の機能は、モデルの `features` に挙げたときだけ�
 
 1. Anthropic wire の registry、`/model`、`features` による送信の制御、thinking の除去、保存（SOC-041）。DeepSeek と GLM には、それぞれの Anthropic 互換 endpoint で接続する。
 2. provider 非依存の契約（SOC-014）と OpenAI Chat Completions の wire（SOC-016）。OpenAI 本家の GPT-5、Ollama Cloud、OpenRouter に接続する。2026-11-13 の実装では、履歴と tool 定義の変換を `openai-chat` の adapter 内に置き、core の型は変えていない。SOC-014 の共通契約は、Responses（SOC-042）で reasoning item を持つ必要が出た時点で定める。OpenAI の現行モデル一覧では GPT-5 系の汎用モデルが外れ、GPT-6 系（`gpt-6-astra` など）が主力になっていたので、設定例はそれに合わせた。
-3. OpenAI Responses の wire（SOC-042）。GPT-5 の reasoning を tool の往復をまたいで保つ。
+3. OpenAI Responses の wire（SOC-042）。GPT-5 の reasoning を tool の往復をまたいで保つ。2026-11-14 の実装では、`gpt-6-astra` が Chat Completions で tool と reasoning の併用を拒否したため、OpenAI 本家の設定例をこの wire に移した。reasoning item は core の型を増やさず既存の `Thinking` ブロック（`signature` に送り返す item）に載せ、モデル切り替え時の除去も既存の処理に任せた。
 
 ### Consequences
 

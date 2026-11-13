@@ -28,10 +28,12 @@ base_url = "https://api.z.ai/api/anthropic"
 api_key_env = "ZAI_API_KEY"
 auth = "bearer"
 
-# OpenAI: https://platform.openai.com (API keys; prepaid). Chat
-# Completions also serves Ollama, OpenRouter, and other compatible APIs.
+# OpenAI: https://platform.openai.com (API keys; prepaid). The Responses
+# API lets reasoning models call tools; Chat Completions rejects tools with
+# reasoning on GPT-6 Astra. Ollama, OpenRouter, and other compatible APIs
+# use wire = "openai-chat".
 [providers.openai]
-wire = "openai-chat"
+wire = "openai-responses"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 
@@ -80,7 +82,10 @@ max_output_tokens = 32000
 #     One line shown in the /model picker.
 #   features = ["adaptive_thinking", "effort", "eager_input_streaming", "anthropic_text_editor"]
 #     Anthropic extensions to send; omit for compatible endpoints. On the
-#     openai-chat wire only "effort" applies (sent as reasoning_effort).
+#     OpenAI wires only "effort" applies: openai-chat sends it as
+#     reasoning_effort; on openai-responses it marks a reasoning model,
+#     whose summaries are shown and whose encrypted reasoning is sent back
+#     across tool calls, and EFFORT is sent as reasoning.effort.
 #   compact_model = "<alias>"
 #     Model that summarizes history; defaults to this model.
 #
@@ -100,7 +105,7 @@ max_output_tokens = 32000
 # api_key_env = "LOCAL_API_KEY"
 
 # GPT-6 Astra, OpenAI's flagship for coding as of 2026-11-13 (the GPT-5
-# family is no longer listed). "effort" sends EFFORT as reasoning_effort.
+# family is no longer listed). "effort" marks it as a reasoning model.
 [[models]]
 alias = "gpt"
 provider = "openai"
