@@ -1,7 +1,7 @@
 use crate::agent::types::Message;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Error, ErrorKind, Read};
+use std::io::{self, Error, ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
@@ -296,14 +296,35 @@ pub(crate) fn lock_workspace(root: &Path) -> io::Result<fs::File> {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let file = options.open(path)?;
+    let mut file = options.open(path)?;
     check_state_file(&file.metadata()?)?;
-    file.try_lock().map_err(|e| {
-        Error::other(format!(
-            "Workspace session is already in use (or cannot be locked): {e}"
-        ))
-    })?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => {
+            return Err(Error::other(match lock_owner(&mut file) {
+                Some(pid) => format!(
+                    "Workspace session is already in use by another socium (PID {pid}); exit it or run socium in another directory"
+                ),
+                None => "Workspace session is already in use by another socium".to_string(),
+            }));
+        }
+        Err(fs::TryLockError::Error(e)) => {
+            return Err(Error::other(format!(
+                "Workspace session cannot be locked: {e}"
+            )));
+        }
+    }
+    // Record the owner so that a second start can name it.
+    file.set_len(0)?;
+    writeln!(file, "{}", std::process::id())?;
     Ok(file)
+}
+
+/// The PID the lock holder recorded, when it has written one yet.
+fn lock_owner(file: &mut fs::File) -> Option<u32> {
+    let mut text = String::new();
+    Read::by_ref(file).take(32).read_to_string(&mut text).ok()?;
+    text.trim().parse().ok()
 }
 
 #[cfg(test)]

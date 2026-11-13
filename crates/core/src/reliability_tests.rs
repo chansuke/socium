@@ -485,7 +485,13 @@ fn lock_child_probe() {
     let Some(root) = std::env::var_os("SOCIUM_TEST_LOCK_ROOT") else {
         return;
     };
-    assert!(crate::agent::state::lock_workspace(std::path::Path::new(&root)).is_err());
+    let err = crate::agent::state::lock_workspace(std::path::Path::new(&root)).unwrap_err();
+    let owner = std::env::var("SOCIUM_TEST_LOCK_OWNER_PID").unwrap();
+    assert!(
+        err.to_string()
+            .contains(&format!("in use by another socium (PID {owner})")),
+        "{err}"
+    );
 }
 
 #[test]
@@ -495,6 +501,7 @@ fn session_lock_rejects_a_second_process() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "reliability_tests::lock_child_probe"])
         .env("SOCIUM_TEST_LOCK_ROOT", root.path())
+        .env("SOCIUM_TEST_LOCK_OWNER_PID", std::process::id().to_string())
         .output()
         .unwrap();
     assert!(

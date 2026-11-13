@@ -69,7 +69,7 @@ Anthropic 固有の機能は、モデルの `features` に挙げたときだけ�
 * `/model` は引数なしで一覧を composer の位置に出し、`/model <alias>` で直ちに切り替える。キーの環境変数が無い provider のモデルは、理由を付けて選べないものとして出す。
 * 切り替えは request の実行中には受け付けない。切り替える時点で provider を組み立て、キーと設定を検査する。
 * `/model` で選んだ alias だけを `.socium/conversation.json` に保存する。`MODEL` や `default` で決まったモデルは保存しないので、後から `MODEL` を変えればそれが効く。
-* 起動時の選択は、保存された alias、`MODEL` 環境変数、設定ファイルの `default`（未指定なら組み込みの `opus`）の順に決める。保存された alias が registry から消えていたり、キーが無く使えなかったりしたら、警告して次に進み、保存を消す。`/model` は利用者が会話の中で選んだ結果なので、常に設定される `MODEL` より優先する。
+* 起動時の選択は、保存された alias、`MODEL` 環境変数、設定ファイルの `default`（未指定なら組み込みの `opus`）の順に決める。保存された alias が registry から消えていたり、キーが無く使えなかったりしたら、警告して次に進み、保存を消す。`/model` は利用者が会話の中で選んだ結果なので、常に設定される `MODEL` より優先する。どれも使えなければ、登録順で最初に組み立てられるモデル（キーのあるもの）で起動し、警告する。それも無ければ起動を止める。
 * `MODEL` は alias か、registry にあるモデル ID を受け付ける。どちらでもない値は、組み込みの `anthropic` provider のモデル ID とみなす（従来の動作）。
 
 ### 履歴の扱い
@@ -83,7 +83,7 @@ Anthropic 固有の機能は、モデルの `features` に挙げたときだけ�
 ### 段階
 
 1. Anthropic wire の registry、`/model`、`features` による送信の制御、thinking の除去、保存（SOC-041）。DeepSeek と GLM には、それぞれの Anthropic 互換 endpoint で接続する。
-2. provider 非依存の契約（SOC-014）と OpenAI Chat Completions の wire（SOC-016）。OpenAI 本家の GPT-5、Ollama Cloud、OpenRouter に接続する。
+2. provider 非依存の契約（SOC-014）と OpenAI Chat Completions の wire（SOC-016）。OpenAI 本家の GPT-5、Ollama Cloud、OpenRouter に接続する。2026-11-13 の実装では、履歴と tool 定義の変換を `openai-chat` の adapter 内に置き、core の型は変えていない。SOC-014 の共通契約は、Responses（SOC-042）で reasoning item を持つ必要が出た時点で定める。OpenAI の現行モデル一覧では GPT-5 系の汎用モデルが外れ、GPT-6 系（`gpt-6-astra` など）が主力になっていたので、設定例はそれに合わせた。
 3. OpenAI Responses の wire（SOC-042）。GPT-5 の reasoning を tool の往復をまたいで保つ。
 
 ### Consequences

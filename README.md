@@ -47,11 +47,11 @@ alias. Switching is allowed between turns only, removes earlier
 thinking blocks from the history (their signatures only work with the model
 that produced them), and is saved with the conversation, so a restart resumes
 the same model. At startup the saved choice wins over `MODEL`, which wins over
-the registry default.
+the registry default; when none of them has its API key set, Socium starts on
+the first registered model that does and says so.
 
 The built-in registry has `opus`, `sonnet`, and `haiku` on Anthropic. Add other
-endpoints that speak the Anthropic Messages format in
-`~/.config/socium/models.toml` (or `$XDG_CONFIG_HOME/socium/models.toml`, or the
+endpoints in `~/.config/socium/models.toml` (or `$XDG_CONFIG_HOME/socium/models.toml`, or the
 file named by `SOCIUM_MODELS_FILE`); start from
 [`models.toml.example`](models.toml.example). The file names the environment
 variable that holds each key, never the key itself:
@@ -94,13 +94,20 @@ thinking, effort, eager tool input streaming, and the built-in text editor tool
 type) are sent only to models whose `features` list them; built-in Claude
 models list all four (`adaptive_thinking`, `effort`, `eager_input_streaming`,
 `anthropic_text_editor`), and other models get none, receiving the text editor
-as an ordinary JSON-schema tool. Model IDs above were checked against the
+as an ordinary JSON-schema tool.
+
+Providers with `wire = "openai-chat"` speak OpenAI Chat Completions: OpenAI
+itself (`https://api.openai.com/v1`), Ollama Cloud (`https://ollama.com/v1`),
+OpenRouter, or a local server such as Ollama (`http://localhost:11434/v1`).
+They use Bearer authentication, and only the `effort` feature applies, sent as
+`reasoning_effort`. Reasoning text that some servers stream is shown in the
+Activity pane but not kept in the history. Model IDs above were checked against the
 DeepSeek and Z.ai documentation on 2026-11-13; DeepSeek rejects unknown
 non-Claude names with 400. To check a registered model against its real API
 (this costs money), run
 `SOCIUM_LIVE_MODEL=<alias> nix develop -c cargo test -p socium-core live_ -- --ignored`.
-OpenAI endpoints (including GPT-5, Ollama
-Cloud, and OpenRouter) are planned; see
+The OpenAI Responses API, which keeps
+reasoning across tool calls, is planned; see
 [ADR 6](docs/adr/0006-モデルを接続形式と接続先の組で登録しmodelコマンドで切り替える.md).
 Web search is also planned.
 

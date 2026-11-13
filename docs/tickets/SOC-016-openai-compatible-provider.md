@@ -54,7 +54,13 @@ Anthropic以外のproviderはNotImplemented。local modelや第二実providerで
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-13 実装中（branch `feat/openai-chat-wire`、#108 の上に積む）。
+
+- `wire = "openai-chat"`（`crates/core/src/providers/openai_chat/`）。`{base_url}/chat/completions` へ Bearer 認証・stream・`stream_options.include_usage`・`max_completion_tokens` で送る。`effort` feature で `EFFORT` を `reasoning_effort` として送る。
+- 履歴の変換は adapter 内で行い、core の型は変えていない（SOC-014 の共通契約は SOC-042 で必要になった時点で定める）。thinking は送らず、tool 結果は `tool` メッセージ、エラー結果は `Error: ` を前置する。
+- stream: tool call 断片の index ごとの結合、index なしの一括 tool call、`stop` で終わる tool call（互換 server）、`reasoning_content`/`reasoning` の Activity 表示（履歴には残さない）、usage（cached を cache read として）、`length`・`content_filter`・finish_reason 欠落・stream 中の error・不正な arguments を検証。
+- 試験: 単体試験と loopback の mock HTTP server（認証ヘッダー、tool call、401 の表示、finish_reason 前の切断）。core 212、tui 69 通過。
+- 未検証: OpenAI 本家（キーなし）。OpenAI の現行一覧では GPT-5 系の汎用モデルが外れ GPT-6 系が主力のため、設定例は `gpt-6-astra`。認証不要の local endpoint（キーの環境変数は必須のまま）、tool 非対応 model の扱い、複数 round の実 API 試験。
 
 [一覧へ戻る](README.md)
 

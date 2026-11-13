@@ -18,13 +18,17 @@ const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Wire {
     Anthropic,
+    /// OpenAI Chat Completions, also served by Ollama, OpenRouter, and
+    /// other OpenAI-compatible endpoints.
+    OpenAiChat,
 }
 
 impl Wire {
     fn parse(raw: &str) -> Result<Self, String> {
         match raw {
             "anthropic" => Ok(Self::Anthropic),
-            "openai-chat" | "openai-responses" => Err(format!("wire '{raw}' is not supported yet")),
+            "openai-chat" => Ok(Self::OpenAiChat),
+            "openai-responses" => Err(format!("wire '{raw}' is not supported yet")),
             other => Err(format!(
                 "unknown wire '{other}'; expected anthropic, openai-chat, or openai-responses"
             )),
@@ -268,10 +272,21 @@ impl ModelRegistry {
 
     fn validate(&self) -> Result<(), String> {
         for model in &self.models {
-            if !self.providers.contains_key(&model.provider) {
+            let Some(provider) = self.providers.get(&model.provider) else {
                 return Err(format!(
                     "model '{}': unknown provider '{}'",
                     model.alias, model.provider
+                ));
+            };
+            let features = model.features;
+            if provider.wire == Wire::OpenAiChat
+                && (features.adaptive_thinking
+                    || features.eager_input_streaming
+                    || features.anthropic_text_editor)
+            {
+                return Err(format!(
+                    "model '{}': only the effort feature applies to the openai-chat wire",
+                    model.alias
                 ));
             }
             if let Some(compact) = &model.compact_model
@@ -351,10 +366,13 @@ fn parse_provider(name: &str, raw: RawProvider) -> Result<ProviderConfig, String
                 .into(),
         );
     }
-    let auth = match raw.auth.as_deref() {
-        None | Some("x-api-key") => AuthScheme::ApiKeyHeader,
-        Some("bearer") => AuthScheme::Bearer,
-        Some(other) => return Err(format!("auth must be x-api-key or bearer; got '{other}'")),
+    let auth = match (wire, raw.auth.as_deref()) {
+        (Wire::Anthropic, None | Some("x-api-key")) => AuthScheme::ApiKeyHeader,
+        (_, Some("bearer")) | (Wire::OpenAiChat, None) => AuthScheme::Bearer,
+        (Wire::OpenAiChat, Some("x-api-key")) => {
+            return Err("auth must be bearer for the openai-chat wire".into());
+        }
+        (_, Some(other)) => return Err(format!("auth must be x-api-key or bearer; got '{other}'")),
     };
     Ok(ProviderConfig {
         name: name.to_string(),
@@ -504,8 +522,16 @@ context_window = 1000000
     fn invalid_files_are_rejected_with_the_offending_entry() {
         let cases = [
             (
-                "[providers.x]\nwire = \"openai-chat\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"",
-                "provider 'x': wire 'openai-chat' is not supported yet",
+                "[providers.x]\nwire = \"openai-responses\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"",
+                "provider 'x': wire 'openai-responses' is not supported yet",
+            ),
+            (
+                "[providers.x]\nwire = \"openai-chat\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"\nauth = \"x-api-key\"",
+                "auth must be bearer for the openai-chat wire",
+            ),
+            (
+                "[providers.x]\nwire = \"openai-chat\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"\n[[models]]\nalias = \"m\"\nprovider = \"x\"\nid = \"y\"\nfeatures = [\"adaptive_thinking\"]",
+                "only the effort feature applies to the openai-chat wire",
             ),
             (
                 "[providers.x]\nwire = \"grpc\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"",
@@ -567,6 +593,39 @@ context_window = 1000000
         }
         let err = ModelRegistry::from_toml(cases[4].0).unwrap_err();
         assert!(!err.contains("sk-live-123"), "{err}");
+    }
+
+    #[test]
+    fn openai_chat_providers_default_to_bearer_auth() {
+        let registry = ModelRegistry::from_toml(
+            r#"
+[providers.openai]
+wire = "openai-chat"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[[models]]
+alias = "gpt"
+provider = "openai"
+id = "gpt-6-astra"
+features = ["effort"]
+"#,
+        )
+        .unwrap();
+        let provider = registry.provider("openai").unwrap();
+        assert_eq!(provider.wire, Wire::OpenAiChat);
+        assert_eq!(provider.auth, AuthScheme::Bearer);
+        assert!(registry.find("gpt").unwrap().features.effort);
+    }
+
+    #[test]
+    fn the_example_registry_parses() {
+        let registry =
+            ModelRegistry::from_toml(include_str!("../../../models.toml.example")).unwrap();
+        for alias in ["ds-flash", "ds-pro", "glm", "gpt"] {
+            assert!(registry.find(alias).is_some(), "{alias}");
+        }
+        assert_eq!(registry.provider("openai").unwrap().wire, Wire::OpenAiChat);
     }
 
     #[test]

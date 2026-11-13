@@ -414,22 +414,51 @@ impl AgentService {
         candidates.push(registry.default_model().clone());
         candidates.dedup();
 
-        let last = candidates.len() - 1;
+        // When none of the preferred models can start, such as without
+        // ANTHROPIC_API_KEY, start on the first registered model that can.
+        let preferred = candidates.len();
+        for model in &registry.models {
+            if !candidates.contains(model) {
+                candidates.push(model.clone());
+            }
+        }
         let mut target = None;
+        let mut failures = Vec::new();
         for (index, model) in candidates.into_iter().enumerate() {
             let alias = model.alias.clone();
             match ModelTarget::build(&registry, model, lookup.as_ref()) {
                 Ok(built) => {
+                    if index < preferred {
+                        warnings.extend(
+                            failures
+                                .iter()
+                                .map(|failure| format!("Model {failure}; using '{alias}'")),
+                        );
+                    } else {
+                        warnings.push(format!(
+                            "No preferred model is available ({}); started with '{alias}'",
+                            failures.join("; ")
+                        ));
+                    }
                     target = Some(built);
                     break;
                 }
-                Err(err) if index < last => {
-                    warnings.push(format!("Model '{alias}' is unavailable: {err}"))
+                Err(err) if index < preferred => {
+                    failures.push(format!("'{alias}' is unavailable: {err}"))
                 }
-                Err(err) => return Err(err.into()),
+                Err(_) => {}
             }
         }
-        let mut target = target.expect("the last candidate either builds or returns");
+        let Some(mut target) = target else {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "No registered model can start ({}); set the API key of one of them",
+                    failures.join("; ")
+                ),
+            )
+            .into());
+        };
         warnings.append(&mut target.warnings);
         target.warnings = warnings;
 
@@ -1448,6 +1477,18 @@ max_output_tokens = 4000
             .unwrap();
             assert_eq!(service.active_model().alias, "opus");
             assert!(service.startup_warnings()[0].contains("'ds-flash' is no longer registered"));
+        }
+
+        #[test]
+        fn without_the_default_key_startup_uses_a_model_that_has_one() {
+            let root = make_temp_dir("model_other_key");
+            let service = open(root.path(), &[("DEEPSEEK_API_KEY", "d")]);
+            assert_eq!(service.active_model().alias, "ds-flash");
+            let warnings = service.startup_warnings();
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("'opus' is unavailable: ANTHROPIC_API_KEY is not set"));
+            assert!(warnings[0].contains("started with 'ds-flash'"));
+            assert!(saved_state(root.path()).get("active_model").is_none());
         }
 
         #[test]

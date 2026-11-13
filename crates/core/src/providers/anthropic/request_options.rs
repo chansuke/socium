@@ -7,7 +7,7 @@ pub(super) const THINKING_DISPLAY_UPDATES_BETA: &str = "thinking-display-updates
 /// How much of the model's adaptive thinking the API returns as text.
 /// Thinking itself, and its billing, is the same under every setting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) enum ThinkingDisplay {
+pub(crate) enum ThinkingDisplay {
     /// Reasoning summaries and between-tool progress updates, mixed.
     #[default]
     Summarized,
@@ -28,11 +28,11 @@ impl ThinkingDisplay {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct RequestOptions {
-    pub(super) thinking_display: ThinkingDisplay,
-    pub(super) effort: Option<&'static str>,
+pub(crate) struct RequestOptions {
+    pub(crate) thinking_display: ThinkingDisplay,
+    pub(crate) effort: Option<&'static str>,
     /// Problems with the configuration that did not prevent startup.
-    pub(super) warnings: Vec<String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -40,7 +40,7 @@ const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 impl RequestOptions {
     /// Reads `THINKING_DISPLAY` and `EFFORT` through `lookup` so tests can
     /// supply values without touching the process environment.
-    pub(super) fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, Error> {
+    pub(crate) fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, Error> {
         let thinking_display = match lookup("THINKING_DISPLAY").as_deref().map(str::trim) {
             None | Some("") => ThinkingDisplay::default(),
             Some(raw) => match raw.to_ascii_lowercase().as_str() {
@@ -93,7 +93,7 @@ impl RequestOptions {
 
     /// Records settings the model cannot honor, so they are reported once
     /// instead of silently dropped.
-    pub(super) fn warn_unsupported(&mut self, model: &str, features: ModelFeatures) {
+    pub(crate) fn warn_unsupported(&mut self, model: &str, features: ModelFeatures) {
         if self.thinking_display != ThinkingDisplay::default() && !features.adaptive_thinking {
             self.warnings.push(format!(
                 "THINKING_DISPLAY is ignored for {model}: it does not list the adaptive_thinking feature"

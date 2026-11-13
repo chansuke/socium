@@ -1,5 +1,17 @@
-# Keep ANTHROPIC_API_KEY and other provider keys in your shell or secret manager,
-# not in this file. Register other models in ~/.config/socium/models.toml.
-# Copy to .envrc only if you use direnv; .envrc is ignored by Git.
+# Copy to .envrc only if you use direnv; .envrc is ignored by Git. Keys can
+# also come from your shell or a secret manager instead.
+#
+# Provider keys, named as api_key_env in models.toml.example. Set only the
+# providers you use; models whose key is missing are listed but unavailable
+# in /model.
+export ANTHROPIC_API_KEY=''
+# export DEEPSEEK_API_KEY=''    # https://platform.deepseek.com
+# export ZAI_API_KEY=''         # https://z.ai/manage-apikey/apikey-list
+# export OPENAI_API_KEY=''      # https://platform.openai.com
+# export OLLAMA_API_KEY=''      # https://ollama.com
+# export OPENROUTER_API_KEY=''  # https://openrouter.ai
+
+# Register other models in ~/.config/socium/models.toml
+# (start from models.toml.example).
 export MODEL='claude-opus-5-5'
-export MAX_TOKENS='1000'
+export MAX_TOKENS='64000'

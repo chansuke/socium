@@ -1,10 +1,13 @@
 pub mod anthropic;
 pub mod error;
+pub(crate) mod openai_chat;
+pub(crate) mod sse;
 
 use crate::agent::types::{AgentMessageRequest, AgentMessageResponse};
 use crate::models::{ModelConfig, ProviderConfig, Wire};
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::error::ProviderError;
+use crate::providers::openai_chat::OpenAiChatProvider;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -37,6 +40,7 @@ pub struct ProviderCapabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Anthropic,
+    OpenAiChat,
 }
 
 pub(crate) struct ProviderResponse {
@@ -92,6 +96,7 @@ impl fmt::Display for ProviderKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::Anthropic => "anthropic",
+            Self::OpenAiChat => "openai-chat",
         };
         write!(f, "{name}")
     }
@@ -129,6 +134,9 @@ pub(crate) fn build_provider(
 ) -> Result<Box<dyn Provider>, ProviderError> {
     match provider.wire {
         Wire::Anthropic => Ok(Box::new(AnthropicProvider::from_config(
+            provider, model, lookup,
+        )?)),
+        Wire::OpenAiChat => Ok(Box::new(OpenAiChatProvider::from_config(
             provider, model, lookup,
         )?)),
     }

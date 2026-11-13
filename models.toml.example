@@ -28,6 +28,25 @@ base_url = "https://api.z.ai/api/anthropic"
 api_key_env = "ZAI_API_KEY"
 auth = "bearer"
 
+# OpenAI: https://platform.openai.com (API keys; prepaid). Chat
+# Completions also serves Ollama, OpenRouter, and other compatible APIs.
+[providers.openai]
+wire = "openai-chat"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+# Ollama Cloud: https://ollama.com (account settings -> API keys).
+# [providers.ollama]
+# wire = "openai-chat"
+# base_url = "https://ollama.com/v1"
+# api_key_env = "OLLAMA_API_KEY"
+
+# OpenRouter: https://openrouter.ai (Keys).
+# [providers.openrouter]
+# wire = "openai-chat"
+# base_url = "https://openrouter.ai/api/v1"
+# api_key_env = "OPENROUTER_API_KEY"
+
 # DeepSeek-V4.1-Flash. DeepSeek rejects unknown non-Claude names with 400.
 [[models]]
 alias = "ds-flash"
@@ -60,14 +79,33 @@ max_output_tokens = 32000
 #   description = "..."
 #     One line shown in the /model picker.
 #   features = ["adaptive_thinking", "effort", "eager_input_streaming", "anthropic_text_editor"]
-#     Anthropic extensions to send; omit for compatible endpoints.
+#     Anthropic extensions to send; omit for compatible endpoints. On the
+#     openai-chat wire only "effort" applies (sent as reasoning_effort).
 #   compact_model = "<alias>"
 #     Model that summarizes history; defaults to this model.
 #
-# A local server speaking the Anthropic Messages format (http is allowed
-# only on localhost):
+# A local server (http is allowed only on localhost), such as Ollama's
+# OpenAI-compatible API, which ignores the key:
+#
+# [providers.local]
+# wire = "openai-chat"
+# base_url = "http://localhost:11434/v1"
+# api_key_env = "LOCAL_API_KEY"
+#
+# or one speaking the Anthropic Messages format:
 #
 # [providers.local]
 # wire = "anthropic"
 # base_url = "http://localhost:11434"
 # api_key_env = "LOCAL_API_KEY"
+
+# GPT-6 Astra, OpenAI's flagship for coding as of 2026-11-13 (the GPT-5
+# family is no longer listed). "effort" sends EFFORT as reasoning_effort.
+[[models]]
+alias = "gpt"
+provider = "openai"
+id = "gpt-6-astra"
+description = "GPT-6 Astra for complex reasoning and coding"
+features = ["effort"]
+context_window = 1050000
+max_output_tokens = 32000

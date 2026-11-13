@@ -20,3 +20,137 @@ pub enum ProviderError {
     #[error("{0}")]
     Stream(String),
 }
+
+const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
+const MAX_ERROR_MESSAGE_CHARS: usize = 300;
+
+/// Reads a bounded prefix of a non-2xx response and formats it.
+pub(crate) async fn api_error(provider: &str, mut response: reqwest::Response) -> ProviderError {
+    let status = response.status();
+    let mut body = Vec::new();
+    while body.len() < MAX_ERROR_BODY_BYTES
+        && let Ok(Some(chunk)) = response.chunk().await
+    {
+        body.extend_from_slice(&chunk);
+    }
+    body.truncate(MAX_ERROR_BODY_BYTES);
+    ProviderError::Api(api_error_message(provider, status, &body))
+}
+
+/// Formats a non-2xx response for the UI and persisted transcript. Only the
+/// documented error fields are shown, bounded and stripped of control
+/// characters, so the raw body (which may echo request text) and terminal
+/// escape sequences never reach the screen.
+pub(crate) fn api_error_message(
+    provider: &str,
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> String {
+    let fallback = format!("{provider} API error {status}");
+    match serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| describe_error(&value["error"]))
+    {
+        Some(detail) => format!("{fallback}: {detail}"),
+        None => fallback,
+    }
+}
+
+/// `kind: message` from an error object: Anthropic's `type`, or the
+/// `code` that OpenAI-compatible servers send when `type` is absent.
+pub(crate) fn describe_error(error: &serde_json::Value) -> Option<String> {
+    let message = error["message"].as_str()?;
+    let mut cleaned = message
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c });
+    let mut shown = cleaned
+        .by_ref()
+        .take(MAX_ERROR_MESSAGE_CHARS)
+        .collect::<String>();
+    if cleaned.next().is_some() {
+        shown.push('…');
+    }
+    let kind = error["type"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| match &error["code"] {
+            serde_json::Value::String(code) => Some(code.clone()),
+            serde_json::Value::Number(code) => Some(code.to_string()),
+            _ => None,
+        })
+        .map(|kind| {
+            kind.chars()
+                .filter(|c| !c.is_control())
+                .take(64)
+                .collect::<String>()
+        });
+    Some(match kind {
+        Some(kind) => format!("{kind}: {shown}"),
+        None => shown,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::api_error_message;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn api_error_shows_type_and_message() {
+        let body = br#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."},"request_id":"req_1"}"#;
+        assert_eq!(
+            api_error_message("anthropic", StatusCode::BAD_REQUEST, body),
+            "anthropic API error 400 Bad Request: invalid_request_error: Your credit balance is too low to access the Anthropic API."
+        );
+    }
+
+    #[test]
+    fn api_error_falls_back_to_the_code_then_the_message_alone() {
+        let zai = br#"{"error":{"code":"1000","message":"auth failed"}}"#;
+        assert_eq!(
+            api_error_message("zai", StatusCode::UNAUTHORIZED, zai),
+            "zai API error 401 Unauthorized: 1000: auth failed"
+        );
+        let openai = br#"{"error":{"message":"No such model","type":null,"code":404}}"#;
+        assert_eq!(
+            api_error_message("openai", StatusCode::NOT_FOUND, openai),
+            "openai API error 404 Not Found: 404: No such model"
+        );
+        let bare = br#"{"error":{"message":"busy"}}"#;
+        assert_eq!(
+            api_error_message("local", StatusCode::SERVICE_UNAVAILABLE, bare),
+            "local API error 503 Service Unavailable: busy"
+        );
+    }
+
+    #[test]
+    fn api_error_falls_back_to_status_for_unrecognized_bodies() {
+        for body in [
+            &b"<html>bad gateway</html>"[..],
+            b"",
+            br#"{"error":{"type":"x""#,
+            br#"{"error":"plain string"}"#,
+        ] {
+            assert_eq!(
+                api_error_message("deepseek", StatusCode::BAD_GATEWAY, body),
+                "deepseek API error 502 Bad Gateway"
+            );
+        }
+    }
+
+    #[test]
+    fn api_error_message_is_bounded_and_strips_control_characters() {
+        let message = format!("bad\u{1b}[31m input\n{}", "x".repeat(1000));
+        let body =
+            serde_json::json!({"error": {"type": "invalid_request_error", "message": message}});
+        let shown = api_error_message(
+            "anthropic",
+            StatusCode::BAD_REQUEST,
+            body.to_string().as_bytes(),
+        );
+        assert!(!shown.chars().any(char::is_control));
+        assert!(shown.contains("bad [31m input x"));
+        assert!(shown.ends_with('…'));
+        assert!(shown.chars().count() < 400);
+    }
+}

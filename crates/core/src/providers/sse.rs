@@ -1,7 +1,7 @@
 use crate::providers::error::ProviderError;
 
 #[derive(Default)]
-pub(super) struct SseParser {
+pub(crate) struct SseParser {
     buffer: Vec<u8>,
     /// Byte offset the next boundary scan resumes from, so repeated pushes
     /// of partial events do not rescan the whole buffer each time.
@@ -9,7 +9,7 @@ pub(super) struct SseParser {
 }
 
 impl SseParser {
-    pub(super) fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, ProviderError> {
+    pub(crate) fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, ProviderError> {
         if self.buffer.len().saturating_add(chunk.len()) > 4 * 1024 * 1024 {
             return Err(ProviderError::Stream("SSE buffer exceeded 4 MiB".into()));
         }
@@ -33,7 +33,7 @@ impl SseParser {
         Ok(events)
     }
 
-    pub(super) fn finish(&mut self) -> Result<Option<String>, ProviderError> {
+    pub(crate) fn finish(&mut self) -> Result<Option<String>, ProviderError> {
         if self.buffer.is_empty() {
             return Ok(None);
         }
