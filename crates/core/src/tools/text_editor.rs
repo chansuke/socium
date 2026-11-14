@@ -167,6 +167,7 @@ pub(crate) fn text_editor_str_replace(
             path: path.into(),
             before: Some(content),
             after: Some(updated),
+            ..Mutation::default()
         }],
     )?;
     Ok(maybe_prepend_dirty_worktree_warning(
@@ -192,6 +193,7 @@ pub(crate) fn text_editor_create(
             path: path.into(),
             before: None,
             after: Some(file_text.into()),
+            ..Mutation::default()
         }],
     )?;
     Ok(maybe_prepend_dirty_worktree_warning(
@@ -247,6 +249,7 @@ pub(crate) fn text_editor_insert(
             path: path.into(),
             before: Some(content),
             after: Some(updated),
+            ..Mutation::default()
         }],
     )?;
     Ok(maybe_prepend_dirty_worktree_warning(

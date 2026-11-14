@@ -3,7 +3,7 @@ use crate::constants::*;
 use crate::tools::error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{optional_bool_field, require_string_field};
-use crate::tools::text_file::read_utf8_file_with_limit;
+use crate::tools::text_file::{read_utf8_file_and_mode, read_utf8_file_with_limit};
 use crate::tools::workspace::{
     resolve_workspace_mutation_path, resolve_workspace_path, resolve_workspace_path_for_create,
 };
@@ -153,6 +153,7 @@ fn plan_patch(
                     path: path.clone(),
                     before: None,
                     after: Some(content.clone()),
+                    ..Mutation::default()
                 });
             }
             PatchAction::Delete { path } => {
@@ -162,6 +163,7 @@ fn plan_patch(
                     path: path.clone(),
                     before: Some(content),
                     after: None,
+                    ..Mutation::default()
                 });
             }
             PatchAction::Update {
@@ -170,7 +172,7 @@ fn plan_patch(
                 hunks,
             } => {
                 let source = resolve_workspace_path(root, path)?;
-                let content = read_utf8_file_with_limit(&source, path, MAX_READ_FILE_BYTES)?;
+                let (content, mode) = read_utf8_file_and_mode(&source, path, MAX_READ_FILE_BYTES)?;
                 let updated = apply_patch_hunks_to_text(&content, path, hunks)?;
                 if let Some(destination) = move_to {
                     let target = resolve_workspace_path_for_create(root, destination)?;
@@ -182,21 +184,29 @@ fn plan_patch(
                             format!("Cannot move '{path}': destination already exists").into()
                         );
                     }
+                    // The moved file keeps the source's mode, such as its
+                    // executable bit.
                     plan.push(Mutation {
                         path: path.clone(),
                         before: Some(content),
                         after: None,
+                        before_mode: mode,
+                        after_mode: None,
                     });
                     plan.push(Mutation {
                         path: destination.clone(),
                         before: None,
                         after: Some(updated),
+                        before_mode: None,
+                        after_mode: mode,
                     });
                 } else {
                     plan.push(Mutation {
                         path: path.clone(),
                         before: Some(content),
                         after: Some(updated),
+                        before_mode: mode,
+                        after_mode: mode,
                     });
                 }
             }

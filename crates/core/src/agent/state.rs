@@ -226,26 +226,48 @@ where
             "State exceeds 64 MiB limit; archive the session before continuing",
         ));
     }
-    atomic_write_impl(path, serialized.as_bytes(), false, &mut |_| Ok(()))
+    atomic_write_impl(
+        path,
+        serialized.as_bytes(),
+        ReplacementMode::Private,
+        &mut |_| Ok(()),
+    )
 }
 
 /// Write a same-directory temporary file, sync it, then atomically replace the
 /// destination. Failed serialization/writes never truncate the previous state.
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    atomic_write_with_checkpoint(path, bytes, &mut |_| Ok(()))
+/// The file gets `mode` before it replaces the destination, so a recreated
+/// file never appears with other permissions; `None` keeps the
+/// destination's permissions.
+pub(crate) fn atomic_write_with_mode(
+    path: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+) -> io::Result<()> {
+    atomic_write_impl(path, bytes, ReplacementMode::Mode(mode), &mut |_| Ok(()))
 }
+
+#[cfg(test)]
 fn atomic_write_with_checkpoint(
     path: &Path,
     bytes: &[u8],
     checkpoint: &mut dyn FnMut(&str) -> io::Result<()>,
 ) -> io::Result<()> {
-    atomic_write_impl(path, bytes, true, checkpoint)
+    atomic_write_impl(path, bytes, ReplacementMode::Mode(None), checkpoint)
+}
+
+/// The permissions a replacement file gets.
+enum ReplacementMode {
+    /// Owner-only, for private state.
+    Private,
+    /// These bits, or the destination's current ones when `None`.
+    Mode(Option<u32>),
 }
 
 fn atomic_write_impl(
     path: &Path,
     bytes: &[u8],
-    preserve_permissions: bool,
+    permissions: ReplacementMode,
     checkpoint: &mut dyn FnMut(&str) -> io::Result<()>,
 ) -> io::Result<()> {
     use std::io::Write;
@@ -272,8 +294,18 @@ fn atomic_write_impl(
         let mut file = options.open(&temporary)?;
         created = true;
         checkpoint("created")?;
-        if preserve_permissions && let Ok(metadata) = fs::metadata(path) {
-            file.set_permissions(metadata.permissions())?;
+        match permissions {
+            ReplacementMode::Private => {}
+            #[cfg(unix)]
+            ReplacementMode::Mode(Some(mode)) => {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(mode))?;
+            }
+            _ => {
+                if let Ok(metadata) = fs::metadata(path) {
+                    file.set_permissions(metadata.permissions())?;
+                }
+            }
         }
         file.write_all(bytes)?;
         checkpoint("written")?;

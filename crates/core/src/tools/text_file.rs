@@ -167,7 +167,22 @@ pub(crate) fn read_utf8_file_with_limit(
     display_path: &str,
     max_bytes: usize,
 ) -> Result<String, String> {
+    read_utf8_file_and_mode(path, display_path, max_bytes).map(|(content, _)| content)
+}
+
+/// Reads a regular UTF-8 file of at most `max_bytes` together with its
+/// permission bits (`None` off Unix), both from the same open descriptor.
+pub(crate) fn read_utf8_file_and_mode(
+    path: &Path,
+    display_path: &str,
+    max_bytes: usize,
+) -> Result<(String, Option<u32>), String> {
     let mut file = open_regular_file(path, display_path)?;
+    let mode = file_mode(
+        &file
+            .metadata()
+            .map_err(|e| format!("Failed to inspect file '{}': {e}", display_path))?,
+    );
     let mut bytes = Vec::new();
     let mut limited = Read::by_ref(&mut file).take((max_bytes + 1) as u64);
     limited
@@ -179,7 +194,23 @@ pub(crate) fn read_utf8_file_with_limit(
             display_path, max_bytes
         ));
     }
-    String::from_utf8(bytes).map_err(|e| format!("File '{}' is not valid UTF-8: {e}", display_path))
+    let content = String::from_utf8(bytes)
+        .map_err(|e| format!("File '{}' is not valid UTF-8: {e}", display_path))?;
+    Ok((content, mode))
+}
+
+/// Permission bits (including setuid, setgid, and sticky) of a file.
+pub(crate) fn file_mode(metadata: &fs::Metadata) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Some(metadata.permissions().mode() & 0o7777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
 }
 
 #[cfg(all(test, unix))]
