@@ -118,15 +118,17 @@ fn search_text_controlled(
         SearchMode::SmartCase,
         control,
     )?;
+    let note = execution.incomplete_note();
     let SearchExecution {
         matches,
         status_code,
-        truncated,
+        ..
     } = execution;
     let mut formatted = format_search_results("Pattern", pattern, path, glob, max_results, matches);
 
-    if truncated {
-        formatted.push_str("\n(truncated at 256 KiB capture limit; narrow the search)");
+    if let Some(note) = note {
+        formatted.push('\n');
+        formatted.push_str(note);
     }
 
     match status_code {

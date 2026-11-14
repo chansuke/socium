@@ -5,7 +5,7 @@ use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_string_field,
 };
 use crate::tools::ripgrep::{
-    SearchExecution, SearchMode, format_search_results, search_with_ripgrep,
+    SearchExecution, SearchMode, escape_regex, format_search_results, search_with_ripgrep,
 };
 use crate::tools::workspace::resolve_workspace_path;
 use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
@@ -103,18 +103,22 @@ fn find_symbol_controlled(
     } = FindSymbolInput::parse(input)?;
     let resolved_path = resolve_workspace_path(workspace_root, path)?;
 
+    // Search for declaration-like lines only. Searching for the bare name
+    // would spend ripgrep's per-file match limit on references and could
+    // stop before a declaration further down the file.
     let execution = search_with_ripgrep(
         workspace_root,
         &resolved_path,
-        symbol,
+        &declaration_pattern(symbol),
         Some("*.rs"),
-        SearchMode::FixedCaseSensitive,
+        SearchMode::Regex,
         control,
     )?;
+    let note = execution.incomplete_note();
     let SearchExecution {
         matches,
         status_code,
-        truncated,
+        ..
     } = execution;
     let matches = matches
         .into_iter()
@@ -123,8 +127,9 @@ fn find_symbol_controlled(
     let mut formatted =
         format_search_results("Symbol", symbol, path, Some("*.rs"), max_results, matches);
 
-    if truncated {
-        formatted.push_str("\n(truncated at 256 KiB capture limit; narrow the search)");
+    if let Some(note) = note {
+        formatted.push('\n');
+        formatted.push_str(note);
     }
 
     match status_code {
@@ -132,6 +137,13 @@ fn find_symbol_controlled(
         Some(code) => Err(format!("find_symbol failed with exit code {code}\n{formatted}").into()),
         None => Err(format!("find_symbol terminated unexpectedly\n{formatted}").into()),
     }
+}
+
+/// A ripgrep pattern for every line `looks_like_rust_symbol_declaration`
+/// can accept, so that filter sees all candidates.
+fn declaration_pattern(symbol: &str) -> String {
+    let symbol = escape_regex(symbol);
+    format!("(?:fn|struct|enum|trait|type|mod|const|static) {symbol}|^\\s*impl .*{symbol}")
 }
 
 pub(crate) fn looks_like_rust_symbol_declaration(line: &str, symbol: &str) -> bool {
@@ -208,5 +220,67 @@ mod tests {
         assert!(output.contains("src/lib.rs:1:pub struct Widget;"));
         assert!(output.contains("src/lib.rs:3:impl Widget { pub fn build() -> Self { Self } }"));
         assert!(!output.contains("WidgetState"));
+    }
+
+    #[test]
+    fn a_declaration_after_more_than_201_references_is_found() {
+        let workspace = make_temp_dir("symbol-late-declaration");
+        let mut source = String::from("use crate::Widget;\n");
+        for line in 0..250 {
+            source.push_str(&format!("let w{line}: Widget = Widget::default();\n"));
+        }
+        source.push_str(
+            "pub struct Widget;\nimpl Default for Widget { fn default() -> Self { Widget } }\n",
+        );
+        fs::write(workspace.path().join("late.rs"), source).unwrap();
+
+        let output =
+            find_symbol_in_workspace(workspace.path(), &json!({"symbol": "Widget"})).unwrap();
+
+        assert!(
+            output.contains("late.rs:252:pub struct Widget;"),
+            "{output}"
+        );
+        assert!(
+            output.contains("late.rs:253:impl Default for Widget"),
+            "{output}"
+        );
+        assert!(!output.contains("(no matches)"));
+        assert!(!output.contains("incomplete"), "{output}");
+    }
+
+    #[test]
+    fn a_search_cut_off_at_its_match_limit_says_it_is_incomplete() {
+        let workspace = make_temp_dir("symbol-incomplete");
+        let mut source = String::new();
+        for line in 0..(MAX_SEARCH_RESULTS + 20) {
+            source.push_str(&format!("impl Widget {{ fn f{line}() {{}} }}\n"));
+        }
+        source.push_str("pub struct Widget;\n");
+        fs::write(workspace.path().join("many.rs"), source).unwrap();
+
+        let output =
+            find_symbol_in_workspace(workspace.path(), &json!({"symbol": "Widget"})).unwrap();
+
+        assert!(
+            output.contains("(incomplete: the search stopped at its match limit"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn symbols_with_regex_characters_are_matched_literally() {
+        assert_eq!(
+            declaration_pattern("a.b"),
+            "(?:fn|struct|enum|trait|type|mod|const|static) a\\.b|^\\s*impl .*a\\.b"
+        );
+        let workspace = make_temp_dir("symbol-literal");
+        fs::write(
+            workspace.path().join("x.rs"),
+            "fn r#match() {}\nfn aXb() {}\n",
+        )
+        .unwrap();
+        let output = find_symbol_in_workspace(workspace.path(), &json!({"symbol": "a.b"})).unwrap();
+        assert!(output.contains("(no matches)"), "{output}");
     }
 }

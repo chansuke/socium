@@ -10,11 +10,46 @@ pub(crate) struct SearchExecution {
     pub matches: Vec<SearchMatch>,
     pub status_code: Option<i32>,
     pub truncated: bool,
+    /// ripgrep stopped at its match limit in some file, or in total, so
+    /// later lines were never searched and the result may miss matches.
+    pub stopped_early: bool,
 }
+
+impl SearchExecution {
+    /// A note to append when part of the scope went unsearched; an empty
+    /// result is then not evidence that nothing matches.
+    pub(crate) fn incomplete_note(&self) -> Option<&'static str> {
+        if self.truncated {
+            Some(
+                "(incomplete: output exceeded the 256 KiB capture limit; later matches were not read; narrow the search)",
+            )
+        } else if self.stopped_early {
+            Some(
+                "(incomplete: the search stopped at its match limit; lines after it were not searched; narrow the path)",
+            )
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum SearchMode {
     SmartCase,
-    FixedCaseSensitive,
+    /// A case-sensitive regular expression built by the caller.
+    Regex,
+}
+
+/// Escapes `text` for use as a literal inside a ripgrep regular expression.
+pub(crate) fn escape_regex(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if "\\.+*?()|[]{}^$#&-~".contains(ch) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 pub(crate) fn format_search_results(
@@ -71,7 +106,7 @@ pub(crate) fn search_with_ripgrep(
     ];
     match mode {
         SearchMode::SmartCase => command.push("--smart-case".into()),
-        SearchMode::FixedCaseSensitive => command.push("--fixed-strings".into()),
+        SearchMode::Regex => {}
     }
     if let Some(glob) = glob {
         command.push("--glob".into());
@@ -93,10 +128,18 @@ pub(crate) fn search_with_ripgrep(
     }
     check_search_status(&output)?;
     let matches = parse_matches(workspace_root, &output.stdout, output.truncated)?;
+    let mut per_file = std::collections::HashMap::<&str, usize>::new();
+    let stopped_early = matches.len() > MAX_SEARCH_RESULTS
+        || matches.iter().any(|entry| {
+            let count = per_file.entry(entry.path.as_str()).or_default();
+            *count += 1;
+            *count > MAX_SEARCH_RESULTS
+        });
     Ok(SearchExecution {
         matches,
         status_code: output.status.code(),
         truncated: output.truncated,
+        stopped_early,
     })
 }
 
