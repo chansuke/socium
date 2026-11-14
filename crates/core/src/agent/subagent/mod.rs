@@ -995,6 +995,118 @@ mod tests {
         assert_eq!(messages[3]["content"], "Try again");
     }
 
+    /// Answers the main agent from a script. Each subagent request waits
+    /// until `gate` has as many subagents waiting at once, then reports its
+    /// prompt, so subagents run one at a time never get past it.
+    struct GatedProvider {
+        main: ScriptedProvider,
+        gate: tokio::sync::Barrier,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::providers::Provider for GatedProvider {
+        fn kind(&self) -> crate::providers::ProviderKind {
+            crate::providers::ProviderKind::Anthropic
+        }
+
+        fn capabilities(&self) -> crate::providers::ProviderCapabilities {
+            crate::providers::ProviderCapabilities {
+                supports_tools: true,
+            }
+        }
+
+        async fn send_message(
+            &self,
+            client: &reqwest::Client,
+            request: &crate::agent::types::AgentMessageRequest<'_>,
+            on_delta: &mut (dyn FnMut(crate::providers::ProviderEvent) + Send),
+        ) -> Result<ProviderResponse, ProviderError> {
+            let value = serde_json::to_value(request)?;
+            if value["system"] == DEFAULT_SYSTEM_PROMPT {
+                return self.main.send_message(client, request, on_delta).await;
+            }
+            self.gate.wait().await;
+            let prompt = value["messages"][0]["content"].as_str().unwrap_or_default();
+            Ok(text_provider_response(&format!("report on {prompt}"), None))
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_subagents_in_one_response_run_at_the_same_time() {
+        let workspace = make_temp_dir("subagent_concurrent");
+        let explore = |id: &str, prompt: &str| {
+            (
+                id.to_string(),
+                json!({"description": "Look", "prompt": prompt, "agent_type": "explorer"}),
+            )
+        };
+        let batch = [explore("agent-a", "src"), explore("agent-b", "docs")];
+        let provider = GatedProvider {
+            main: ScriptedProvider::new(vec![
+                calls(
+                    &batch
+                        .iter()
+                        .map(|(id, input)| (id.as_str(), "agent", input.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+                text("Both done."),
+            ]),
+            gate: tokio::sync::Barrier::new(2),
+        };
+        let requests = provider.main.recorded_requests.clone();
+        let mut service = AgentService::with_provider(
+            workspace.path().into(),
+            Box::new(provider),
+            "test".into(),
+            1000,
+            reqwest::Client::new(),
+        );
+        let mut finished = Vec::new();
+
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            service.submit_with_progress("Look at both".into(), |event| {
+                if let AgentProgress::Activity(activity) = event
+                    && let ActivityKind::ToolFinished { call_id, .. } = activity.kind
+                {
+                    finished.push(call_id);
+                }
+            }),
+        )
+        .await
+        .expect("the two subagents waited for each other, so they ran at once")
+        .unwrap();
+
+        assert_eq!(reply.text, "Both done.");
+        finished.sort();
+        assert_eq!(finished, ["agent-a", "agent-b"]);
+        // Results come back in call order, each with its own record.
+        let results = last_results(&requests.lock().unwrap()[1]);
+        let contents = results
+            .iter()
+            .map(|result| {
+                (
+                    result["tool_use_id"].as_str().unwrap(),
+                    result["content"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contents[0].0, "agent-a");
+        assert!(
+            contents[0]
+                .1
+                .starts_with("report on src\n\n(subagent agent-a: ")
+        );
+        assert_eq!(contents[1].0, "agent-b");
+        assert!(
+            contents[1]
+                .1
+                .starts_with("report on docs\n\n(subagent agent-b: ")
+        );
+        assert_eq!(record(workspace.path(), "agent-a")["status"], "finished");
+        assert_eq!(record(workspace.path(), "agent-b")["status"], "finished");
+    }
+
     #[test]
     fn long_reports_are_cut_on_a_character_boundary() {
         let report = "é".repeat(super::MAX_SUBAGENT_REPORT_CHARACTERS + 5);

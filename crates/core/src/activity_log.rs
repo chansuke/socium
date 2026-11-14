@@ -78,18 +78,29 @@ impl ActivityRecorder {
                 }
             }
             ActivityKind::RoundFinished { .. } | ActivityKind::TurnFinished { .. } => {
-                // Streams cut off by an error or cancellation.
-                let mut open = self
+                // Streams cut off by an error or cancellation. Another
+                // subagent running at the same time keeps its open streams.
+                let turn_over = matches!(event.kind, ActivityKind::TurnFinished { .. });
+                let mut closed = self
                     .streams
-                    .drain()
-                    .filter(|((agent, round, _), _)| {
-                        (*agent == event.agent && *round == event.round)
-                            || matches!(event.kind, ActivityKind::TurnFinished { .. })
+                    .keys()
+                    .filter(|(agent, round, _)| {
+                        turn_over || (*agent == event.agent && *round == event.round)
                     })
+                    .cloned()
                     .collect::<Vec<_>>();
-                open.sort_by(|(a, _), (b, _)| a.cmp(b));
-                self.pending
-                    .extend(open.into_iter().map(|(_, merged)| merged));
+                closed.sort();
+                for key in closed {
+                    if let Some(merged) = self.streams.remove(&key) {
+                        self.pending.push(merged);
+                    }
+                }
+                // Streams of other rounds of this agent can no longer finish.
+                if !turn_over {
+                    self.streams.retain(|(agent, round, _), _| {
+                        *agent != event.agent || *round > event.round
+                    });
+                }
             }
             _ => {}
         }
@@ -405,6 +416,76 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ActivityEvent>(main_json).unwrap(),
             main
+        );
+    }
+
+    #[test]
+    fn subagents_running_together_keep_each_others_open_streams() {
+        let (_root, path) = state_dir();
+        let sub = |agent: &str, kind| ActivityEvent {
+            agent: Some(agent.into()),
+            ..event(1, 1, kind)
+        };
+        let thought = |agent: &str, text: &str| {
+            sub(
+                agent,
+                ActivityKind::ThoughtDelta {
+                    block: 0,
+                    text: text.into(),
+                },
+            )
+        };
+        record(
+            &path,
+            &[
+                event(1, 0, ActivityKind::TurnStarted),
+                sub("a", ActivityKind::ThoughtStarted { block: 0 }),
+                sub("b", ActivityKind::ThoughtStarted { block: 0 }),
+                thought("a", "a1 "),
+                thought("b", "b1 "),
+                // a's round ends while b is still thinking.
+                sub(
+                    "a",
+                    ActivityKind::RoundFinished {
+                        stop_reason: None,
+                        usage: None,
+                        ttft_ms: None,
+                        elapsed_ms: 1,
+                    },
+                ),
+                thought("b", "b2"),
+                sub(
+                    "b",
+                    ActivityKind::ThoughtFinished {
+                        block: 0,
+                        role: ThoughtRole::Reasoning,
+                        interrupted: false,
+                    },
+                ),
+                event(
+                    1,
+                    0,
+                    ActivityKind::TurnFinished {
+                        ok: true,
+                        error: None,
+                    },
+                ),
+            ],
+        );
+
+        let texts = load_recent(&path, REPLAY_TURNS)
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                ActivityKind::ThoughtDelta { text, .. } => Some((event.agent.unwrap(), text)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            [
+                ("a".to_string(), "a1 ".to_string()),
+                ("b".to_string(), "b1 b2".to_string())
+            ]
         );
     }
 }

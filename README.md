@@ -164,7 +164,9 @@ are not yet supported.
   calls, token use, time, and its ID. A subagent runs on the current model unless
   its type or the call names another registered model whose API key is set,
   so a simple search can go to a smaller model. Subagents cannot start
-  subagents, and run one at a time while the main agent waits. Their steps
+  subagents, and the main agent waits for them. New subagents of types that
+  cannot change the workspace (such as `explorer`), called one after another
+  in the same response, run at the same time; others run one at a time. Their steps
   appear in the Activity pane under the `agent` call, marked with `│`. Each
   subagent's conversation is saved in `.socium/agents/<id>.json` before each
   of its tool calls; the model can continue a subagent with everything it

@@ -11,7 +11,11 @@ use crate::providers::{Provider, ProviderEvent, TokenUsage};
 use crate::tools::ToolDefinition;
 use crate::tools::error::ToolError;
 use crate::tools::run_tool_call_checkpointed;
+use serde_json::Value;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Instant;
 
 #[derive(Clone, Copy)]
@@ -168,7 +172,107 @@ where
         }
         let mut results = Vec::new();
         messages.push(Message::user_blocks(Vec::new()));
-        for (id, name, input) in calls {
+        let mut next = 0;
+        while next < calls.len() {
+            let batch = concurrent_batch_len(ctx, &calls[next..]);
+            if batch > 1 && !ctx.control.is_cancelled() {
+                let batch_calls = &calls[next..next + batch];
+                next += batch;
+                for (id, name, input) in batch_calls {
+                    emit(
+                        on_progress,
+                        ActivityKind::ToolStarted {
+                            call_id: id.clone(),
+                            name: name.clone(),
+                            input_summary: summarize_tool_input(name, input),
+                        },
+                    );
+                    on_progress(AgentProgress::ToolCallStarted { name: name.clone() });
+                }
+                // Every intent is saved before any of them starts.
+                let mut outcomes = batch_calls
+                    .iter()
+                    .map(|(id, name, input)| {
+                        checkpoint(
+                            messages,
+                            serde_json::json!({"type":"tool_started","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"input":input,"authorization":"subagent-tools-only","concurrent":true}),
+                        )
+                        .err()
+                        .map(|e| {
+                            Err(ToolError::Message(format!(
+                                "Could not persist execution intent; tool was not started: {e}"
+                            )))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let shared = std::sync::Mutex::new(&mut *on_progress);
+                let shared = &shared;
+                let runs = batch_calls
+                    .iter()
+                    .zip(&outcomes)
+                    .enumerate()
+                    .filter(|(_, (_, outcome))| outcome.is_none())
+                    .map(|(index, ((id, name, input), _))| {
+                        let run: Pin<Box<dyn Future<Output = _> + Send + '_>> =
+                            Box::pin(async move {
+                                let started = Instant::now();
+                                let mut forward = |event: AgentProgress| {
+                                    let mut on_progress =
+                                        shared.lock().unwrap_or_else(|e| e.into_inner());
+                                    (*on_progress)(event);
+                                };
+                                let report = run_subagent(ctx, id, input, &mut forward).await;
+                                // Shown as each one ends, not when the batch does.
+                                let (is_error, content) = match &report {
+                                    Ok(content) => (false, content.clone()),
+                                    Err(err) => (true, err.to_string()),
+                                };
+                                forward(AgentProgress::ToolCallFinished {
+                                    name: name.clone(),
+                                    is_error,
+                                });
+                                forward(AgentProgress::Activity(clock.event(
+                                    round_number,
+                                    ActivityKind::ToolFinished {
+                                        call_id: id.clone(),
+                                        name: name.clone(),
+                                        is_error,
+                                        elapsed_ms: elapsed_ms(started),
+                                        summary: summarize_tool_result(&content),
+                                    },
+                                )));
+                                (index, report)
+                            });
+                        run
+                    })
+                    .collect::<Vec<_>>();
+                for (index, report) in join_all(runs).await {
+                    outcomes[index] = Some(report);
+                }
+                for ((id, name, _), outcome) in batch_calls.iter().zip(outcomes) {
+                    let result = match outcome.expect("every call in the batch has an outcome") {
+                        Ok(content) => ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content,
+                            is_error: None,
+                        },
+                        Err(err) => tool_error(id.clone(), err),
+                    };
+                    let failed = matches!(
+                        result,
+                        ContentBlock::ToolResult {
+                            is_error: Some(true),
+                            ..
+                        }
+                    );
+                    results.push(result);
+                    *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
+                    checkpoint(messages,serde_json::json!({"type":"tool_finished","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"is_error":failed,"result_index":results.len()-1})).map_err(|e|std::io::Error::other(format!("Tool finished but its result could not be saved; outcome may be unknown after restart: {e}")))?;
+                }
+                continue;
+            }
+            let (id, name, input) = calls[next].clone();
+            next += 1;
             let call_id = id.clone();
             let tool_name = name.clone();
             let tool_started = Instant::now();
@@ -312,6 +416,52 @@ where
     })
 }
 
+/// How many calls from the start of `calls` can run at once: consecutive
+/// new subagents whose types cannot change the workspace, so they never
+/// ask for approval or edit the same file. A resumed subagent runs alone.
+fn concurrent_batch_len(ctx: &TurnContext<'_>, calls: &[(String, String, Value)]) -> usize {
+    calls
+        .iter()
+        .take_while(|(_, name, input)| {
+            name == AGENT_TOOL_NAME
+                && ctx.tools.iter().any(|tool| tool.name() == name)
+                && input.get("resume").is_none()
+                && input
+                    .get("agent_type")
+                    .and_then(Value::as_str)
+                    .and_then(|agent_type| ctx.subagents.find(agent_type))
+                    .is_some_and(|kind| !kind.tools.may_change_workspace())
+        })
+        .count()
+}
+
+/// Polls `futures` together on the current task and returns their outputs
+/// in order.
+async fn join_all<'a, T>(mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + 'a>>>) -> Vec<T> {
+    let mut outputs = futures.iter().map(|_| None).collect::<Vec<Option<T>>>();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for (future, output) in futures.iter_mut().zip(outputs.iter_mut()) {
+            if output.is_none() {
+                match future.as_mut().poll(cx) {
+                    Poll::Ready(value) => *output = Some(value),
+                    Poll::Pending => pending = true,
+                }
+            }
+        }
+        if pending {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    })
+    .await;
+    outputs
+        .into_iter()
+        .map(|output| output.expect("every future finished"))
+        .collect()
+}
+
 fn tool_error(tool_use_id: String, err: ToolError) -> ContentBlock {
     ContentBlock::ToolResult {
         tool_use_id,
@@ -418,6 +568,67 @@ mod tests {
     use super::*;
     use crate::agent::types::ContentBlock;
     use serde_json::json;
+
+    #[test]
+    fn only_consecutive_new_read_only_subagents_are_batched() {
+        use crate::agent::subagent::catalog::SubagentCatalog;
+        use crate::test_support::{ScriptedProvider, make_temp_dir};
+        let workspace = make_temp_dir("batch");
+        let provider = ScriptedProvider::new(Vec::new());
+        let client = reqwest::Client::new();
+        let tools = crate::tools::tools_for_model(true);
+        let subagents = SubagentCatalog::builtin();
+        let control = crate::TaskControl::default();
+        let ctx = TurnContext {
+            provider: &provider,
+            client: &client,
+            model: "m",
+            system: "s",
+            context_window: None,
+            max_tokens: 100,
+            tools: &tools,
+            subagents: &subagents,
+            control: &control,
+            workspace_root: workspace.path(),
+            clock: ActivityClock::start(0),
+        };
+        let agent = |agent_type: &str| {
+            (
+                "id".to_string(),
+                "agent".to_string(),
+                json!({"agent_type": agent_type}),
+            )
+        };
+        let resumed = (
+            "id".to_string(),
+            "agent".to_string(),
+            json!({"agent_type": "explorer", "resume": "x"}),
+        );
+        let read = (
+            "id".to_string(),
+            "read_file".to_string(),
+            json!({"path": "a"}),
+        );
+
+        let explorer = agent("explorer");
+        assert_eq!(
+            concurrent_batch_len(&ctx, &[explorer.clone(), explorer.clone(), agent("worker")]),
+            2
+        );
+        assert_eq!(
+            concurrent_batch_len(&ctx, &[agent("worker"), explorer.clone()]),
+            0
+        );
+        assert_eq!(
+            concurrent_batch_len(&ctx, &[explorer.clone(), resumed, explorer.clone()]),
+            1
+        );
+        assert_eq!(
+            concurrent_batch_len(&ctx, &[explorer.clone(), read, explorer.clone()]),
+            1
+        );
+        assert_eq!(concurrent_batch_len(&ctx, &[agent("unknown"), explorer]), 0);
+    }
 
     #[test]
     fn extract_text_ignores_non_text_blocks() {
