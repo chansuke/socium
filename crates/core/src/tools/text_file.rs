@@ -135,13 +135,39 @@ pub(crate) fn line_start_offset(content: &str, line: usize) -> Option<usize> {
     None
 }
 
+/// Opens `path` for reading and accepts only a regular file. The open does
+/// not block and the type is checked on the opened descriptor, so a FIFO,
+/// socket, or device fails at once instead of stalling the tool, even if it
+/// replaced a file after an earlier metadata check. Callers pass resolved
+/// paths, so a symlink as the last component is refused too.
+pub(crate) fn open_regular_file(path: &Path, display_path: &str) -> Result<fs::File, String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NONBLOCK only matters for the open of a FIFO or device; reads
+        // of a regular file ignore it.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_NOCTTY);
+    }
+    let file = options
+        .open(path)
+        .map_err(|e| format!("Failed to open file '{}': {e}", display_path))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("Failed to inspect file '{}': {e}", display_path))?;
+    if !metadata.is_file() {
+        return Err(format!("Not a regular file: '{}'", display_path));
+    }
+    Ok(file)
+}
+
 pub(crate) fn read_utf8_file_with_limit(
     path: &Path,
     display_path: &str,
     max_bytes: usize,
 ) -> Result<String, String> {
-    let mut file =
-        fs::File::open(path).map_err(|e| format!("Failed to open file '{}': {e}", display_path))?;
+    let mut file = open_regular_file(path, display_path)?;
     let mut bytes = Vec::new();
     let mut limited = Read::by_ref(&mut file).take((max_bytes + 1) as u64);
     limited
@@ -154,4 +180,40 @@ pub(crate) fn read_utf8_file_with_limit(
         ));
     }
     String::from_utf8(bytes).map_err(|e| format!("File '{}' is not valid UTF-8: {e}", display_path))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::test_support::{make_fifo, make_temp_dir};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn special_files_are_refused_without_blocking() {
+        let root = make_temp_dir("reader-fifo");
+        let fifo = root.path().join("pipe");
+        make_fifo(&fifo);
+
+        let started = Instant::now();
+        let err = read_utf8_file_with_limit(&fifo, "pipe", 1024).unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(err, "Not a regular file: 'pipe'");
+        assert!(read_utf8_file_with_limit(Path::new("/dev/null"), "null", 8).is_err());
+    }
+
+    #[test]
+    fn regular_files_still_read_and_symlinks_as_last_component_are_refused() {
+        let root = make_temp_dir("reader-regular");
+        let file = root.path().join("a.txt");
+        fs::write(&file, "日本語\n").unwrap();
+        assert_eq!(
+            read_utf8_file_with_limit(&file, "a.txt", 64).unwrap(),
+            "日本語\n"
+        );
+        assert!(read_utf8_file_with_limit(&file, "a.txt", 3).is_err());
+
+        std::os::unix::fs::symlink(&file, root.path().join("link")).unwrap();
+        assert!(read_utf8_file_with_limit(&root.path().join("link"), "link", 64).is_err());
+    }
 }

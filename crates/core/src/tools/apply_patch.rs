@@ -454,6 +454,31 @@ mod tests {
         assert!(!workspace.path().join("first").exists());
         assert!(!workspace.path().join(".socium").exists());
     }
+    #[cfg(unix)]
+    #[test]
+    fn patches_naming_a_fifo_are_refused_without_blocking() {
+        let workspace = make_temp_dir("patch-fifo");
+        crate::test_support::make_fifo(&workspace.path().join("pipe"));
+        let started = std::time::Instant::now();
+        for patch in [
+            "*** Begin Patch\n*** Update File: pipe\n@@\n-old\n+new\n*** End Patch",
+            "*** Begin Patch\n*** Delete File: pipe\n*** End Patch",
+            "*** Begin Patch\n*** Update File: pipe\n*** Move to: moved\n@@\n-old\n+new\n*** End Patch",
+        ] {
+            for dry_run in [true, false] {
+                let err = apply_patch_from_workspace(
+                    workspace.path(),
+                    &json!({"patch": patch, "dry_run": dry_run}),
+                )
+                .unwrap_err();
+                assert!(err.to_string().contains("Not a regular file"), "{err}");
+            }
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(!workspace.path().join("moved").exists());
+        assert!(!workspace.path().join(".socium").exists());
+    }
+
     #[test]
     fn ambiguous_hunks_are_refused_and_move_undo_is_grouped() {
         let workspace = make_temp_dir("patch-move");

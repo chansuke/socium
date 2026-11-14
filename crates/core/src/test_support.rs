@@ -70,6 +70,15 @@ impl Provider for ScriptedProvider {
     }
 }
 
+/// Creates a FIFO, which blocks a plain `open` for reading until a writer
+/// appears.
+#[cfg(unix)]
+pub(crate) fn make_fifo(path: &Path) {
+    let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: `name` is a valid NUL-terminated path for the call.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+}
+
 pub(crate) fn make_temp_dir(prefix: &str) -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix(&format!("socium_{prefix}_"))
