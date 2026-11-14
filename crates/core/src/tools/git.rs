@@ -306,24 +306,54 @@ fn commit_paths(root: &Path, input: &Value) -> Result<Option<Vec<String>>, ToolE
     }
     let paths = crate::tools::input::require_string_array_field(object, "paths", "git_commit")?;
     let canonical = root.canonicalize().map_err(|e| e.to_string())?;
-    let mut relative = Vec::new();
-    for path in paths {
-        let resolved =
-            crate::tools::workspace::resolve_workspace_path_for_create(&canonical, &path)?;
-        if resolved.is_dir() {
-            return Err("git_commit accepts files only".into());
-        }
-        let path = resolved
-            .strip_prefix(&canonical)
-            .map_err(|e| e.to_string())?
-            .to_string_lossy()
-            .into_owned();
-        if path.starts_with(".socium/") || path.starts_with(".git/") {
-            return Err("Cannot commit agent or Git state".into());
-        }
-        relative.push(path);
+    paths
+        .iter()
+        .map(|path| commit_pathspec(&canonical, path))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+/// The Git pathspec for one requested path. Git names the entry itself, so
+/// the last component is never followed: a symlink is committed as a link,
+/// not as the file it points to. Parent directories are resolved like any
+/// other tool path, which keeps the entry inside the workspace and outside
+/// Git and Socium state.
+fn commit_pathspec(canonical_root: &Path, requested: &str) -> Result<String, ToolError> {
+    use std::path::Component;
+    let path = Path::new(requested);
+    let Some(Component::Normal(name)) = path.components().next_back() else {
+        return Err("git_commit accepts files only".into());
+    };
+    let directory = match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => crate::tools::workspace::resolve_workspace_path_for_create(
+            canonical_root,
+            &parent.to_string_lossy(),
+        )?,
+        None => canonical_root.to_path_buf(),
+    };
+    if directory.exists() && !directory.is_dir() {
+        return Err(format!("Parent is not a directory: '{requested}'").into());
     }
-    Ok(Some(relative))
+    let entry = directory.join(name);
+    match std::fs::symlink_metadata(&entry) {
+        Ok(metadata) if metadata.is_dir() => return Err("git_commit accepts files only".into()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Failed to inspect path '{requested}': {e}").into()),
+    }
+    let relative = entry
+        .strip_prefix(canonical_root)
+        .map_err(|e| e.to_string())?;
+    if matches!(
+        relative.components().next(),
+        Some(Component::Normal(first)) if first == ".git" || first == ".socium"
+    ) {
+        return Err("Cannot commit agent or Git state".into());
+    }
+    Ok(relative.to_string_lossy().into_owned())
 }
 
 pub(crate) fn commit_review(root: &Path, input: &Value) -> Result<String, ToolError> {
@@ -643,5 +673,122 @@ mod tests {
             "tracked.txt"
         );
         assert!(workspace.path().join("untracked.txt").exists());
+    }
+
+    fn approved_commit(root: &Path, paths: &[&str]) -> ContentBlock {
+        let control = crate::TaskControl::default();
+        control.enable_interactive_approval();
+        crate::tools::run_tool_call_controlled(
+            root,
+            "commit",
+            "git_commit",
+            &json!({"message": "scoped", "paths": paths}),
+            &control,
+            &mut |e| {
+                if let AgentProgress::ApprovalRequested { request_id, .. } = e {
+                    control.answer_approval(request_id, true);
+                }
+            },
+        )
+    }
+
+    fn committed(root: &Path) -> String {
+        git_stdout(root, &["show", "--pretty=", "--name-status", "HEAD"])
+    }
+
+    fn succeeded(result: &ContentBlock) -> bool {
+        matches!(result, ContentBlock::ToolResult { is_error: None, .. })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_path_commits_the_link_and_never_its_target() {
+        use std::os::unix::fs::symlink;
+        let workspace = make_temp_dir("commit-symlink");
+        let root = workspace.path();
+        init_git_repo(root);
+        fs::write(root.join("target.txt"), "target v1\n").unwrap();
+        fs::write(root.join("other.txt"), "other\n").unwrap();
+        symlink("target.txt", root.join("link")).unwrap();
+        git_stdout(root, &["add", "target.txt", "other.txt", "link"]);
+        git_stdout(root, &["commit", "-m", "base"]);
+
+        // The target changes; committing the link must not pick it up.
+        fs::write(root.join("target.txt"), "target v2\n").unwrap();
+        let review = commit_review(root, &json!({"paths": ["link"]}));
+        assert!(
+            review.is_err(),
+            "the link itself did not change: {review:?}"
+        );
+        assert!(!succeeded(&approved_commit(root, &["link"])));
+        assert_eq!(
+            git_stdout(root, &["show", "HEAD:target.txt"]),
+            "target v1\n"
+        );
+
+        // Retargeting the link commits only the link.
+        fs::remove_file(root.join("link")).unwrap();
+        symlink("other.txt", root.join("link")).unwrap();
+        let review = commit_review(root, &json!({"paths": ["link"]})).unwrap();
+        assert!(
+            review.contains("+other.txt") && !review.contains("target v2"),
+            "{review}"
+        );
+        let result = approved_commit(root, &["link"]);
+        assert!(succeeded(&result), "{result:?}");
+        assert_eq!(committed(root).trim(), "M\tlink");
+        assert_eq!(git_stdout(root, &["show", "HEAD:link"]), "other.txt");
+        assert_eq!(
+            git_stdout(root, &["show", "HEAD:target.txt"]),
+            "target v1\n"
+        );
+
+        // Deleting the link commits the deletion, not the target's.
+        fs::remove_file(root.join("link")).unwrap();
+        let result = approved_commit(root, &["link"]);
+        assert!(succeeded(&result), "{result:?}");
+        assert_eq!(committed(root).trim(), "D\tlink");
+        assert!(git_stdout(root, &["status", "--porcelain"]).contains(" M target.txt"));
+
+        // The target's change is committed by naming the target.
+        let result = approved_commit(root, &["target.txt"]);
+        assert!(succeeded(&result), "{result:?}");
+        assert_eq!(committed(root).trim(), "M\ttarget.txt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_paths_keep_the_workspace_and_state_boundaries() {
+        use std::os::unix::fs::symlink;
+        let workspace = make_temp_dir("commit-boundary");
+        let outside = make_temp_dir("commit-outside");
+        let root = workspace.path();
+        init_git_repo(root);
+        symlink(outside.path(), root.join("away")).unwrap();
+        symlink(".git", root.join("gitdir")).unwrap();
+        fs::create_dir(root.join("dir")).unwrap();
+        let canonical = root.canonicalize().unwrap();
+
+        for (path, message) in [
+            ("away/file", "outside"),
+            ("../escape", "outside"),
+            ("gitdir/config", "git state"),
+            (".git/config", "git state"),
+            (".socium/edit_history.json", "git state"),
+            ("dir", "files only"),
+            ("dir/..", "files only"),
+            ("tracked.txt/x", "not a directory"),
+        ] {
+            let err = commit_pathspec(&canonical, path).unwrap_err().to_string();
+            assert!(err.to_lowercase().contains(message), "{path}: {err}");
+        }
+        // A link that leaves the workspace is committed as a link; Git
+        // stores where it points and never reads the target.
+        symlink(outside.path().join("secret"), root.join("outlink")).unwrap();
+        assert_eq!(commit_pathspec(&canonical, "outlink").unwrap(), "outlink");
+        assert_eq!(
+            commit_pathspec(&canonical, "./sub/../tracked.txt").unwrap(),
+            "tracked.txt"
+        );
     }
 }
