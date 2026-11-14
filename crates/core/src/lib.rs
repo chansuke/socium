@@ -36,6 +36,7 @@ use crate::agent::state::{
     ConversationState, ConversationStateRef, ConversationSummary, ConversationSummaryState,
     load_json_file,
 };
+use crate::agent::subagent::catalog::{SubagentCatalog, SubagentModel, load_user_types};
 use crate::agent::turn::{TurnContext, run_agent_turn};
 use crate::agent::types::{Message, strip_thinking};
 use crate::constants::*;
@@ -244,6 +245,8 @@ pub struct AgentService {
     max_tokens_override: Option<u32>,
     max_tokens: u32,
     tools: Vec<ToolDefinition>,
+    /// Types the `agent` tool can start, user types loaded at startup.
+    subagents: SubagentCatalog,
     client: reqwest::Client,
     /// Configuration problems found while choosing the startup model.
     warnings: Vec<String>,
@@ -324,6 +327,7 @@ impl AgentService {
             max_tokens_override,
             max_tokens: DEFAULT_MAX_TOKENS,
             tools: Vec::new(),
+            subagents: SubagentCatalog::builtin(),
             client,
             warnings: target.warnings,
             last_measured_usage: None,
@@ -510,6 +514,25 @@ impl AgentService {
             client,
         );
         service.state_lock = Some(state_lock);
+        let max_tokens_override = service.max_tokens_override;
+        let (user_types, mut agent_warnings) =
+            load_user_types(service.env.as_ref(), &service.registry, &|config| {
+                let provider_config = service
+                    .registry
+                    .provider(&config.provider)
+                    .ok_or_else(|| format!("unknown provider '{}'", config.provider))?;
+                Ok(SubagentModel {
+                    provider: build_provider(provider_config, config, service.env.as_ref())
+                        .map_err(|err| err.to_string())?,
+                    max_tokens: config
+                        .max_output_tokens
+                        .or(max_tokens_override)
+                        .unwrap_or(DEFAULT_MAX_TOKENS),
+                    config: config.clone(),
+                })
+            });
+        service.warnings.append(&mut agent_warnings);
+        service.install_subagents(SubagentCatalog::builtin().with_user_types(user_types));
         service.apply_state(state)?;
         if let Some(alias) = saved {
             if alias == service.active_model.alias {
@@ -546,6 +569,19 @@ impl AgentService {
             .or(self.max_tokens_override)
             .unwrap_or(DEFAULT_MAX_TOKENS);
         self.tools = tools_for_model(self.active_model.features.anthropic_text_editor);
+        if let Some(agent) = self
+            .tools
+            .iter_mut()
+            .find(|tool| tool.name() == AGENT_TOOL_NAME)
+        {
+            *agent = self.subagents.tool_definition();
+        }
+    }
+
+    /// Makes `catalog` the types the `agent` tool offers.
+    fn install_subagents(&mut self, catalog: SubagentCatalog) {
+        self.subagents = catalog;
+        self.apply_model_limits();
     }
 
     fn model_choice(&self, model: &ModelConfig) -> ModelChoice {
@@ -985,6 +1021,7 @@ impl AgentService {
             context_window: self.active_model.context_window,
             max_tokens: self.max_tokens,
             tools: &self.tools,
+            subagents: &self.subagents,
             workspace_root: &self.workspace_root,
             control: &self.control,
             clock,
@@ -2011,6 +2048,53 @@ max_output_tokens = 4000
             assert!(warnings[0].contains("'opus' is unavailable: ANTHROPIC_API_KEY is not set"));
             assert!(warnings[0].contains("started with 'ds-flash'"));
             assert!(saved_state(root.path()).get("active_model").is_none());
+        }
+
+        #[test]
+        fn user_agent_types_load_at_startup_and_survive_a_model_switch() {
+            let root = make_temp_dir("agent_types");
+            let agents = make_temp_dir("agent_types_dir");
+            std::fs::write(
+                agents.path().join("scout.md"),
+                "+++\nname = \"scout\"\ndescription = \"Finds things\"\n+++\nLook.",
+            )
+            .unwrap();
+            std::fs::write(
+                agents.path().join("cheap.md"),
+                "+++\nname = \"cheap\"\ndescription = \"d\"\nmodel = \"ds-flash\"\n+++\nLook.",
+            )
+            .unwrap();
+            let dir = agents.path().to_string_lossy().into_owned();
+            let mut service = open(
+                root.path(),
+                &[("ANTHROPIC_API_KEY", "a"), ("SOCIUM_AGENTS_DIR", &dir)],
+            );
+            let agent_types = |service: &AgentService| {
+                let agent = service
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name() == crate::constants::AGENT_TOOL_NAME)
+                    .unwrap();
+                let ToolDefinition::Custom(agent) = agent else {
+                    panic!("agent is a schema tool");
+                };
+                agent.input_schema["properties"]["agent_type"]["enum"].clone()
+            };
+
+            assert_eq!(
+                agent_types(&service),
+                json!(["explorer", "worker", "scout"])
+            );
+            let warnings = service.startup_warnings();
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("cheap.md"), "{warnings:?}");
+            assert!(warnings[0].contains("DEEPSEEK_API_KEY"), "{warnings:?}");
+
+            service.switch_model("sonnet").unwrap();
+            assert_eq!(
+                agent_types(&service),
+                json!(["explorer", "worker", "scout"])
+            );
         }
 
         #[test]

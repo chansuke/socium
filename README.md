@@ -167,6 +167,16 @@ are not yet supported.
   marked with `│`; their messages are not saved, so a restart during one
   marks the call's outcome unknown. See
   [ADR 8](docs/adr/0008-agentツールで独立した文脈のサブエージェントに作業を委ねる.md).
+- Define your own subagent types in `~/.config/socium/agents/*.md` (or
+  `$XDG_CONFIG_HOME/socium/agents/`, or the directory named by
+  `SOCIUM_AGENTS_DIR`): a TOML front matter between `+++` lines with `name`,
+  `description`, and optionally `tools` (read-only tools when omitted) and
+  `model` (a registry alias; the current model when omitted), followed by the
+  subagent's system prompt. Start from
+  [`agent.md.example`](agent.md.example). Definitions are read at startup;
+  a file with a mistake, or whose model cannot start, is skipped with a
+  warning. Definitions in the project directory are not read. See
+  [ADR 9](docs/adr/0009-利用者定義のサブエージェントを設定ディレクトリのmarkdownで定める.md).
 - Press Esc or Ctrl+C during a task to cancel and wait for cleanup.
 - Each start opens a new conversation. `-c` (`--continue`) continues the most
   recently saved one in the workspace, and `-r` (`--resume`) lists the saved

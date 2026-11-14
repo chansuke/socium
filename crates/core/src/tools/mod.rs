@@ -99,7 +99,7 @@ pub fn default_tools() -> Vec<ToolDefinition> {
 }
 
 /// Tool definitions for a model: the built-in tools and the `agent` tool
-/// that delegates to a subagent. Without the native text editor, the text
+/// with the built-in subagent types. Without the native text editor, the text
 /// editor is sent as an ordinary schema tool of the same name and input.
 pub(crate) fn tools_for_model(native_text_editor: bool) -> Vec<ToolDefinition> {
     BUILTIN_TOOLS
@@ -110,7 +110,7 @@ pub(crate) fn tools_for_model(native_text_editor: bool) -> Vec<ToolDefinition> {
             }
             definition => definition,
         })
-        .chain([crate::agent::subagent::agent_tool_definition()])
+        .chain([crate::agent::subagent::catalog::SubagentCatalog::builtin().tool_definition()])
         .collect()
 }
 

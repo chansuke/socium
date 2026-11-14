@@ -66,7 +66,7 @@ Chosen option: 「同期の `agent` tool」。親の tool loop の中で子の t
 ### 段階
 
 1. 同期の `agent` tool と、組み込みの `explorer` と `worker`（この ADR）。
-2. 利用者が定義する種類。名前、説明、tool の一覧、system prompt、モデルを設定に書く。tool の一覧は、組み込みの種類と同じく渡した tool の照合で強制する。
+2. 利用者が定義する種類。名前、説明、tool の一覧、system prompt、モデルを設定に書く。tool の一覧は、組み込みの種類と同じく渡した tool の照合で強制する。形式と置き場所は ADR 9 で決めた。
 3. 一つの応答にある複数の `explorer` 呼び出しを並行に実行する。読み取りだけの種類に限れば、承認と編集の競合は起きない。
 
 ### Consequences

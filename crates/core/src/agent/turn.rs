@@ -2,6 +2,7 @@ use crate::AgentProgress;
 use crate::activity::{
     ActivityClock, ActivityKind, RoundActivity, summarize_tool_input, summarize_tool_result,
 };
+use crate::agent::subagent::catalog::SubagentCatalog;
 use crate::agent::subagent::run_subagent;
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message};
 use crate::constants::{AGENT_TOOL_NAME, MAX_TOOL_ROUNDS};
@@ -23,6 +24,8 @@ pub(crate) struct TurnContext<'a> {
     pub(crate) max_tokens: u32,
     /// The tools offered to the model; a call to any other is refused.
     pub(crate) tools: &'a [ToolDefinition],
+    /// The types the `agent` tool can start.
+    pub(crate) subagents: &'a SubagentCatalog,
     pub(crate) control: &'a crate::TaskControl,
     pub(crate) workspace_root: &'a Path,
     pub(crate) clock: ActivityClock,

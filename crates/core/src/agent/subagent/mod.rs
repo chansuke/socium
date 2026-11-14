@@ -1,107 +1,27 @@
 //! The `agent` tool: runs a delegated task in a fresh context with its own
 //! tool loop and returns only the subagent's final report as the tool result.
 //!
-//! A subagent shares the main agent's model, workspace, cancellation, and
-//! approvals. It never sees the main conversation, and its tools are a
-//! subset chosen by its type that never includes `agent`, so subagents do
-//! not nest.
+//! A subagent shares the main agent's workspace, cancellation, and
+//! approvals, and its model unless its type names another. It never sees
+//! the main conversation, and its tools are a subset chosen by its type that
+//! never includes `agent`, so subagents do not nest.
+
+pub(crate) mod catalog;
 
 use crate::AgentProgress;
 use crate::activity::{ActivityKind, summarize_tool_input};
 use crate::agent::turn::{TurnContext, extract_text, run_agent_turn};
 use crate::agent::types::Message;
-use crate::constants::{
-    AGENT_TOOL_NAME, MAX_SUBAGENT_REPORT_CHARACTERS, MAX_TOOL_ROUNDS,
-    SUBAGENT_EXPLORER_SYSTEM_PROMPT, SUBAGENT_WORKER_SYSTEM_PROMPT,
-};
+use crate::constants::{AGENT_TOOL_NAME, MAX_SUBAGENT_REPORT_CHARACTERS, MAX_TOOL_ROUNDS};
 use crate::error::AgentError;
 use crate::providers::TokenUsage;
 use crate::tools::error::ToolError;
 use crate::tools::input::{require_object_input, require_string_field};
-use crate::tools::{CustomToolDefinition, ToolDefinition};
-use serde_json::{Value, json};
+use crate::tools::tools_for_model;
+use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Instant;
-
-/// What a subagent may do, chosen by the delegating model per call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SubagentKind {
-    /// Reads and searches only.
-    Explorer,
-    /// Every tool except `agent`; commands and commits still need approval.
-    Worker,
-}
-
-impl SubagentKind {
-    fn parse(value: &str) -> Result<Self, ToolError> {
-        match value {
-            "explorer" => Ok(Self::Explorer),
-            "worker" => Ok(Self::Worker),
-            other => Err(ToolError::Message(format!(
-                "Unknown agent_type '{other}'; use 'explorer' or 'worker'"
-            ))),
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Explorer => "explorer",
-            Self::Worker => "worker",
-        }
-    }
-
-    fn system_prompt(self) -> &'static str {
-        match self {
-            Self::Explorer => SUBAGENT_EXPLORER_SYSTEM_PROMPT,
-            Self::Worker => SUBAGENT_WORKER_SYSTEM_PROMPT,
-        }
-    }
-
-    pub(crate) fn allows(self, tool: &str) -> bool {
-        match self {
-            Self::Explorer => matches!(
-                tool,
-                "read_file"
-                    | "list_files"
-                    | "search_text"
-                    | "find_symbol"
-                    | "git_branch"
-                    | "git_status"
-                    | "git_diff"
-                    | "git_log"
-            ),
-            Self::Worker => tool != AGENT_TOOL_NAME,
-        }
-    }
-}
-
-pub(crate) fn agent_tool_definition() -> ToolDefinition {
-    ToolDefinition::Custom(CustomToolDefinition {
-        name: AGENT_TOOL_NAME.to_string(),
-        description: "Delegate a self-contained task to a subagent. The subagent starts with an empty context, works with its own tools until it is done, and returns one written report as this tool's result; nothing else it saw comes back. Use it to keep a broad search or a separable piece of work out of this conversation, not for a single file read or search. The subagent cannot see this conversation, so put everything it needs in prompt: the goal, relevant paths and constraints, and what the report must contain. agent_type 'explorer' can only read, list, and search files and inspect Git; 'worker' can also edit files and run commands, which still need the user's approval. Subagents cannot start subagents. Read the report critically and tell the user what matters; they do not see it.".to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "description": {
-                    "type": "string",
-                    "description": "A short label for the task, 3 to 6 words, shown to the user."
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "The complete task for the subagent, with the context it needs and what to report."
-                },
-                "agent_type": {
-                    "type": "string",
-                    "enum": ["explorer", "worker"],
-                    "description": "'explorer' for read-only investigation; 'worker' when the task needs edits or commands."
-                }
-            },
-            "required": ["description", "prompt", "agent_type"],
-            "additionalProperties": false
-        }),
-    })
-}
 
 type ReportFuture<'a> = Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + 'a>>;
 
@@ -123,30 +43,51 @@ pub(crate) fn run_subagent<'a>(
         let fields = require_object_input(input, AGENT_TOOL_NAME)?;
         require_string_field(fields, "description", AGENT_TOOL_NAME)?;
         let prompt = require_string_field(fields, "prompt", AGENT_TOOL_NAME)?;
-        let kind =
-            SubagentKind::parse(require_string_field(fields, "agent_type", AGENT_TOOL_NAME)?)?;
+        let agent_type = require_string_field(fields, "agent_type", AGENT_TOOL_NAME)?;
+        let kind = ctx.subagents.find(agent_type).ok_or_else(|| {
+            ToolError::Message(format!(
+                "Unknown agent_type '{agent_type}'; use one of: {}",
+                ctx.subagents.names().join(", ")
+            ))
+        })?;
         if prompt.trim().is_empty() {
             return Err(ToolError::Message(
                 "agent requires a non-empty prompt".into(),
             ));
         }
 
-        let tools = ctx
+        // The type's tools, as its model is offered them.
+        let model_tools;
+        let child = match &kind.model {
+            None => *ctx,
+            Some(model) => {
+                model_tools = tools_for_model(model.config.features.anthropic_text_editor);
+                TurnContext {
+                    provider: model.provider.as_ref(),
+                    model: &model.config.id,
+                    context_window: model.config.context_window,
+                    max_tokens: model.max_tokens,
+                    tools: &model_tools,
+                    ..*ctx
+                }
+            }
+        };
+        let tools = child
             .tools
             .iter()
-            .filter(|tool| kind.allows(tool.name()))
+            .filter(|tool| kind.tools.allows(tool.name()))
             .cloned()
             .collect::<Vec<_>>();
         let child = TurnContext {
-            system: kind.system_prompt(),
+            system: &kind.system_prompt,
             tools: &tools,
-            ..*ctx
+            ..child
         };
         let mut messages = vec![Message::user_text(prompt.to_string())];
         let agent = Some(call_id.to_string());
         let requested_by = format!(
             "{} subagent \"{}\"",
-            kind.name(),
+            kind.name,
             summarize_tool_input(AGENT_TOOL_NAME, input)
         );
         let mut stats = RunStats::start();
@@ -179,11 +120,10 @@ pub(crate) fn run_subagent<'a>(
         let result = run_agent_turn(&child, &mut messages, &mut forward, &mut |_, _| Ok(())).await;
 
         let notes = last_assistant_text(&messages);
-        let side_effects = match kind {
-            SubagentKind::Explorer => "",
-            SubagentKind::Worker => {
-                " Changes it made before stopping are kept; inspect the workspace before retrying."
-            }
+        let side_effects = if kind.tools.may_change_workspace() {
+            " Changes it made before stopping are kept; inspect the workspace before retrying."
+        } else {
+            ""
         };
         let stats = stats.describe();
         match result {
@@ -614,7 +554,7 @@ mod tests {
         let results = last_results(&requests[1]);
         assert_eq!(
             results[0]["content"],
-            "Unknown agent_type 'admin'; use 'explorer' or 'worker'"
+            "Unknown agent_type 'admin'; use one of: explorer, worker"
         );
         assert_eq!(results[1]["content"], "agent requires a non-empty prompt");
     }
@@ -669,6 +609,66 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("Sandbox command denied")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_user_type_runs_with_its_own_prompt_tools_and_model() {
+        use super::catalog::{SubagentCatalog, SubagentModel, SubagentType, ToolSet};
+        let workspace = make_temp_dir("subagent_user_type");
+        let (mut service, main_requests) =
+            scripted(workspace.path(), vec![delegate("reviewer"), text("Done.")]);
+        let model_provider = ScriptedProvider::new(vec![text("No bugs found.")]);
+        let model_requests = model_provider.recorded_requests.clone();
+        let haiku = crate::models::ModelRegistry::builtin()
+            .find("haiku")
+            .unwrap()
+            .clone();
+        service.install_subagents(
+            SubagentCatalog::builtin().with_user_types(vec![SubagentType {
+                name: "reviewer".into(),
+                description: "Reviews a diff".into(),
+                system_prompt: "You review.".into(),
+                tools: ToolSet::Only(vec!["git_diff".into(), "read_file".into()]),
+                model: Some(SubagentModel {
+                    config: haiku,
+                    provider: Box::new(model_provider),
+                    max_tokens: 321,
+                }),
+            }]),
+        );
+
+        service.submit("Review it".into()).await.unwrap();
+
+        let main_requests = main_requests.lock().unwrap().clone();
+        assert_eq!(
+            main_requests.len(),
+            2,
+            "the main model ran no subagent round"
+        );
+        let agent = main_requests[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "agent")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            agent["input_schema"]["properties"]["agent_type"]["enum"],
+            json!(["explorer", "worker", "reviewer"])
+        );
+        let child = model_requests.lock().unwrap()[0].clone();
+        assert_eq!(child["model"], "claude-haiku-5-5");
+        assert_eq!(child["max_tokens"], 321);
+        assert_eq!(child["system"], "You review.");
+        assert_eq!(tool_names(&child), ["read_file", "git_diff"]);
+        let report = last_results(&main_requests[1])[0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            report.starts_with("No bugs found.\n\n(subagent: 1 round"),
+            "{report}"
         );
     }
 
