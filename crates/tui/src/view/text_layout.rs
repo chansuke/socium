@@ -70,6 +70,7 @@ pub(crate) fn render_entry(entry: &ChatEntry, width: usize) -> Vec<Line<'static>
         Speaker::Socium => render_socium_entry(entry, width),
         Speaker::Thinking => render_thinking_indicator(),
         Speaker::System => render_wrapped_text(&entry.body, width, "! ", "  ", PINK, TEXT, None),
+        Speaker::Tool { failed } => render_tool_entry(&entry.body, width, failed),
     }
 }
 
@@ -135,6 +136,22 @@ fn render_socium_entry(entry: &ChatEntry, width: usize) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
+    lines
+}
+
+/// `⏺ name argument`, then `⎿ result` under it, the marker pink when the
+/// call failed.
+fn render_tool_entry(body: &str, width: usize, failed: bool) -> Vec<Line<'static>> {
+    let (call, result) = body.split_once('\n').unwrap_or((body, ""));
+    let marker = if failed { PINK } else { LILAC };
+    let mut lines = render_wrapped_text(call, width, "⏺ ", "  ", marker, TEXT, None);
+    if !result.is_empty() {
+        lines.pop();
+        let color = if failed { PINK } else { MUTED };
+        lines.extend(render_wrapped_text(
+            result, width, "  ⎿ ", "    ", MUTED, color, None,
+        ));
+    }
     lines
 }
 
@@ -406,6 +423,22 @@ mod tests {
         assert_eq!(
             joined,
             "差分を確認してから承認してください。e\u{301}と👨\u{200d}👩\u{200d}👧も表示します。"
+        );
+    }
+
+    #[test]
+    fn a_tool_entry_shows_the_call_then_its_result() {
+        let entry = crate::transcript::ChatEntry {
+            speaker: crate::transcript::Speaker::Tool { failed: false },
+            body: "read_file src/lib.rs\nPath: src/lib.rs".into(),
+        };
+        let lines = super::render_entry(&entry, 40)
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            ["⏺ read_file src/lib.rs", "  ⎿ Path: src/lib.rs", ""]
         );
     }
 }

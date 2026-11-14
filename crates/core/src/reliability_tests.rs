@@ -62,11 +62,16 @@ async fn read_search_edit_test_failure_restart_and_resume_preserve_human_changes
     );
     let control = agent.task_control();
     control.enable_interactive_approval();
+    let mut live_tools = Vec::new();
     assert!(
         agent
             .submit_with_progress("Update old to new and test".into(), |event| {
-                if let AgentProgress::ApprovalRequested { request_id, .. } = event {
-                    control.answer_approval(request_id, true);
+                match event {
+                    AgentProgress::ApprovalRequested { request_id, .. } => {
+                        control.answer_approval(request_id, true);
+                    }
+                    AgentProgress::ToolCallRecorded(entry) => live_tools.push(entry),
+                    _ => {}
                 }
             })
             .await
@@ -108,11 +113,32 @@ async fn read_search_edit_test_failure_restart_and_resume_preserve_human_changes
             .iter()
             .all(|b| matches!(b, ContentBlock::ToolResult { is_error: None, .. }))
     );
-    assert!(
-        restarted
-            .transcript_entries()
+    // The restarted transcript shows each call with its outcome and the
+    // turn's failure.
+    let entries = restarted.transcript_entries();
+    let tools = entries
+        .iter()
+        .filter(|e| matches!(e.role, crate::TranscriptRole::Tool { failed: false }))
+        .map(|e| e.text.lines().next().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(tools.len(), 4, "{entries:?}");
+    // The live transcript showed the same entries.
+    assert_eq!(
+        live_tools,
+        entries
             .iter()
-            .any(|e| e.text.contains("Exit code: 0"))
+            .filter(|e| matches!(e.role, crate::TranscriptRole::Tool { .. }))
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert!(tools[2].starts_with("apply_patch tracked.txt"));
+    assert!(
+        tools[3].starts_with("run_command sh -c") && tools[3].ends_with("(approved)"),
+        "{tools:?}"
+    );
+    assert_eq!(
+        entries.last().unwrap().text,
+        "Request failed: connection lost"
     );
     assert_eq!(
         restarted

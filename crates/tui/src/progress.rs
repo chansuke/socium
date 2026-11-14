@@ -12,6 +12,14 @@ impl App {
                 round,
                 json,
             } => self.activity.push_raw(turn_id, round, json),
+            AgentProgress::ToolCallRecorded(entry) => {
+                self.pop_thinking_message();
+                self.messages
+                    .extend(crate::transcript::transcript_entries_to_chat_entries(vec![
+                        entry,
+                    ]));
+                self.transcript_scroll = 0;
+            }
             AgentProgress::CommandOutput {
                 stdout_bytes,
                 stderr_bytes,

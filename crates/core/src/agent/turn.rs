@@ -168,6 +168,7 @@ where
                 },
             );
             let mut approval_started = None;
+            let mut approved = false;
             let mut tool_progress = |event: AgentProgress| {
                 let kind = match &event {
                     AgentProgress::ApprovalRequested { tool, .. } => {
@@ -177,10 +178,13 @@ where
                             tool: tool.clone(),
                         })
                     }
-                    AgentProgress::ApprovalResolved { approved, .. } => {
+                    AgentProgress::ApprovalResolved {
+                        approved: allowed, ..
+                    } => {
+                        approved |= *allowed;
                         Some(ActivityKind::ApprovalResolved {
                             call_id: call_id.clone(),
-                            approved: *approved,
+                            approved: *allowed,
                             waited_ms: approval_started.take().map_or(0, elapsed_ms),
                         })
                     }
@@ -229,6 +233,14 @@ where
                 }
             );
             if let ContentBlock::ToolResult { content, .. } = &result {
+                on_progress(AgentProgress::ToolCallRecorded(
+                    crate::transcript::tool_entry(
+                        &tool_name,
+                        &input,
+                        Some((content, failed)),
+                        approved,
+                    ),
+                ));
                 emit(
                     on_progress,
                     ActivityKind::ToolFinished {

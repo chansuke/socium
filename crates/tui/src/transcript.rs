@@ -7,6 +7,10 @@ pub(crate) enum Speaker {
     Socium,
     Thinking,
     System,
+    /// A tool call: name and argument, then its result on the next line.
+    Tool {
+        failed: bool,
+    },
 }
 
 pub(crate) struct ChatEntry {
@@ -89,6 +93,7 @@ pub(crate) fn transcript_entries_to_chat_entries(entries: Vec<TranscriptEntry>) 
                 TranscriptRole::User => Speaker::User,
                 TranscriptRole::Assistant => Speaker::Socium,
                 TranscriptRole::System => Speaker::System,
+                TranscriptRole::Tool { failed } => Speaker::Tool { failed },
             },
             body: entry.text,
         })
@@ -173,5 +178,19 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(messages[1].speaker, Speaker::Socium));
         assert_eq!(messages[1].body, "answer");
+    }
+
+    #[test]
+    fn a_recorded_tool_call_replaces_the_thinking_indicator() {
+        let mut app = crate::app::App::for_test();
+        app.show_thinking_indicator();
+        app.apply_progress(socium_core::AgentProgress::ToolCallRecorded(
+            TranscriptEntry {
+                role: TranscriptRole::Tool { failed: true },
+                text: "run_command cargo test\nexit code 101".into(),
+            },
+        ));
+        assert_eq!(app.messages.len(), 1);
+        assert!(app.messages[0].speaker == Speaker::Tool { failed: true });
     }
 }

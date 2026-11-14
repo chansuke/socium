@@ -8,9 +8,11 @@ mod execution;
 mod models;
 mod process;
 mod session;
+mod transcript;
 pub use control::TaskControl;
 pub use execution::SANDBOX_DESCRIPTION;
 pub use session::{SessionStart, SessionSummary, list_sessions};
+pub use transcript::{TranscriptEntry, TranscriptRole};
 pub mod agent;
 pub mod constants;
 pub mod error;
@@ -149,19 +151,6 @@ pub struct CompactionReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TranscriptRole {
-    User,
-    Assistant,
-    System,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TranscriptEntry {
-    pub role: TranscriptRole,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentProgress {
     ModelRequestStarted {
         round: usize,
@@ -204,6 +193,8 @@ pub enum AgentProgress {
         name: String,
         is_error: bool,
     },
+    /// A finished tool call as the transcript shows it after a restart.
+    ToolCallRecorded(TranscriptEntry),
     CommandOutput {
         stdout_bytes: u64,
         stderr_bytes: u64,
@@ -910,42 +901,7 @@ impl AgentService {
     }
 
     pub fn transcript_entries(&self) -> Vec<TranscriptEntry> {
-        self.messages
-            .iter()
-            .filter_map(|message| {
-                let text = match &message.content {
-                    crate::agent::types::MessageContent::Text(text) => text.clone(),
-                    crate::agent::types::MessageContent::Blocks(blocks) => blocks
-                        .iter()
-                        .filter_map(|block| match block {
-                            crate::agent::types::ContentBlock::Text { text } => Some(text.clone()),
-                            crate::agent::types::ContentBlock::ToolUse { name, input, .. } => {
-                                Some(format!("Tool: {name} {input}"))
-                            }
-                            crate::agent::types::ContentBlock::ToolResult {
-                                tool_use_id,
-                                content,
-                                is_error,
-                            } => Some(format!(
-                                "Tool result {tool_use_id} (error={}): {content}",
-                                is_error == &Some(true)
-                            )),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                };
-                if text.trim().is_empty() {
-                    return None;
-                }
-                let role = match message.role {
-                    crate::agent::types::Role::User => TranscriptRole::User,
-                    crate::agent::types::Role::Assistant => TranscriptRole::Assistant,
-                    crate::agent::types::Role::System => TranscriptRole::System,
-                };
-                Some(TranscriptEntry { role, text })
-            })
-            .collect()
+        transcript::transcript_entries(&self.messages, &self.events)
     }
 
     pub async fn submit(&mut self, user_input: String) -> Result<AgentReply, AgentError> {
@@ -1260,16 +1216,23 @@ mod tests {
         service.messages = messages;
 
         let entries = service.transcript_entries();
-        assert_eq!(entries.len(), 3);
         assert_eq!(
-            entries[0],
-            TranscriptEntry {
-                role: TranscriptRole::User,
-                text: "hello".into()
-            }
+            entries,
+            [
+                TranscriptEntry {
+                    role: TranscriptRole::User,
+                    text: "hello".into()
+                },
+                TranscriptEntry {
+                    role: TranscriptRole::Assistant,
+                    text: "answer".into()
+                },
+                TranscriptEntry {
+                    role: TranscriptRole::Tool { failed: false },
+                    text: "read_file src/lib.rs\nPath: src/lib.rs".into()
+                },
+            ]
         );
-        assert!(entries[1].text.contains("Tool: read_file"));
-        assert!(entries[2].text.contains("Tool result tool_1"));
     }
 
     fn service_with_scripted_provider(
