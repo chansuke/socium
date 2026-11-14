@@ -235,3 +235,74 @@ async fn live_text_editor_call_uses_the_editor_input() {
     assert_eq!(input["command"], "view");
     assert_eq!(input["path"], "README.md");
 }
+
+/// The whole delegation path on a real model: the main agent is asked to
+/// use an explorer, the subagent reads the workspace on its own, and its
+/// report reaches the reply. Also shows whether the tool description is
+/// enough for the model to delegate when asked.
+#[tokio::test]
+#[ignore = "calls a paid API; set SOCIUM_LIVE_MODEL and run with --ignored"]
+async fn live_main_agent_delegates_to_an_explorer() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir(workspace.path().join("src")).unwrap();
+    std::fs::write(
+        workspace.path().join("src/config.rs"),
+        "pub const RETRY_LIMIT: u32 = 7;\n",
+    )
+    .unwrap();
+    let alias = env::var("SOCIUM_LIVE_MODEL").unwrap_or_else(|_| "haiku".to_string());
+    let lookup: crate::EnvLookup = std::sync::Arc::new(move |key: &str| {
+        if key == "MODEL" {
+            Some(alias.clone())
+        } else {
+            env::var(key).ok()
+        }
+    });
+    let registry = ModelRegistry::load(lookup.as_ref()).expect("models.toml");
+    let mut service = crate::AgentService::open(
+        workspace.path().to_path_buf(),
+        crate::session::SessionStart::New,
+        registry,
+        lookup,
+        None,
+        crate::provider_http_client().unwrap(),
+    )
+    .unwrap();
+    let mut subagent_tools = Vec::new();
+    let mut delegated = false;
+
+    let reply = service
+        .submit_with_progress(
+            "Use the agent tool with agent_type explorer to find the value of RETRY_LIMIT in this workspace. Do not search yourself. Then tell me the value.".into(),
+            |event| {
+                if let crate::AgentProgress::Activity(activity) = event
+                    && let crate::ActivityKind::ToolStarted { name, .. } = activity.kind
+                {
+                    match activity.agent {
+                        Some(_) => subagent_tools.push(name),
+                        None => delegated |= name == "agent",
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        delegated,
+        "the main agent did not call agent: {}",
+        reply.text
+    );
+    assert!(!subagent_tools.is_empty(), "the subagent used no tools");
+    assert!(
+        subagent_tools
+            .iter()
+            .all(|name| crate::agent::subagent::catalog::ToolSet::ReadOnly.allows(name)),
+        "{subagent_tools:?}"
+    );
+    assert!(reply.text.contains('7'), "{}", reply.text);
+    let runs = service.subagent_runs().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, crate::SubagentStatus::Finished);
+    println!("subagent tools: {subagent_tools:?}\nreply: {}", reply.text);
+}
