@@ -34,7 +34,7 @@ use crate::agent::context::{
 };
 use crate::agent::state::{
     ConversationState, ConversationStateRef, ConversationSummary, ConversationSummaryState,
-    load_json_file, save_json_file,
+    load_json_file,
 };
 use crate::agent::turn::{TurnContext, run_agent_turn};
 use crate::agent::types::{Message, strip_thinking};
@@ -999,7 +999,7 @@ impl AgentService {
             raw_messages.truncate(raw_len);
             raw_messages.extend_from_slice(&context[initial_len..]);
             events.push(serde_json::json!({"sequence":events.len(),"turn_id":turn_id,"message_offset":raw_messages.len(),"event":event}));
-            save_json_file(
+            session::save_conversation(
                 path,
                 &ConversationStateRef {
                     schema_version: 1,
@@ -1145,7 +1145,7 @@ impl AgentService {
     }
 
     fn persist_state(&self) -> std::io::Result<()> {
-        save_json_file(
+        session::save_conversation(
             &self.conversation_path(),
             &ConversationStateRef {
                 schema_version: 1,

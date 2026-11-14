@@ -3,16 +3,21 @@
 //! conversation into one of them.
 
 use crate::activity_log::{ACTIVITY_LOG_FILE_NAME, ROTATED_FILE_NAME};
-use crate::agent::state::{check_state_file, load_json_file, lock_workspace, workspace_state_path};
+use crate::agent::state::{
+    ConversationStateRef, check_state_file, load_json_file, lock_workspace, save_json_file,
+    workspace_state_path,
+};
 use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
 use crate::constants::{CONVERSATION_STATE_FILE_NAME, STATE_DIR_NAME};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const SESSIONS_DIR_NAME: &str = "sessions";
+const META_FILE_NAME: &str = "meta.json";
+const META_SCHEMA_VERSION: u32 = 1;
 const MAX_PREVIEW_CHARACTERS: usize = 200;
 const MAX_NAME_CHARACTERS: usize = 80;
 
@@ -54,6 +59,70 @@ struct SessionHead {
     active_model: Option<String>,
     #[serde(default)]
     name: Option<String>,
+}
+
+/// What the listing shows of a session, cached beside its conversation so
+/// that listing does not parse every snapshot. It describes the snapshot
+/// of exactly `snapshot_len` bytes modified at `snapshot_modified_ns`; any
+/// other snapshot is read in full and the cache rewritten.
+#[derive(Serialize, Deserialize, Default, PartialEq, Eq, Debug)]
+struct SessionMeta {
+    schema_version: u32,
+    snapshot_len: u64,
+    snapshot_modified_ns: u64,
+    message_count: usize,
+    preview: String,
+    #[serde(default)]
+    active_model: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+fn modified_ns(metadata: &fs::Metadata) -> io::Result<u64> {
+    Ok(metadata
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64)
+}
+
+impl SessionMeta {
+    fn describe(
+        snapshot: &fs::Metadata,
+        messages: &[Message],
+        active_model: Option<&str>,
+        name: Option<&str>,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            schema_version: META_SCHEMA_VERSION,
+            snapshot_len: snapshot.len(),
+            snapshot_modified_ns: modified_ns(snapshot)?,
+            message_count: messages.len(),
+            preview: preview(messages),
+            active_model: active_model.map(str::to_string),
+            name: name.map(str::to_string),
+        })
+    }
+
+    fn describes(&self, snapshot: &fs::Metadata) -> bool {
+        self.schema_version == META_SCHEMA_VERSION
+            && self.snapshot_len == snapshot.len()
+            && modified_ns(snapshot).is_ok_and(|ns| ns == self.snapshot_modified_ns)
+    }
+}
+
+/// Saves a session's conversation snapshot, then its listing cache. The
+/// cache is only an aid: failing to write it does not fail the save, and a
+/// stale one is rebuilt by the next listing.
+pub(crate) fn save_conversation(path: &Path, state: &ConversationStateRef) -> io::Result<()> {
+    save_json_file(path, state)?;
+    let _ = fs::symlink_metadata(path).and_then(|snapshot| {
+        save_json_file(
+            &path.with_file_name(META_FILE_NAME),
+            &SessionMeta::describe(&snapshot, state.messages, state.active_model, state.name)?,
+        )
+    });
+    Ok(())
 }
 
 /// `YYYYMMDD-HHMMSS-xxxx` in UTC; the suffix is taken from the sub-second
@@ -187,19 +256,37 @@ pub(crate) fn scan_sessions(root: &Path) -> io::Result<Vec<SessionSummary>> {
             continue;
         }
         let path = session_file(root, &id, CONVERSATION_STATE_FILE_NAME);
-        let updated = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata.modified()?,
+        let snapshot = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
             Err(err) if err.kind() == ErrorKind::NotFound => continue,
             Err(err) => return Err(err),
         };
-        sessions.push(match load_json_file::<SessionHead>(&path) {
-            Ok(head) => SessionSummary {
+        let updated = snapshot.modified()?;
+        let meta_path = path.with_file_name(META_FILE_NAME);
+        let cached = load_json_file::<SessionMeta>(&meta_path)
+            .ok()
+            .filter(|meta| meta.describes(&snapshot));
+        let meta = match cached {
+            Some(meta) => Ok(meta),
+            None => load_json_file::<SessionHead>(&path).and_then(|head| {
+                let meta = SessionMeta::describe(
+                    &snapshot,
+                    &head.messages,
+                    head.active_model.as_deref(),
+                    head.name.as_deref(),
+                )?;
+                let _ = save_json_file(&meta_path, &meta);
+                Ok(meta)
+            }),
+        };
+        sessions.push(match meta {
+            Ok(meta) => SessionSummary {
                 id,
                 updated,
-                message_count: head.messages.len(),
-                preview: preview(&head.messages),
-                active_model: head.active_model,
-                name: head.name,
+                message_count: meta.message_count,
+                preview: meta.preview,
+                active_model: meta.active_model,
+                name: meta.name,
                 readable: true,
             },
             Err(err) => SessionSummary {
@@ -559,5 +646,79 @@ mod tests {
         let root = make_temp_dir("session-locked");
         let _held = lock_workspace(root.path()).unwrap();
         assert!(list_sessions(root.path()).is_err());
+    }
+
+    #[test]
+    fn listing_uses_the_cache_while_it_describes_the_snapshot() {
+        let root = make_temp_dir("session-meta");
+        let id = "20261101-000000-0000";
+        save_conversation(root.path(), id, &["real prompt"], 100);
+        let meta_path = session_file(root.path(), id, META_FILE_NAME);
+
+        // The first listing reads the snapshot and writes the cache.
+        assert_eq!(
+            scan_sessions(root.path()).unwrap()[0].preview,
+            "real prompt"
+        );
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+        assert_eq!(meta["message_count"], 1);
+
+        // A cache that matches the snapshot is trusted without reading it.
+        meta["preview"] = "from the cache".into();
+        fs::write(&meta_path, meta.to_string()).unwrap();
+        assert_eq!(
+            scan_sessions(root.path()).unwrap()[0].preview,
+            "from the cache"
+        );
+
+        // A changed snapshot is read again and the cache rebuilt.
+        save_conversation(root.path(), id, &["changed", "two"], 200);
+        let listed = scan_sessions(root.path()).unwrap();
+        assert_eq!(
+            (listed[0].preview.as_str(), listed[0].message_count),
+            ("changed", 2)
+        );
+        let meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+        assert_eq!(meta["preview"], "changed");
+
+        // A broken cache is ignored.
+        fs::write(&meta_path, "{").unwrap();
+        assert_eq!(scan_sessions(root.path()).unwrap()[0].preview, "changed");
+    }
+
+    #[test]
+    fn saving_a_conversation_writes_its_cache() {
+        let root = make_temp_dir("session-meta-save");
+        let path = workspace_state_path(
+            root.path(),
+            &format!("{SESSIONS_DIR_NAME}/20261101-000000-0000/{CONVERSATION_STATE_FILE_NAME}"),
+        )
+        .unwrap();
+        let messages = vec![Message::user_text("saved".into())];
+        super::save_conversation(
+            &path,
+            &ConversationStateRef {
+                schema_version: 1,
+                messages: &messages,
+                events: &[],
+                summary_state: &Default::default(),
+                active_model: Some("sonnet"),
+                name: Some("named"),
+            },
+        )
+        .unwrap();
+        let meta = load_json_file::<SessionMeta>(&path.with_file_name(META_FILE_NAME)).unwrap();
+        assert!(meta.describes(&fs::symlink_metadata(&path).unwrap()));
+        assert_eq!(
+            (
+                meta.message_count,
+                meta.preview.as_str(),
+                meta.active_model.as_deref(),
+                meta.name.as_deref()
+            ),
+            (1, "saved", Some("sonnet"), Some("named"))
+        );
     }
 }
