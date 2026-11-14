@@ -13,6 +13,7 @@ use socium_core::ThoughtRole;
 use socium_core::providers::TokenUsage;
 
 const GUTTER: usize = 2;
+const SUBAGENT_GUIDE: &str = "│ ";
 const COLLAPSED_THOUGHT_LINES: usize = 2;
 const EXPANDED_INPUT_LINES: usize = 40;
 const ERROR: Color = Color::Rgb(240, 110, 110);
@@ -46,9 +47,15 @@ pub(crate) fn activity_lines(
         let is_selected = selected == Some(index);
         let live = newest == Some(index);
         let turn_output = output_tokens.get(&item.turn_id).copied();
+        // A subagent's items hang under its `agent` call behind a guide.
+        let guide = if item.agent.is_some() {
+            SUBAGENT_GUIDE
+        } else {
+            ""
+        };
         for (row, line) in item_lines(
             item,
-            width.saturating_sub(GUTTER).max(16),
+            width.saturating_sub(GUTTER + cells(guide)).max(16),
             live,
             turn_output,
         )
@@ -61,6 +68,9 @@ pub(crate) fn activity_lines(
                 "  "
             };
             let mut spans = vec![Span::styled(marker, Style::default().fg(LILAC))];
+            if !guide.is_empty() {
+                spans.push(Span::styled(guide, Style::default().fg(SOFT)));
+            }
             spans.extend(line.spans);
             lines.push(Line::from(spans));
         }
@@ -784,5 +794,32 @@ mod tests {
         assert_eq!(format_ms(125_000), "2m05s");
         assert_eq!(format_bytes(2_048), "2.0 KiB");
         assert_eq!(format_count(999), "999");
+    }
+
+    #[test]
+    fn subagent_items_hang_under_a_guide() {
+        let mut model = ActivityModel::default();
+        for event in crate::activity::tests::turn_with_subagent() {
+            model.apply(event);
+        }
+
+        let lines = plain(&activity_lines(&model, 60, 40));
+
+        let guided = lines
+            .iter()
+            .filter(|line| line.starts_with("  │ "))
+            .cloned()
+            .collect::<Vec<_>>();
+        // Every line of a subagent item, wrapped ones included.
+        assert_eq!(guided.len(), 3, "{lines:#?}");
+        assert!(guided[0].contains("◆ round 1"), "{guided:#?}");
+        assert!(guided[1].contains("look in a.txt"), "{guided:#?}");
+        assert!(guided[2].contains("thinking…"), "{guided:#?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("  ⚙ agent  Find the greeting")),
+            "{lines:#?}"
+        );
     }
 }

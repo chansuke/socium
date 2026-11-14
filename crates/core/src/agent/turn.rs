@@ -2,21 +2,26 @@ use crate::AgentProgress;
 use crate::activity::{
     ActivityClock, ActivityKind, RoundActivity, summarize_tool_input, summarize_tool_result,
 };
+use crate::agent::subagent::run_subagent;
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message};
-use crate::constants::MAX_TOOL_ROUNDS;
+use crate::constants::{AGENT_TOOL_NAME, MAX_TOOL_ROUNDS};
 use crate::error::AgentError;
 use crate::providers::{Provider, ProviderEvent, TokenUsage};
 use crate::tools::ToolDefinition;
+use crate::tools::error::ToolError;
 use crate::tools::run_tool_call_checkpointed;
 use std::path::Path;
 use std::time::Instant;
 
+#[derive(Clone, Copy)]
 pub(crate) struct TurnContext<'a> {
     pub(crate) provider: &'a dyn Provider,
     pub(crate) client: &'a reqwest::Client,
     pub(crate) model: &'a str,
+    pub(crate) system: &'a str,
     pub(crate) context_window: Option<u32>,
     pub(crate) max_tokens: u32,
+    /// The tools offered to the model; a call to any other is refused.
     pub(crate) tools: &'a [ToolDefinition],
     pub(crate) control: &'a crate::TaskControl,
     pub(crate) workspace_root: &'a Path,
@@ -75,8 +80,13 @@ where
             )
             .into());
         }
-        let message_request =
-            AgentMessageRequest::new(ctx.model, ctx.max_tokens, messages, ctx.tools);
+        let message_request = AgentMessageRequest::with_system_prompt(
+            ctx.model,
+            ctx.max_tokens,
+            ctx.system,
+            messages,
+            ctx.tools,
+        );
         let mut round_activity = RoundActivity::start();
         let mut on_delta = |event: ProviderEvent| {
             match &event {
@@ -203,11 +213,40 @@ where
                     on_progress(AgentProgress::Activity(clock.event(round_number, kind)));
                 }
             };
+            let offered = ctx.tools.iter().any(|tool| tool.name() == name);
             let result = if ctx.control.is_cancelled() {
                 ContentBlock::ToolResult {
                     tool_use_id: id,
                     content: "Cancelled before execution; no side effects".into(),
                     is_error: Some(true),
+                }
+            } else if !offered {
+                // A model may name a tool it was not given, such as a
+                // subagent asking for one outside its type.
+                tool_error(id, ToolError::UnsupportedTool(name.clone()))
+            } else if name == AGENT_TOOL_NAME {
+                tool_progress(AgentProgress::ToolCallStarted { name: name.clone() });
+                let started = checkpoint(
+                    messages,
+                    serde_json::json!({"type":"tool_started","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"input":input,"authorization":"subagent-tools-only"}),
+                );
+                let report = match started {
+                    Err(e) => Err(ToolError::Message(format!(
+                        "Could not persist execution intent; tool was not started: {e}"
+                    ))),
+                    Ok(()) => run_subagent(ctx, &id, &input, &mut tool_progress).await,
+                };
+                tool_progress(AgentProgress::ToolCallFinished {
+                    name: name.clone(),
+                    is_error: report.is_err(),
+                });
+                match report {
+                    Ok(content) => ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        content,
+                        is_error: None,
+                    },
+                    Err(err) => tool_error(id, err),
                 }
             } else {
                 run_tool_call_checkpointed(
@@ -268,6 +307,14 @@ where
         assistant_text_chunks,
         last_usage,
     })
+}
+
+fn tool_error(tool_use_id: String, err: ToolError) -> ContentBlock {
+    ContentBlock::ToolResult {
+        tool_use_id,
+        content: err.to_string(),
+        is_error: Some(true),
+    }
 }
 
 fn elapsed_ms(start: Instant) -> u64 {

@@ -978,6 +978,7 @@ impl AgentService {
             provider: self.provider.as_ref(),
             client: &self.client,
             model: &self.active_model.id,
+            system: DEFAULT_SYSTEM_PROMPT,
             context_window: self.active_model.context_window,
             max_tokens: self.max_tokens,
             tools: &self.tools,

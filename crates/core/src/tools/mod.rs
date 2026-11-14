@@ -36,6 +36,15 @@ pub enum ToolDefinition {
     AnthropicTextEditor(AnthropicTextEditorToolDefinition),
 }
 
+impl ToolDefinition {
+    pub fn name(&self) -> &str {
+        match self {
+            ToolDefinition::Custom(tool) => &tool.name,
+            ToolDefinition::AnthropicTextEditor(tool) => &tool.name,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct CustomToolDefinition {
     pub name: String,
@@ -89,7 +98,8 @@ pub fn default_tools() -> Vec<ToolDefinition> {
     tools_for_model(true)
 }
 
-/// Tool definitions for a model. Without the native text editor, the text
+/// Tool definitions for a model: the built-in tools and the `agent` tool
+/// that delegates to a subagent. Without the native text editor, the text
 /// editor is sent as an ordinary schema tool of the same name and input.
 pub(crate) fn tools_for_model(native_text_editor: bool) -> Vec<ToolDefinition> {
     BUILTIN_TOOLS
@@ -100,6 +110,7 @@ pub(crate) fn tools_for_model(native_text_editor: bool) -> Vec<ToolDefinition> {
             }
             definition => definition,
         })
+        .chain([crate::agent::subagent::agent_tool_definition()])
         .collect()
 }
 

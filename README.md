@@ -155,6 +155,16 @@ are not yet supported.
   the conversation. Its title shows what the agent is doing (investigating,
   editing, verifying), and it points out repeated calls, a change of course
   after a failure, and long stretches of tool rounds without an update.
+- The model can hand a self-contained task to a subagent with the `agent`
+  tool. The subagent starts from an empty context and returns only its final
+  report, so a broad search stays out of the conversation. An `explorer` can
+  only read, list, and search files and inspect Git; a `worker` can also edit
+  and run commands, which still need your approval. Subagents use the current
+  model, cannot start subagents, and run one at a time while the main agent
+  waits. Their steps appear in the Activity pane under the `agent` call,
+  marked with `│`; their messages are not saved, so a restart during one
+  marks the call's outcome unknown. See
+  [ADR 8](docs/adr/0008-agentツールで独立した文脈のサブエージェントに作業を委ねる.md).
 - Press Esc or Ctrl+C during a task to cancel and wait for cleanup.
 - Each start opens a new conversation. `-c` (`--continue`) continues the most
   recently saved one in the workspace, and `-r` (`--resume`) lists the saved

@@ -22,6 +22,10 @@ pub struct ActivityEvent {
     pub round: usize,
     /// Milliseconds since the turn started.
     pub at_ms: u64,
+    /// Call ID of the `agent` tool call whose subagent produced the event;
+    /// `None` for the main agent. Subagent rounds count from 1 on their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     #[serde(flatten)]
     pub kind: ActivityKind,
 }
@@ -149,6 +153,7 @@ impl ActivityClock {
             turn_id: self.turn_id,
             round,
             at_ms: self.elapsed_ms(),
+            agent: None,
             kind,
         }
     }
@@ -325,6 +330,7 @@ fn primary_input_key(tool: &str) -> Option<&'static str> {
         "find_symbol" => "symbol",
         "run_command" => "command",
         "apply_patch" => "patch",
+        "agent" => "description",
         "git_commit" => "message",
         _ => return None,
     })

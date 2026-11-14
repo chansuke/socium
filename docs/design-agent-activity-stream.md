@@ -107,6 +107,8 @@ pub struct ActivityEvent {
     pub turn_id: usize,
     pub round: usize,          // 1 始まり。compaction など tool loop の外は 0
     pub at_ms: u64,            // turn 開始からの経過（monotonic）
+    pub agent: Option<String>, // サブエージェントの event なら、起動した agent 呼び出しの call ID（ADR 8）。
+                               // round はサブエージェントごとに 1 から数える。None は JSON に出さない
     pub kind: ActivityKind,
 }
 

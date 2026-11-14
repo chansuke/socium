@@ -34,6 +34,8 @@ pub(crate) struct RawView {
 pub(crate) struct Item {
     pub(crate) turn_id: usize,
     pub(crate) round: usize,
+    /// Call ID of the `agent` call whose subagent this item belongs to.
+    pub(crate) agent: Option<String>,
     pub(crate) kind: ItemKind,
     pub(crate) expanded: bool,
 }
@@ -143,7 +145,7 @@ impl ActivityModel {
     /// outside a turn.
     pub(crate) fn push_note(&mut self, text: impl Into<String>) {
         let (turn_id, round) = self.items.last().map_or((0, 0), |item| (item.turn_id, 0));
-        self.push(turn_id, round, ItemKind::Note(text.into()));
+        self.push(turn_id, round, None, ItemKind::Note(text.into()));
     }
 
     pub(crate) fn apply(&mut self, event: ActivityEvent) {
@@ -199,6 +201,9 @@ impl ActivityModel {
         if item.round == 0 {
             return Err("This item is not part of a model request");
         }
+        if item.agent.is_some() {
+            return Err("Raw streams of subagent rounds are not kept");
+        }
         if self.raw_round(item.turn_id, item.round).is_none() {
             return Err("The raw stream of this round is no longer kept");
         }
@@ -220,10 +225,16 @@ impl ActivityModel {
                 SignalChange::Phase(_) => None,
             })
             .collect::<Vec<_>>();
-        let (signal_turn, signal_round) = (event.turn_id, event.round);
+        let (signal_turn, signal_round, signal_agent) =
+            (event.turn_id, event.round, event.agent.clone());
         self.apply_kind(event, replayed);
         for description in raised {
-            self.push(signal_turn, signal_round, ItemKind::Signal(description));
+            self.push(
+                signal_turn,
+                signal_round,
+                signal_agent.clone(),
+                ItemKind::Signal(description),
+            );
         }
     }
 
@@ -232,6 +243,7 @@ impl ActivityModel {
             turn_id,
             round,
             at_ms,
+            agent,
             kind,
         } = event;
         match kind {
@@ -241,6 +253,7 @@ impl ActivityModel {
                 self.push(
                     turn_id,
                     round,
+                    agent.clone(),
                     ItemKind::Turn {
                         number,
                         replayed,
@@ -249,11 +262,17 @@ impl ActivityModel {
                 );
             }
             ActivityKind::RoundStarted { model } => {
-                self.push(turn_id, round, ItemKind::Round { model, stats: None });
+                self.push(
+                    turn_id,
+                    round,
+                    agent,
+                    ItemKind::Round { model, stats: None },
+                );
             }
             ActivityKind::ThoughtStarted { block } => self.push(
                 turn_id,
                 round,
+                agent.clone(),
                 ItemKind::Thought {
                     block,
                     role: None,
@@ -265,7 +284,7 @@ impl ActivityModel {
             ActivityKind::ThoughtDelta { block, text: delta } => {
                 if let Some(ItemKind::Thought {
                     text, truncated, ..
-                }) = self.find_thought(turn_id, round, block)
+                }) = self.find_thought(turn_id, round, agent.as_deref(), block)
                 {
                     append_bounded(text, truncated, &delta);
                 }
@@ -277,7 +296,7 @@ impl ActivityModel {
             } => {
                 if let Some(ItemKind::Thought {
                     role, interrupted, ..
-                }) = self.find_thought(turn_id, round, block)
+                }) = self.find_thought(turn_id, round, agent.as_deref(), block)
                 {
                     *role = Some(finished_role);
                     *interrupted = was_interrupted;
@@ -285,7 +304,7 @@ impl ActivityModel {
             }
             ActivityKind::TextFinished { chars, .. } => {
                 if chars > 0 {
-                    self.push(turn_id, round, ItemKind::Response { chars });
+                    self.push(turn_id, round, agent, ItemKind::Response { chars });
                 }
             }
             ActivityKind::ToolIntentStarted {
@@ -295,6 +314,7 @@ impl ActivityModel {
             } => self.push(
                 turn_id,
                 round,
+                agent.clone(),
                 ItemKind::Tool(Box::new(ToolItem {
                     call_id,
                     block: Some(block),
@@ -311,7 +331,8 @@ impl ActivityModel {
                 block,
                 partial_json,
             } => {
-                if let Some(tool) = self.find_tool_by_block(turn_id, round, block) {
+                if let Some(tool) = self.find_tool_by_block(turn_id, round, agent.as_deref(), block)
+                {
                     let mut truncated = false;
                     append_bounded(&mut tool.partial_json, &mut truncated, &partial_json);
                     if let Some(summary) = socium_core::activity::summarize_partial_tool_input(
@@ -323,7 +344,7 @@ impl ActivityModel {
                 }
             }
             ActivityKind::ToolIntentFinished { block } => {
-                if let Some(tool) = self.find_tool_by_block(turn_id, round, block)
+                if let Some(tool) = self.find_tool_by_block(turn_id, round, agent.as_deref(), block)
                     && tool.state == ToolState::Composing
                 {
                     tool.state = ToolState::Ready;
@@ -341,6 +362,7 @@ impl ActivityModel {
                 }) = self.items.iter_mut().rev().find(|item| {
                     item.turn_id == turn_id
                         && item.round == round
+                        && item.agent == agent
                         && matches!(item.kind, ItemKind::Round { .. })
                 }) {
                     *stats = Some(RoundStats {
@@ -365,6 +387,7 @@ impl ActivityModel {
                     self.push(
                         turn_id,
                         round,
+                        agent.clone(),
                         ItemKind::Tool(Box::new(ToolItem {
                             call_id,
                             block: None,
@@ -423,6 +446,7 @@ impl ActivityModel {
             ActivityKind::CompactionStarted => self.push(
                 turn_id,
                 round,
+                agent.clone(),
                 ItemKind::Note("Compacting conversation context".into()),
             ),
             ActivityKind::CompactionFinished {
@@ -431,6 +455,7 @@ impl ActivityModel {
             } => self.push(
                 turn_id,
                 round,
+                agent.clone(),
                 ItemKind::Note(format!(
                     "Compacted: {covered_messages} messages summarized ({})",
                     if used_llm {
@@ -441,7 +466,7 @@ impl ActivityModel {
                 )),
             ),
             ActivityKind::Warning { message } => {
-                self.push(turn_id, round, ItemKind::Note(message));
+                self.push(turn_id, round, agent, ItemKind::Note(message));
             }
             ActivityKind::TurnFinished { ok, error } => {
                 if let Some(Item {
@@ -519,10 +544,11 @@ impl ActivityModel {
         }
     }
 
-    fn push(&mut self, turn_id: usize, round: usize, kind: ItemKind) {
+    fn push(&mut self, turn_id: usize, round: usize, agent: Option<String>, kind: ItemKind) {
         self.items.push(Item {
             turn_id,
             round,
+            agent,
             kind,
             expanded: false,
         });
@@ -537,6 +563,7 @@ impl ActivityModel {
         &mut self,
         turn_id: usize,
         round: usize,
+        agent: Option<&str>,
         block: usize,
     ) -> Option<&mut ItemKind> {
         self.items
@@ -545,6 +572,7 @@ impl ActivityModel {
             .take_while(|item| item.turn_id == turn_id)
             .find(|item| {
                 item.round == round
+                    && item.agent.as_deref() == agent
                     && matches!(item.kind, ItemKind::Thought { block: b, .. } if b == block)
             })
             .map(|item| &mut item.kind)
@@ -554,13 +582,14 @@ impl ActivityModel {
         &mut self,
         turn_id: usize,
         round: usize,
+        agent: Option<&str>,
         block: usize,
     ) -> Option<&mut ToolItem> {
         self.items
             .iter_mut()
             .rev()
             .take_while(|item| item.turn_id == turn_id)
-            .filter(|item| item.round == round)
+            .filter(|item| item.round == round && item.agent.as_deref() == agent)
             .find_map(|item| match &mut item.kind {
                 ItemKind::Tool(tool) if tool.block == Some(block) => Some(tool.as_mut()),
                 _ => None,
@@ -605,6 +634,7 @@ pub(crate) mod tests {
             turn_id,
             round,
             at_ms: 1_500,
+            agent: None,
             kind,
         }
     }
@@ -989,5 +1019,121 @@ pub(crate) mod tests {
         assert!(
             matches!(last, ItemKind::Signal(text) if text.contains("read_file a.rs started 3 times"))
         );
+    }
+
+    /// A main round whose `agent` call runs a subagent round of the same
+    /// number: the subagent's events must not land on the main items.
+    pub(crate) fn turn_with_subagent() -> Vec<ActivityEvent> {
+        let sub = |round, kind| ActivityEvent {
+            agent: Some("agent-1".into()),
+            ..event(2, round, kind)
+        };
+        vec![
+            event(2, 0, ActivityKind::TurnStarted),
+            event(2, 1, ActivityKind::RoundStarted { model: "m".into() }),
+            event(2, 1, ActivityKind::ThoughtStarted { block: 0 }),
+            event(
+                2,
+                1,
+                ActivityKind::ThoughtDelta {
+                    block: 0,
+                    text: "delegate the search".into(),
+                },
+            ),
+            event(
+                2,
+                1,
+                ActivityKind::ToolStarted {
+                    call_id: "agent-1".into(),
+                    name: "agent".into(),
+                    input_summary: "Find the greeting".into(),
+                },
+            ),
+            sub(1, ActivityKind::RoundStarted { model: "m".into() }),
+            sub(1, ActivityKind::ThoughtStarted { block: 0 }),
+            sub(
+                1,
+                ActivityKind::ThoughtDelta {
+                    block: 0,
+                    text: "look in a.txt".into(),
+                },
+            ),
+            sub(
+                1,
+                ActivityKind::RoundFinished {
+                    stop_reason: Some("end_turn".into()),
+                    usage: None,
+                    ttft_ms: None,
+                    elapsed_ms: 40,
+                },
+            ),
+            event(
+                2,
+                1,
+                ActivityKind::ToolFinished {
+                    call_id: "agent-1".into(),
+                    name: "agent".into(),
+                    is_error: false,
+                    elapsed_ms: 50,
+                    summary: "a.txt:1 says hello".into(),
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn subagent_events_fill_their_own_items() {
+        let mut model = ActivityModel::default();
+        for event in turn_with_subagent() {
+            model.apply(event);
+        }
+
+        let thoughts = model
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::Thought { text, .. } => Some((item.agent.as_deref(), text.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            thoughts,
+            [
+                (None, "delegate the search"),
+                (Some("agent-1"), "look in a.txt")
+            ]
+        );
+        let rounds = model
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::Round { stats, .. } => Some((item.agent.as_deref(), stats.is_some())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rounds, [(None, false), (Some("agent-1"), true)]);
+    }
+
+    #[test]
+    fn raw_view_is_refused_for_subagent_rounds() {
+        let mut model = ActivityModel::default();
+        for event in turn_with_subagent() {
+            model.apply(event);
+        }
+        model.push_raw(2, 1, "{}".into());
+        model.focused = true;
+        let subagent_round = model
+            .items
+            .iter()
+            .position(|item| item.agent.is_some())
+            .unwrap();
+
+        model.selected = Some(subagent_round);
+        assert_eq!(
+            model.open_raw_view(),
+            Err("Raw streams of subagent rounds are not kept")
+        );
+        model.selected = Some(1);
+        assert!(model.open_raw_view().is_ok());
     }
 }

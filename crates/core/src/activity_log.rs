@@ -26,12 +26,16 @@ struct Header {
     version: u32,
 }
 
+/// A streamed block: its agent (`None` for the main agent), round, and
+/// block index.
+type StreamKey = (Option<String>, usize, usize);
+
 /// Collects a turn's events, merging streamed text into one delta per
 /// block, and appends them to the log at block and turn boundaries.
 pub(crate) struct ActivityRecorder {
     path: PathBuf,
     pending: Vec<ActivityEvent>,
-    streams: HashMap<(usize, usize), ActivityEvent>,
+    streams: HashMap<StreamKey, ActivityEvent>,
     warned: bool,
 }
 
@@ -48,7 +52,7 @@ impl ActivityRecorder {
     /// Records `event`. Returns a message the first time writing fails;
     /// recording never fails the turn.
     pub(crate) fn observe(&mut self, event: &ActivityEvent) -> Option<String> {
-        let key = |block: usize| (event.round, block);
+        let key = |block: usize| (event.agent.clone(), event.round, block);
         match &event.kind {
             ActivityKind::ThoughtDelta { block, text } => {
                 self.merge(key(*block), event, text, |kind| match kind {
@@ -78,12 +82,12 @@ impl ActivityRecorder {
                 let mut open = self
                     .streams
                     .drain()
-                    .filter(|((round, _), _)| {
-                        *round == event.round
+                    .filter(|((agent, round, _), _)| {
+                        (*agent == event.agent && *round == event.round)
                             || matches!(event.kind, ActivityKind::TurnFinished { .. })
                     })
                     .collect::<Vec<_>>();
-                open.sort_by_key(|(key, _)| *key);
+                open.sort_by(|(a, _), (b, _)| a.cmp(b));
                 self.pending
                     .extend(open.into_iter().map(|(_, merged)| merged));
             }
@@ -102,7 +106,7 @@ impl ActivityRecorder {
 
     fn merge(
         &mut self,
-        key: (usize, usize),
+        key: StreamKey,
         event: &ActivityEvent,
         fragment: &str,
         text_of: impl Fn(&mut ActivityKind) -> Option<&mut String>,
@@ -198,6 +202,7 @@ mod tests {
             turn_id,
             round,
             at_ms: 0,
+            agent: None,
             kind,
         }
     }
@@ -377,5 +382,29 @@ mod tests {
             &e.kind,
             ActivityKind::ThoughtDelta { text, .. } if text == "first second"
         )));
+    }
+
+    #[test]
+    fn subagent_tags_are_written_only_when_present() {
+        let main = event(1, 1, ActivityKind::TurnStarted);
+        let sub = ActivityEvent {
+            agent: Some("agent-1".into()),
+            ..main.clone()
+        };
+
+        let main_json = serde_json::to_value(&main).unwrap();
+        let sub_json = serde_json::to_value(&sub).unwrap();
+
+        // Lines written before subagents existed still read back.
+        assert!(main_json.get("agent").is_none());
+        assert_eq!(sub_json["agent"], "agent-1");
+        assert_eq!(
+            serde_json::from_value::<ActivityEvent>(sub_json).unwrap(),
+            sub
+        );
+        assert_eq!(
+            serde_json::from_value::<ActivityEvent>(main_json).unwrap(),
+            main
+        );
     }
 }

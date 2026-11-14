@@ -206,6 +206,7 @@ mod tests {
             turn_id: 1,
             round: 1,
             at_ms: 0,
+            agent: None,
             kind,
         }
     }
