@@ -69,8 +69,25 @@ enum PatchAction {
 }
 
 struct PatchHunk {
-    old_lines: Vec<String>,
-    new_lines: Vec<String>,
+    lines: Vec<HunkLine>,
+}
+
+enum HunkLine {
+    Context(String),
+    Remove(String),
+    Add(String),
+}
+
+impl PatchHunk {
+    fn old_lines(&self) -> Vec<&str> {
+        self.lines
+            .iter()
+            .filter_map(|line| match line {
+                HunkLine::Context(text) | HunkLine::Remove(text) => Some(text.as_str()),
+                HunkLine::Add(_) => None,
+            })
+            .collect()
+    }
 }
 
 struct ApplyPatchInput<'a> {
@@ -312,18 +329,14 @@ fn parse_patch_actions(patch: &str) -> Result<Vec<PatchAction>, String> {
 
 fn parse_patch_hunks(path: &str, lines: &[&str]) -> Result<Vec<PatchHunk>, String> {
     let mut hunks = Vec::new();
-    let mut old_lines = Vec::new();
-    let mut new_lines = Vec::new();
+    let mut current = Vec::new();
 
     for line in lines {
         if line.starts_with("@@") {
-            if !old_lines.is_empty() || !new_lines.is_empty() {
+            if !current.is_empty() {
                 hunks.push(PatchHunk {
-                    old_lines,
-                    new_lines,
+                    lines: std::mem::take(&mut current),
                 });
-                old_lines = Vec::new();
-                new_lines = Vec::new();
             }
             continue;
         }
@@ -332,27 +345,27 @@ fn parse_patch_hunks(path: &str, lines: &[&str]) -> Result<Vec<PatchHunk>, Strin
             .next()
             .map(|prefix| (prefix, &line[prefix.len_utf8()..]))
             .ok_or_else(|| format!("Invalid empty patch line in '{}'", path))?;
-        match prefix {
-            ' ' => {
-                old_lines.push(content.to_string());
-                new_lines.push(content.to_string());
-            }
-            '-' => old_lines.push(content.to_string()),
-            '+' => new_lines.push(content.to_string()),
+        if content.contains('\r') {
+            return Err(format!(
+                "Patch line for '{}' contains a carriage return; line endings are kept from the file",
+                path
+            ));
+        }
+        current.push(match prefix {
+            ' ' => HunkLine::Context(content.to_string()),
+            '-' => HunkLine::Remove(content.to_string()),
+            '+' => HunkLine::Add(content.to_string()),
             _ => {
                 return Err(format!(
                     "Invalid patch line prefix '{}' in update for '{}'",
                     prefix, path
                 ));
             }
-        }
+        });
     }
 
-    if !old_lines.is_empty() || !new_lines.is_empty() {
-        hunks.push(PatchHunk {
-            old_lines,
-            new_lines,
-        });
+    if !current.is_empty() {
+        hunks.push(PatchHunk { lines: current });
     }
     if hunks.is_empty() {
         return Err(format!(
@@ -364,59 +377,125 @@ fn parse_patch_hunks(path: &str, lines: &[&str]) -> Result<Vec<PatchHunk>, Strin
     Ok(hunks)
 }
 
+/// One line of a file with the terminator it was read with: "\n", "\r\n",
+/// or "" for a last line without one.
+struct FileLine {
+    text: String,
+    ending: &'static str,
+}
+
+/// Applies hunks line by line. Every line the patch does not touch keeps
+/// its own terminator, so a file mixing LF and CRLF changes only where the
+/// patch changes it. Added lines take the terminator of the line they
+/// replace or precede. Whether the file ends with a newline is kept.
 fn apply_patch_hunks_to_text(
     content: &str,
     path: &str,
     hunks: &[PatchHunk],
 ) -> Result<String, String> {
-    let crlf = content.contains("\r\n");
-    let normalized = if crlf {
-        content.replace("\r\n", "\n")
-    } else {
-        content.to_string()
-    };
-    let content = normalized.as_str();
-    let trailing_newline = content.ends_with('\n');
-    let stripped = content.strip_suffix('\n').unwrap_or(content);
-    let mut lines = if stripped.is_empty() {
-        Vec::new()
-    } else {
-        stripped
-            .split('\n')
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-    };
+    let mut lines = split_file_lines(content, path)?;
+    let trailing_newline = lines.last().is_none_or(|line| !line.ending.is_empty());
+    let default_ending = dominant_ending(&lines);
     let mut search_start = 0usize;
 
     for hunk in hunks {
-        if hunk.old_lines.is_empty() {
+        let old_lines = hunk.old_lines();
+        if old_lines.is_empty() {
             return Err(format!(
                 "apply_patch does not support insertion-only hunks yet for '{}'",
                 path
             ));
         }
-        let position = find_hunk_position(&lines, &hunk.old_lines, search_start)
+        let texts = lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>();
+        let position = find_hunk_position(&texts, &old_lines, search_start)
             .ok_or_else(|| format!("Failed to match patch hunk in '{}'", path))?;
-        lines.splice(
-            position..position + hunk.old_lines.len(),
-            hunk.new_lines.clone(),
-        );
+        let old = lines
+            .splice(position..position + old_lines.len(), [])
+            .collect::<Vec<_>>();
+        let mut old = old.into_iter().peekable();
+        let mut replacement = Vec::new();
+        let mut last_ending = position
+            .checked_sub(1)
+            .map_or(default_ending, |index| lines[index].ending);
+        for line in &hunk.lines {
+            match line {
+                HunkLine::Context(_) => {
+                    let kept = old.next().expect("matched context line");
+                    last_ending = kept.ending;
+                    replacement.push(kept);
+                }
+                HunkLine::Remove(_) => {
+                    last_ending = old.next().expect("matched removed line").ending;
+                }
+                HunkLine::Add(text) => {
+                    let ending = old.peek().map_or(last_ending, |next| next.ending);
+                    replacement.push(FileLine {
+                        text: text.clone(),
+                        ending,
+                    });
+                }
+            }
+        }
+        lines.splice(position..position, replacement);
         search_start = position;
     }
 
-    let mut updated = lines.join("\n");
-    if trailing_newline && !updated.is_empty() {
-        updated.push('\n');
+    let count = lines.len();
+    let mut updated = String::with_capacity(content.len());
+    for (index, line) in lines.iter().enumerate() {
+        updated.push_str(&line.text);
+        let last = index + 1 == count;
+        updated.push_str(if last && !trailing_newline {
+            ""
+        } else if line.ending.is_empty() {
+            default_ending
+        } else {
+            line.ending
+        });
     }
-    Ok(if crlf {
-        updated.replace("\n", "\r\n")
-    } else {
-        updated
-    })
+    Ok(updated)
 }
 
-fn find_hunk_position(lines: &[String], needle: &[String], search_start: usize) -> Option<usize> {
-    if needle.is_empty() || needle.len() > lines.len() {
+/// Splits `content` into lines with their terminators. A carriage return
+/// outside a CRLF pair has no safe line-based reading, so the file is
+/// refused before anything is planned or written.
+fn split_file_lines(content: &str, path: &str) -> Result<Vec<FileLine>, String> {
+    let mut lines = Vec::new();
+    for piece in content.split_inclusive('\n') {
+        let (text, ending) = if let Some(text) = piece.strip_suffix("\r\n") {
+            (text, "\r\n")
+        } else if let Some(text) = piece.strip_suffix('\n') {
+            (text, "\n")
+        } else {
+            (piece, "")
+        };
+        if text.contains('\r') {
+            return Err(format!(
+                "Cannot patch '{}': it contains a carriage return that does not end a line; edit it another way",
+                path
+            ));
+        }
+        lines.push(FileLine {
+            text: text.to_string(),
+            ending,
+        });
+    }
+    Ok(lines)
+}
+
+/// The terminator most lines use, for lines that need one and have no
+/// neighbour to copy it from. LF when there is a tie or no terminator.
+fn dominant_ending(lines: &[FileLine]) -> &'static str {
+    let crlf = lines.iter().filter(|line| line.ending == "\r\n").count();
+    let lf = lines.iter().filter(|line| line.ending == "\n").count();
+    if crlf > lf { "\r\n" } else { "\n" }
+}
+
+fn find_hunk_position(lines: &[&str], needle: &[&str], search_start: usize) -> Option<usize> {
+    if needle.is_empty() || needle.len() > lines.len() || search_start > lines.len() {
         return None;
     }
 
@@ -477,6 +556,81 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         assert!(!workspace.path().join("moved").exists());
         assert!(!workspace.path().join(".socium").exists());
+    }
+
+    /// Applies `patch` to a file holding `before`, first as a dry run and
+    /// then for real, and returns the written bytes. The preview must
+    /// show exactly the bytes that get written.
+    fn patch_bytes(before: &str, patch: &str) -> Result<String, String> {
+        let workspace = make_temp_dir("patch-eol");
+        let file = workspace.path().join("f.txt");
+        fs::write(&file, before).unwrap();
+        let input = |dry_run| json!({"patch": patch, "dry_run": dry_run});
+        let preview = apply_patch_from_workspace(workspace.path(), &input(true))
+            .map_err(|e| e.to_string())?;
+        assert_eq!(fs::read_to_string(&file).unwrap(), before, "dry run wrote");
+        apply_patch_from_workspace(workspace.path(), &input(false)).map_err(|e| e.to_string())?;
+        let after = fs::read_to_string(&file).unwrap();
+        let mut previewed = String::new();
+        for line in preview.split_inclusive('\n').filter(|l| l.starts_with('+')) {
+            if !line.starts_with("+++ ") {
+                previewed.push_str(&line[1..]);
+            }
+        }
+        // Without a final newline the preview ends the last line before its
+        // "\ No newline at end of file" note.
+        let previewed = if after.ends_with('\n') {
+            previewed
+        } else {
+            assert!(preview.contains("\\ No newline at end of file"));
+            previewed.strip_suffix('\n').unwrap().to_string()
+        };
+        assert_eq!(previewed, after, "preview and write differ");
+        Ok(after)
+    }
+
+    #[test]
+    fn untouched_lines_keep_their_own_line_endings() {
+        let patch = "*** Begin Patch\n*** Update File: f.txt\n@@\n b\n-c\n+C\n+C2\n*** End Patch";
+        for (before, expected) in [
+            ("a\nb\nc\nd\n", "a\nb\nC\nC2\nd\n"),
+            ("a\r\nb\r\nc\r\nd\r\n", "a\r\nb\r\nC\r\nC2\r\nd\r\n"),
+            // Mixed: only the replaced line's ending is reused.
+            ("a\r\nb\nc\r\nd\n", "a\r\nb\nC\r\nC2\r\nd\n"),
+            ("a\nb\r\nc\nd\r\n", "a\nb\r\nC\nC2\nd\r\n"),
+            // No newline at the end stays that way.
+            ("a\nb\nc", "a\nb\nC\nC2"),
+            ("a\r\nb\r\nc", "a\r\nb\r\nC\r\nC2"),
+        ] {
+            assert_eq!(patch_bytes(before, patch).unwrap(), expected, "{before:?}");
+        }
+    }
+
+    #[test]
+    fn lines_added_after_an_unterminated_last_line_get_an_ending() {
+        let patch = "*** Begin Patch\n*** Update File: f.txt\n@@\n-b\n+b\n+c\n*** End Patch";
+        assert_eq!(patch_bytes("a\r\nb", patch).unwrap(), "a\r\nb\r\nc");
+        assert_eq!(patch_bytes("a\nb\n", patch).unwrap(), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn a_bare_carriage_return_is_refused_before_any_write() {
+        let patch = "*** Begin Patch\n*** Update File: f.txt\n@@\n-b\n+B\n*** End Patch";
+        for before in ["a\rb\n", "a\nb\rc\n", "b\n\r"] {
+            let workspace = make_temp_dir("patch-cr");
+            let file = workspace.path().join("f.txt");
+            fs::write(&file, before).unwrap();
+            for dry_run in [true, false] {
+                let err = apply_patch_from_workspace(
+                    workspace.path(),
+                    &json!({"patch": patch, "dry_run": dry_run}),
+                )
+                .unwrap_err();
+                assert!(err.to_string().contains("carriage return"), "{err}");
+            }
+            assert_eq!(fs::read_to_string(&file).unwrap(), before);
+            assert!(!workspace.path().join(".socium").exists());
+        }
     }
 
     #[test]
