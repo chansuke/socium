@@ -661,6 +661,13 @@ impl AgentService {
                 "Summary coverage exceeds conversation history; original state preserved",
             ));
         }
+        // State saved before the boundary was recorded cannot say which kept
+        // turns came after the summary, so none of their thinking is resent.
+        if let Some(summary) = &mut self.summary_state.summary
+            && summary.thinking_valid_from.is_none()
+        {
+            summary.thinking_valid_from = Some(self.messages.len());
+        }
         Ok(())
     }
 
@@ -953,6 +960,9 @@ impl AgentService {
             summary: Some(ConversationSummary {
                 covered_messages: boundary,
                 text,
+                // Everything after the cut so far was produced against the
+                // replaced history.
+                thinking_valid_from: Some(self.messages.len()),
             }),
         };
         self.persist_state()?;
@@ -1232,6 +1242,280 @@ mod tests {
         let result = service.compact().await;
 
         assert!(matches!(result, Err(crate::AgentError::NothingToCompact)));
+    }
+
+    mod thinking_after_compaction {
+        use super::*;
+        use crate::agent::state::{ConversationState, load_json_file};
+        use crate::agent::types::AgentMessageResponse;
+        use crate::providers::ProviderResponse;
+        use crate::providers::error::ProviderError;
+
+        /// Each turn: a request, a tool call with thinking, its result, and
+        /// an answer with thinking. Four messages per turn.
+        fn history(turns: usize) -> Vec<Message> {
+            (0..turns)
+                .flat_map(|turn| {
+                    [
+                        Message::user_text(format!("request {turn}")),
+                        Message::assistant_blocks(vec![
+                            ContentBlock::Thinking {
+                                thinking: format!("plan {turn}"),
+                                signature: format!("sig-call-{turn}"),
+                            },
+                            ContentBlock::RedactedThinking {
+                                data: format!("redacted-{turn}"),
+                            },
+                            ContentBlock::ToolUse {
+                                id: format!("tool_{turn}"),
+                                name: "read_file".into(),
+                                input: json!({"path": "missing.txt"}),
+                            },
+                        ]),
+                        Message::user_blocks(vec![ContentBlock::ToolResult {
+                            tool_use_id: format!("tool_{turn}"),
+                            content: "not found".into(),
+                            is_error: Some(true),
+                        }]),
+                        Message::assistant_blocks(vec![
+                            ContentBlock::Thinking {
+                                thinking: String::new(),
+                                signature: format!("sig-answer-{turn}"),
+                            },
+                            ContentBlock::Text {
+                                text: format!("done {turn}"),
+                            },
+                        ]),
+                    ]
+                })
+                .collect()
+        }
+
+        fn response(blocks: Vec<ContentBlock>) -> Result<ProviderResponse, ProviderError> {
+            Ok(ProviderResponse {
+                message: AgentMessageResponse { content: blocks },
+                streamed_text: false,
+                usage: None,
+            })
+        }
+
+        fn thinking_then_tool(signature: &str, id: &str) -> Vec<ContentBlock> {
+            vec![
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: signature.into(),
+                },
+                ContentBlock::ToolUse {
+                    id: id.into(),
+                    name: "read_file".into(),
+                    input: json!({"path": "missing.txt"}),
+                },
+            ]
+        }
+
+        fn thinking_then_text(signature: &str) -> Vec<ContentBlock> {
+            vec![
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: signature.into(),
+                },
+                ContentBlock::Text {
+                    text: "answer".into(),
+                },
+            ]
+        }
+
+        /// Signatures and redacted data the request sends back.
+        fn sent_thinking(request: &serde_json::Value) -> Vec<String> {
+            let mut found = Vec::new();
+            for message in request["messages"].as_array().unwrap() {
+                for block in message["content"].as_array().into_iter().flatten() {
+                    match block["type"].as_str() {
+                        Some("thinking") => found.push(block["signature"].as_str().unwrap().into()),
+                        Some("redacted_thinking") => {
+                            found.push(block["data"].as_str().unwrap().into())
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            found
+        }
+
+        /// Every tool_result answers a tool_use in the assistant message
+        /// right before it, and every tool_use is answered.
+        fn assert_tool_pairs(request: &serde_json::Value) {
+            let messages = request["messages"].as_array().unwrap();
+            for (index, message) in messages.iter().enumerate() {
+                let blocks = message["content"].as_array().into_iter().flatten();
+                for block in blocks {
+                    if block["type"] == "tool_use" {
+                        let next = &messages[index + 1]["content"];
+                        assert!(
+                            next.as_array().unwrap().iter().any(|result| {
+                                result["type"] == "tool_result"
+                                    && result["tool_use_id"] == block["id"]
+                            }),
+                            "unanswered {block}"
+                        );
+                    }
+                    if block["type"] == "tool_result" {
+                        let previous = &messages[index - 1]["content"];
+                        assert!(
+                            previous.as_array().unwrap().iter().any(|call| {
+                                call["type"] == "tool_use" && call["id"] == block["tool_use_id"]
+                            }),
+                            "orphaned {block}"
+                        );
+                    }
+                }
+            }
+        }
+
+        type Requests = std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+        fn scripted(
+            workspace: &std::path::Path,
+            responses: Vec<Result<ProviderResponse, ProviderError>>,
+            messages: Vec<Message>,
+            usage: Option<TokenUsage>,
+        ) -> (AgentService, Requests) {
+            let provider = ScriptedProvider::new(responses);
+            let requests = provider.recorded_requests.clone();
+            (
+                service_with_scripted_provider(workspace, provider, messages, usage),
+                requests,
+            )
+        }
+
+        #[tokio::test]
+        async fn explicit_compaction_resends_only_thinking_produced_after_the_cut() {
+            let workspace = make_temp_dir("thinking_explicit");
+            let (mut service, requests) = scripted(
+                workspace.path(),
+                vec![
+                    Ok(text_provider_response("1. User request: summary", None)),
+                    response(thinking_then_tool("sig-new-call", "tool_new")),
+                    response(thinking_then_text("sig-new-answer")),
+                    response(thinking_then_text("sig-later")),
+                ],
+                history(8),
+                None,
+            );
+
+            let report = service.compact().await.unwrap();
+            assert_eq!(report.covered_messages, 16);
+            service.submit("next".into()).await.unwrap();
+
+            // The first request after the cut: every kept turn was produced
+            // against the replaced history.
+            let first = requests.lock().unwrap()[1].clone();
+            assert!(
+                sent_thinking(&first).is_empty(),
+                "{:?}",
+                sent_thinking(&first)
+            );
+            assert_tool_pairs(&first);
+            assert!(first.to_string().contains("tool_7"));
+            // Within the same turn, the open tool call keeps its thinking.
+            let second = requests.lock().unwrap()[2].clone();
+            assert_eq!(sent_thinking(&second), ["sig-new-call"]);
+            assert_tool_pairs(&second);
+
+            service.submit("again".into()).await.unwrap();
+            let later = requests.lock().unwrap()[3].clone();
+            assert_eq!(sent_thinking(&later), ["sig-new-call", "sig-new-answer"]);
+            assert_tool_pairs(&later);
+
+            // The raw history keeps every block for the record.
+            let saved = serde_json::to_string(&service.messages).unwrap();
+            assert!(saved.contains("sig-call-5") && saved.contains("redacted-5"));
+        }
+
+        #[tokio::test]
+        async fn auto_compaction_drops_kept_thinking_from_the_turn_that_triggered_it() {
+            let workspace = make_temp_dir("thinking_auto");
+            let (mut service, requests) = scripted(
+                workspace.path(),
+                vec![
+                    Ok(text_provider_response("1. User request: summary", None)),
+                    response(thinking_then_text("sig-new")),
+                ],
+                history(8),
+                Some(TokenUsage {
+                    input_tokens: 170_000,
+                    ..TokenUsage::default()
+                }),
+            );
+
+            service.submit("next".into()).await.unwrap();
+
+            assert!(service.summary_state.summary.is_some());
+            let turn = requests.lock().unwrap()[1].clone();
+            assert!(
+                sent_thinking(&turn).is_empty(),
+                "{:?}",
+                sent_thinking(&turn)
+            );
+            assert_tool_pairs(&turn);
+        }
+
+        #[tokio::test]
+        async fn restart_keeps_the_boundary_and_treats_legacy_summaries_as_stale() {
+            let workspace = make_temp_dir("thinking_restart");
+            let (mut service, _) = scripted(
+                workspace.path(),
+                vec![
+                    Ok(text_provider_response("1. User request: summary", None)),
+                    response(thinking_then_text("sig-new")),
+                ],
+                history(8),
+                None,
+            );
+            service.compact().await.unwrap();
+            service.submit("next".into()).await.unwrap();
+            let path = service.conversation_path.clone();
+            drop(service);
+
+            let saved: ConversationState = load_json_file(&path).unwrap();
+            let boundary = saved.summary_state.unwrap().summary.unwrap();
+            assert_eq!(boundary.thinking_valid_from, Some(32));
+
+            let (mut restarted, requests) = scripted(
+                workspace.path(),
+                vec![response(thinking_then_text("sig-after"))],
+                Vec::new(),
+                None,
+            );
+            restarted.restore_state().unwrap();
+            restarted.submit("after restart".into()).await.unwrap();
+            assert_eq!(sent_thinking(&requests.lock().unwrap()[0]), ["sig-new"]);
+            drop(restarted);
+
+            // A summary saved before the boundary existed: no kept turn may
+            // be assumed to follow it.
+            let mut legacy: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            legacy["summary_state"]["summary"]
+                .as_object_mut()
+                .unwrap()
+                .remove("thinking_valid_from");
+            std::fs::write(&path, legacy.to_string()).unwrap();
+            let (mut restarted, requests) = scripted(
+                workspace.path(),
+                vec![response(thinking_then_text("sig-x"))],
+                Vec::new(),
+                None,
+            );
+            restarted.restore_state().unwrap();
+            let length = restarted.messages.len();
+            let summary = restarted.summary_state.summary.as_ref().unwrap();
+            assert_eq!(summary.thinking_valid_from, Some(length));
+            restarted.submit("legacy".into()).await.unwrap();
+            let request = requests.lock().unwrap()[0].clone();
+            assert!(sent_thinking(&request).is_empty());
+            assert_tool_pairs(&request);
+        }
     }
 
     #[tokio::test]

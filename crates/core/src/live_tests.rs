@@ -160,6 +160,68 @@ async fn live_tool_result_round_trip_completes_the_turn() {
     assert!(text.contains("Prime Notes"), "{}: {text:?}", model.alias);
 }
 
+/// Replaces the first request with a summary, as compaction does, and
+/// sends the kept turn back. Kept thinking would fail the prefix check on
+/// models with preserved thinking (Claude Opus 5.5 and others), which can
+/// answer 400; the prepared context must leave it out.
+#[tokio::test]
+#[ignore = "calls a paid API; set SOCIUM_LIVE_MODEL and run with --ignored"]
+async fn live_request_after_a_summary_is_accepted() {
+    use crate::agent::state::{ConversationSummary, ConversationSummaryState};
+    let (model, provider) = live_target();
+    let tools = tools_for_model(model.features.anthropic_text_editor);
+    let client = crate::provider_http_client().unwrap();
+    let mut ignore = |_| {};
+    let mut messages = vec![Message::user_text(
+        "Think it through, then call read_file with the path notes/a.md before answering."
+            .to_string(),
+    )];
+    let first = {
+        let request = AgentMessageRequest::new(&model.id, LIVE_MAX_TOKENS, &messages, &tools);
+        provider
+            .send_message(&client, &request, &mut ignore)
+            .await
+            .unwrap_or_else(|err| panic!("{} first request: {err}", model.alias))
+    };
+    let call_id = first
+        .message
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{}: no tool call", model.alias));
+    messages.push(Message::assistant_blocks(first.message.content));
+    messages.push(Message::user_blocks(vec![ContentBlock::ToolResult {
+        tool_use_id: call_id,
+        content: "# A\n".into(),
+        is_error: None,
+    }]));
+    messages.push(Message::user_text("Reply with the heading only.".into()));
+    let summary = ConversationSummaryState {
+        summary: Some(ConversationSummary {
+            covered_messages: 1,
+            text: "1. User request: read notes/a.md".into(),
+            thinking_valid_from: Some(messages.len()),
+        }),
+    };
+    let prepared = crate::agent::context::prepare_context_messages(
+        &messages,
+        &summary,
+        model.context_window,
+        &model.id,
+        LIVE_MAX_TOKENS,
+        &tools,
+    )
+    .unwrap();
+    let request = AgentMessageRequest::new(&model.id, LIVE_MAX_TOKENS, &prepared.messages, &tools);
+    provider
+        .send_message(&client, &request, &mut ignore)
+        .await
+        .unwrap_or_else(|err| panic!("{} request after summary: {err}", model.alias));
+}
+
 #[tokio::test]
 #[ignore = "calls a paid API; set SOCIUM_LIVE_MODEL and run with --ignored"]
 async fn live_text_editor_call_uses_the_editor_input() {

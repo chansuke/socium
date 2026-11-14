@@ -156,6 +156,12 @@ pub(crate) struct ConversationSummaryState {
 pub(crate) struct ConversationSummary {
     pub covered_messages: usize,
     pub text: String,
+    /// Raw messages from this index on were produced after this summary
+    /// was in the prompt, so their thinking is still bound to the prefix it
+    /// is sent with. Thinking in kept messages before it is not resent.
+    /// `None` in state saved before the field existed; loading fills it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_valid_from: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]

@@ -6,20 +6,20 @@ use crate::providers::{
 use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Scripted `Provider` for tests: returns pre-recorded responses in order
 /// and records every serialized request it receives.
 pub(crate) struct ScriptedProvider {
     responses: Mutex<VecDeque<Result<ProviderResponse, ProviderError>>>,
-    pub(crate) recorded_requests: Mutex<Vec<serde_json::Value>>,
+    pub(crate) recorded_requests: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 impl ScriptedProvider {
     pub(crate) fn new(responses: Vec<Result<ProviderResponse, ProviderError>>) -> Self {
         Self {
             responses: Mutex::new(responses.into()),
-            recorded_requests: Mutex::new(Vec::new()),
+            recorded_requests: Arc::default(),
         }
     }
 }

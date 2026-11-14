@@ -1,6 +1,8 @@
 use crate::agent::state::{ConversationSummary, ConversationSummaryState};
 use crate::agent::turn::extract_text;
-use crate::agent::types::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
+use crate::agent::types::{
+    AgentMessageRequest, ContentBlock, Message, MessageContent, Role, strip_thinking,
+};
 use crate::constants::{
     DEFAULT_CONTEXT_WINDOW_TOKENS, MAX_SUMMARY_CHARACTERS, MAX_SUMMARY_LINE_CHARACTERS,
     MAX_SUMMARY_LINES, MIN_RECENT_CONTEXT_MESSAGES, TARGET_RECENT_CONTEXT_MESSAGES,
@@ -242,11 +244,23 @@ fn compose_context(
         raw_messages.len().saturating_sub(covered_messages).max(1),
     );
     let summary_state = build_summary_state(raw_messages, summary_state, covered_messages);
+    let kept_from = covered_messages.min(raw_messages.len());
     let mut messages = Vec::new();
     if let Some(summary) = &summary_state.summary {
         messages.push(summary_message(summary));
     }
-    messages.extend_from_slice(&raw_messages[covered_messages.min(raw_messages.len())..]);
+    messages.extend_from_slice(&raw_messages[kept_from..]);
+    if let Some(summary) = &summary_state.summary {
+        // Thinking is bound to everything before it. Kept messages produced
+        // before this summary replaced their prefix would fail the
+        // provider's prefix check, so they go without their thinking; turns
+        // produced since keep theirs.
+        let valid_from = summary.thinking_valid_from.unwrap_or(usize::MAX);
+        let stale = valid_from
+            .saturating_sub(kept_from)
+            .min(raw_messages.len() - kept_from);
+        strip_thinking(&mut messages[1..=stale]);
+    }
 
     let estimated_input_tokens =
         estimate_request_tokens(model, budget.max_output_tokens, &messages, tools);
@@ -289,6 +303,7 @@ fn build_summary_state(
                 summary: Some(ConversationSummary {
                     covered_messages,
                     text,
+                    thinking_valid_from: Some(raw_messages.len()),
                 }),
             };
         }
@@ -298,6 +313,7 @@ fn build_summary_state(
         summary: Some(ConversationSummary {
             covered_messages,
             text: summarize_messages(&raw_messages[..covered_messages]),
+            thinking_valid_from: Some(raw_messages.len()),
         }),
     }
 }
@@ -623,6 +639,7 @@ mod tests {
             summary: Some(crate::agent::state::ConversationSummary {
                 covered_messages: 2,
                 text: "1. User request: keep this LLM summary".to_string(),
+                thinking_valid_from: Some(2),
             }),
         };
 
@@ -649,6 +666,7 @@ mod tests {
             summary: Some(crate::agent::state::ConversationSummary {
                 covered_messages: 6,
                 text: "persisted compaction summary".to_string(),
+                thinking_valid_from: Some(10),
             }),
         };
 
@@ -667,6 +685,85 @@ mod tests {
         assert_eq!(prepared.metrics.summarized_messages, 6);
         // summary message + the 4 uncovered raw messages
         assert_eq!(prepared.messages.len(), 5);
+    }
+
+    fn thinking_turn(turn: usize) -> [Message; 3] {
+        [
+            Message::user_text(format!("request {turn}: {}", "x".repeat(300))),
+            Message::assistant_blocks(vec![
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: format!("sig-{turn}"),
+                },
+                ContentBlock::ToolUse {
+                    id: format!("tool_{turn}"),
+                    name: "read_file".into(),
+                    input: json!({}),
+                },
+            ]),
+            Message::user_blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: format!("tool_{turn}"),
+                content: "y".repeat(300),
+                is_error: None,
+            }]),
+        ]
+    }
+
+    fn sent_signatures(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|message| match &message.content {
+                crate::agent::types::MessageContent::Blocks(blocks) => Some(blocks),
+                crate::agent::types::MessageContent::Text(_) => None,
+            })
+            .flatten()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking { signature, .. } => Some(signature.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn budget_trimming_drops_thinking_kept_across_the_new_cut_only() {
+        let budget = ContextBudget {
+            context_window_tokens: 4_000,
+            max_output_tokens: 500,
+        };
+        let mut messages = (0..20).flat_map(thinking_turn).collect::<Vec<_>>();
+
+        let prepared = prepare_context_with_budget(
+            &messages,
+            &ConversationSummaryState::default(),
+            "claude-sonnet-4-5",
+            budget,
+            &[],
+        );
+        let summary = prepared.summary_state.summary.as_ref().unwrap();
+        assert_eq!(summary.thinking_valid_from, Some(messages.len()));
+        assert!(prepared.metrics.summarized_messages < messages.len());
+        assert!(sent_signatures(&prepared.messages).is_empty());
+        let serialized = serde_json::to_string(&prepared.messages).unwrap();
+        assert!(serialized.contains("tool_19") && serialized.contains("tool_use"));
+
+        // The model answers after the cut; its thinking belongs to the new
+        // prefix and is resent while the summary stays the same.
+        messages.push(Message::assistant_blocks(vec![
+            ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: "sig-after".into(),
+            },
+            ContentBlock::Text { text: "ok".into() },
+        ]));
+        let next = super::compose_context(
+            &messages,
+            &prepared.summary_state,
+            summary.covered_messages,
+            "claude-sonnet-4-5",
+            budget,
+            &[],
+        );
+        assert_eq!(sent_signatures(&next.messages), ["sig-after"]);
     }
 
     #[test]
