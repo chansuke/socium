@@ -226,7 +226,7 @@ pub enum AgentProgress {
 
 pub struct AgentService {
     control: TaskControl,
-    state_lock: Option<std::fs::File>,
+    state_lock: Option<crate::agent::state::WorkspaceLock>,
     workspace_root: PathBuf,
     /// The conversation saved under `.socium/sessions/<id>/`.
     session_id: String,

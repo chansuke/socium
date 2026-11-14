@@ -1,8 +1,11 @@
 use crate::agent::types::Message;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
-use std::io::{self, Error, ErrorKind, Read, Write};
+use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -328,7 +331,36 @@ fn atomic_write_impl(
     result
 }
 
-pub(crate) fn lock_workspace(root: &Path) -> io::Result<fs::File> {
+/// How long a start waits for a process this one started to drop its copy
+/// of a released lock, and how often it looks.
+const LOCK_RELEASE_WAIT: Duration = Duration::from_secs(2);
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Lock files this process holds. A process another thread starts keeps a
+/// copy of every open file descriptor from fork until exec, and the lock
+/// with it, so a released lock can still look held for that moment.
+static HELD_LOCKS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+fn held_locks() -> std::sync::MutexGuard<'static, BTreeSet<PathBuf>> {
+    HELD_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The workspace lock, held until dropped.
+#[derive(Debug)]
+pub(crate) struct WorkspaceLock {
+    file: fs::File,
+    path: PathBuf,
+}
+
+impl Drop for WorkspaceLock {
+    fn drop(&mut self) {
+        held_locks().remove(&self.path);
+    }
+}
+
+pub(crate) fn lock_workspace(root: &Path) -> io::Result<WorkspaceLock> {
     let path = workspace_state_path(root, "session.lock")?;
     let mut options = fs::OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
@@ -339,32 +371,52 @@ pub(crate) fn lock_workspace(root: &Path) -> io::Result<fs::File> {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let mut file = options.open(path)?;
+    let mut file = options.open(&path)?;
     check_state_file(&file.metadata()?)?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => {
-            return Err(Error::other(match lock_owner(&mut file) {
-                Some(pid) => format!(
-                    "Workspace session is already in use by another socium (PID {pid}); exit it or run socium in another directory"
-                ),
-                None => "Workspace session is already in use by another socium".to_string(),
-            }));
+    let in_use = |pid: Option<u32>| {
+        Error::other(match pid {
+            Some(pid) => format!(
+                "Workspace session is already in use by another socium (PID {pid}); exit it or run socium in another directory"
+            ),
+            None => "Workspace session is already in use by another socium".to_string(),
+        })
+    };
+    let deadline = Instant::now() + LOCK_RELEASE_WAIT;
+    loop {
+        if held_locks().contains(&path) {
+            return Err(in_use(Some(std::process::id())));
         }
-        Err(fs::TryLockError::Error(e)) => {
-            return Err(Error::other(format!(
-                "Workspace session cannot be locked: {e}"
-            )));
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(fs::TryLockError::WouldBlock) => {
+                let owner = lock_owner(&mut file);
+                // This process wrote the PID and no longer holds the lock:
+                // a child it started has a copy until it runs.
+                if owner != Some(std::process::id()) || Instant::now() >= deadline {
+                    return Err(in_use(owner));
+                }
+                std::thread::sleep(LOCK_RETRY_INTERVAL);
+            }
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(Error::other(format!(
+                    "Workspace session cannot be locked: {e}"
+                )));
+            }
         }
     }
+    held_locks().insert(path.clone());
+    let lock = WorkspaceLock { file, path };
     // Record the owner so that a second start can name it.
+    let mut file = &lock.file;
     file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
     writeln!(file, "{}", std::process::id())?;
-    Ok(file)
+    Ok(lock)
 }
 
 /// The PID the lock holder recorded, when it has written one yet.
 fn lock_owner(file: &mut fs::File) -> Option<u32> {
+    file.seek(SeekFrom::Start(0)).ok()?;
     let mut text = String::new();
     Read::by_ref(file).take(32).read_to_string(&mut text).ok()?;
     text.trim().parse().ok()
@@ -406,6 +458,36 @@ mod tests {
             );
             assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_can_be_taken_again_while_a_child_started_under_it_has_not_run_yet() {
+        use std::os::unix::process::CommandExt;
+        let root = make_temp_dir("lock-child");
+        let lock = lock_workspace(root.path()).unwrap();
+        // A process another thread starts gets a copy of the lock's file
+        // descriptor, which it keeps from fork until exec.
+        let child = std::thread::spawn(|| {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "exit 0"]);
+            unsafe {
+                command.pre_exec(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    Ok(())
+                });
+            }
+            command.status().unwrap()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(lock);
+
+        let again = lock_workspace(root.path());
+
+        assert!(child.join().unwrap().success());
+        assert!(again.is_ok(), "{:?}", again.err());
+        // The lock still keeps out a second holder in this process.
+        assert!(lock_workspace(root.path()).is_err());
     }
 
     #[test]
