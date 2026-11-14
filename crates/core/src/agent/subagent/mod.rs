@@ -16,7 +16,7 @@ use crate::constants::{AGENT_TOOL_NAME, MAX_SUBAGENT_REPORT_CHARACTERS, MAX_TOOL
 use crate::error::AgentError;
 use crate::providers::TokenUsage;
 use crate::tools::error::ToolError;
-use crate::tools::input::{require_object_input, require_string_field};
+use crate::tools::input::{optional_string_field, require_object_input, require_string_field};
 use crate::tools::tools_for_model;
 use serde_json::Value;
 use std::future::Future;
@@ -55,10 +55,22 @@ pub(crate) fn run_subagent<'a>(
                 "agent requires a non-empty prompt".into(),
             ));
         }
+        // The call's model, else the type's, else the current one.
+        let alias =
+            optional_string_field(fields, "model", AGENT_TOOL_NAME)?.or(kind.model.as_deref());
+        let model = match alias {
+            None => None,
+            Some(alias) => Some(ctx.subagents.model(alias).ok_or_else(|| {
+                ToolError::Message(format!(
+                    "Model '{alias}' is not available to subagents; use one of: {}",
+                    ctx.subagents.model_aliases().join(", ")
+                ))
+            })?),
+        };
 
         // The type's tools, as its model is offered them.
         let model_tools;
-        let child = match &kind.model {
+        let child = match model {
             None => *ctx,
             Some(model) => {
                 model_tools = tools_for_model(model.config.features.anthropic_text_editor);
@@ -624,19 +636,20 @@ mod tests {
             .find("haiku")
             .unwrap()
             .clone();
-        service.install_subagents(
-            SubagentCatalog::builtin().with_user_types(vec![SubagentType {
+        service.install_subagents(SubagentCatalog::new(
+            vec![SubagentType {
                 name: "reviewer".into(),
                 description: "Reviews a diff".into(),
                 system_prompt: "You review.".into(),
                 tools: ToolSet::Only(vec!["git_diff".into(), "read_file".into()]),
-                model: Some(SubagentModel {
-                    config: haiku,
-                    provider: Box::new(model_provider),
-                    max_tokens: 321,
-                }),
-            }]),
-        );
+                model: Some("haiku".into()),
+            }],
+            vec![SubagentModel {
+                config: haiku,
+                provider: Box::new(model_provider),
+                max_tokens: 321,
+            }],
+        ));
 
         service.submit("Review it".into()).await.unwrap();
 
@@ -669,6 +682,64 @@ mod tests {
         assert!(
             report.starts_with("No bugs found.\n\n(subagent: 1 round"),
             "{report}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_can_choose_a_model_and_unknown_models_are_refused() {
+        use super::catalog::{SubagentCatalog, SubagentModel};
+        let workspace = make_temp_dir("subagent_call_model");
+        let (mut service, main_requests) = scripted(
+            workspace.path(),
+            vec![
+                calls(&[
+                    (
+                        "agent-1",
+                        "agent",
+                        json!({"description": "d", "prompt": "Look", "agent_type": "explorer", "model": "haiku"}),
+                    ),
+                    (
+                        "agent-2",
+                        "agent",
+                        json!({"description": "d", "prompt": "Look", "agent_type": "explorer", "model": "gpt"}),
+                    ),
+                ]),
+                text("Done."),
+            ],
+        );
+        let haiku_provider = ScriptedProvider::new(vec![text("Found it.")]);
+        let haiku_requests = haiku_provider.recorded_requests.clone();
+        let haiku = crate::models::ModelRegistry::builtin()
+            .find("haiku")
+            .unwrap()
+            .clone();
+        service.install_subagents(SubagentCatalog::new(
+            Vec::new(),
+            vec![SubagentModel {
+                config: haiku,
+                provider: Box::new(haiku_provider),
+                max_tokens: 500,
+            }],
+        ));
+
+        service.submit("Look".into()).await.unwrap();
+
+        let child = haiku_requests.lock().unwrap()[0].clone();
+        assert_eq!(child["model"], "claude-haiku-5-5");
+        assert_eq!(child["system"], SUBAGENT_EXPLORER_SYSTEM_PROMPT);
+        let main_requests = main_requests.lock().unwrap().clone();
+        assert_eq!(main_requests.len(), 2);
+        let results = last_results(&main_requests[1]);
+        assert!(
+            results[0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("Found it.")
+        );
+        assert_eq!(results[1]["is_error"], true);
+        assert_eq!(
+            results[1]["content"],
+            "Model 'gpt' is not available to subagents; use one of: haiku"
         );
     }
 

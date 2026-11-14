@@ -36,7 +36,9 @@ use crate::agent::state::{
     ConversationState, ConversationStateRef, ConversationSummary, ConversationSummaryState,
     load_json_file,
 };
-use crate::agent::subagent::catalog::{SubagentCatalog, SubagentModel, load_user_types};
+use crate::agent::subagent::catalog::{
+    SubagentCatalog, SubagentModel, SubagentType, load_user_types,
+};
 use crate::agent::turn::{TurnContext, run_agent_turn};
 use crate::agent::types::{Message, strip_thinking};
 use crate::constants::*;
@@ -514,25 +516,9 @@ impl AgentService {
             client,
         );
         service.state_lock = Some(state_lock);
-        let max_tokens_override = service.max_tokens_override;
-        let (user_types, mut agent_warnings) =
-            load_user_types(service.env.as_ref(), &service.registry, &|config| {
-                let provider_config = service
-                    .registry
-                    .provider(&config.provider)
-                    .ok_or_else(|| format!("unknown provider '{}'", config.provider))?;
-                Ok(SubagentModel {
-                    provider: build_provider(provider_config, config, service.env.as_ref())
-                        .map_err(|err| err.to_string())?,
-                    max_tokens: config
-                        .max_output_tokens
-                        .or(max_tokens_override)
-                        .unwrap_or(DEFAULT_MAX_TOKENS),
-                    config: config.clone(),
-                })
-            });
+        let (user_types, subagent_models, mut agent_warnings) = service.load_subagents();
         service.warnings.append(&mut agent_warnings);
-        service.install_subagents(SubagentCatalog::builtin().with_user_types(user_types));
+        service.install_subagents(SubagentCatalog::new(user_types, subagent_models));
         service.apply_state(state)?;
         if let Some(alias) = saved {
             if alias == service.active_model.alias {
@@ -576,6 +562,44 @@ impl AgentService {
         {
             *agent = self.subagents.tool_definition();
         }
+    }
+
+    /// User subagent types and every registered model whose provider can
+    /// be built, for subagents to run on.
+    fn load_subagents(&self) -> (Vec<SubagentType>, Vec<SubagentModel>, Vec<String>) {
+        let mut models = Vec::new();
+        let mut unavailable = Vec::new();
+        for config in &self.registry.models {
+            let built = self
+                .registry
+                .provider(&config.provider)
+                .ok_or_else(|| format!("unknown provider '{}'", config.provider))
+                .and_then(|provider| {
+                    build_provider(provider, config, self.env.as_ref())
+                        .map_err(|err| err.to_string())
+                });
+            match built {
+                Ok(provider) => models.push(SubagentModel {
+                    provider,
+                    max_tokens: config
+                        .max_output_tokens
+                        .or(self.max_tokens_override)
+                        .unwrap_or(DEFAULT_MAX_TOKENS),
+                    config: config.clone(),
+                }),
+                Err(reason) => unavailable.push((config.alias.clone(), reason)),
+            }
+        }
+        let (types, warnings) =
+            load_user_types(
+                self.env.as_ref(),
+                &self.registry,
+                &|config| match unavailable.iter().find(|(alias, _)| *alias == config.alias) {
+                    Some((_, reason)) => Err(reason.clone()),
+                    None => Ok(()),
+                },
+            );
+        (types, models, warnings)
     }
 
     /// Makes `catalog` the types the `agent` tool offers.
@@ -2084,6 +2108,19 @@ max_output_tokens = 4000
             assert_eq!(
                 agent_types(&service),
                 json!(["explorer", "worker", "scout"])
+            );
+            // Only models whose key is set can be chosen for a subagent.
+            let ToolDefinition::Custom(agent) = service
+                .tools
+                .iter()
+                .find(|tool| tool.name() == crate::constants::AGENT_TOOL_NAME)
+                .unwrap()
+            else {
+                panic!("agent is a schema tool");
+            };
+            assert_eq!(
+                agent.input_schema["properties"]["model"]["enum"],
+                json!(["opus", "sonnet", "haiku"])
             );
             let warnings = service.startup_warnings();
             assert_eq!(warnings.len(), 1, "{warnings:?}");

@@ -161,9 +161,10 @@ are not yet supported.
   only read, list, and search files and inspect Git; a `worker` can also edit
   and run commands, which still need your approval; the approval names the
   subagent that asked. The report ends with the subagent's rounds, tool
-  calls, token use, and time. Subagents use the current
-  model, cannot start subagents, and run one at a time while the main agent
-  waits. Their steps appear in the Activity pane under the `agent` call,
+  calls, token use, and time. A subagent runs on the current model unless
+  its type or the call names another registered model whose API key is set,
+  so a simple search can go to a smaller model. Subagents cannot start
+  subagents, and run one at a time while the main agent waits. Their steps appear in the Activity pane under the `agent` call,
   marked with `│`; their messages are not saved, so a restart during one
   marks the call's outcome unknown. See
   [ADR 8](docs/adr/0008-agentツールで独立した文脈のサブエージェントに作業を委ねる.md).

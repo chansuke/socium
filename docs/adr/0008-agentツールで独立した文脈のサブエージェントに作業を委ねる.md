@@ -77,7 +77,7 @@ Chosen option: 「同期の `agent` tool」。親の tool loop の中で子の t
 * Bad, because 子が動く間、親は待つ。複数の調査を同時に進められない。
 * Bad, because 子の message を保存しないので、再起動後に子の途中経過を見返すには Activity の記録しかない。
 * Bad, because 子の報告の質はモデルに依存する。親のモデルは報告を鵜呑みにしうる。tool の説明で、報告を確かめてから利用者に伝えるよう求めている。
-* Neutral, because 子は親と同じモデルを使う。安いモデルに調査を任せたい場合は段階 2 で扱う。
+* Neutral, because 子は親と同じモデルを使う。安いモデルに調査を任せる方法は ADR 9 と ADR 10 で足した。
 
 ### Confirmation
 

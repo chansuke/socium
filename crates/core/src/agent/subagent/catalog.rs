@@ -74,7 +74,8 @@ impl ToolSet {
     }
 }
 
-/// A model chosen by a subagent type instead of the current one.
+/// A registered model a subagent can run on instead of the current one,
+/// built at startup because its API key is set.
 pub(crate) struct SubagentModel {
     pub(crate) config: ModelConfig,
     pub(crate) provider: Box<dyn Provider>,
@@ -87,19 +88,41 @@ pub(crate) struct SubagentType {
     pub(crate) description: String,
     pub(crate) system_prompt: String,
     pub(crate) tools: ToolSet,
-    /// `None` runs on the main agent's current model.
-    pub(crate) model: Option<SubagentModel>,
+    /// Alias of the model the type runs on; `None` runs on the main
+    /// agent's current model.
+    pub(crate) model: Option<String>,
 }
 
 pub(crate) struct SubagentCatalog {
     types: Vec<SubagentType>,
+    /// Models a call can choose with `model`, in registry order.
+    models: Vec<SubagentModel>,
 }
 
 impl SubagentCatalog {
     pub(crate) fn builtin() -> Self {
         Self {
             types: builtin_types(),
+            models: Vec::new(),
         }
+    }
+
+    /// The built-in types, then `user_types`, with `models` to choose from.
+    pub(crate) fn new(user_types: Vec<SubagentType>, models: Vec<SubagentModel>) -> Self {
+        let mut types = builtin_types();
+        types.extend(user_types);
+        Self { types, models }
+    }
+
+    pub(crate) fn model(&self, alias: &str) -> Option<&SubagentModel> {
+        self.models.iter().find(|model| model.config.alias == alias)
+    }
+
+    pub(crate) fn model_aliases(&self) -> Vec<&str> {
+        self.models
+            .iter()
+            .map(|model| model.config.alias.as_str())
+            .collect()
     }
 
     pub(crate) fn find(&self, name: &str) -> Option<&SubagentType> {
@@ -115,41 +138,59 @@ impl SubagentCatalog {
         let types = self
             .types
             .iter()
-            .map(|kind| format!("- {}: {}", kind.name, kind.description))
+            .map(|kind| match &kind.model {
+                Some(model) => format!("- {}: {} (runs on {model})", kind.name, kind.description),
+                None => format!("- {}: {}", kind.name, kind.description),
+            })
             .collect::<Vec<_>>()
             .join("\n");
+        let models = self
+            .models
+            .iter()
+            .map(|model| match &model.config.description {
+                Some(description) => format!("- {}: {description}", model.config.alias),
+                None => format!("- {}: {}", model.config.alias, model.config.id),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "A short label for the task, 3 to 6 words, shown to the user."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "The complete task for the subagent, with the context it needs and what to report."
+                },
+                "agent_type": {
+                    "type": "string",
+                    "enum": self.names(),
+                    "description": "The agent type that fits the task; see the list in this tool's description."
+                }
+            },
+            "required": ["description", "prompt", "agent_type"],
+            "additionalProperties": false
+        });
+        let mut description = format!(
+            "Delegate a self-contained task to a subagent. The subagent starts with an empty context, works with its own tools until it is done, and returns one written report as this tool's result; nothing else it saw comes back. Use it to keep a broad search or a separable piece of work out of this conversation, not for a single file read or search. The subagent cannot see this conversation, so put everything it needs in prompt: the goal, relevant paths and constraints, and what the report must contain. Commands and commits a subagent runs still need the user's approval. Subagents cannot start subagents. Read the report critically and tell the user what matters; they do not see it.\n\nAgent types:\n{types}"
+        );
+        if !self.models.is_empty() {
+            description.push_str(&format!(
+                "\n\nModels (optional model input; by default a subagent runs on its type's model, else on yours). Choose a smaller model for simple searches:\n{models}"
+            ));
+            schema["properties"]["model"] = json!({
+                "type": "string",
+                "enum": self.model_aliases(),
+                "description": "Model alias for this run; see the list in this tool's description."
+            });
+        }
         ToolDefinition::Custom(CustomToolDefinition {
             name: AGENT_TOOL_NAME.to_string(),
-            description: format!(
-                "Delegate a self-contained task to a subagent. The subagent starts with an empty context, works with its own tools until it is done, and returns one written report as this tool's result; nothing else it saw comes back. Use it to keep a broad search or a separable piece of work out of this conversation, not for a single file read or search. The subagent cannot see this conversation, so put everything it needs in prompt: the goal, relevant paths and constraints, and what the report must contain. Commands and commits a subagent runs still need the user's approval. Subagents cannot start subagents. Read the report critically and tell the user what matters; they do not see it.\n\nAgent types:\n{types}"
-            ),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "description": {
-                        "type": "string",
-                        "description": "A short label for the task, 3 to 6 words, shown to the user."
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "The complete task for the subagent, with the context it needs and what to report."
-                    },
-                    "agent_type": {
-                        "type": "string",
-                        "enum": self.names(),
-                        "description": "The agent type that fits the task; see the list in this tool's description."
-                    }
-                },
-                "required": ["description", "prompt", "agent_type"],
-                "additionalProperties": false
-            }),
+            description,
+            input_schema: schema,
         })
-    }
-
-    /// Adds user types after the built-ins.
-    pub(crate) fn with_user_types(mut self, types: Vec<SubagentType>) -> Self {
-        self.types.extend(types);
-        self
     }
 }
 
@@ -276,8 +317,8 @@ fn split_front_matter(text: &str) -> Result<(&str, &str), String> {
     Err("the front matter is not closed with a +++ line".into())
 }
 
-/// Builds a model a definition names; injected so tests need no API keys.
-pub(crate) type ModelBuilder<'a> = dyn Fn(&ModelConfig) -> Result<SubagentModel, String> + 'a;
+/// Says why a registered model cannot run, or `Ok` when it can.
+pub(crate) type ModelCheck<'a> = dyn Fn(&ModelConfig) -> Result<(), String> + 'a;
 
 /// Reads the definitions in the directory named by `SOCIUM_AGENTS_DIR`, or
 /// else `socium/agents` in the XDG config directory, in file name order. A
@@ -286,7 +327,7 @@ pub(crate) type ModelBuilder<'a> = dyn Fn(&ModelConfig) -> Result<SubagentModel,
 pub(crate) fn load_user_types(
     lookup: &dyn Fn(&str) -> Option<String>,
     registry: &ModelRegistry,
-    build_model: &ModelBuilder<'_>,
+    check_model: &ModelCheck<'_>,
 ) -> (Vec<SubagentType>, Vec<String>) {
     let mut warnings = Vec::new();
     let explicit = lookup(AGENTS_DIR_ENV).filter(|value| !value.is_empty());
@@ -348,8 +389,8 @@ pub(crate) fn load_user_types(
                     warnings.push(skip(format!("model '{alias}' is not registered")));
                     continue;
                 }
-                Some(config) => match build_model(config) {
-                    Ok(model) => Some(model),
+                Some(config) => match check_model(config) {
+                    Ok(()) => Some(alias.clone()),
                     Err(reason) => {
                         warnings.push(skip(format!("model '{alias}' is unavailable: {reason}")));
                         continue;
@@ -399,19 +440,15 @@ mod tests {
 
     const REVIEWER: &str = "+++\nname = \"reviewer\"\ndescription = \"Reviews a diff for correctness bugs\"\ntools = [\"read_file\", \"git_diff\", \"read_file\"]\nmodel = \"haiku\"\n+++\n\nYou review changes.\n";
 
-    fn no_model(_: &ModelConfig) -> Result<SubagentModel, String> {
+    fn no_model(_: &ModelConfig) -> Result<(), String> {
         Err("no models in this test".into())
     }
 
-    fn scripted_model(config: &ModelConfig) -> Result<SubagentModel, String> {
-        Ok(SubagentModel {
-            config: config.clone(),
-            provider: Box::new(ScriptedProvider::new(Vec::new())),
-            max_tokens: 100,
-        })
+    fn any_model(_: &ModelConfig) -> Result<(), String> {
+        Ok(())
     }
 
-    fn load(dir: &Path, build: &ModelBuilder<'_>) -> (Vec<SubagentType>, Vec<String>) {
+    fn load(dir: &Path, build: &ModelCheck<'_>) -> (Vec<SubagentType>, Vec<String>) {
         let dir = dir.to_string_lossy().into_owned();
         let lookup = move |key: &str| (key == AGENTS_DIR_ENV).then(|| dir.clone());
         load_user_types(&lookup, &ModelRegistry::builtin(), build)
@@ -516,7 +553,7 @@ mod tests {
         );
         write("notes.txt", "ignored");
 
-        let (types, warnings) = load(dir.path(), &scripted_model);
+        let (types, warnings) = load(dir.path(), &any_model);
 
         let names = types
             .iter()
@@ -524,7 +561,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, ["scout", "reviewer"]);
         assert!(types[0].model.is_none());
-        assert_eq!(types[1].model.as_ref().unwrap().config.alias, "haiku");
+        assert_eq!(types[1].model.as_deref(), Some("haiku"));
         assert_eq!(warnings.len(), 3, "{warnings:#?}");
         assert!(
             warnings[0].contains("c-again.md") && warnings[0].contains("already defines 'scout'")
@@ -582,13 +619,21 @@ mod tests {
     #[test]
     fn the_agent_tool_lists_every_type() {
         let user = parse_definition(REVIEWER).unwrap();
-        let catalog = SubagentCatalog::builtin().with_user_types(vec![SubagentType {
-            name: user.name,
-            description: user.description,
-            system_prompt: user.system_prompt,
-            tools: user.tools,
-            model: None,
-        }]);
+        let haiku = ModelRegistry::builtin().find("haiku").unwrap().clone();
+        let catalog = SubagentCatalog::new(
+            vec![SubagentType {
+                name: user.name,
+                description: user.description,
+                system_prompt: user.system_prompt,
+                tools: user.tools,
+                model: user.model,
+            }],
+            vec![SubagentModel {
+                config: haiku,
+                provider: Box::new(ScriptedProvider::new(Vec::new())),
+                max_tokens: 100,
+            }],
+        );
 
         let ToolDefinition::Custom(tool) = catalog.tool_definition() else {
             panic!("agent is a schema tool");
@@ -600,10 +645,25 @@ mod tests {
         );
         assert!(
             tool.description
-                .ends_with("- reviewer: Reviews a diff for correctness bugs"),
+                .contains("- reviewer: Reviews a diff for correctness bugs (runs on haiku)\n"),
             "{}",
             tool.description
         );
+        assert!(
+            tool.description
+                .ends_with("- haiku: Haiku 5.5 for quick answers"),
+            "{}",
+            tool.description
+        );
+        assert_eq!(
+            tool.input_schema["properties"]["model"]["enum"],
+            json!(["haiku"])
+        );
+        // Without models to choose from, there is no model input.
+        let ToolDefinition::Custom(builtin) = SubagentCatalog::builtin().tool_definition() else {
+            panic!("agent is a schema tool");
+        };
+        assert!(builtin.input_schema["properties"].get("model").is_none());
     }
 
     #[test]
