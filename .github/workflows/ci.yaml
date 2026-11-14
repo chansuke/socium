@@ -18,6 +18,9 @@ jobs:
     name: Format, Lint and Test
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # Incremental data only helps local rebuilds and bloats the cache.
+      CARGO_INCREMENTAL: 0
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,6 +31,20 @@ jobs:
         uses: ./.github/actions/setup-nix
         with:
           cachix-auth-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.CACHIX_AUTH_TOKEN || '' }}
+
+      # Compiled dependencies for Clippy and the tests. Pushes to main save
+      # them; pull requests only restore, so they do not fill the cache.
+      - name: Restore cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('flake.lock', 'Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
 
       # Ubuntu's default userns restriction denies capabilities inside a new
       # namespace for binaries without a profile, including Nix's bwrap path.
@@ -58,6 +75,17 @@ jobs:
 
       - name: Run tests
         uses: ./.github/actions/run-test
+
+      - name: Save cargo cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
       - name: Build Nix package
         run: nix build .#default
