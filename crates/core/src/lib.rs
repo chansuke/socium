@@ -1461,6 +1461,61 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn redacted_thinking_goes_back_unchanged_with_tool_results_and_after_restart() {
+            let data = "EmwKAhgBEgy3va3pzix/LafPsn4aDFIT2Xlxh0L5L8rLVyIwxtE3rAFBa8cr3qpP+/=";
+            let workspace = make_temp_dir("redacted_round_trip");
+            let (mut service, requests) = scripted(
+                workspace.path(),
+                vec![
+                    response(vec![
+                        ContentBlock::RedactedThinking { data: data.into() },
+                        ContentBlock::ToolUse {
+                            id: "tool_r".into(),
+                            name: "read_file".into(),
+                            input: json!({"path": "missing.txt"}),
+                        },
+                    ]),
+                    response(thinking_then_text("sig-final")),
+                ],
+                Vec::new(),
+                None,
+            );
+
+            service.submit("look".into()).await.unwrap();
+
+            // The tool round sends the turn back exactly: redacted block
+            // first, then the call it preceded, then the result.
+            let round = requests.lock().unwrap()[1].clone();
+            let messages = round["messages"].as_array().unwrap();
+            assert_eq!(
+                messages[1]["content"][0],
+                json!({"type": "redacted_thinking", "data": data})
+            );
+            assert_eq!(messages[1]["content"][1]["id"], "tool_r");
+            assert_eq!(messages[2]["content"][0]["tool_use_id"], "tool_r");
+            // Nothing of it is shown as text.
+            let shown = format!("{:?}", service.transcript_entries());
+            assert!(!shown.contains(data), "{shown}");
+            drop(service);
+
+            let (mut restarted, requests) = scripted(
+                workspace.path(),
+                vec![response(thinking_then_text("sig-next"))],
+                Vec::new(),
+                None,
+            );
+            restarted.restore_state().unwrap();
+            restarted.submit("again".into()).await.unwrap();
+            let request = requests.lock().unwrap()[0].clone();
+            assert_eq!(sent_thinking(&request), [data, "sig-final"]);
+            assert_eq!(
+                request["messages"][1]["content"][0],
+                json!({"type": "redacted_thinking", "data": data})
+            );
+            assert_tool_pairs(&request);
+        }
+
+        #[tokio::test]
         async fn restart_keeps_the_boundary_and_treats_legacy_summaries_as_stale() {
             let workspace = make_temp_dir("thinking_restart");
             let (mut service, _) = scripted(
