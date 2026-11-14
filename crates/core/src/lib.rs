@@ -7,8 +7,10 @@ mod control;
 mod execution;
 mod models;
 mod process;
+mod session;
 pub use control::TaskControl;
 pub use execution::SANDBOX_DESCRIPTION;
+pub use session::{SessionStart, SessionSummary, list_sessions};
 pub mod agent;
 pub mod constants;
 pub mod error;
@@ -228,7 +230,8 @@ pub struct AgentService {
     control: TaskControl,
     state_lock: Option<std::fs::File>,
     workspace_root: PathBuf,
-    conversation_path: PathBuf,
+    /// The conversation saved under `.socium/sessions/<id>/`.
+    session_id: String,
     messages: Vec<Message>,
     events: Vec<serde_json::Value>,
     summary_state: ConversationSummaryState,
@@ -263,8 +266,8 @@ fn provider_http_client() -> Result<reqwest::Client, ProviderError> {
 }
 
 impl AgentService {
-    pub fn from_current_dir() -> Result<Self, AgentError> {
-        Self::from_env(env::current_dir().map_err(AgentError::State)?)
+    pub fn from_current_dir(start: SessionStart) -> Result<Self, AgentError> {
+        Self::from_env(env::current_dir().map_err(AgentError::State)?, start)
     }
 
     /// Construction seam that takes the provider and HTTP client directly,
@@ -285,8 +288,10 @@ impl AgentService {
             compaction_model: DEFAULT_COMPACTION_MODEL.to_string(),
             warnings: Vec::new(),
         };
+        let session_id = session::new_session_id(&workspace_root, None);
         Self::new(
             workspace_root,
+            session_id,
             ModelRegistry::builtin(),
             target,
             Arc::new(|_| None),
@@ -297,20 +302,18 @@ impl AgentService {
 
     fn new(
         workspace_root: PathBuf,
+        session_id: String,
         registry: ModelRegistry,
         target: ModelTarget,
         env: EnvLookup,
         max_tokens_override: Option<u32>,
         client: reqwest::Client,
     ) -> Self {
-        let conversation_path = workspace_root
-            .join(STATE_DIR_NAME)
-            .join(CONVERSATION_STATE_FILE_NAME);
         let mut service = Self {
             control: TaskControl::default(),
             state_lock: None,
             workspace_root,
-            conversation_path,
+            session_id,
             messages: Vec::new(),
             events: Vec::new(),
             summary_state: ConversationSummaryState::default(),
@@ -332,7 +335,7 @@ impl AgentService {
         service
     }
 
-    pub fn from_env(workspace_root: PathBuf) -> Result<Self, AgentError> {
+    pub fn from_env(workspace_root: PathBuf, start: SessionStart) -> Result<Self, AgentError> {
         let lookup: EnvLookup = Arc::new(|key| env::var(key).ok());
         let registry = ModelRegistry::load(lookup.as_ref())?;
         let max_tokens_override = lookup("MAX_TOKENS")
@@ -366,6 +369,7 @@ impl AgentService {
 
         Self::open(
             workspace_root,
+            start,
             registry,
             lookup,
             max_tokens_override,
@@ -373,25 +377,62 @@ impl AgentService {
         )
     }
 
-    /// Restores the workspace conversation and selects its model: the
-    /// alias saved with `/model`, then `MODEL`, then the registry default.
-    /// A candidate that cannot be built is skipped with a warning; only the
+    /// Opens the session `start` names and selects its model: the alias
+    /// saved with `/model`, then `MODEL`, then the registry default. A new
+    /// session takes the saved alias of the most recently saved one. A
+    /// candidate that cannot be built is skipped with a warning; only the
     /// last one is fatal. History is stripped of thinking when the model
     /// differs from the saved one.
     pub(crate) fn open(
         workspace_root: PathBuf,
+        start: SessionStart,
         registry: ModelRegistry,
         lookup: EnvLookup,
         max_tokens_override: Option<u32>,
         client: reqwest::Client,
     ) -> Result<Self, AgentError> {
         let state_lock = crate::agent::state::lock_workspace(&workspace_root)?;
-        let state = load_json_file::<ConversationState>(&workspace_state_path(
-            &workspace_root,
-            CONVERSATION_STATE_FILE_NAME,
-        )?)?;
-
+        session::migrate_legacy_conversation(&workspace_root)?;
+        let sessions = session::scan_sessions(&workspace_root)?;
         let mut warnings = Vec::new();
+        let resumed = match &start {
+            SessionStart::New => None,
+            SessionStart::Continue => {
+                // An unreadable latest session fails to load below rather
+                // than being passed over for an older one.
+                let latest = sessions
+                    .iter()
+                    .find(|session| !session.readable || session.message_count > 0);
+                if latest.is_none() {
+                    warnings.push(
+                        "No saved session to continue in this workspace; started a new one"
+                            .to_string(),
+                    );
+                }
+                latest
+            }
+            SessionStart::Resume(query) => Some(session::resolve_session(&sessions, query)?),
+        };
+        let (session_id, state) = match resumed {
+            Some(session) => (
+                session.id.clone(),
+                load_json_file::<ConversationState>(&session::session_file(
+                    &workspace_root,
+                    &session.id,
+                    CONVERSATION_STATE_FILE_NAME,
+                ))?,
+            ),
+            None => (
+                session::new_session_id(&workspace_root, None),
+                ConversationState {
+                    active_model: sessions
+                        .first()
+                        .and_then(|session| session.active_model.clone()),
+                    ..ConversationState::default()
+                },
+            ),
+        };
+
         if lookup("COMPACT_MODEL").is_some() {
             warnings.push(
                 "COMPACT_MODEL is no longer supported and is ignored; set compact_model for the model in models.toml"
@@ -464,6 +505,7 @@ impl AgentService {
 
         let mut service = Self::new(
             workspace_root,
+            session_id,
             registry,
             target,
             lookup,
@@ -479,7 +521,10 @@ impl AgentService {
                 strip_thinking(&mut service.messages);
             }
         }
-        service.persist_state()?;
+        // A new session is written once it has something to save.
+        if resumed.is_some() {
+            service.persist_state()?;
+        }
         Ok(service)
     }
 
@@ -629,13 +674,36 @@ impl AgentService {
         Ok(())
     }
 
+    /// Continues the most recently saved session, as a restart with
+    /// `SessionStart::Continue` does.
     #[cfg(test)]
     fn restore_state(&mut self) -> std::io::Result<()> {
         self.ensure_state_lock()?;
-        workspace_state_path(&self.workspace_root, CONVERSATION_STATE_FILE_NAME)?;
-        let state = load_json_file::<ConversationState>(&self.conversation_path)?;
+        session::migrate_legacy_conversation(&self.workspace_root)?;
+        if let Some(latest) = session::scan_sessions(&self.workspace_root)?.first() {
+            self.session_id = latest.id.clone();
+        }
+        let state = load_json_file::<ConversationState>(&self.conversation_path())?;
         self.apply_state(state)?;
         self.persist_state()
+    }
+
+    /// The ID that resumes this conversation.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Whether the conversation has messages, so it can be resumed.
+    pub fn has_saved_messages(&self) -> bool {
+        !self.messages.is_empty()
+    }
+
+    pub(crate) fn conversation_path(&self) -> PathBuf {
+        session::session_file(
+            &self.workspace_root,
+            &self.session_id,
+            CONVERSATION_STATE_FILE_NAME,
+        )
     }
 
     fn apply_state(&mut self, state: ConversationState) -> std::io::Result<()> {
@@ -671,19 +739,15 @@ impl AgentService {
         Ok(())
     }
 
+    /// Starts a new session with the current model. The previous one stays
+    /// saved and can be resumed by its ID.
     pub fn clear(&mut self) -> std::io::Result<()> {
         self.ensure_state_lock()?;
-        crate::activity_log::rotate(&self.activity_log_path())?;
-        let old_messages = std::mem::take(&mut self.messages);
-        let old_events = std::mem::take(&mut self.events);
-        let old_summary = self.summary_state.clone();
+        self.session_id = session::new_session_id(&self.workspace_root, Some(&self.session_id));
+        self.messages.clear();
+        self.events.clear();
         self.summary_state = ConversationSummaryState::default();
-        if let Err(err) = self.persist_state() {
-            self.messages = old_messages;
-            self.events = old_events;
-            self.summary_state = old_summary;
-            return Err(err);
-        }
+        self.last_measured_usage = None;
         Ok(())
     }
 
@@ -696,9 +760,11 @@ impl AgentService {
     }
 
     fn activity_log_path(&self) -> PathBuf {
-        self.workspace_root
-            .join(STATE_DIR_NAME)
-            .join(ACTIVITY_LOG_FILE_NAME)
+        session::session_file(
+            &self.workspace_root,
+            &self.session_id,
+            ACTIVITY_LOG_FILE_NAME,
+        )
     }
 
     /// Tolerated configuration problems to show once at startup.
@@ -831,7 +897,7 @@ impl AgentService {
         let raw_len = self.messages.len();
         let active_model = self.selected_model.clone();
         self.summary_state = prepared_context.summary_state;
-        let path = &self.conversation_path;
+        let path = &self.conversation_path();
         let raw_messages = &mut self.messages;
         let summary = &self.summary_state;
         let events = &mut self.events;
@@ -987,7 +1053,7 @@ impl AgentService {
 
     fn persist_state(&self) -> std::io::Result<()> {
         save_json_file(
-            &self.conversation_path,
+            &self.conversation_path(),
             &ConversationStateRef {
                 schema_version: 1,
                 messages: &self.messages,
@@ -1008,7 +1074,7 @@ mod security_tests;
 #[cfg(test)]
 mod tests {
     use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
-    use crate::constants::{CONVERSATION_STATE_FILE_NAME, STATE_DIR_NAME};
+    use crate::constants::CONVERSATION_STATE_FILE_NAME;
     use crate::providers::TokenUsage;
     use crate::providers::anthropic::AnthropicProvider;
     use crate::test_support::{ScriptedProvider, make_temp_dir, text_provider_response};
@@ -1018,10 +1084,6 @@ mod tests {
     #[test]
     fn transcript_entries_include_text_and_tool_results() {
         let workspace = make_temp_dir("transcript");
-        let conversation_path = workspace
-            .path()
-            .join(STATE_DIR_NAME)
-            .join(CONVERSATION_STATE_FILE_NAME);
         let messages = vec![
             Message {
                 role: Role::User,
@@ -1057,7 +1119,6 @@ mod tests {
             128,
             reqwest::Client::builder().build().unwrap(),
         );
-        service.conversation_path = conversation_path;
         service.messages = messages;
 
         let entries = service.transcript_entries();
@@ -1136,13 +1197,7 @@ mod tests {
         );
 
         let persisted: crate::agent::state::ConversationState =
-            crate::agent::state::load_json_file(
-                &workspace
-                    .path()
-                    .join(STATE_DIR_NAME)
-                    .join(CONVERSATION_STATE_FILE_NAME),
-            )
-            .unwrap();
+            crate::agent::state::load_json_file(&service.conversation_path()).unwrap();
         assert_eq!(
             persisted
                 .summary_state
@@ -1535,7 +1590,7 @@ mod tests {
             );
             service.compact().await.unwrap();
             service.submit("next".into()).await.unwrap();
-            let path = service.conversation_path.clone();
+            let path = service.conversation_path();
             drop(service);
 
             let saved: ConversationState = load_json_file(&path).unwrap();
@@ -1610,6 +1665,7 @@ mod tests {
 
     mod model_switching {
         use super::*;
+        use crate::SessionStart;
         use crate::models::ModelRegistry;
         use crate::tools::ToolDefinition;
         use std::collections::HashMap;
@@ -1641,6 +1697,7 @@ max_output_tokens = 32000
         fn open(root: &std::path::Path, env: &[(&str, &str)]) -> AgentService {
             AgentService::open(
                 root.to_path_buf(),
+                SessionStart::New,
                 ModelRegistry::from_toml(MODELS).unwrap(),
                 lookup(env),
                 None,
@@ -1657,8 +1714,16 @@ max_output_tokens = 32000
             env
         }
 
+        /// The most recently saved conversation; null when none is saved.
         fn saved_state(root: &std::path::Path) -> serde_json::Value {
-            let path = root.join(STATE_DIR_NAME).join(CONVERSATION_STATE_FILE_NAME);
+            let Some(latest) = crate::session::scan_sessions(root)
+                .unwrap()
+                .into_iter()
+                .next()
+            else {
+                return serde_json::Value::Null;
+            };
+            let path = crate::session::session_file(root, &latest.id, CONVERSATION_STATE_FILE_NAME);
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
         }
 
@@ -1727,10 +1792,15 @@ max_output_tokens = 32000
             service.persist_state().unwrap();
             drop(service);
 
-            let service = open(
-                root.path(),
-                &[("ANTHROPIC_API_KEY", "a"), ("MODEL", "sonnet")],
-            );
+            let service = AgentService::open(
+                root.path().to_path_buf(),
+                SessionStart::Continue,
+                ModelRegistry::from_toml(MODELS).unwrap(),
+                lookup(&[("ANTHROPIC_API_KEY", "a"), ("MODEL", "sonnet")]),
+                None,
+                reqwest::Client::new(),
+            )
+            .unwrap();
             assert_eq!(service.active_model().alias, "sonnet");
             let warnings = service.startup_warnings();
             assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -1756,6 +1826,7 @@ max_output_tokens = 4000
             .unwrap();
             let mut service = AgentService::open(
                 root.path().to_path_buf(),
+                SessionStart::New,
                 registry,
                 lookup(&KEYS),
                 None,
@@ -1814,6 +1885,7 @@ max_output_tokens = 4000
 
             let service = AgentService::open(
                 root.path().to_path_buf(),
+                SessionStart::New,
                 ModelRegistry::builtin(),
                 lookup(&KEYS),
                 None,
@@ -1841,6 +1913,7 @@ max_output_tokens = 4000
             let root = make_temp_dir("model_no_key");
             let err = AgentService::open(
                 root.path().to_path_buf(),
+                SessionStart::New,
                 ModelRegistry::builtin(),
                 lookup(&[]),
                 None,

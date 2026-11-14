@@ -45,8 +45,10 @@ composer, with a check on the current one; choose with the arrow keys and Enter,
 or press its number. `/model <alias>` switches at once, and Tab completes the
 alias. Switching is allowed between turns only, removes earlier
 thinking blocks from the history (their signatures only work with the model
-that produced them), and is saved with the conversation, so a restart resumes
-the same model. At startup the saved choice wins over `MODEL`, which wins over
+that produced them), and is saved with the conversation, so resuming it, or
+starting a new conversation after it, uses the same model. At startup the saved
+choice (of the resumed conversation, or of the most recently saved one for a new
+conversation) wins over `MODEL`, which wins over
 the registry default; when none of them has its API key set, Socium starts on
 the first registered model that does and says so.
 
@@ -154,8 +156,14 @@ are not yet supported.
   editing, verifying), and it points out repeated calls, a change of course
   after a failure, and long stretches of tool rounds without an update.
 - Press Esc or Ctrl+C during a task to cancel and wait for cleanup.
-- Restart in the same workspace to load saved conversation and tool results.
-  Interrupted operations with no saved result are marked unknown, never replayed.
+- Each start opens a new conversation. `-c` (`--continue`) continues the most
+  recently saved one in the workspace, and `-r` (`--resume`) lists the saved
+  ones, newest first, to choose from; `-r <ID>` opens one directly, by its full
+  ID or any unique prefix. On exit Socium prints the command that resumes the
+  conversation. `/clear` starts a new conversation and keeps the previous one
+  resumable. Resuming loads the conversation, tool results, and Activity;
+  interrupted operations with no saved result are marked unknown, never
+  replayed. Only one Socium runs in a workspace at a time.
 - `/compact`, automatic compaction, and budget trimming replace older turns
   with a summary. Thinking in the turns kept verbatim was produced against the
   replaced history, so it is no longer sent back; thinking produced after the

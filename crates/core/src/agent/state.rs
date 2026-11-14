@@ -21,7 +21,7 @@ pub fn workspace_state_path(root: &Path, relative: &str) -> io::Result<PathBuf> 
     Ok(path)
 }
 
-fn check_state_file(metadata: &fs::Metadata) -> io::Result<()> {
+pub(crate) fn check_state_file(metadata: &fs::Metadata) -> io::Result<()> {
     if !metadata.is_file() || metadata.len() > MAX_STATE_BYTES {
         return Err(Error::other(
             "State must be a regular file of at most 64 MiB",

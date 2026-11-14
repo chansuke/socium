@@ -10,7 +10,7 @@ use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 pub(crate) const ACTIVITY_LOG_FILE_NAME: &str = "activity.jsonl";
-const ROTATED_FILE_NAME: &str = "activity.1.jsonl";
+pub(crate) const ROTATED_FILE_NAME: &str = "activity.1.jsonl";
 const LOG_KIND: &str = "socium_activity_log";
 const LOG_VERSION: u32 = 1;
 const ROTATE_BYTES: u64 = 16 * 1024 * 1024;

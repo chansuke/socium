@@ -247,7 +247,7 @@ fn competing_writer_corruption_and_unknown_schema_do_not_erase_history() {
     first.restore_state().unwrap();
     let mut second = service(root.path(), vec![]);
     assert!(second.restore_state().is_err());
-    let path = first.conversation_path.clone();
+    let path = first.conversation_path();
     drop(first);
     drop(second);
     for bytes in [
@@ -271,7 +271,7 @@ async fn failed_initial_checkpoint_prevents_tools() {
             json!({"patch":"*** Begin Patch\n*** Add File: never\n+bad\n*** End Patch"}),
         )]))],
     );
-    std::fs::create_dir_all(&agent.conversation_path).unwrap();
+    std::fs::create_dir_all(agent.conversation_path()).unwrap();
     assert!(agent.submit("Do work".into()).await.is_err());
     assert!(!root.path().join("never").exists());
 }
@@ -418,7 +418,7 @@ async fn failed_result_save_recovers_unknown_without_repeating_edit() {
             json!({"patch":"*** Begin Patch\n*** Add File: created\n+done\n*** End Patch"}),
         )]))],
     );
-    let state = agent.conversation_path.clone();
+    let state = agent.conversation_path();
     let saved = state.with_extension("saved");
     let result=agent.submit_with_progress("Create a file".into(),|e|{
         if matches!(e,AgentProgress::ToolCallFinished{ref name,is_error:false} if name=="apply_patch") {
@@ -580,7 +580,7 @@ async fn activity_records_rounds_tools_and_turn_outcome_in_order() {
 }
 
 #[tokio::test]
-async fn activity_is_saved_replayed_after_restart_and_rotated_by_clear() {
+async fn activity_is_saved_replayed_after_restart_and_left_behind_by_clear() {
     let root = tempfile::tempdir().unwrap();
     let mut agent = service(
         root.path(),
@@ -606,7 +606,169 @@ async fn activity_is_saved_replayed_after_restart_and_rotated_by_clear() {
             .any(|e| matches!(e.kind, ActivityKind::Warning { .. }))
     );
 
+    let previous = restarted.session_id().to_string();
     restarted.clear().unwrap();
+    assert_ne!(restarted.session_id(), previous);
     assert!(restarted.recent_activity().is_empty());
-    assert!(root.path().join(".socium/activity.1.jsonl").is_file());
+    restarted.session_id = previous;
+    assert_eq!(restarted.recent_activity(), live);
+}
+
+fn open_session(root: &std::path::Path, start: SessionStart) -> Result<AgentService, AgentError> {
+    AgentService::open(
+        root.into(),
+        start,
+        crate::models::ModelRegistry::builtin(),
+        Arc::new(|key| (key == "ANTHROPIC_API_KEY").then(|| "test".to_string())),
+        None,
+        reqwest::Client::new(),
+    )
+}
+
+/// A saved session holding one user prompt.
+fn saved_session(root: &std::path::Path, prompt: &str) -> String {
+    let mut agent = open_session(root, SessionStart::New).unwrap();
+    agent.messages = vec![Message::user_text(prompt.into())];
+    agent.persist_state().unwrap();
+    agent.session_id().to_string()
+}
+
+fn prompts(agent: &AgentService) -> Vec<String> {
+    agent
+        .transcript_entries()
+        .into_iter()
+        .map(|entry| entry.text)
+        .collect()
+}
+
+#[test]
+fn a_plain_start_opens_a_new_session_and_saves_nothing_until_it_has_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let first = saved_session(root.path(), "first");
+
+    let agent = open_session(root.path(), SessionStart::New).unwrap();
+    assert_ne!(agent.session_id(), first);
+    assert!(!agent.has_saved_messages());
+    assert!(prompts(&agent).is_empty());
+    assert!(agent.startup_warnings().is_empty());
+    let id = agent.session_id().to_string();
+    drop(agent);
+    assert!(!root.path().join(".socium/sessions").join(&id).exists());
+    assert_eq!(
+        list_sessions(root.path())
+            .unwrap()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        [first.as_str()]
+    );
+}
+
+#[test]
+fn continue_opens_the_most_recently_saved_session() {
+    let root = tempfile::tempdir().unwrap();
+    saved_session(root.path(), "older");
+    std::thread::sleep(Duration::from_millis(20));
+    let newer = saved_session(root.path(), "newer");
+
+    let agent = open_session(root.path(), SessionStart::Continue).unwrap();
+    assert_eq!(agent.session_id(), newer);
+    assert_eq!(prompts(&agent), ["newer"]);
+    assert!(agent.startup_warnings().is_empty());
+}
+
+#[test]
+fn continue_refuses_an_unreadable_latest_session_instead_of_skipping_it() {
+    let root = tempfile::tempdir().unwrap();
+    saved_session(root.path(), "older");
+    std::thread::sleep(Duration::from_millis(20));
+    let broken = saved_session(root.path(), "newer");
+    let path = root
+        .path()
+        .join(".socium/sessions")
+        .join(&broken)
+        .join("conversation.json");
+    std::fs::write(&path, "{broken").unwrap();
+
+    let err = open_session(root.path(), SessionStart::Continue)
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("Invalid JSON"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+}
+
+#[test]
+fn continue_without_a_saved_session_starts_a_new_one_and_says_so() {
+    let root = tempfile::tempdir().unwrap();
+    let agent = open_session(root.path(), SessionStart::Continue).unwrap();
+    assert!(!agent.has_saved_messages());
+    assert!(agent.startup_warnings()[0].contains("No saved session to continue"));
+}
+
+#[test]
+fn resume_opens_the_named_session_and_refuses_an_unknown_one() {
+    let root = tempfile::tempdir().unwrap();
+    let older = saved_session(root.path(), "older");
+    std::thread::sleep(Duration::from_millis(20));
+    saved_session(root.path(), "newer");
+
+    let agent = open_session(root.path(), SessionStart::Resume(older.clone())).unwrap();
+    assert_eq!(agent.session_id(), older);
+    assert_eq!(prompts(&agent), ["older"]);
+    drop(agent);
+
+    let err = open_session(root.path(), SessionStart::Resume("1999".into()))
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("No saved session '1999'"), "{err}");
+}
+
+#[test]
+fn the_pre_session_conversation_is_moved_and_continued() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy = crate::workspace_state_path(root.path(), "conversation.json").unwrap();
+    std::fs::write(
+        &legacy,
+        r#"{"schema_version":1,"messages":[{"role":"user","content":"from before"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(root.path().join(".socium/activity.jsonl"), "").unwrap();
+
+    let agent = open_session(root.path(), SessionStart::Continue).unwrap();
+    assert_eq!(prompts(&agent), ["from before"]);
+    assert!(!legacy.exists());
+    assert!(!root.path().join(".socium/activity.jsonl").exists());
+    assert!(
+        root.path()
+            .join(".socium/sessions")
+            .join(agent.session_id())
+            .join("activity.jsonl")
+            .is_file()
+    );
+}
+
+#[test]
+fn clear_keeps_the_previous_session_resumable() {
+    let root = tempfile::tempdir().unwrap();
+    let first = saved_session(root.path(), "keep me");
+    let mut agent = open_session(root.path(), SessionStart::Resume(first.clone())).unwrap();
+
+    agent.clear().unwrap();
+    assert_ne!(agent.session_id(), first);
+    assert!(prompts(&agent).is_empty());
+    drop(agent);
+
+    let resumed = open_session(root.path(), SessionStart::Resume(first)).unwrap();
+    assert_eq!(prompts(&resumed), ["keep me"]);
+}
+
+#[test]
+fn a_new_session_starts_on_the_model_chosen_in_the_last_one() {
+    let root = tempfile::tempdir().unwrap();
+    let mut agent = open_session(root.path(), SessionStart::New).unwrap();
+    agent.switch_model("sonnet").unwrap();
+    drop(agent);
+
+    let agent = open_session(root.path(), SessionStart::New).unwrap();
+    assert_eq!(agent.active_model().alias, "sonnet");
 }

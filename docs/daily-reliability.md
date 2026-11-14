@@ -80,10 +80,14 @@ These permissions do not encrypt data or protect it from the same OS user.
 Pre-existing linked state now fails startup: back it up, inspect it, and copy
 validated contents into ordinary files/directories before resuming.
 
-One Socium process owns a workspace session through an OS file lock held for the
+One Socium process owns a workspace through an OS file lock held for the
 service lifetime. The lock file can remain after exit: the OS lock, not file
-existence, establishes ownership. Conversation, summary and execution events share
-one versioned snapshot. Writes use a same-directory temporary file, file sync,
+existence, establishes ownership. Each conversation is a session kept in
+`.socium/sessions/<ID>/`, where the ID is its UTC start time
+(`YYYYMMDD-HHMMSS-xxxx`). Its conversation, summary and execution events share
+one versioned snapshot, `conversation.json`, which is first written when the
+conversation has something to save. Edit history, input history and command
+output artifacts belong to the workspace, not to a session. Writes use a same-directory temporary file, file sync,
 rename and (on Unix) parent-directory sync. State is bounded at 64 MiB; reaching
 the limit fails explicitly instead of silently dropping history.
 
@@ -91,16 +95,26 @@ The user request, assistant tool intent, authorized execution boundary and each
 result are saved independently of turn success. Events identify the turn by its
 raw user-message offset, the round, tool-call ID, and monotonic event sequence.
 These offsets remain stable because raw history is not truncated at the front.
-`/clear` begins a fresh conversation and clears its event sequence. Summaries only
+`/clear` begins a new session with its own event sequence and leaves the previous
+session's files unchanged. Summaries only
 change the model's context projection; full tool results remain in the transcript.
 
-The Activity pane's record is appended to `.socium/activity.jsonl`, separate from
+The Activity pane's record is appended to the session's `activity.jsonl`, separate from
 the snapshot, and the most recent 20 turns are shown again at startup. It holds
 reasoning summaries, tool inputs, one-line result summaries, timings and token
 use, but never full tool output or raw provider events. A failed append shows a
 warning and does not fail the turn; a line cut off by a crash is skipped on
-replay. At 16 MiB, and on `/clear`, the file moves to `activity.1.jsonl`,
-replacing the previous one.
+replay. At 16 MiB the file moves to `activity.1.jsonl`, replacing the previous
+one.
+
+State saved before sessions existed, `.socium/conversation.json` with
+`activity.jsonl` and `activity.1.jsonl`, is moved into a session named after the
+conversation's modification time on the next start, or by `-r` listing the
+sessions. The files are renamed, never copied or rewritten, and the conversation
+moves last, so a move cut short finishes on the next start. When a file of the
+same name is already in that session, startup stops and names both files rather
+than overwrite either; move one aside and start again. To go back to an older
+Socium, move the three files back to `.socium/`.
 
 Bubblewrap ties subprocess lifetime to Socium and isolates descendants in a PID
 namespace. A crash after intent but before a saved result still produces an **unknown outcome** on
@@ -122,9 +136,10 @@ errors. They do not start an empty conversation and overwrite the evidence.
 
 1. Stop all Socium processes for that workspace.
 2. Copy `.socium` to a backup outside the working tree before changing anything.
-3. Inspect `conversation.json`, `edit_history.json`, leftover `.socium-*.tmp` files
-   and `outputs/`. A temporary snapshot may be older or newer; validate it before
-   selecting it for manual recovery. Never infer a tool succeeded solely from intent.
+3. Inspect `sessions/*/conversation.json`, `edit_history.json`, leftover
+   `.socium-*.tmp` files and `outputs/`. A temporary snapshot may be older or
+   newer; validate it before selecting it for manual recovery. Never infer a tool
+   succeeded solely from intent.
 4. Restore a validated complete snapshot from a backup, or move the saved state
    aside to intentionally start fresh. Do not delete a lock file to bypass a live
    writer. For incomplete edits, compare each recorded `before`/`after` to disk and

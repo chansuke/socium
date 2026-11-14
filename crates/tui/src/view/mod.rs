@@ -806,7 +806,7 @@ mod tests {
 
         assert!(rows[composer - 5].contains(" commands "));
         assert!(rows[composer - 4].contains("  /commands  List available slash commands"));
-        assert!(rows[composer - 3].contains("› /clear     Clear the current conversation"));
+        assert!(rows[composer - 3].contains("› /clear     Start a new conversation"));
         assert!(rows[composer - 2].contains("  /compact"));
         assert!(rows[composer - 1].starts_with('└'));
     }

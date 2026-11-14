@@ -61,6 +61,12 @@ impl App {
         let model_label = model_label(&agent.active_model());
         let workspace_label = format_workspace_path(env::current_dir().ok());
         let mut messages = transcript_entries_to_chat_entries(agent.transcript_entries());
+        if agent.has_saved_messages() {
+            messages.push(ChatEntry {
+                speaker: Speaker::System,
+                body: format!("Resumed session {}", agent.session_id()),
+            });
+        }
         messages.extend(agent.startup_warnings().into_iter().map(|body| ChatEntry {
             speaker: Speaker::System,
             body,
@@ -392,11 +398,18 @@ impl App {
                 self.status = Some("Commands".to_string());
             }
             SlashAction::Clear => {
-                self.agent_mut()?.clear()?;
+                let agent = self.agent_mut()?;
+                let previous = agent
+                    .has_saved_messages()
+                    .then(|| agent.session_id().to_string());
+                agent.clear()?;
                 self.messages.clear();
                 self.activity.clear();
                 self.last_latency_ms = None;
-                self.status = Some("Conversation cleared".to_string());
+                self.status = Some(match previous {
+                    Some(id) => format!("Conversation cleared; resume it with -r {id}"),
+                    None => "Conversation cleared".to_string(),
+                });
                 self.refresh_context_metrics();
             }
             SlashAction::Model => match argument {
@@ -425,7 +438,18 @@ impl App {
             .ok_or_else(|| eyre!("agent is unavailable while a request is running"))
     }
 
-    pub(crate) async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+    /// Runs until the user quits, and returns the ID that resumes the
+    /// conversation when it has been saved.
+    pub(crate) async fn run(mut self, mut terminal: DefaultTerminal) -> Result<Option<String>> {
+        self.run_loop(&mut terminal).await?;
+        Ok(self
+            .agent
+            .as_ref()
+            .filter(|agent| agent.has_saved_messages())
+            .map(|agent| agent.session_id().to_string()))
+    }
+
+    async fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         loop {
             self.poll_pending_task();
             terminal.draw(|frame| self.draw(frame))?;

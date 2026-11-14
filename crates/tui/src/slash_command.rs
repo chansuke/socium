@@ -34,7 +34,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "clear",
-        description: "Clear the current conversation",
+        description: "Start a new conversation; the current one stays resumable",
         action: SlashAction::Clear,
         takes_argument: false,
     },
