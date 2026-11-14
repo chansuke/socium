@@ -126,10 +126,20 @@ are not yet supported.
 ## Everyday work
 
 - Read and search workspace files, preview patches, and undo recorded edits.
+  Patches keep each untouched line's LF or CRLF ending and refuse files with a
+  stray carriage return; moves and undo keep Unix permission bits such as the
+  executable bit (not owners, ACLs, or extended attributes), and undo refuses
+  a file whose mode was changed since; FIFOs and other special files are
+  refused rather than read. Searches
+  that stop at their match limit say the result is incomplete.
 - Review sandboxed commands and commit diffs in the TUI; press `y` to allow once
-  or `n` to deny. Commands can write workspace files, but cannot access the host
-  home or network. Existing Git metadata is read-only except during `git_commit`;
-  Socium's state is hidden from all child processes.
+  or `n` to deny. While a request waits, the whole request, diff included,
+  replaces the conversation: PgUp/PgDn (or Space/b) page through it and
+  Home/End jump to its ends; these keys never answer. Commands can write
+  workspace files, but cannot access the host home or network. Existing Git
+  metadata is read-only except during `git_commit`, which commits a symlink
+  named in `paths` as a link, never the file it points to; Socium's state is
+  hidden from all child processes.
 - Type `/` to show command suggestions: Up/Down select, Tab completes, Enter
   runs, Esc closes. `/commands` lists every command; `/help` adds key
   bindings. Type `exit` or `/exit` to quit.
@@ -146,6 +156,13 @@ are not yet supported.
 - Press Esc or Ctrl+C during a task to cancel and wait for cleanup.
 - Restart in the same workspace to load saved conversation and tool results.
   Interrupted operations with no saved result are marked unknown, never replayed.
+- `/compact`, automatic compaction, and budget trimming replace older turns
+  with a summary. Thinking in the turns kept verbatim was produced against the
+  replaced history, so it is no longer sent back; thinking produced after the
+  summary is. The full history stays in `.socium/` either way, and summary
+  updates keep room for the newest messages.
+- Conversation, Activity, and code blocks wrap by terminal cells, so CJK text,
+  combining characters, and emoji sequences are not cut off.
 
 Add `.socium/` to your project's `.gitignore`. See the
 [Linux sandbox guide](docs/linux-sandbox.md) for the exact filesystem policy,
