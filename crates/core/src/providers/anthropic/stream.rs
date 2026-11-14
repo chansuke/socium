@@ -80,6 +80,9 @@ enum StreamContentBlockStart {
         #[serde(default)]
         thinking: String,
     },
+    /// Arrives whole in `content_block_start`; no deltas follow.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -118,6 +121,7 @@ pub(super) struct StreamingMessageBuilder {
 enum StreamingContentBlock {
     Text(TextBlockState),
     Thinking(ThinkingBlockState),
+    RedactedThinking(String),
     ToolUse(ToolUseBlockState),
 }
 
@@ -298,6 +302,9 @@ impl StreamingMessageBuilder {
                     thinking: state.thinking,
                     signature: state.signature,
                 },
+                StreamingContentBlock::RedactedThinking(data) => {
+                    ContentBlock::RedactedThinking { data }
+                }
                 StreamingContentBlock::ToolUse(state) => {
                     let input = if state.input_json.trim().is_empty() {
                         state.initial_input
@@ -326,7 +333,8 @@ impl StreamingMessageBuilder {
             index,
             kind: match &content_block {
                 StreamContentBlockStart::Text { .. } => BlockKind::Text,
-                StreamContentBlockStart::Thinking { .. } => BlockKind::Thinking,
+                StreamContentBlockStart::Thinking { .. }
+                | StreamContentBlockStart::RedactedThinking { .. } => BlockKind::Thinking,
                 StreamContentBlockStart::ToolUse { id, name, .. } => BlockKind::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -364,6 +372,11 @@ impl StreamingMessageBuilder {
                     thinking,
                     signature: String::new(),
                 })
+            }
+            // The encrypted data is kept for the next request and never
+            // emitted as thinking text.
+            StreamContentBlockStart::RedactedThinking { data } => {
+                StreamingContentBlock::RedactedThinking(data)
             }
             StreamContentBlockStart::ToolUse { id, name, input } => {
                 StreamingContentBlock::ToolUse(ToolUseBlockState {
@@ -436,6 +449,22 @@ fn ensure_block_capacity(blocks: &mut Vec<Option<StreamingContentBlock>>, index:
     if blocks.len() <= index {
         blocks.resize_with(index + 1, || None);
     }
+}
+
+/// The raw event as the Activity pane may show it. The encrypted `data` of
+/// a redacted thinking block is replaced by its size; the parser still gets
+/// the original event.
+pub(super) fn displayable_raw_event(raw_event: &str) -> String {
+    let Ok(mut event) = serde_json::from_str::<Value>(raw_event) else {
+        return raw_event.to_string();
+    };
+    let block = &mut event["content_block"];
+    if block["type"] != "redacted_thinking" {
+        return raw_event.to_string();
+    }
+    let size = block["data"].as_str().map_or(0, str::len);
+    block["data"] = Value::String(format!("[encrypted, {size} bytes]"));
+    event.to_string()
 }
 
 fn append_text_to_state(state: &mut TextBlockState, text: &str) -> String {
@@ -613,5 +642,43 @@ mod tests {
         assert!(
             matches!(&b.finish().unwrap().content[0],ContentBlock::Thinking{signature,..} if signature=="sig")
         );
+    }
+
+    #[test]
+    fn raw_events_shown_in_activity_hide_redacted_data() {
+        let raw = json!({"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"c2VjcmV0"}}).to_string();
+        let shown = displayable_raw_event(&raw);
+        assert!(!shown.contains("c2VjcmV0"), "{shown}");
+        assert!(shown.contains("[encrypted, 8 bytes]"));
+        let text = json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}).to_string();
+        assert_eq!(displayable_raw_event(&text), text);
+    }
+
+    #[test]
+    fn redacted_thinking_is_kept_opaque_beside_a_tool_call_and_never_streamed() {
+        let data = "EmwKAhgBEgy3va3pzix/LafPsn4aDFIT2Xlxh0L5L8rLVyIwxtE3rAFBa8cr3qpP";
+        let mut b = start();
+        let mut deltas = Vec::new();
+        for event in [
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":data}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"read_file","input":{"path":"a.rs"}}}),
+            json!({"type":"content_block_stop","index":1}),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+            json!({"type":"message_stop"}),
+        ] {
+            b.apply_event(&event.to_string(), &mut |d| deltas.push(d))
+                .unwrap();
+        }
+        assert!(!deltas.iter().any(|d| matches!(
+            d,
+            ProviderEvent::ThinkingDelta { .. } | ProviderEvent::TextDelta { .. }
+        )));
+        let content = b.finish().unwrap().content;
+        assert_eq!(
+            content[0],
+            ContentBlock::RedactedThinking { data: data.into() }
+        );
+        assert!(matches!(&content[1], ContentBlock::ToolUse { id, .. } if id == "t1"));
     }
 }

@@ -51,6 +51,10 @@ pub(crate) enum ContentBlock {
     Text { text: String },
     #[serde(rename = "thinking")]
     Thinking { thinking: String, signature: String },
+    /// Safety-redacted reasoning. `data` is opaque and encrypted; it is kept
+    /// byte for byte and never shown.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -95,9 +99,21 @@ impl Message {
     }
 }
 
-/// Removes thinking blocks, whose signatures only the model that produced
-/// them accepts. Returns how many were removed. An assistant message left
-/// empty keeps a placeholder so the history stays well-formed.
+impl ContentBlock {
+    /// Thinking in either form, whose signature or data is bound to the
+    /// model and the prefix it was produced after.
+    pub(crate) fn is_thinking(&self) -> bool {
+        matches!(
+            self,
+            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+        )
+    }
+}
+
+/// Removes thinking and redacted thinking blocks, whose signatures only the
+/// model that produced them accepts, after the prefix they were produced
+/// against. Returns how many were removed. An assistant message left empty
+/// keeps a placeholder so the history stays well-formed.
 pub(crate) fn strip_thinking(messages: &mut [Message]) -> usize {
     let mut removed = 0;
     for message in messages {
@@ -105,7 +121,7 @@ pub(crate) fn strip_thinking(messages: &mut [Message]) -> usize {
             continue;
         };
         let before = blocks.len();
-        blocks.retain(|block| !matches!(block, ContentBlock::Thinking { .. }));
+        blocks.retain(|block| !block.is_thinking());
         removed += before - blocks.len();
         if blocks.is_empty() && before > 0 {
             blocks.push(ContentBlock::Text {
@@ -163,10 +179,15 @@ mod tests {
                     text: "answer".into(),
                 },
             ]),
-            Message::assistant_blocks(vec![thinking()]),
+            Message::assistant_blocks(vec![
+                thinking(),
+                ContentBlock::RedactedThinking {
+                    data: "opaque".into(),
+                },
+            ]),
         ];
 
-        assert_eq!(strip_thinking(&mut messages), 2);
+        assert_eq!(strip_thinking(&mut messages), 3);
         let blocks = |message: &Message| match &message.content {
             MessageContent::Blocks(blocks) => blocks.clone(),
             MessageContent::Text(_) => panic!("expected blocks"),
@@ -184,5 +205,17 @@ mod tests {
             }]
         );
         assert_eq!(strip_thinking(&mut messages), 0);
+    }
+
+    #[test]
+    fn redacted_thinking_round_trips_its_opaque_data_unchanged() {
+        let data = "EmwKAhgBEgy3va3pzix/LafPsn4aDFIT2Xlxh0L5L8rLVyIwxtE3rAFBa8cr3qpP";
+        let wire = serde_json::json!({"type": "redacted_thinking", "data": data});
+
+        let block: ContentBlock = serde_json::from_value(wire.clone()).unwrap();
+
+        assert_eq!(block, ContentBlock::RedactedThinking { data: data.into() });
+        assert!(block.is_thinking());
+        assert_eq!(serde_json::to_value(&block).unwrap(), wire);
     }
 }

@@ -214,7 +214,9 @@ fn append_items(items: &mut Vec<Value>, message: &Message) {
                         "name": name,
                         "arguments": input.to_string(),
                     })),
-                    ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => {}
+                    ContentBlock::Text { .. }
+                    | ContentBlock::RedactedThinking { .. }
+                    | ContentBlock::ToolResult { .. } => {}
                 }
             }
         }
@@ -239,7 +241,9 @@ fn append_items(items: &mut Vec<Value>, message: &Message) {
                         }));
                     }
                     ContentBlock::Text { text: part } => text.push(part.as_str()),
-                    ContentBlock::Thinking { .. } | ContentBlock::ToolUse { .. } => {}
+                    ContentBlock::Thinking { .. }
+                    | ContentBlock::RedactedThinking { .. }
+                    | ContentBlock::ToolUse { .. } => {}
                 }
             }
             if !text.is_empty() {

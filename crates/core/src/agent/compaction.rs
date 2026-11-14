@@ -146,7 +146,9 @@ fn render_blocks_for_transcript(blocks: &[ContentBlock]) -> String {
                     truncate_for_transcript(content, COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS);
                 parts.push(format!("[{marker} {content_preview}]"));
             }
-            ContentBlock::Text { .. } | ContentBlock::Thinking { .. } => {}
+            ContentBlock::Text { .. }
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::RedactedThinking { .. } => {}
         }
     }
 

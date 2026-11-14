@@ -134,7 +134,7 @@ impl Provider for AnthropicProvider {
         while let Some(chunk) = response.chunk().await? {
             for event in parser.push(&chunk)? {
                 forward(ProviderEvent::Raw {
-                    json: event.clone(),
+                    json: stream::displayable_raw_event(&event),
                 });
                 builder.apply_event(&event, &mut forward)?;
             }
@@ -142,7 +142,7 @@ impl Provider for AnthropicProvider {
 
         if let Some(event) = parser.finish()? {
             forward(ProviderEvent::Raw {
-                json: event.clone(),
+                json: stream::displayable_raw_event(&event),
             });
             builder.apply_event(&event, &mut forward)?;
         }
