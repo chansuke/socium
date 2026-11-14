@@ -27,11 +27,9 @@ impl App {
                 input,
             } => {
                 self.pop_thinking_message();
-                self.push_message(
-                    Speaker::System,
-                    format!("Approve sandboxed command: {tool}\n{input}"),
-                );
-                self.open_approval(request_id, tool, summary);
+                let details = format!("Approve sandboxed command: {tool}\n{input}");
+                self.push_message(Speaker::System, details.clone());
+                self.open_approval(request_id, tool, summary, details);
             }
             AgentProgress::ApprovalResolved { request_id, .. } => {
                 self.close_unanswered_approval(request_id);

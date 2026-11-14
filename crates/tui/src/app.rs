@@ -271,6 +271,10 @@ impl App {
     /// the input instead of cancelling. Cancel (Ctrl+C) and approval (y / n)
     /// still reach the task handling.
     fn handle_activity_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        // An open approval owns the screen and the keys until it is answered.
+        if self.approval.is_some() {
+            return false;
+        }
         let control = modifiers.contains(KeyModifiers::CONTROL);
         if control && code == KeyCode::Char('a') {
             self.activity.toggle_focus();

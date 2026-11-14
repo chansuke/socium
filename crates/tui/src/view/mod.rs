@@ -97,10 +97,48 @@ fn approval_lines(prompt: &ApprovalPrompt, width: u16) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " ↑↓ select · Enter confirm · Esc cancel task",
+        " ↑↓ select · Enter confirm · PgUp/PgDn/Home/End review · Esc cancel",
         Style::default().fg(MUTED),
     )));
     lines
+}
+
+/// The full approval request, scrolled from its first line. Spacing is kept
+/// as sent, so diff indentation survives, and nothing is cut off: long
+/// lines wrap by terminal cells.
+fn draw_approval_details(frame: &mut Frame, area: Rect, prompt: &ApprovalPrompt) {
+    let width = area.width.saturating_sub(2) as usize;
+    let rows = area.height.saturating_sub(2) as usize;
+    let lines = cells::wrap_preformatted(&prompt.details, width);
+    let max_scroll = lines.len().saturating_sub(rows);
+    let scroll = prompt.scroll.min(max_scroll);
+    prompt
+        .viewport
+        .set(crate::approval::DetailsViewport { rows, max_scroll });
+    let last = (scroll + rows).min(lines.len());
+    let more = if last < lines.len() {
+        " · more below"
+    } else {
+        ""
+    };
+    let title = format!(
+        " Review {} · lines {}-{last} of {}{more} ",
+        prompt.tool,
+        (scroll + 1).min(last),
+        lines.len()
+    );
+    let block = Block::bordered()
+        .title(cells::truncate_cells(&title, width))
+        .border_style(Style::default().fg(LILAC))
+        .style(Style::default().bg(BG));
+    let visible = lines
+        .into_iter()
+        .skip(scroll)
+        .take(rows)
+        .map(|row| Line::from(Span::styled(row, Style::default().fg(TEXT))))
+        .collect::<Vec<_>>();
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(visible).block(block), area);
 }
 
 /// The model picker's contents inside its border, laid out like Claude
@@ -195,8 +233,14 @@ impl App {
         let areas = layout(frame.area(), self.activity.fullscreen, composer_rows);
 
         self.draw_header(frame, areas.header);
-        self.draw_transcript(frame, areas.transcript);
-        self.draw_activity(frame, areas.activity);
+        if let Some(prompt) = &self.approval {
+            // The request under review replaces the transcript and Activity
+            // so that a long diff gets the whole body of the screen.
+            draw_approval_details(frame, areas.transcript.union(areas.activity), prompt);
+        } else {
+            self.draw_transcript(frame, areas.transcript);
+            self.draw_activity(frame, areas.activity);
+        }
         self.draw_composer(frame, areas.composer);
         self.draw_footer(frame, areas.footer);
         self.draw_slash_popup(frame, areas.composer);
@@ -559,24 +603,117 @@ impl App {
 mod tests {
     use crate::app::App;
     use ratatui::{Terminal, backend::TestBackend};
+    use unicode_width::UnicodeWidthStr;
 
     fn render(app: &App) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        render_at(app, 80, 30)
+    }
+
+    fn render_at(app: &App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
+        // A wide grapheme fills its cell and the next; read it once.
         (0..buffer.area.height)
             .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
+                let mut row = String::new();
+                let mut x = 0;
+                while x < buffer.area.width {
+                    let symbol = buffer[(x, y)].symbol();
+                    row.push_str(symbol);
+                    x += symbol.width().max(1) as u16;
+                }
+                row
+            })
+            .collect()
+    }
+
+    /// A commit review as the core sends it: status, then a long diff.
+    fn long_commit_review() -> String {
+        let mut diff = String::from(
+            "Approve sandboxed command: git_commit\nRepository state:\n# branch.head main\nRequested diff:\ndiff --git a/src/lib.rs b/src/lib.rs\n",
+        );
+        for line in 1..=120 {
+            diff.push_str(&format!("+\tfn step_{line}() {{ /* 変更 {line} */ }}\n"));
+        }
+        diff.push_str("-END OF DIFF");
+        diff
+    }
+
+    fn details_rows(rows: &[String]) -> Vec<String> {
+        let top = rows
+            .iter()
+            .position(|row| row.starts_with("┌ Review git_commit"))
+            .unwrap();
+        rows[top + 1..]
+            .iter()
+            .take_while(|row| row.starts_with('│'))
+            .map(|row| {
+                row.trim_start_matches('│')
+                    .trim_end_matches('│')
+                    .trim_end()
+                    .to_string()
             })
             .collect()
     }
 
     #[test]
+    fn a_long_diff_can_be_read_from_first_to_last_line_at_80x24() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = App::for_test();
+        app.open_approval(
+            3,
+            "git_commit".into(),
+            "fix parser".into(),
+            long_commit_review(),
+        );
+
+        let rows = render_at(&app, 80, 24);
+        assert_eq!(rows.len(), 24);
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with("┌ Approve git_commit "))
+        );
+        let first = details_rows(&rows);
+        assert!(first.len() >= 10, "{rows:#?}");
+        assert_eq!(first[0], "Approve sandboxed command: git_commit");
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("lines 1-") && row.contains("of 126"))
+        );
+
+        // Page through the whole request; every diff line appears once.
+        let mut seen = first.clone();
+        for _ in 0..40 {
+            app.handle_approval_key(KeyCode::PageDown);
+            let page = details_rows(&render_at(&app, 80, 24));
+            seen.extend(page);
+        }
+        for line in 1..=120 {
+            let expected = format!("+   fn step_{line}() {{ /* 変更 {line} */ }}");
+            assert!(seen.contains(&expected), "missing {expected}");
+        }
+        assert!(seen.iter().any(|row| row == "-END OF DIFF"));
+        assert!(app.approval.is_some(), "paging never answers");
+
+        app.handle_approval_key(KeyCode::Home);
+        assert_eq!(details_rows(&render_at(&app, 80, 24))[0], first[0]);
+        app.handle_approval_key(KeyCode::End);
+        assert_eq!(
+            details_rows(&render_at(&app, 80, 24)).last().unwrap(),
+            "-END OF DIFF"
+        );
+    }
+
+    #[test]
     fn approval_picker_replaces_the_composer_and_marks_the_choice() {
         let mut app = App::for_test();
-        app.open_approval(1, "run_command".into(), "cargo test".into());
+        app.open_approval(
+            1,
+            "run_command".into(),
+            "cargo test".into(),
+            "Approve sandboxed command: run_command".into(),
+        );
         let rows = render(&app);
         let top = rows
             .iter()
@@ -586,7 +723,7 @@ mod tests {
         assert!(rows[top + 1].starts_with("│ cargo test "));
         assert!(rows[top + 3].starts_with("│ ❯ 1. Allow once"));
         assert!(rows[top + 4].starts_with("│   2. Deny"));
-        assert!(rows[top + 6].contains("↑↓ select · Enter confirm · Esc cancel task"));
+        assert!(rows[top + 6].contains("↑↓ select · Enter confirm · PgUp/PgDn/Home/End review"));
         assert!(rows[top + 7].starts_with('└'));
         assert_eq!(top + 8, rows.len() - 1, "the footer stays on the last row");
         assert!(!rows.iter().any(|row| row.starts_with("> ")));
@@ -707,19 +844,6 @@ mod tests {
         // 78 cells wide; 38 wide chars (76 cells) plus the cursor cell fit.
         assert_eq!(x, 2 + 76);
         assert!(row.trim_end().ends_with('あ'));
-    }
-
-    fn render_at(app: &App, width: u16, height: u16) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        let buffer = terminal.backend().buffer();
-        (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect()
     }
 
     fn app_with_activity() -> App {
