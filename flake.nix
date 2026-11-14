@@ -77,7 +77,9 @@
               ./Cargo.toml
               ./Cargo.lock
               ./crates
-              ./models.toml.example # read by a models.rs test
+              # Example files that tests read with include_str!, such as
+              # models.toml.example and agent.md.example.
+              (lib.fileset.fileFilter (file: lib.hasSuffix ".example" file.name) ./.)
             ];
           };
           commonArgs = {
