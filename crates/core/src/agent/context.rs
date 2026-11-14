@@ -293,16 +293,15 @@ fn build_summary_state(
         // from a compaction survives; only the newly covered slice gets
         // the deterministic treatment.
         if summary.covered_messages < covered_messages {
-            let extension =
-                summarize_messages(&raw_messages[summary.covered_messages..covered_messages]);
-            let mut text = format!("{}\n{}", summary.text, extension);
-            if text.chars().count() > MAX_SUMMARY_CHARACTERS {
-                text = truncate_summary_text(&text, MAX_SUMMARY_CHARACTERS);
-            }
             return ConversationSummaryState {
                 summary: Some(ConversationSummary {
                     covered_messages,
-                    text,
+                    text: extend_summary_text(
+                        &summary.text,
+                        raw_messages,
+                        summary.covered_messages,
+                        covered_messages,
+                    ),
                     thinking_valid_from: Some(raw_messages.len()),
                 }),
             };
@@ -316,6 +315,56 @@ fn build_summary_state(
             thinking_valid_from: Some(raw_messages.len()),
         }),
     }
+}
+
+/// Appends a deterministic summary of `raw_messages[from..to]` to
+/// `previous`. The new slice always gets room: it carries the latest
+/// corrections, constraints, and open work. When both do not fit, the
+/// earlier summary gives up its middle and says where the full text is.
+pub(crate) fn extend_summary_text(
+    previous: &str,
+    raw_messages: &[Message],
+    from: usize,
+    to: usize,
+) -> String {
+    let header = format!("Messages {from}-{}:", to.saturating_sub(1));
+    let extension_budget = MAX_SUMMARY_CHARACTERS * 3 / 4 - header.chars().count() - 1;
+    let extension = format!(
+        "{header}\n{}",
+        summarize_messages_within(&raw_messages[from..to], extension_budget)
+    );
+    let combined = format!("{previous}\n{extension}");
+    if combined.chars().count() <= MAX_SUMMARY_CHARACTERS {
+        return combined;
+    }
+    let previous_budget = MAX_SUMMARY_CHARACTERS - extension.chars().count() - 1;
+    let marker = format!(
+        "[earlier summary shortened; raw messages 0-{} keep the full text]",
+        from.saturating_sub(1)
+    );
+    format!(
+        "{}\n{extension}",
+        elide_middle(previous, previous_budget, &marker)
+    )
+}
+
+/// Keeps the start (the original request) and the end (the latest state)
+/// of `text` within `max_chars`, replacing the middle with `marker`.
+fn elide_middle(text: &str, max_chars: usize, marker: &str) -> String {
+    let length = text.chars().count();
+    if length <= max_chars {
+        return text.to_string();
+    }
+    let marker_length = marker.chars().count() + 2;
+    if max_chars <= marker_length {
+        return truncate_summary_text(text, max_chars);
+    }
+    let keep = max_chars - marker_length;
+    let head = keep / 2;
+    let tail = keep - head;
+    let start = text.chars().take(head).collect::<String>();
+    let end = text.chars().skip(length - tail).collect::<String>();
+    format!("{start}\n{marker}\n{end}")
 }
 
 fn summary_message(summary: &ConversationSummary) -> Message {
@@ -387,6 +436,12 @@ fn chars_per_token_for_model(model: &str) -> f32 {
 }
 
 pub(crate) fn summarize_messages(messages: &[Message]) -> String {
+    summarize_messages_within(messages, MAX_SUMMARY_CHARACTERS)
+}
+
+/// One line per message, dropping the oldest lines first to fit
+/// `max_chars`.
+fn summarize_messages_within(messages: &[Message], max_chars: usize) -> String {
     let mut lines = messages
         .iter()
         .filter_map(summarize_message_line)
@@ -396,30 +451,25 @@ pub(crate) fn summarize_messages(messages: &[Message]) -> String {
         return "Earlier context contained no retained natural-language content.".to_string();
     }
 
-    if lines.len() > MAX_SUMMARY_LINES {
-        let hidden = lines.len() - MAX_SUMMARY_LINES;
-        lines.drain(0..hidden);
-        lines.insert(
-            0,
-            format!("- {} earlier exchanges omitted for brevity.", hidden),
-        );
+    let mut hidden = lines.len().saturating_sub(MAX_SUMMARY_LINES);
+    lines.drain(..hidden);
+    let render = |hidden: usize, lines: &[String]| {
+        let omission =
+            (hidden > 0).then(|| format!("- {hidden} earlier exchanges omitted for brevity."));
+        omission
+            .into_iter()
+            .chain(lines.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let mut summary = render(hidden, &lines);
+    while summary.chars().count() > max_chars && lines.len() > 1 {
+        lines.remove(0);
+        hidden += 1;
+        summary = render(hidden, &lines);
     }
 
-    let mut summary = lines.join("\n");
-    while summary.chars().count() > MAX_SUMMARY_CHARACTERS && lines.len() > 1 {
-        let hidden_line = lines.get(1).cloned();
-        lines.remove(1);
-        if let Some(line) = hidden_line {
-            lines[0] = merge_omission_line(&lines[0], &line);
-        }
-        summary = lines.join("\n");
-    }
-
-    if summary.chars().count() > MAX_SUMMARY_CHARACTERS {
-        truncate_summary_text(&summary, MAX_SUMMARY_CHARACTERS)
-    } else {
-        summary
-    }
+    truncate_summary_text(&summary, max_chars)
 }
 
 fn summarize_message_line(message: &Message) -> Option<String> {
@@ -503,19 +553,6 @@ fn truncate_summary_text(text: &str, max_chars: usize) -> String {
         .collect::<String>();
     truncated.push('…');
     truncated
-}
-
-fn merge_omission_line(existing: &str, hidden_line: &str) -> String {
-    let existing_count = existing
-        .split_whitespace()
-        .nth(1)
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let additional = if hidden_line.is_empty() { 0 } else { 1 };
-    format!(
-        "- {} earlier exchanges omitted for brevity.",
-        existing_count + additional
-    )
 }
 
 #[cfg(test)]
@@ -764,6 +801,60 @@ mod tests {
             &[],
         );
         assert_eq!(sent_signatures(&next.messages), ["sig-after"]);
+    }
+
+    #[test]
+    fn extending_a_full_summary_keeps_the_new_corrections_within_the_limit() {
+        let mut messages = vec![Message::user_text("original request".into())];
+        let mut summary = ConversationSummaryState {
+            summary: Some(crate::agent::state::ConversationSummary {
+                covered_messages: 1,
+                text: format!(
+                    "1. User request: ship the parser{}\n5. Immediate next step: run tests",
+                    " detail".repeat(800)
+                ),
+                thinking_valid_from: Some(1),
+            }),
+        };
+        for round in 0..5 {
+            messages.push(Message::user_text(format!(
+                "Correction {round}: the limit is {round}00 MiB, not 64 MiB"
+            )));
+            messages.push(Message::assistant_blocks(vec![ContentBlock::Text {
+                text: format!("TODO {round}: update docs for the {round}00 MiB limit"),
+            }]));
+            let covered = messages.len();
+            summary = super::build_summary_state(&messages, &summary, covered);
+
+            let current = summary.summary.as_ref().unwrap();
+            assert_eq!(current.covered_messages, covered);
+            let length = current.text.chars().count();
+            assert!(
+                length <= super::MAX_SUMMARY_CHARACTERS,
+                "round {round}: {length}"
+            );
+            assert!(current.text.contains(&format!("Correction {round}")));
+            assert!(current.text.contains(&format!("TODO {round}")));
+            assert!(current.text.starts_with("1. User request: ship the parser"));
+            assert!(current.text.contains("raw messages 0-"));
+        }
+    }
+
+    #[test]
+    fn trimmed_summary_lines_count_every_omitted_line() {
+        let messages = (0..30)
+            .map(|index| Message::user_text(format!("{index} {}", "w".repeat(200))))
+            .collect::<Vec<_>>();
+
+        let summary = super::summarize_messages_within(&messages, 1_000);
+
+        let first = summary.lines().next().unwrap();
+        let kept = summary.lines().count() - 1;
+        assert_eq!(
+            first,
+            format!("- {} earlier exchanges omitted for brevity.", 30 - kept)
+        );
+        assert!(summary.ends_with(&format!("29 {}", "w".repeat(200))));
     }
 
     #[test]

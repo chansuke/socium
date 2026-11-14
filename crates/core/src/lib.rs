@@ -25,7 +25,7 @@ use crate::agent::compaction::{
     CompactionRequest, compaction_threshold_tokens, retention_boundary, summarize_with_llm,
 };
 use crate::agent::context::{
-    context_metrics_for_input, history_input_tokens, prepare_context_messages,
+    context_metrics_for_input, extend_summary_text, history_input_tokens, prepare_context_messages,
     resolve_context_budget, summarize_messages,
 };
 use crate::agent::state::{
@@ -952,7 +952,13 @@ impl AgentService {
             Ok(text) => (text, true),
             Err(err) => {
                 eprintln!("LLM compaction failed, falling back to deterministic summary: {err}");
-                (summarize_messages(&self.messages[..boundary]), false)
+                let text = match previous_summary.as_deref() {
+                    Some(previous) => {
+                        extend_summary_text(previous, &self.messages, covered, boundary)
+                    }
+                    None => summarize_messages(&self.messages[..boundary]),
+                };
+                (text, false)
             }
         };
 
