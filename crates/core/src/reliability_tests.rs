@@ -867,3 +867,83 @@ fn resume_applies_the_sessions_model_or_stays_and_drops_thinking() {
     assert!(saved.get("active_model").is_none());
     assert!(!saved.to_string().contains("\"thinking\""));
 }
+
+#[test]
+fn a_named_session_is_listed_and_resumed_by_its_name() {
+    let root = tempfile::tempdir().unwrap();
+    let mut agent = open_session(root.path(), SessionStart::New).unwrap();
+    agent.messages = vec![Message::user_text("named".into())];
+    agent.rename_session("  readme fix  ").unwrap();
+    assert_eq!(agent.session_name(), Some("readme fix"));
+    let id = agent.session_id().to_string();
+    for bad in ["", "   ", "two\nlines", &"x".repeat(81)] {
+        assert!(agent.rename_session(bad).is_err(), "{bad:?}");
+    }
+    assert_eq!(agent.session_name(), Some("readme fix"));
+    drop(agent);
+
+    assert_eq!(
+        list_sessions(root.path()).unwrap()[0].name.as_deref(),
+        Some("readme fix")
+    );
+    let agent = open_session(root.path(), SessionStart::Resume("readme fix".into())).unwrap();
+    assert_eq!(agent.session_id(), id);
+    assert_eq!(agent.session_name(), Some("readme fix"));
+    drop(agent);
+
+    // The same name on two sessions is ambiguous.
+    let mut other = open_session(root.path(), SessionStart::New).unwrap();
+    other.messages = vec![Message::user_text("other".into())];
+    other.rename_session("readme fix").unwrap();
+    drop(other);
+    let err = open_session(root.path(), SessionStart::Resume("readme fix".into()))
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("ambiguous"), "{err}");
+}
+
+#[test]
+fn clear_starts_a_session_without_the_previous_name() {
+    let root = tempfile::tempdir().unwrap();
+    let mut agent = open_session(root.path(), SessionStart::New).unwrap();
+    agent.rename_session("first").unwrap();
+    agent.clear().unwrap();
+    assert_eq!(agent.session_name(), None);
+}
+
+#[test]
+fn delete_removes_another_session_and_refuses_the_open_or_unknown_one() {
+    let root = tempfile::tempdir().unwrap();
+    let other = saved_session(root.path(), "delete me");
+    let open = saved_session(root.path(), "keep me");
+    let mut agent = open_session(root.path(), SessionStart::Resume(open.clone())).unwrap();
+
+    let err = agent.delete_session(&open).unwrap_err();
+    assert!(err.to_string().contains("cannot be deleted"), "{err}");
+    for unknown in ["20000101-000000-0000", "../..", "", "sessions"] {
+        assert_eq!(
+            agent.delete_session(unknown).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound,
+            "{unknown}"
+        );
+    }
+    agent.delete_session(&other).unwrap();
+    assert!(!root.path().join(".socium/sessions").join(&other).exists());
+    assert!(agent.list_sessions().unwrap().is_empty());
+    assert_eq!(prompts(&agent), ["keep me"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_refuses_a_session_path_that_is_a_symlink() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("keep"), "x").unwrap();
+    let mut agent = open_session(root.path(), SessionStart::New).unwrap();
+    std::fs::create_dir_all(root.path().join(".socium/sessions")).unwrap();
+    let link = root.path().join(".socium/sessions/20000101-000000-0000");
+    std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+
+    assert!(agent.delete_session("20000101-000000-0000").is_err());
+    assert!(outside.path().join("keep").exists());
+}

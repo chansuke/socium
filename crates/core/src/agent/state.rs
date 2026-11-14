@@ -144,6 +144,9 @@ pub(crate) struct ConversationState {
     /// Alias chosen with `/model`; `None` for the startup default.
     #[serde(default)]
     pub active_model: Option<String>,
+    /// Name given with `/rename`.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
@@ -172,6 +175,8 @@ pub(crate) struct ConversationStateRef<'a> {
     pub summary_state: &'a ConversationSummaryState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<&'a str>,
 }
 
 pub fn load_json_file<T>(path: &Path) -> io::Result<T>

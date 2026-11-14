@@ -25,12 +25,15 @@ const CHROME_ROWS: u16 = 4;
 pub(crate) struct SessionPicker {
     pub(crate) sessions: Vec<SessionSummary>,
     pub(crate) selected: usize,
+    /// `d` was pressed on the selection; `y` confirms the deletion.
+    pub(crate) confirming_delete: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PickerOutcome {
     Open,
     Chosen(String),
+    Delete(String),
     Cancelled,
 }
 
@@ -50,10 +53,23 @@ impl SessionPicker {
         Self {
             sessions,
             selected: 0,
+            confirming_delete: false,
         }
     }
 
+    /// Drops a deleted session from the list.
+    pub(crate) fn remove(&mut self, id: &str) {
+        self.sessions.retain(|session| session.id != id);
+        self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+    }
+
     pub(crate) fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> PickerOutcome {
+        if std::mem::take(&mut self.confirming_delete) {
+            return match (code, self.sessions.get(self.selected)) {
+                (KeyCode::Char('y'), Some(session)) => PickerOutcome::Delete(session.id.clone()),
+                _ => PickerOutcome::Open,
+            };
+        }
         let last = self.sessions.len().saturating_sub(1);
         match code {
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
@@ -71,6 +87,9 @@ impl SessionPicker {
                 return PickerOutcome::Cancelled;
             }
             KeyCode::Esc | KeyCode::Char('q') => return PickerOutcome::Cancelled,
+            KeyCode::Char('d') | KeyCode::Delete => {
+                self.confirming_delete = !self.sessions.is_empty();
+            }
             _ => {}
         }
         PickerOutcome::Open
@@ -116,12 +135,19 @@ impl SessionPicker {
                         " ".repeat(age_width - age.width()),
                         session.message_count
                     );
+                    let name = session
+                        .name
+                        .as_ref()
+                        .map(|name| format!("{name} · "))
+                        .unwrap_or_default();
+                    let name = truncate_text(&name, inner.saturating_sub(head.width()));
                     let preview = if session.preview.is_empty() {
                         format!("({})", session.id)
                     } else {
                         session.preview.clone()
                     };
-                    let preview = truncate_text(&preview, inner.saturating_sub(head.width()));
+                    let preview =
+                        truncate_text(&preview, inner.saturating_sub(head.width() + name.width()));
                     let (head_style, preview_style) = if !session.readable {
                         (Style::default().fg(SOFT), Style::default().fg(SOFT))
                     } else if selected {
@@ -134,15 +160,28 @@ impl SessionPicker {
                     };
                     Line::from(vec![
                         Span::styled(head, head_style),
+                        Span::styled(name, preview_style.add_modifier(Modifier::BOLD)),
                         Span::styled(preview, preview_style),
                     ])
                 }),
         );
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            truncate_text(" ↑↓ select · Enter resume · Esc close", inner),
-            Style::default().fg(MUTED),
-        )));
+        lines.push(match self.sessions.get(self.selected) {
+            Some(session) if self.confirming_delete => Line::from(Span::styled(
+                truncate_text(
+                    &format!(
+                        " Delete {} permanently? y to delete · any other key to keep",
+                        session.id
+                    ),
+                    inner,
+                ),
+                Style::default().fg(PINK).add_modifier(Modifier::BOLD),
+            )),
+            _ => Line::from(Span::styled(
+                truncate_text(" ↑↓ select · Enter resume · d delete · Esc close", inner),
+                Style::default().fg(MUTED),
+            )),
+        });
         lines
     }
 
@@ -211,7 +250,63 @@ impl App {
                 self.session_picker = None;
                 self.resume_session(&id)
             }
+            PickerOutcome::Delete(id) => {
+                self.delete_session(&id);
+                false
+            }
         }
+    }
+
+    fn delete_session(&mut self, id: &str) {
+        let Some(agent) = self.agent.as_mut() else {
+            self.status = Some("Request in progress".into());
+            return;
+        };
+        match agent.delete_session(id) {
+            Ok(()) => {
+                self.status = Some(format!("Deleted session {id}"));
+                if let Some(picker) = self.session_picker.as_mut() {
+                    picker.remove(id);
+                    if picker.sessions.is_empty() {
+                        self.session_picker = None;
+                        self.push_message(
+                            Speaker::System,
+                            "No other saved conversation in this workspace",
+                        );
+                    }
+                }
+            }
+            Err(err) => self.status = Some(format!("Cannot delete {id}: {err}")),
+        }
+    }
+
+    /// `/rename <name>` names the open session; without a name it shows
+    /// the current one.
+    pub(crate) fn rename_session(&mut self, name: Option<&str>) {
+        let Some(agent) = self.agent.as_mut() else {
+            self.status = Some("Request in progress".into());
+            return;
+        };
+        let message = match name {
+            None => match agent.session_name() {
+                Some(name) => format!(
+                    "Session {} is named '{name}'; /rename <name> changes it",
+                    agent.session_id()
+                ),
+                None => format!(
+                    "Session {} has no name; /rename <name> names it",
+                    agent.session_id()
+                ),
+            },
+            Some(name) => match agent.rename_session(name) {
+                Ok(()) => {
+                    let name = agent.session_name().unwrap_or_default();
+                    format!("Named this session '{name}'; resume it with -r '{name}'")
+                }
+                Err(err) => format!("Cannot rename: {err}"),
+            },
+        };
+        self.push_message(Speaker::System, message);
     }
 
     /// Returns `true` when the resumed history should be compacted before
@@ -256,6 +351,7 @@ mod tests {
             message_count: 3,
             preview: preview.into(),
             active_model: None,
+            name: None,
             readable: true,
         }
     }
@@ -360,5 +456,55 @@ mod tests {
         assert!(!app.handle_session_picker_key(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.session_picker.is_none());
         assert_eq!(app.status.as_deref(), Some("Session unchanged"));
+    }
+
+    #[test]
+    fn d_then_y_deletes_the_selection_and_any_other_key_keeps_it() {
+        let mut picker = picker(3);
+        let none = KeyModifiers::NONE;
+        picker.handle_key(KeyCode::Down, none);
+        assert_eq!(
+            picker.handle_key(KeyCode::Char('d'), none),
+            PickerOutcome::Open
+        );
+        let lines = text(&picker.lines(80, 10, now()));
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .contains("Delete 20261114-000001-0000 permanently?"),
+            "{lines:?}"
+        );
+        assert_eq!(
+            picker.handle_key(KeyCode::Char('n'), none),
+            PickerOutcome::Open
+        );
+        assert!(!picker.confirming_delete);
+        // Esc while confirming keeps the picker open.
+        picker.handle_key(KeyCode::Char('d'), none);
+        assert_eq!(picker.handle_key(KeyCode::Esc, none), PickerOutcome::Open);
+
+        picker.handle_key(KeyCode::Char('d'), none);
+        assert_eq!(
+            picker.handle_key(KeyCode::Char('y'), none),
+            PickerOutcome::Delete("20261114-000001-0000".into())
+        );
+        picker.remove("20261114-000001-0000");
+        assert_eq!(picker.sessions.len(), 2);
+        assert_eq!(picker.selected, 1);
+        picker.remove("20261114-000002-0000");
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn a_named_session_shows_its_name_before_the_preview() {
+        let mut named = session("20261114-000000-0000", 0, "first prompt");
+        named.name = Some("readme fix".into());
+        let picker = SessionPicker::new(vec![named]);
+        let lines = text(&picker.lines(80, 10, now()));
+        assert!(
+            lines[2].ends_with("3 msgs  readme fix · first prompt"),
+            "{lines:?}"
+        );
     }
 }

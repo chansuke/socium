@@ -449,6 +449,7 @@ impl App {
                 }
                 None => self.open_session_picker(),
             },
+            SlashAction::Rename => self.rename_session(argument.as_deref()),
             SlashAction::Compact => {
                 self.push_message(Speaker::System, "Compacting conversation context…");
                 self.status = Some("Compacting".to_string());

@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const SESSIONS_DIR_NAME: &str = "sessions";
 const MAX_PREVIEW_CHARACTERS: usize = 200;
+const MAX_NAME_CHARACTERS: usize = 80;
 
 /// Which conversation a start opens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +40,8 @@ pub struct SessionSummary {
     pub preview: String,
     /// The model alias chosen with `/model` in it.
     pub active_model: Option<String>,
+    /// Name given with `/rename`.
+    pub name: Option<String>,
     pub readable: bool,
 }
 
@@ -49,6 +52,8 @@ struct SessionHead {
     messages: Vec<Message>,
     #[serde(default)]
     active_model: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 /// `YYYYMMDD-HHMMSS-xxxx` in UTC; the suffix is taken from the sub-second
@@ -194,6 +199,7 @@ pub(crate) fn scan_sessions(root: &Path) -> io::Result<Vec<SessionSummary>> {
                 message_count: head.messages.len(),
                 preview: preview(&head.messages),
                 active_model: head.active_model,
+                name: head.name,
                 readable: true,
             },
             Err(err) => SessionSummary {
@@ -202,6 +208,7 @@ pub(crate) fn scan_sessions(root: &Path) -> io::Result<Vec<SessionSummary>> {
                 message_count: 0,
                 preview: format!("Cannot read: {err}"),
                 active_model: None,
+                name: None,
                 readable: false,
             },
         });
@@ -234,7 +241,8 @@ fn preview(messages: &[Message]) -> String {
         .collect()
 }
 
-/// The session `query` names, exactly or as the prefix of one ID.
+/// The session `query` names: its ID, else its name, else a prefix of its
+/// ID.
 pub(crate) fn resolve_session<'a>(
     sessions: &'a [SessionSummary],
     query: &str,
@@ -242,10 +250,18 @@ pub(crate) fn resolve_session<'a>(
     if let Some(exact) = sessions.iter().find(|session| session.id == query) {
         return Ok(exact);
     }
-    let matches = sessions
+    let named = sessions
         .iter()
-        .filter(|session| !query.is_empty() && session.id.starts_with(query))
+        .filter(|session| session.name.as_deref() == Some(query))
         .collect::<Vec<_>>();
+    let matches = if named.is_empty() {
+        sessions
+            .iter()
+            .filter(|session| !query.is_empty() && session.id.starts_with(query))
+            .collect::<Vec<_>>()
+    } else {
+        named
+    };
     match matches.as_slice() {
         [only] => Ok(only),
         [] => Err(Error::new(
@@ -263,6 +279,46 @@ pub(crate) fn resolve_session<'a>(
                     .join(", ")
             ),
         )),
+    }
+}
+
+/// A session name: trimmed, one line, at most `MAX_NAME_CHARACTERS`.
+pub(crate) fn validate_session_name(name: &str) -> io::Result<String> {
+    let name = name.trim();
+    let invalid = |reason: &str| Err(Error::new(ErrorKind::InvalidInput, reason.to_string()));
+    if name.is_empty() {
+        return invalid("A session name cannot be empty");
+    }
+    if name.chars().count() > MAX_NAME_CHARACTERS {
+        return invalid("A session name can have at most 80 characters");
+    }
+    if name.chars().any(char::is_control) {
+        return invalid("A session name must be one line without control characters");
+    }
+    Ok(name.to_string())
+}
+
+/// Removes the session directory with this exact ID. Call with the
+/// workspace lock held.
+pub(crate) fn delete_session_dir(root: &Path, id: &str) -> io::Result<()> {
+    let not_found = || {
+        Error::new(
+            ErrorKind::NotFound,
+            format!("No saved session '{id}' in this workspace"),
+        )
+    };
+    if !is_session_id(id) {
+        return Err(not_found());
+    }
+    let dir = sessions_dir(root).join(id);
+    match fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&dir),
+        Ok(_) => Err(Error::other(format!(
+            "'{}' is not a session directory; inspect it by hand",
+            dir.display()
+        ))),
+        Err(err) if err.kind() == ErrorKind::NotFound => Err(not_found()),
+        Err(err) => Err(err),
     }
 }
 

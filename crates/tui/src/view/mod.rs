@@ -751,6 +751,7 @@ mod tests {
                 message_count: 4,
                 preview: "fix the README".into(),
                 active_model: None,
+                name: Some("readme".into()),
                 readable: true,
             },
         ]));
@@ -759,7 +760,7 @@ mod tests {
             .iter()
             .position(|row| row.starts_with("┌ Resume · 20261114-000000-0000 "))
             .unwrap();
-        assert!(rows[top + 3].contains("❯ just now     4 msgs  fix the README"));
+        assert!(rows[top + 3].contains("❯ just now     4 msgs  readme · fix the README"));
         assert!(!rows.iter().any(|row| row.contains("hidden while choosing")));
     }
 

@@ -232,6 +232,8 @@ pub struct AgentService {
     workspace_root: PathBuf,
     /// The conversation saved under `.socium/sessions/<id>/`.
     session_id: String,
+    /// Name given with `/rename`.
+    session_name: Option<String>,
     messages: Vec<Message>,
     events: Vec<serde_json::Value>,
     summary_state: ConversationSummaryState,
@@ -314,6 +316,7 @@ impl AgentService {
             state_lock: None,
             workspace_root,
             session_id,
+            session_name: None,
             messages: Vec::new(),
             events: Vec::new(),
             summary_state: ConversationSummaryState::default(),
@@ -693,6 +696,36 @@ impl AgentService {
         &self.session_id
     }
 
+    /// Name given with `/rename`.
+    pub fn session_name(&self) -> Option<&str> {
+        self.session_name.as_deref()
+    }
+
+    /// Names this session so that `-r <name>` and `/resume <name>` open it.
+    /// Surrounding whitespace is dropped.
+    pub fn rename_session(&mut self, name: &str) -> std::io::Result<()> {
+        self.ensure_state_lock()?;
+        let name = session::validate_session_name(name)?;
+        let previous = self.session_name.replace(name);
+        if let Err(err) = self.persist_state() {
+            self.session_name = previous;
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Permanently removes another saved session, named by its full ID.
+    pub fn delete_session(&mut self, id: &str) -> std::io::Result<()> {
+        self.ensure_state_lock()?;
+        if id == self.session_id {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "The open session cannot be deleted; /clear or /resume another one first",
+            ));
+        }
+        session::delete_session_dir(&self.workspace_root, id)
+    }
+
     /// Whether the conversation has messages, so it can be resumed.
     pub fn has_saved_messages(&self) -> bool {
         !self.messages.is_empty()
@@ -718,6 +751,7 @@ impl AgentService {
         self.summary_state = state.summary_state.unwrap_or_default();
         self.messages = state.messages;
         self.events = state.events;
+        self.session_name = state.name;
         crate::agent::turn::repair_incomplete_tools(&mut self.messages);
         if self
             .summary_state
@@ -744,6 +778,7 @@ impl AgentService {
     pub fn clear(&mut self) -> std::io::Result<()> {
         self.ensure_state_lock()?;
         self.session_id = session::new_session_id(&self.workspace_root, Some(&self.session_id));
+        self.session_name = None;
         self.messages.clear();
         self.events.clear();
         self.summary_state = ConversationSummaryState::default();
@@ -788,6 +823,7 @@ impl AgentService {
         let previous_events = std::mem::take(&mut self.events);
         let previous_summary = std::mem::take(&mut self.summary_state);
         let previous_selection = self.selected_model.take();
+        let previous_name = self.session_name.take();
         let previous_usage = self.last_measured_usage.take();
         let mut previous_model = None;
         let mut warnings = Vec::new();
@@ -829,6 +865,7 @@ impl AgentService {
             self.events = previous_events;
             self.summary_state = previous_summary;
             self.selected_model = previous_selection;
+            self.session_name = previous_name;
             self.last_measured_usage = previous_usage;
             return Err(err.into());
         }
@@ -994,6 +1031,7 @@ impl AgentService {
         };
         let raw_len = self.messages.len();
         let active_model = self.selected_model.clone();
+        let session_name = self.session_name.clone();
         self.summary_state = prepared_context.summary_state;
         let path = &self.conversation_path();
         let raw_messages = &mut self.messages;
@@ -1013,6 +1051,7 @@ impl AgentService {
                     events,
                     summary_state: summary,
                     active_model: active_model.as_deref(),
+                    name: session_name.as_deref(),
                 },
             )
         };
@@ -1158,6 +1197,7 @@ impl AgentService {
                 events: &self.events,
                 summary_state: &self.summary_state,
                 active_model: self.selected_model.as_deref(),
+                name: self.session_name.as_deref(),
             },
         )
     }
