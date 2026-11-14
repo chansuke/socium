@@ -8,6 +8,7 @@ mod model_picker;
 mod progress;
 mod session_picker;
 mod slash_command;
+mod subagents;
 mod transcript;
 mod view;
 

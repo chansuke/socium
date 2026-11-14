@@ -21,6 +21,7 @@ pub mod tools;
 
 pub use crate::activity::{ActivityEvent, ActivityKind, ThoughtRole};
 pub use crate::agent::context::ContextMetrics;
+pub use crate::agent::subagent::record::{SubagentStatus, SubagentSummary};
 pub use crate::error::AgentError;
 
 use crate::activity::ActivityClock;
@@ -965,6 +966,28 @@ impl AgentService {
 
     pub fn transcript_entries(&self) -> Vec<TranscriptEntry> {
         transcript::transcript_entries(&self.messages, &self.events)
+    }
+
+    /// Saved subagents, most recently updated first.
+    pub fn subagent_runs(&self) -> std::io::Result<Vec<SubagentSummary>> {
+        Ok(crate::agent::subagent::record::list(&self.workspace_root)?
+            .iter()
+            .map(|record| record.summary())
+            .collect())
+    }
+
+    /// A saved subagent and its conversation, prompts and tool results
+    /// included.
+    pub fn subagent_transcript(
+        &self,
+        id: &str,
+    ) -> std::io::Result<(SubagentSummary, Vec<TranscriptEntry>)> {
+        let record = crate::agent::subagent::record::load(&self.workspace_root, id)?
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("No saved subagent '{id}'")))?;
+        Ok((
+            record.summary(),
+            transcript::transcript_entries(&record.messages, &[]),
+        ))
     }
 
     pub async fn submit(&mut self, user_input: String) -> Result<AgentReply, AgentError> {

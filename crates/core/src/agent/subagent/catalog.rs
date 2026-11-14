@@ -168,13 +168,17 @@ impl SubagentCatalog {
                     "type": "string",
                     "enum": self.names(),
                     "description": "The agent type that fits the task; see the list in this tool's description."
+                },
+                "resume": {
+                    "type": "string",
+                    "description": "ID of an earlier subagent, from the end of its report, to give it this prompt as a follow-up with everything it already saw. Use the same agent_type."
                 }
             },
             "required": ["description", "prompt", "agent_type"],
             "additionalProperties": false
         });
         let mut description = format!(
-            "Delegate a self-contained task to a subagent. The subagent starts with an empty context, works with its own tools until it is done, and returns one written report as this tool's result; nothing else it saw comes back. Use it to keep a broad search or a separable piece of work out of this conversation, not for a single file read or search. The subagent cannot see this conversation, so put everything it needs in prompt: the goal, relevant paths and constraints, and what the report must contain. Commands and commits a subagent runs still need the user's approval. Subagents cannot start subagents. Read the report critically and tell the user what matters; they do not see it.\n\nAgent types:\n{types}"
+            "Delegate a self-contained task to a subagent. The subagent starts with an empty context, works with its own tools until it is done, and returns one written report as this tool's result; nothing else it saw comes back. Use it to keep a broad search or a separable piece of work out of this conversation, not for a single file read or search. The subagent cannot see this conversation, so put everything it needs in prompt: the goal, relevant paths and constraints, and what the report must contain. Commands and commits a subagent runs still need the user's approval. Subagents cannot start subagents. The report ends with the subagent's ID; to follow up on its work without repeating it, call agent again with resume set to that ID. Read the report critically and tell the user what matters; they do not see it.\n\nAgent types:\n{types}"
         );
         if !self.models.is_empty() {
             description.push_str(&format!(

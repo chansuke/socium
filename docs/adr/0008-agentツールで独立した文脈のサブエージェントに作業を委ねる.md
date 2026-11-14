@@ -60,7 +60,7 @@ Chosen option: 「同期の `agent` tool」。親の tool loop の中で子の t
 * 子の Activity event は、`ActivityEvent.agent` にそれを起動した `agent` 呼び出しの call ID を入れて親に渡す。親の event には付けない。JSONL の記録にも同じ形で残り、この項目の無い古い記録はそのまま読める。
 * TUI は `agent` の付いた項目を `│ ` の罫線で字下げして出す。子の round 番号は 1 から数え直すので、項目の照合には `turn_id` と `round` に `agent` を加える。
 * 子の本文の stream、thinking の stream、生の provider event、model request の開始は親に渡さない。会話欄に親の発言として混ざるため。子の round では、生の event 表示（`r`）を出さず、理由を示す。
-* 子の message は保存しない。親の会話には、`agent` 呼び出しの開始（`tool_started`）と結果だけが残る。子の実行中に止まった場合は、他の tool と同じく結果不明として扱い、再実行しない。子が呼んだ tool は、Activity の記録に残る。
+* 子の message は保存しない。親の会話には、`agent` 呼び出しの開始（`tool_started`）と結果だけが残る。子の実行中に止まった場合は、他の tool と同じく結果不明として扱い、再実行しない。子が呼んだ tool は、Activity の記録に残る。（ADR 10 で、子の message を保存し、再開できるようにした。）
 * 子の token 使用量は、turn の出力 token の合計に含める。親の自動 compaction の判断には使わない。
 
 ### 段階
@@ -75,7 +75,7 @@ Chosen option: 「同期の `agent` tool」。親の tool loop の中で子の t
 * Good, because 子は承認、sandbox、取り消しを親と共有し、tool の一覧の外を呼んでも実行されない。
 * Good, because 今の tool loop を再帰的に呼ぶだけで済み、新しい永続化の形式が要らない。
 * Bad, because 子が動く間、親は待つ。複数の調査を同時に進められない。
-* Bad, because 子の message を保存しないので、再起動後に子の途中経過を見返すには Activity の記録しかない。
+* Bad, because 子の message を保存しないので、再起動後に子の途中経過を見返すには Activity の記録しかない（ADR 10 で解消）。
 * Bad, because 子の報告の質はモデルに依存する。親のモデルは報告を鵜呑みにしうる。tool の説明で、報告を確かめてから利用者に伝えるよう求めている。
 * Neutral, because 子は親と同じモデルを使う。安いモデルに調査を任せる方法は ADR 9 と ADR 10 で足した。
 

@@ -123,6 +123,13 @@ same name is already in that session, startup stops and names both files rather
 than overwrite either; move one aside and start again. To go back to an older
 Socium, move the three files back to `.socium/`.
 
+Each subagent's conversation is saved to `.socium/agents/<id>.json` before its
+first request and at the same checkpoints as the main conversation, so its tool
+intents are on disk before they run. A record left `running` was cut off by a
+crash; resuming it marks its unfinished tool calls unknown, as on restart. Only
+the 100 most recently updated records are kept; older ones are removed when a
+new subagent starts.
+
 Bubblewrap ties subprocess lifetime to Socium and isolates descendants in a PID
 namespace. A crash after intent but before a saved result still produces an **unknown outcome** on
 restart. Socium does not re-execute that tool automatically. Inspect the files,

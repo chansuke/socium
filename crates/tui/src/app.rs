@@ -450,6 +450,25 @@ impl App {
                 None => self.open_session_picker(),
             },
             SlashAction::Rename => self.rename_session(argument.as_deref()),
+            SlashAction::Agents => {
+                let agent = self.agent_mut()?;
+                let text = match argument {
+                    None => agent.subagent_runs().map(|runs| {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |elapsed| elapsed.as_millis() as u64);
+                        crate::subagents::runs_text(&runs, now_ms)
+                    }),
+                    Some(id) => agent.subagent_transcript(&id).map(|(summary, entries)| {
+                        crate::subagents::transcript_text(&summary, &entries)
+                    }),
+                };
+                self.push_message(
+                    Speaker::System,
+                    text.unwrap_or_else(|err| format!("Cannot read saved subagents: {err}")),
+                );
+                self.status = Some("Subagents".to_string());
+            }
             SlashAction::Compact => {
                 self.push_message(Speaker::System, "Compacting conversation context…");
                 self.status = Some("Compacting".to_string());
