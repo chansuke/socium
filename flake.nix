@@ -2,9 +2,15 @@
   description = "A tiny AI Agent";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  inputs.crane.url = "github:ipetkov/crane";
 
   outputs =
-    { self, nixpkgs, ... }:
+    {
+      self,
+      nixpkgs,
+      crane,
+      ...
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -62,26 +68,24 @@
         pkgs:
         let
           lib = pkgs.lib;
-        in
-        {
-          default = pkgs.rustPlatform.buildRustPackage {
+          craneLib = crane.mkLib pkgs;
+          # Only what the crates build and test with, so that changes to
+          # docs or CI do not rebuild the package.
+          src = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./crates
+              ./models.toml.example # read by a models.rs test
+            ];
+          };
+          commonArgs = {
+            inherit src;
             pname = "socium";
             version = "0.1.0";
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-
-            nativeBuildInputs = [
-              pkgs.pkg-config
-              pkgs.makeWrapper
-            ];
-            nativeCheckInputs = [
-              pkgs.git
-              pkgs.ripgrep
-            ]
-            ++ lib.optionals pkgs.stdenv.isLinux [
-              (sandboxBackend pkgs)
-              pkgs.util-linux # setsid for detached-descendant enforcement tests
-            ];
+            strictDeps = true;
+            nativeBuildInputs = [ pkgs.pkg-config ];
             buildInputs = [
               pkgs.openssl
             ]
@@ -91,22 +95,44 @@
             ];
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-
-            postFixup = ''
-              wrapProgram "$out/bin/socium-tui" \
-                --prefix PATH : "${
-                  lib.makeBinPath (
-                    [
-                      pkgs.git
-                      pkgs.ripgrep
-                    ]
-                    ++ lib.optionals pkgs.stdenv.isLinux [ (sandboxBackend pkgs) ]
-                  )
-                }" \
-                --set-default SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" \
-                --set-default NIX_SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-            '';
           };
+          # Dependencies alone, built from Cargo.toml and Cargo.lock. Its
+          # output stays the same until they change, so the Cachix cache
+          # serves it to later builds.
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        in
+        {
+          default = craneLib.buildPackage (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
+              nativeCheckInputs = [
+                pkgs.git
+                pkgs.ripgrep
+              ]
+              ++ lib.optionals pkgs.stdenv.isLinux [
+                (sandboxBackend pkgs)
+                pkgs.util-linux # setsid for detached-descendant enforcement tests
+              ];
+
+              postFixup = ''
+                wrapProgram "$out/bin/socium-tui" \
+                  --prefix PATH : "${
+                    lib.makeBinPath (
+                      [
+                        pkgs.git
+                        pkgs.ripgrep
+                      ]
+                      ++ lib.optionals pkgs.stdenv.isLinux [ (sandboxBackend pkgs) ]
+                    )
+                  }" \
+                  --set-default SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" \
+                  --set-default NIX_SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              '';
+            }
+          );
+          deps = cargoArtifacts;
           adrs = adrs pkgs;
         }
       );
