@@ -3,6 +3,7 @@ use crate::agent_task::{PendingSubmission, PendingTask};
 use crate::approval::ApprovalPrompt;
 use crate::input_history;
 use crate::model_picker::{ModelPicker, model_label};
+use crate::session_picker::SessionPicker;
 use crate::slash_command::{self, SlashAction, SlashCommand};
 use crate::transcript::{ChatEntry, Speaker, transcript_entries_to_chat_entries};
 use crate::view::text_layout::{help_text, truncate_text};
@@ -36,6 +37,7 @@ pub(crate) struct App {
     pub(crate) pending_task: Option<PendingTask>,
     pub(crate) approval: Option<ApprovalPrompt>,
     pub(crate) model_picker: Option<ModelPicker>,
+    pub(crate) session_picker: Option<SessionPicker>,
     pub(crate) input_history: input_history::InputSession,
     pub(crate) history_index: Option<usize>,
     pub(crate) history_draft: String,
@@ -60,6 +62,47 @@ impl App {
     pub(crate) fn new(agent: AgentService) -> Result<Self> {
         let model_label = model_label(&agent.active_model());
         let workspace_label = format_workspace_path(env::current_dir().ok());
+        let warnings = agent.startup_warnings();
+        let history_path =
+            socium_core::workspace_state_path(&env::current_dir()?, INPUT_HISTORY_FILE_NAME)?;
+        let input_history = input_history::InputSession::load(history_path)?;
+
+        let mut app = Self {
+            agent: Some(agent),
+            input: String::new(),
+            character_index: 0,
+            input_mode: InputMode::Editing,
+            messages: Vec::new(),
+            activity: ActivityModel::default(),
+            transcript_scroll: 0,
+            status: Some(socium_core::SANDBOX_DESCRIPTION.to_string()),
+            workspace_label,
+            model_label,
+            context_metrics: ContextMetrics::default(),
+            last_latency_ms: None,
+            pending_task: None,
+            approval: None,
+            model_picker: None,
+            session_picker: None,
+            input_history,
+            history_index: None,
+            history_draft: String::new(),
+            slash_selection: 0,
+            slash_popup_dismissed: false,
+        };
+        app.load_session_view();
+        for body in warnings {
+            app.push_message(Speaker::System, body);
+        }
+        Ok(app)
+    }
+
+    /// Shows the agent's session: its conversation, a note when it was
+    /// resumed, and its recent Activity.
+    pub(crate) fn load_session_view(&mut self) {
+        let Some(agent) = self.agent.as_ref() else {
+            return;
+        };
         let mut messages = transcript_entries_to_chat_entries(agent.transcript_entries());
         if agent.has_saved_messages() {
             messages.push(ChatEntry {
@@ -67,41 +110,15 @@ impl App {
                 body: format!("Resumed session {}", agent.session_id()),
             });
         }
-        messages.extend(agent.startup_warnings().into_iter().map(|body| ChatEntry {
-            speaker: Speaker::System,
-            body,
-        }));
-        let context_metrics = agent.context_metrics("").unwrap_or_default();
         let mut activity = ActivityModel::default();
         for event in agent.recent_activity() {
             activity.apply_replayed(event);
         }
-        let history_path =
-            socium_core::workspace_state_path(&env::current_dir()?, INPUT_HISTORY_FILE_NAME)?;
-        let input_history = input_history::InputSession::load(history_path)?;
-
-        Ok(Self {
-            agent: Some(agent),
-            input: String::new(),
-            character_index: 0,
-            input_mode: InputMode::Editing,
-            messages,
-            activity,
-            transcript_scroll: 0,
-            status: Some(socium_core::SANDBOX_DESCRIPTION.to_string()),
-            workspace_label,
-            model_label,
-            context_metrics,
-            last_latency_ms: None,
-            pending_task: None,
-            approval: None,
-            model_picker: None,
-            input_history,
-            history_index: None,
-            history_draft: String::new(),
-            slash_selection: 0,
-            slash_popup_dismissed: false,
-        })
+        self.messages = messages;
+        self.activity = activity;
+        self.transcript_scroll = 0;
+        self.last_latency_ms = None;
+        self.refresh_context_metrics();
     }
 
     #[cfg(test)]
@@ -122,6 +139,7 @@ impl App {
             pending_task: None,
             approval: None,
             model_picker: None,
+            session_picker: None,
             input_history: input_history::InputSession {
                 history_path: PathBuf::new(),
                 entries: Vec::new(),
@@ -423,6 +441,14 @@ impl App {
                     self.open_model_picker(choices);
                 }
             },
+            SlashAction::Resume => match argument {
+                Some(query) => {
+                    if self.resume_session(&query) {
+                        return Ok(SubmitAction::Compact);
+                    }
+                }
+                None => self.open_session_picker(),
+            },
             SlashAction::Compact => {
                 self.push_message(Speaker::System, "Compacting conversation context…");
                 self.status = Some("Compacting".to_string());
@@ -459,6 +485,13 @@ impl App {
             }
 
             if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press && self.session_picker.is_some() {
+                    if self.handle_session_picker_key(key.code, key.modifiers) {
+                        terminal.draw(|frame| self.draw(frame))?;
+                        self.start_compact_task()?;
+                    }
+                    continue;
+                }
                 if key.kind == KeyEventKind::Press && self.model_picker.is_some() {
                     if self.handle_model_picker_key(key.code) {
                         terminal.draw(|frame| self.draw(frame))?;

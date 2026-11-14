@@ -772,3 +772,98 @@ fn a_new_session_starts_on_the_model_chosen_in_the_last_one() {
     let agent = open_session(root.path(), SessionStart::New).unwrap();
     assert_eq!(agent.active_model().alias, "sonnet");
 }
+
+#[test]
+fn resume_switches_to_another_saved_session_and_lists_the_others() {
+    let root = tempfile::tempdir().unwrap();
+    let first = saved_session(root.path(), "first");
+    std::thread::sleep(Duration::from_millis(20));
+    let second = saved_session(root.path(), "second");
+    let mut agent = open_session(root.path(), SessionStart::Resume(second.clone())).unwrap();
+    assert_eq!(
+        agent
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        [first.as_str()]
+    );
+
+    let switch = agent.resume_session(&first).unwrap();
+    assert!(switch.warnings.is_empty(), "{:?}", switch.warnings);
+    assert!(!switch.needs_compaction);
+    assert_eq!(agent.session_id(), first);
+    assert_eq!(prompts(&agent), ["first"]);
+    assert_eq!(
+        agent
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        [second.as_str()]
+    );
+}
+
+#[test]
+fn resume_refuses_the_open_or_an_unknown_session_and_keeps_the_current_one() {
+    let root = tempfile::tempdir().unwrap();
+    let id = saved_session(root.path(), "only");
+    let mut agent = open_session(root.path(), SessionStart::Resume(id.clone())).unwrap();
+
+    let err = agent.resume_session(&id).err().unwrap();
+    assert!(err.to_string().contains("already open"), "{err}");
+    let err = agent.resume_session("1999").err().unwrap();
+    assert!(err.to_string().contains("No saved session"), "{err}");
+    assert_eq!(agent.session_id(), id);
+    assert_eq!(prompts(&agent), ["only"]);
+}
+
+#[test]
+fn resume_applies_the_sessions_model_or_stays_and_drops_thinking() {
+    let root = tempfile::tempdir().unwrap();
+    let mut agent = open_session(root.path(), SessionStart::New).unwrap();
+    agent.switch_model("sonnet").unwrap();
+    agent.messages = vec![Message::user_text("on sonnet".into())];
+    agent.persist_state().unwrap();
+    let on_sonnet = agent.session_id().to_string();
+    drop(agent);
+
+    // A session saved on a model that is no longer registered, with thinking.
+    let gone = saved_session(root.path(), "on a removed model");
+    let path = root
+        .path()
+        .join(".socium/sessions")
+        .join(&gone)
+        .join("conversation.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    state["active_model"] = json!("ds-flash");
+    state["messages"] = json!([
+        {"role": "user", "content": "on a removed model"},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "plan", "signature": "sig"},
+            {"type": "text", "text": "answer"}
+        ]}
+    ]);
+    std::fs::write(&path, state.to_string()).unwrap();
+
+    let mut agent = open_session(root.path(), SessionStart::New).unwrap();
+    agent.switch_model("opus").unwrap();
+    let switch = agent.resume_session(&on_sonnet).unwrap();
+    assert_eq!(switch.model.alias, "sonnet");
+    assert_eq!(agent.active_model().alias, "sonnet");
+
+    let switch = agent.resume_session(&gone).unwrap();
+    assert_eq!(switch.model.alias, "sonnet");
+    assert!(
+        switch.warnings[0].contains("'ds-flash' is no longer registered; staying on 'sonnet'"),
+        "{:?}",
+        switch.warnings
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(saved.get("active_model").is_none());
+    assert!(!saved.to_string().contains("\"thinking\""));
+}

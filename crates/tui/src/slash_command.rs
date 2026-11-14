@@ -7,6 +7,7 @@ pub(crate) enum SlashAction {
     Clear,
     Compact,
     Model,
+    Resume,
     Exit,
 }
 
@@ -48,6 +49,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "model",
         description: "Choose the model; /model <alias> switches directly",
         action: SlashAction::Model,
+        takes_argument: true,
+    },
+    SlashCommand {
+        name: "resume",
+        description: "Resume another saved conversation; /resume <ID> opens one directly",
+        action: SlashAction::Resume,
         takes_argument: true,
     },
     SlashCommand {

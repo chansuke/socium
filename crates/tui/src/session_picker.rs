@@ -1,14 +1,18 @@
-//! The `-r` picker: chooses a saved session before the agent starts.
+//! The session picker shown by `-r` and `/resume`, in place of the
+//! conversation, and resuming the chosen session.
 
+use crate::app::App;
+use crate::model_picker::model_label;
+use crate::transcript::Speaker;
 use crate::view::text_layout::truncate_text;
 use crate::view::theme::*;
-use color_eyre::Result;
 use ratatui::{
-    DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    Frame,
+    crossterm::event::{KeyCode, KeyModifiers},
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Clear, Paragraph},
 };
 use socium_core::SessionSummary;
 use std::time::SystemTime;
@@ -136,14 +140,14 @@ impl SessionPicker {
         );
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            truncate_text(" ↑↓ select · Enter resume · Esc quit", inner),
+            truncate_text(" ↑↓ select · Enter resume · Esc close", inner),
             Style::default().fg(MUTED),
         )));
         lines
     }
 
-    fn draw(&self, frame: &mut Frame, now: SystemTime) {
-        let area = frame.area();
+    /// Draws the picker over `area`, in place of the conversation.
+    pub(crate) fn draw(&self, frame: &mut Frame, area: Rect, now: SystemTime) {
         let title = self
             .sessions
             .get(self.selected)
@@ -154,25 +158,87 @@ impl SessionPicker {
             .border_style(Style::default().fg(LILAC))
             .style(Style::default().bg(BG));
         let rows = area.height.saturating_sub(2);
+        frame.render_widget(Clear, area);
         frame.render_widget(
             Paragraph::new(self.lines(area.width, rows, now)).block(block),
             area,
         );
     }
+}
 
-    /// Shows the picker until a session is chosen (its ID) or it is closed.
-    pub(crate) fn run(mut self, terminal: &mut DefaultTerminal) -> Result<Option<String>> {
-        loop {
-            let now = SystemTime::now();
-            terminal.draw(|frame| self.draw(frame, now))?;
-            if let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                match self.handle_key(key.code, key.modifiers) {
-                    PickerOutcome::Open => {}
-                    PickerOutcome::Chosen(id) => return Ok(Some(id)),
-                    PickerOutcome::Cancelled => return Ok(None),
+impl App {
+    /// Lists the other saved sessions to choose one to resume.
+    pub(crate) fn open_session_picker(&mut self) {
+        let Some(agent) = self.agent.as_mut() else {
+            self.status = Some("Request in progress".into());
+            return;
+        };
+        match agent.list_sessions() {
+            Ok(sessions) if sessions.is_empty() => {
+                self.push_message(
+                    Speaker::System,
+                    "No other saved conversation in this workspace",
+                );
+            }
+            Ok(sessions) => {
+                self.session_picker = Some(SessionPicker::new(sessions));
+                self.status = Some("Resume: ↑↓ select · Enter resume · Esc close".into());
+            }
+            Err(err) => {
+                self.push_message(Speaker::System, format!("Cannot list sessions: {err}"));
+            }
+        }
+    }
+
+    /// Returns `true` when the resumed history should be compacted before
+    /// the next turn.
+    pub(crate) fn handle_session_picker_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> bool {
+        let Some(picker) = self.session_picker.as_mut() else {
+            return false;
+        };
+        match picker.handle_key(code, modifiers) {
+            PickerOutcome::Open => false,
+            PickerOutcome::Cancelled => {
+                self.session_picker = None;
+                self.status = Some("Session unchanged".into());
+                false
+            }
+            PickerOutcome::Chosen(id) => {
+                self.session_picker = None;
+                self.resume_session(&id)
+            }
+        }
+    }
+
+    /// Returns `true` when the resumed history should be compacted before
+    /// the next turn.
+    pub(crate) fn resume_session(&mut self, query: &str) -> bool {
+        let Some(agent) = self.agent.as_mut() else {
+            self.status = Some("Request in progress".into());
+            return false;
+        };
+        match agent.resume_session(query) {
+            Ok(switch) => {
+                self.load_session_view();
+                self.model_label = model_label(&switch.model);
+                for warning in switch.warnings {
+                    self.push_message(Speaker::System, warning);
                 }
+                self.status = Some("Resumed".into());
+                if switch.needs_compaction {
+                    self.push_message(Speaker::System, "Compacting conversation context…");
+                    self.status = Some("Compacting".into());
+                }
+                switch.needs_compaction
+            }
+            Err(err) => {
+                self.push_message(Speaker::System, format!("Cannot resume {query}: {err}"));
+                self.status = Some("Session unchanged".into());
+                false
             }
         }
     }
@@ -276,5 +342,23 @@ mod tests {
         for line in picker.lines(40, 10, now()) {
             assert!(line.width() <= 38, "{line}");
         }
+    }
+
+    #[test]
+    fn resuming_while_a_request_runs_is_refused() {
+        let mut app = App::for_test();
+        app.open_session_picker();
+        assert!(app.session_picker.is_none());
+        assert!(!app.resume_session("20261114"));
+        assert_eq!(app.status.as_deref(), Some("Request in progress"));
+    }
+
+    #[test]
+    fn closing_the_picker_keeps_the_session() {
+        let mut app = App::for_test();
+        app.session_picker = Some(picker(2));
+        assert!(!app.handle_session_picker_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.session_picker.is_none());
+        assert_eq!(app.status.as_deref(), Some("Session unchanged"));
     }
 }

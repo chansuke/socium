@@ -751,6 +751,104 @@ impl AgentService {
         Ok(())
     }
 
+    /// Other saved sessions in this workspace, most recently saved first.
+    pub fn list_sessions(&mut self) -> std::io::Result<Vec<SessionSummary>> {
+        self.ensure_state_lock()?;
+        Ok(session::scan_sessions(&self.workspace_root)?
+            .into_iter()
+            .filter(|session| {
+                session.id != self.session_id && (session.message_count > 0 || !session.readable)
+            })
+            .collect())
+    }
+
+    /// Switches to the saved session `query` names, between turns. Its
+    /// saved `/model` choice is applied when that model can start;
+    /// otherwise the current model stays and the history loses its
+    /// thinking, as at startup. On failure the current session stays open.
+    pub fn resume_session(&mut self, query: &str) -> Result<ModelSwitch, AgentError> {
+        self.ensure_state_lock()?;
+        let sessions = session::scan_sessions(&self.workspace_root)?;
+        let target = session::resolve_session(&sessions, query)?;
+        if target.id == self.session_id {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("Session {} is already open", target.id),
+            )
+            .into());
+        }
+        let state = load_json_file::<ConversationState>(&session::session_file(
+            &self.workspace_root,
+            &target.id,
+            CONVERSATION_STATE_FILE_NAME,
+        ))?;
+        let saved = state.active_model.clone();
+        let previous_id = std::mem::replace(&mut self.session_id, target.id.clone());
+        let previous_messages = std::mem::take(&mut self.messages);
+        let previous_events = std::mem::take(&mut self.events);
+        let previous_summary = std::mem::take(&mut self.summary_state);
+        let previous_selection = self.selected_model.take();
+        let previous_usage = self.last_measured_usage.take();
+        let mut previous_model = None;
+        let mut warnings = Vec::new();
+        let result = self.apply_state(state).and_then(|()| {
+            match saved {
+                Some(alias) if alias == self.active_model.alias => {
+                    self.selected_model = Some(alias);
+                }
+                Some(alias) => {
+                    let current = self.active_model.alias.clone();
+                    let built = match self.registry.find(&alias).cloned() {
+                        Some(model) => ModelTarget::build(&self.registry, model, self.env.as_ref())
+                            .map_err(|err| format!("Model '{alias}' is unavailable: {err}")),
+                        None => Err(format!("Saved model '{alias}' is no longer registered")),
+                    };
+                    match built {
+                        Ok(mut target) => {
+                            warnings.append(&mut target.warnings);
+                            previous_model = Some(self.install(target));
+                            self.selected_model = Some(alias);
+                            warnings.extend(self.provider.startup_warnings());
+                        }
+                        Err(reason) => {
+                            warnings.push(format!("{reason}; staying on '{current}'"));
+                            strip_thinking(&mut self.messages);
+                        }
+                    }
+                }
+                None => {}
+            }
+            self.persist_state()
+        });
+        if let Err(err) = result {
+            if let Some(model) = previous_model {
+                self.install(model);
+            }
+            self.session_id = previous_id;
+            self.messages = previous_messages;
+            self.events = previous_events;
+            self.summary_state = previous_summary;
+            self.selected_model = previous_selection;
+            self.last_measured_usage = previous_usage;
+            return Err(err.into());
+        }
+        let needs_compaction = match self.history_pressure()? {
+            Some((history, budget)) => {
+                warnings.push(format!(
+                    "History is about {history} tokens, near or over {}'s input budget of {budget}; compact it before continuing",
+                    self.active_model.alias
+                ));
+                true
+            }
+            None => false,
+        };
+        Ok(ModelSwitch {
+            model: self.active_model(),
+            warnings,
+            needs_compaction,
+        })
+    }
+
     /// Activity of the most recent saved turns, oldest first.
     pub fn recent_activity(&self) -> Vec<ActivityEvent> {
         crate::activity_log::load_recent(

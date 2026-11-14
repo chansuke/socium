@@ -237,6 +237,12 @@ impl App {
             // The request under review replaces the transcript and Activity
             // so that a long diff gets the whole body of the screen.
             draw_approval_details(frame, areas.transcript.union(areas.activity), prompt);
+        } else if let Some(picker) = &self.session_picker {
+            picker.draw(
+                frame,
+                areas.transcript.union(areas.activity),
+                std::time::SystemTime::now(),
+            );
         } else {
             self.draw_transcript(frame, areas.transcript);
             self.draw_activity(frame, areas.activity);
@@ -732,6 +738,29 @@ mod tests {
         let rows = render(&app);
         assert!(rows[top + 3].starts_with("│   1. Allow once"));
         assert!(rows[top + 4].starts_with("│ ❯ 2. Deny"));
+    }
+
+    #[test]
+    fn the_session_picker_replaces_the_conversation() {
+        let mut app = App::for_test();
+        app.push_message(crate::transcript::Speaker::User, "hidden while choosing");
+        app.session_picker = Some(crate::session_picker::SessionPicker::new(vec![
+            socium_core::SessionSummary {
+                id: "20261114-000000-0000".into(),
+                updated: std::time::SystemTime::now(),
+                message_count: 4,
+                preview: "fix the README".into(),
+                active_model: None,
+                readable: true,
+            },
+        ]));
+        let rows = render(&app);
+        let top = rows
+            .iter()
+            .position(|row| row.starts_with("┌ Resume · 20261114-000000-0000 "))
+            .unwrap();
+        assert!(rows[top + 3].contains("❯ just now     4 msgs  fix the README"));
+        assert!(!rows.iter().any(|row| row.contains("hidden while choosing")));
     }
 
     #[test]

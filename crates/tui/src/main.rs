@@ -14,7 +14,6 @@ mod view;
 use app::App;
 use cli::Launch;
 use color_eyre::{Result, eyre::eyre};
-use session_picker::SessionPicker;
 use socium_core::{AgentService, SessionStart};
 use std::{env, path::Path};
 
@@ -38,46 +37,19 @@ async fn main() -> Result<()> {
         }
     };
 
-    // The resume picker needs the terminal before the agent starts.
-    let mut terminal = None;
-    let start = match launch {
-        Launch::New | Launch::Help => SessionStart::New,
-        Launch::Continue => SessionStart::Continue,
-        Launch::Resume(Some(id)) => SessionStart::Resume(id),
-        Launch::Resume(None) => {
-            let sessions = socium_core::list_sessions(&env::current_dir()?)
-                .map_err(|err| eyre!(err.to_string()))?;
-            if sessions.is_empty() {
-                eprintln!("No saved conversation to resume in this workspace");
-                return Ok(());
-            }
-            let mut picker_terminal = ratatui::init();
-            match SessionPicker::new(sessions).run(&mut picker_terminal) {
-                Ok(Some(id)) => {
-                    terminal = Some(picker_terminal);
-                    SessionStart::Resume(id)
-                }
-                chosen => {
-                    ratatui::restore();
-                    return chosen.map(|_| ());
-                }
-            }
-        }
+    let (start, pick_session) = match launch {
+        Launch::New | Launch::Help => (SessionStart::New, false),
+        Launch::Continue => (SessionStart::Continue, false),
+        Launch::Resume(Some(id)) => (SessionStart::Resume(id), false),
+        // A new session opens under the picker; closing it keeps that one.
+        Launch::Resume(None) => (SessionStart::New, true),
     };
-
-    let app = AgentService::from_current_dir(start)
-        .map_err(|err| eyre!(err.to_string()))
-        .and_then(App::new);
-    let app = match app {
-        Ok(app) => app,
-        Err(err) => {
-            if terminal.is_some() {
-                ratatui::restore();
-            }
-            return Err(err);
-        }
-    };
-    let terminal = terminal.unwrap_or_else(ratatui::init);
+    let agent = AgentService::from_current_dir(start).map_err(|err| eyre!(err.to_string()))?;
+    let mut app = App::new(agent)?;
+    if pick_session {
+        app.open_session_picker();
+    }
+    let terminal = ratatui::init();
     // Ratatui's global panic hook restores the terminal. Worker panics are
     // caught and reported through the task channel, so leave the UI running.
     let previous_hook = std::panic::take_hook();
