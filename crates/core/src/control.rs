@@ -71,6 +71,7 @@ impl TaskControl {
                 serde_json::to_string_pretty(&input["arguments"]).unwrap_or_default(),
                 input["review"].as_str().unwrap_or("")
             ),
+            requested_by: None,
         });
         let start = Instant::now();
         loop {

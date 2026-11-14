@@ -51,10 +51,12 @@ Chosen option: 「同期の `agent` tool」。親の tool loop の中で子の t
 * tool loop の上限は親と同じ 20 round。
 * tool loop は、モデルに渡した tool 以外の呼び出しを `Unsupported tool` として拒否する。子がモデルの判断で `apply_patch` や `agent` を名指ししても実行されないので、子の権限は渡した tool の一覧で決まる。子の一覧には `agent` が無いので、入れ子にならない。
 * 成功したら、子の最後の assistant message の本文を tool 結果にする。20,000 文字を超えた分は切り、切ったことを書き添える。
+* tool 結果の末尾に、子の round 数、tool 呼び出しの数、token 使用量（入力は cache を含む）、所要時間を一行で付ける。失敗した場合も付ける。親のモデルと利用者が、委任にかかった費用を知れるようにするため。数は子の Activity event から数えるので、途中で止まった実行も測れる。
 * 失敗（provider のエラー、round の上限、取り消し）は `is_error` の tool 結果にする。`worker` の失敗には、それまでの変更が残っていることを書き添える。親は続けて動ける。取り消しは、子の結果を返したあと親の tool loop も止める。
 
 ### 表示と記録
 
+* 子が承認を求めるとき、承認の要求に子の種類と `description` を付ける（`AgentProgress::ApprovalRequested.requested_by`）。TUI は承認の選択肢の上の要約と、要求の詳細の冒頭にそれを出す。表示のためだけの情報で、承認は従来どおり要求の ID で照合する。
 * 子の Activity event は、`ActivityEvent.agent` にそれを起動した `agent` 呼び出しの call ID を入れて親に渡す。親の event には付けない。JSONL の記録にも同じ形で残り、この項目の無い古い記録はそのまま読める。
 * TUI は `agent` の付いた項目を `│ ` の罫線で字下げして出す。子の round 番号は 1 から数え直すので、項目の照合には `turn_id` と `round` に `agent` を加える。
 * 子の本文の stream、thinking の stream、生の provider event、model request の開始は親に渡さない。会話欄に親の発言として混ざるため。子の round では、生の event 表示（`r`）を出さず、理由を示す。

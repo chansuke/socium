@@ -159,7 +159,9 @@ are not yet supported.
   tool. The subagent starts from an empty context and returns only its final
   report, so a broad search stays out of the conversation. An `explorer` can
   only read, list, and search files and inspect Git; a `worker` can also edit
-  and run commands, which still need your approval. Subagents use the current
+  and run commands, which still need your approval; the approval names the
+  subagent that asked. The report ends with the subagent's rounds, tool
+  calls, token use, and time. Subagents use the current
   model, cannot start subagents, and run one at a time while the main agent
   waits. Their steps appear in the Activity pane under the `agent` call,
   marked with `│`; their messages are not saved, so a restart during one

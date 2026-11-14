@@ -7,6 +7,7 @@
 //! not nest.
 
 use crate::AgentProgress;
+use crate::activity::{ActivityKind, summarize_tool_input};
 use crate::agent::turn::{TurnContext, extract_text, run_agent_turn};
 use crate::agent::types::Message;
 use crate::constants::{
@@ -14,12 +15,14 @@ use crate::constants::{
     SUBAGENT_EXPLORER_SYSTEM_PROMPT, SUBAGENT_WORKER_SYSTEM_PROMPT,
 };
 use crate::error::AgentError;
+use crate::providers::TokenUsage;
 use crate::tools::error::ToolError;
 use crate::tools::input::{require_object_input, require_string_field};
 use crate::tools::{CustomToolDefinition, ToolDefinition};
 use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Instant;
 
 /// What a subagent may do, chosen by the delegating model per call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +41,13 @@ impl SubagentKind {
             other => Err(ToolError::Message(format!(
                 "Unknown agent_type '{other}'; use 'explorer' or 'worker'"
             ))),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Explorer => "explorer",
+            Self::Worker => "worker",
         }
     }
 
@@ -134,11 +144,31 @@ pub(crate) fn run_subagent<'a>(
         };
         let mut messages = vec![Message::user_text(prompt.to_string())];
         let agent = Some(call_id.to_string());
+        let requested_by = format!(
+            "{} subagent \"{}\"",
+            kind.name(),
+            summarize_tool_input(AGENT_TOOL_NAME, input)
+        );
+        let mut stats = RunStats::start();
         let mut forward = |event: AgentProgress| match event {
             AgentProgress::Activity(mut activity) => {
+                stats.observe(&activity.kind);
                 activity.agent.clone_from(&agent);
                 on_progress(AgentProgress::Activity(activity));
             }
+            AgentProgress::ApprovalRequested {
+                request_id,
+                tool,
+                summary,
+                input,
+                requested_by: _,
+            } => on_progress(AgentProgress::ApprovalRequested {
+                request_id,
+                tool,
+                summary,
+                input,
+                requested_by: Some(requested_by.clone()),
+            }),
             // These would read as the main agent's own stream.
             AgentProgress::AssistantText { .. }
             | AgentProgress::ThinkingText { .. }
@@ -155,24 +185,88 @@ pub(crate) fn run_subagent<'a>(
                 " Changes it made before stopping are kept; inspect the workspace before retrying."
             }
         };
+        let stats = stats.describe();
         match result {
-            Ok(_) if notes.trim().is_empty() => {
-                Ok("The subagent finished without a report.".into())
-            }
-            Ok(_) => Ok(bounded_report(notes)),
+            Ok(_) if notes.trim().is_empty() => Ok(format!(
+                "The subagent finished without a report.\n\n{stats}"
+            )),
+            Ok(_) => Ok(format!("{}\n\n{stats}", bounded_report(notes))),
             Err(AgentError::ToolRoundsExhausted) => Err(ToolError::Message(format!(
-                "The subagent stopped after {MAX_TOOL_ROUNDS} rounds without finishing.{side_effects}{}",
+                "The subagent stopped after {MAX_TOOL_ROUNDS} rounds without finishing.{side_effects}{}\n\n{stats}",
                 last_notes(&notes)
             ))),
             Err(AgentError::Cancelled) => Err(ToolError::Message(format!(
-                "The subagent was cancelled.{side_effects}"
+                "The subagent was cancelled.{side_effects}\n\n{stats}"
             ))),
             Err(err) => Err(ToolError::Message(format!(
-                "The subagent failed: {err}.{side_effects}{}",
+                "The subagent failed: {err}.{side_effects}{}\n\n{stats}",
                 last_notes(&notes)
             ))),
         }
     })
+}
+
+/// What one subagent run cost, counted from its activity so that failed
+/// and cancelled runs are measured too.
+struct RunStats {
+    started: Instant,
+    rounds: usize,
+    tool_calls: usize,
+    usage: Option<TokenUsage>,
+}
+
+impl RunStats {
+    fn start() -> Self {
+        Self {
+            started: Instant::now(),
+            rounds: 0,
+            tool_calls: 0,
+            usage: None,
+        }
+    }
+
+    fn observe(&mut self, kind: &ActivityKind) {
+        match kind {
+            ActivityKind::RoundStarted { .. } => self.rounds += 1,
+            ActivityKind::ToolStarted { .. } => self.tool_calls += 1,
+            ActivityKind::RoundFinished {
+                usage: Some(usage), ..
+            } => {
+                let total = self.usage.get_or_insert_with(TokenUsage::default);
+                total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+                total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+                total.cache_creation_input_tokens = total
+                    .cache_creation_input_tokens
+                    .saturating_add(usage.cache_creation_input_tokens);
+                total.cache_read_input_tokens = total
+                    .cache_read_input_tokens
+                    .saturating_add(usage.cache_read_input_tokens);
+            }
+            _ => {}
+        }
+    }
+
+    /// One line for the end of the tool result, such as `(subagent: 2
+    /// rounds, 1 tool call, 1200 input + 300 output tokens, 4.1s)`.
+    fn describe(&self) -> String {
+        let plural = |count: usize, word: &str| {
+            format!("{count} {word}{}", if count == 1 { "" } else { "s" })
+        };
+        let tokens = match self.usage {
+            Some(usage) => format!(
+                "{} input + {} output tokens",
+                usage.total_input_tokens(),
+                usage.output_tokens
+            ),
+            None => "token usage not reported".to_string(),
+        };
+        format!(
+            "(subagent: {}, {}, {tokens}, {:.1}s)",
+            plural(self.rounds, "round"),
+            plural(self.tool_calls, "tool call"),
+            self.started.elapsed().as_secs_f64()
+        )
+    }
 }
 
 /// Text of the newest assistant message, which on success is the report.
@@ -212,8 +306,8 @@ mod tests {
     use crate::constants::{
         DEFAULT_SYSTEM_PROMPT, SUBAGENT_EXPLORER_SYSTEM_PROMPT, SUBAGENT_WORKER_SYSTEM_PROMPT,
     };
-    use crate::providers::ProviderResponse;
     use crate::providers::error::ProviderError;
+    use crate::providers::{ProviderResponse, TokenUsage};
     use crate::test_support::{ScriptedProvider, make_temp_dir, text_provider_response};
     use crate::{ActivityKind, AgentProgress, AgentService};
     use serde_json::{Value, json};
@@ -291,7 +385,15 @@ mod tests {
             vec![
                 delegate("explorer"),
                 calls(&[("read-1", "read_file", json!({"path": "a.txt"}))]),
-                text("a.txt:1 says hello"),
+                Ok(text_provider_response(
+                    "a.txt:1 says hello",
+                    Some(TokenUsage {
+                        input_tokens: 900,
+                        output_tokens: 40,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 100,
+                    }),
+                )),
                 text("It is in a.txt."),
             ],
         );
@@ -332,12 +434,20 @@ mod tests {
         // own calls.
         let main = &requests[3];
         assert_eq!(main["system"], DEFAULT_SYSTEM_PROMPT);
-        assert_eq!(
-            last_results(main),
-            [
-                json!({"type": "tool_result", "tool_use_id": "agent-1", "content": "a.txt:1 says hello"})
-            ]
+        let results = last_results(main);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["tool_use_id"], "agent-1");
+        assert_eq!(results[0].get("is_error"), None);
+        // The report, then what the run cost; usage the first round did not
+        // report is left out of the total.
+        let content = results[0]["content"].as_str().unwrap();
+        assert!(
+            content.starts_with(
+                "a.txt:1 says hello\n\n(subagent: 2 rounds, 1 tool call, 1000 input + 40 output tokens, "
+            ),
+            "{content}"
         );
+        assert!(content.ends_with("s)"), "{content}");
         assert!(!main.to_string().contains("read-1"));
         assert!(
             !service
@@ -469,6 +579,10 @@ mod tests {
         assert!(content.starts_with("The subagent failed: "), "{content}");
         assert!(content.contains("overloaded"), "{content}");
         assert!(content.contains("Changes it made before stopping are kept"));
+        assert!(
+            content.contains("(subagent: 1 round, 0 tool calls, token usage not reported, "),
+            "{content}"
+        );
     }
 
     #[tokio::test]
@@ -503,6 +617,59 @@ mod tests {
             "Unknown agent_type 'admin'; use 'explorer' or 'worker'"
         );
         assert_eq!(results[1]["content"], "agent requires a non-empty prompt");
+    }
+
+    #[tokio::test]
+    async fn approvals_a_worker_asks_for_name_the_subagent() {
+        let workspace = make_temp_dir("subagent_approval");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                delegate("worker"),
+                calls(&[(
+                    "cmd-1",
+                    "run_command",
+                    json!({"command": ["cargo", "test"]}),
+                )]),
+                text("The test command was denied."),
+                text("Done."),
+            ],
+        );
+        let control = service.task_control();
+        control.enable_interactive_approval();
+        let mut asked = Vec::new();
+
+        service
+            .submit_with_progress("Run the tests".into(), |event| {
+                if let AgentProgress::ApprovalRequested {
+                    request_id,
+                    summary,
+                    requested_by,
+                    ..
+                } = event
+                {
+                    asked.push((summary, requested_by));
+                    control.answer_approval(request_id, false);
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            asked,
+            [(
+                "cargo test".to_string(),
+                Some("worker subagent \"Find the greeting\"".to_string())
+            )]
+        );
+        let denied = &last_results(&requests.lock().unwrap()[2])[0];
+        assert_eq!(denied["is_error"], true);
+        assert!(
+            denied["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("Sandbox command denied")
+        );
     }
 
     #[test]

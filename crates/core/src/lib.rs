@@ -162,6 +162,9 @@ pub enum AgentProgress {
         /// The tool's main argument on one line, such as the command.
         summary: String,
         input: String,
+        /// The subagent that asked, such as `worker subagent "Fix the
+        /// test"`; `None` when the main agent asked.
+        requested_by: Option<String>,
     },
     ApprovalRequired {
         tool: String,

@@ -33,9 +33,21 @@ impl App {
                 tool,
                 summary,
                 input,
+                requested_by,
             } => {
                 self.pop_thinking_message();
-                let details = format!("Approve sandboxed command: {tool}\n{input}");
+                let (summary, details) = match requested_by {
+                    Some(origin) => (
+                        format!("{origin}: {summary}"),
+                        format!(
+                            "Approve sandboxed command: {tool}\nRequested by: {origin}\n{input}"
+                        ),
+                    ),
+                    None => (
+                        summary,
+                        format!("Approve sandboxed command: {tool}\n{input}"),
+                    ),
+                };
                 self.push_message(Speaker::System, details.clone());
                 self.open_approval(request_id, tool, summary, details);
             }
@@ -168,6 +180,28 @@ mod tests {
         assert_eq!(
             command_completion_status("cargo test", None, true),
             "Command timed out: cargo test"
+        );
+    }
+
+    #[test]
+    fn approvals_from_a_subagent_say_which_one_asked() {
+        let mut app = crate::app::App::for_test();
+        app.apply_progress(socium_core::AgentProgress::ApprovalRequested {
+            request_id: 7,
+            tool: "run_command".into(),
+            summary: "cargo test".into(),
+            input: "Arguments: ...".into(),
+            requested_by: Some("worker subagent \"Fix the test\"".into()),
+        });
+
+        let prompt = app.approval.as_ref().unwrap();
+        assert_eq!(
+            prompt.summary,
+            "worker subagent \"Fix the test\": cargo test"
+        );
+        assert_eq!(
+            prompt.details,
+            "Approve sandboxed command: run_command\nRequested by: worker subagent \"Fix the test\"\nArguments: ..."
         );
     }
 }
