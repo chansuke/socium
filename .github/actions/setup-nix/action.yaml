@@ -18,8 +18,10 @@ runs:
         name: numtide
         authToken: ''
 
+    # The public cache holds what nixpkgs does not, such as the pinned
+    # bubblewrap and adrs, so every run reads it. Only runs given a token
+    # (pushes to main) upload what they build.
     - name: Setup Cachix (chansuke)
-      if: inputs.cachix-auth-token != ''
       uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
       with:
         name: chansuke
