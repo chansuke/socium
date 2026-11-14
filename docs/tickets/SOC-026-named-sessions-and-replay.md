@@ -7,7 +7,7 @@
 | 起票時ラベル | `review:2026-11-11`、`priority:p2`、`enhancement`、`area:state`、`area:tui`、`status:blocked` |
 | GitHub前提 | [SOC-005 / #57](https://github.com/chansuke/socium/issues/57)、[SOC-012 / #64](https://github.com/chansuke/socium/issues/64)、[SOC-013 / #65](https://github.com/chansuke/socium/issues/65) |
 | GitHub後続 | なし |
-| 状態 | 未着手 |
+| 状態 | 実装・検証済み（マージ状態はGitHubを参照） |
 | 優先度 | P2 |
 | 起票日 | 2026-11-11 |
 | 出典 | [詳細レビュー](../review-socium-pi-dsh-2026-11-11.md) — F12 Session／pi session比較 |
@@ -28,10 +28,10 @@ cwdごとに会話1本で、transcript_entriesはtool-only messageを除外す�
 
 **受け入れ条件**
 
-- [ ] 同じworkspaceの独立sessionが互いの会話を上書きせず、明示的に再開できる。
-- [ ] 再起動後もtool名・結果・失敗と中断状態が確認できる。
-- [ ] 旧conversationを消さず移行でき、移行失敗時に戻せる。
-- [ ] 実行中switchや競合writerで記録が混線せず、禁止または安全な待機を明示する。
+- [x] 同じworkspaceの独立sessionが互いの会話を上書きせず、明示的に再開できる。
+- [x] 再起動後もtool名・結果・失敗と中断状態が確認できる。
+- [x] 旧conversationを消さず移行でき、移行失敗時に戻せる。
+- [x] 実行中switchや競合writerで記録が混線せず、禁止または安全な待機を明示する。
 
 **根拠・再現条件**
 
@@ -57,7 +57,9 @@ session tree/forkは後続需要を確認してから。
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+会話を `.socium/sessions/<ID>/` のセッションに分け、起動時は新規、`-c` で直近、`-r [ID|名前]` と `/resume` で選んで再開する。`/rename` で名前を付け、一覧から削除できる。旧 `conversation.json` と Activity は rename で移し、途中で止まっても次の起動で続きを移す（戻すときは三つのファイルを `.socium/` へ戻す）。会話欄は message と event から tool 呼び出し・一行の結果・承認・失敗した turn・中断（Outcome unknown）を組み立て直し、実行中も同じ項目を出す。`/resume` は turn の合間だけで、実行中は "Request in progress" で拒否する。同時 writer はワークスペースのロックで防ぐ。tool の結果は snapshot に本文があるので、`outputs/` の artifact が消えていても表示は変わらない。設計は [ADR 7](../adr/0007-会話をワークスペース内のセッションとして保存し-cと-rで再開する.md)。
+
+検証: Nix環境のfmt、Clippy（warnings deny）、全テスト（core 283 / TUI 92）が成功。tmux上の実端末で、旧形式の移行、`-r` の一覧、削除の確認、再開後のtool履歴と失敗の表示、`/rename` と名前での再開、`/resume` からの削除、終了時の案内を確認（ダミーAPIキー、モデルへの送信なし）。実APIでの実行中のtool表示、セッションが多いときの一覧の速度は未計測。Linuxで検証。
 
 [一覧へ戻る](README.md)
 

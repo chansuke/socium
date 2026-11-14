@@ -159,11 +159,16 @@ are not yet supported.
 - Each start opens a new conversation. `-c` (`--continue`) continues the most
   recently saved one in the workspace, and `-r` (`--resume`) lists the saved
   ones, newest first, to choose from; `-r <ID>` opens one directly, by its full
-  ID or any unique prefix. On exit Socium prints the command that resumes the
+  ID, its name, or any unique ID prefix. `/resume` opens the same list between
+  turns (`/resume <ID>` switches at once); in the list, `d` then `y`
+  permanently deletes the selected conversation. `/rename <name>` names the
+  open conversation. On exit Socium prints the command that resumes the
   conversation. `/clear` starts a new conversation and keeps the previous one
-  resumable. Resuming loads the conversation, tool results, and Activity;
-  interrupted operations with no saved result are marked unknown, never
-  replayed. Only one Socium runs in a workspace at a time.
+  resumable. Resuming loads the conversation and Activity, and the
+  conversation shows each tool call with its argument, a one-line result,
+  whether it was approved, and failed requests; interrupted operations with no
+  saved result are marked unknown, never replayed. Only one Socium runs in a
+  workspace at a time.
 - `/compact`, automatic compaction, and budget trimming replace older turns
   with a summary. Thinking in the turns kept verbatim was produced against the
   replaced history, so it is no longer sent back; thinking produced after the

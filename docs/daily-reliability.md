@@ -86,9 +86,16 @@ existence, establishes ownership. Each conversation is a session kept in
 `.socium/sessions/<ID>/`, where the ID is its UTC start time
 (`YYYYMMDD-HHMMSS-xxxx`). Its conversation, summary and execution events share
 one versioned snapshot, `conversation.json`, which is first written when the
-conversation has something to save. Edit history, input history and command
-output artifacts belong to the workspace, not to a session. Writes use a same-directory temporary file, file sync,
-rename and (on Unix) parent-directory sync. State is bounded at 64 MiB; reaching
+conversation has something to save; the name given with `/rename` is saved in
+it. Each save also writes `meta.json`, a cache of what the session list shows
+(message count, first prompt, name, model) for that exact snapshot size and
+modification time. The list trusts it only while both match and otherwise
+reads the snapshot and rewrites it, so a missing, stale or broken cache costs
+time, not data. Deleting a session from the list removes its directory
+permanently; the open session cannot be deleted. Edit history, input history
+and command output artifacts belong to the workspace, not to a session. Writes
+use a same-directory temporary file, file sync, rename and (on Unix)
+parent-directory sync. State is bounded at 64 MiB; reaching
 the limit fails explicitly instead of silently dropping history.
 
 The user request, assistant tool intent, authorized execution boundary and each

@@ -20,7 +20,7 @@ tracks live status. Do not maintain a second completion checklist here.
 | TODO-09 | Local models | Unimplemented; start with SOC-016. No local endpoint currently exists. |
 | TODO-10 | Local-model quality | Not evaluated; SOC-032 / SOC-033. |
 | TODO-11 | TUI and input history | Transcript, commands and persistent input history already exist in `crates/tui/src/`. Width/layout work remains SOC-027 / SOC-028. No repl.rs integration is needed. |
-| TODO-12 | Sessions | Same-workspace restart is implemented by SOC-005 / SOC-012. Named sessions and stable references remain SOC-013 / SOC-026. |
+| TODO-12 | Sessions | Same-workspace restart is implemented by SOC-005 / SOC-012; multiple named sessions with `-c`, `-r`, and `/resume` by SOC-026. Stable references remain SOC-013. |
 | TODO-13 | Web/docs retrieval | Unimplemented; SOC-037 specifies DeepSeek Search. Fetch is outside that ticket. |
 | TODO-14 | Task planning | Prompt/project conventions: SOC-022. Persistent task management/extensions: evaluate under SOC-036. |
 | TODO-15 | Integration testing | ScriptedProvider, HTTP fixtures and daily acceptance tests already exist. SOC-038 completed; broader contract fixtures remain SOC-030. |
