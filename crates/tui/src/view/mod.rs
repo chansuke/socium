@@ -1,4 +1,5 @@
 pub(crate) mod activity;
+pub(crate) mod cells;
 pub(crate) mod text_layout;
 pub(crate) mod theme;
 

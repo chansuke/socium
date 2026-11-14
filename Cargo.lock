@@ -2272,6 +2272,7 @@ dependencies = [
  "serde_json",
  "socium-core",
  "tokio",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

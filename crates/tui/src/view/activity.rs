@@ -2,6 +2,7 @@
 //! selected item, or the newest one when following, stays in view.
 
 use crate::activity::{ActivityModel, ApprovalState, Item, ItemKind, RawView, ToolItem, ToolState};
+use crate::view::cells::{cells, split_cells, take_cells};
 use crate::view::text_layout::{command_output_preview_lines, wrap_multiline};
 use crate::view::theme::*;
 use ratatui::{
@@ -416,7 +417,7 @@ fn wrap_keeping_indent(text: &str, width: usize) -> Vec<String> {
             if body.is_empty() {
                 return vec![String::new()];
             }
-            let inner = width.saturating_sub(indent.chars().count()).max(1);
+            let inner = width.saturating_sub(cells(indent)).max(1);
             wrap_multiline(body, inner, inner)
                 .into_iter()
                 .map(|row| format!("{indent}{row}"))
@@ -436,7 +437,7 @@ fn push_value(out: &mut Vec<String>, lead: &str, rest: &str, value: &serde_json:
 }
 
 fn indented(text: &str, width: usize, prefix: &'static str, style: Style) -> Vec<Line<'static>> {
-    let inner = width.saturating_sub(prefix.chars().count());
+    let inner = width.saturating_sub(cells(prefix));
     wrap_multiline(text, inner, inner)
         .into_iter()
         .enumerate()
@@ -444,7 +445,7 @@ fn indented(text: &str, width: usize, prefix: &'static str, style: Style) -> Vec
             let lead = if row == 0 {
                 prefix.to_string()
             } else {
-                " ".repeat(prefix.chars().count())
+                " ".repeat(cells(prefix))
             };
             Line::from(vec![Span::styled(lead, style), Span::styled(line, style)])
         })
@@ -452,7 +453,11 @@ fn indented(text: &str, width: usize, prefix: &'static str, style: Style) -> Vec
 }
 
 /// Wraps a styled line at word boundaries, keeping each span's style.
+/// Widths are terminal cells; a word wider than the pane, such as unspaced
+/// Japanese text, is split between graphemes instead of running off it.
 fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
+    const CONTINUATION: &str = "  ";
+    let width = width.max(CONTINUATION.len() + 1);
     let mut lines = Vec::new();
     let mut current: Vec<Span<'static>> = Vec::new();
     let mut used = 0;
@@ -460,20 +465,36 @@ fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
         let style = span.style;
         let mut pending = String::new();
         for word in split_keep_spaces(&span.content) {
-            let len = word.chars().count();
-            if used + len > width && used > 0 {
+            let word_width = cells(word);
+            if used + word_width <= width {
+                pending.push_str(word);
+                used += word_width;
+                continue;
+            }
+            let mut rest = word;
+            if used > 0 {
                 if !pending.is_empty() {
                     current.push(Span::styled(std::mem::take(&mut pending), style));
                 }
                 lines.push(Line::from(std::mem::take(&mut current)));
-                used = 2;
-                pending.push_str("  ");
-                pending.push_str(word.trim_start());
-                used += word.trim_start().chars().count();
+                pending.push_str(CONTINUATION);
+                used = CONTINUATION.len();
+                rest = word.trim_start();
+            }
+            let (first, first_width) = take_cells(rest, width - used);
+            pending.push_str(&first);
+            used += first_width;
+            let remainder = &rest[first.len()..];
+            if remainder.is_empty() {
                 continue;
             }
-            pending.push_str(word);
-            used += len;
+            for piece in split_cells(remainder, width - CONTINUATION.len()) {
+                current.push(Span::styled(std::mem::take(&mut pending), style));
+                lines.push(Line::from(std::mem::take(&mut current)));
+                used = CONTINUATION.len() + cells(&piece);
+                pending.push_str(CONTINUATION);
+                pending.push_str(&piece);
+            }
         }
         if !pending.is_empty() {
             current.push(Span::styled(pending, style));
@@ -612,6 +633,26 @@ mod tests {
         let expanded = plain(&activity_lines(&model, 40, 80));
         assert!(expanded.len() > collapsed.len());
         assert!(!expanded.iter().any(|row| row.contains("+")));
+    }
+
+    #[test]
+    fn tool_rows_wrap_wide_text_by_cells_without_losing_it() {
+        use ratatui::style::Style;
+        use ratatui::text::Span;
+        let path = "ドキュメント/設計書/表示幅の検証👨\u{200d}👩\u{200d}👧.md";
+        let spans = vec![
+            Span::styled("  ⚙ read_file  ", Style::default()),
+            Span::styled(path.to_string(), Style::default()),
+            Span::styled("  ✓ 3ms", Style::default()),
+        ];
+
+        let lines = super::wrap_spans(spans, 20);
+        let rows = plain(&lines);
+
+        assert!(lines.iter().all(|line| line.width() <= 20), "{rows:#?}");
+        let joined = rows.iter().map(|row| row.trim_start()).collect::<String>();
+        assert!(joined.contains(path), "{joined}");
+        assert!(joined.ends_with("✓ 3ms"));
     }
 
     #[test]

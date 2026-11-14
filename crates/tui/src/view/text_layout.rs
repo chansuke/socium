@@ -1,10 +1,10 @@
 use crate::transcript::{ChatEntry, CommandOutputState, Speaker};
+use crate::view::cells::{cells, take_cells, truncate_cells, wrap_words};
 use crate::view::theme::*;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthChar;
 
 enum Segment {
     Text(String),
@@ -149,8 +149,8 @@ fn render_wrapped_text(
 ) -> Vec<Line<'static>> {
     let wrapped = wrap_multiline(
         text,
-        width.saturating_sub(prefix.chars().count()),
-        width.saturating_sub(indent.chars().count()),
+        width.saturating_sub(cells(prefix)),
+        width.saturating_sub(cells(indent)),
     );
     let mut lines = Vec::new();
 
@@ -257,62 +257,14 @@ pub(crate) fn wrap_multiline(text: &str, first_width: usize, next_width: usize) 
 }
 
 fn wrap_paragraph(paragraph: &str, first_width: usize, next_width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut width = first_width.max(1);
-
-    for word in paragraph.split_whitespace() {
-        for segment in split_long_word(word, width.max(1)) {
-            if current.is_empty() {
-                current.push_str(&segment);
-                continue;
-            }
-
-            let next_len = current.chars().count() + 1 + segment.chars().count();
-            if next_len <= width {
-                current.push(' ');
-                current.push_str(&segment);
-            } else {
-                lines.push(std::mem::take(&mut current));
-                current.push_str(&segment);
-                width = next_width.max(1);
-            }
-        }
-    }
-
-    if !current.is_empty() {
-        lines.push(current);
-    }
-
-    lines
-}
-
-fn split_long_word(word: &str, width: usize) -> Vec<String> {
-    if word.chars().count() <= width {
-        return vec![word.to_string()];
-    }
-
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    for ch in word.chars() {
-        current.push(ch);
-        if current.chars().count() == width {
-            parts.push(std::mem::take(&mut current));
-        }
-    }
-
-    if !current.is_empty() {
-        parts.push(current);
-    }
-
-    parts
+    wrap_words(paragraph, first_width, next_width)
 }
 
 fn render_code_block(label: &str, code_lines: &[String], width: usize) -> Vec<Line<'static>> {
     let outer_width = width.saturating_sub(2).max(24);
     let inner_width = outer_width.saturating_sub(2);
     let title = format!(" {} ", if label.is_empty() { "snippet" } else { label });
-    let (title_text, title_width) = take_width(&title, inner_width);
+    let (title_text, title_width) = take_cells(&title, inner_width);
     let fill = inner_width.saturating_sub(title_width);
 
     let mut lines = vec![Line::from(vec![
@@ -323,9 +275,14 @@ fn render_code_block(label: &str, code_lines: &[String], width: usize) -> Vec<Li
         ),
     ])];
 
-    for raw_line in code_lines {
-        let (visible, visible_width) = take_width(raw_line, inner_width.saturating_sub(2));
-        let padding = inner_width.saturating_sub(2 + visible_width);
+    // Long lines continue on the next row instead of being cut off.
+    let rows = code_lines.iter().flat_map(|raw_line| {
+        crate::view::cells::wrap_preformatted(raw_line, inner_width.saturating_sub(2))
+            .into_iter()
+            .chain(raw_line.is_empty().then(String::new))
+    });
+    for visible in rows {
+        let padding = inner_width.saturating_sub(2 + cells(&visible));
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default().fg(MUTED)),
             Span::styled("│ ", Style::default().fg(CODE_BORDER)),
@@ -349,33 +306,9 @@ fn render_code_block(label: &str, code_lines: &[String], width: usize) -> Vec<Li
     lines
 }
 
-/// The longest prefix of `text` that fits in `max_width` terminal columns,
-/// with its width.
-fn take_width(text: &str, max_width: usize) -> (String, usize) {
-    let mut taken = String::new();
-    let mut width = 0;
-    for ch in text.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if width + ch_width > max_width {
-            break;
-        }
-        taken.push(ch);
-        width += ch_width;
-    }
-    (taken, width)
-}
-
-pub(crate) fn truncate_text(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-
-    let mut truncated = text
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
-    truncated.push('…');
-    truncated
+/// `text` cut to `max_cells` terminal cells, ending with `…` when cut.
+pub(crate) fn truncate_text(text: &str, max_cells: usize) -> String {
+    truncate_cells(text, max_cells)
 }
 
 #[cfg(test)]
@@ -422,5 +355,57 @@ mod tests {
         let boxed = &lines[..lines.len() - 1];
 
         assert!(boxed.iter().all(|line| line.width() == 40), "{boxed:#?}");
+    }
+
+    fn row_text(line: &ratatui::text::Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn long_code_lines_wrap_instead_of_losing_their_end() {
+        let code = [format!("let 説明 = \"{}\"; // 終端", "日本語".repeat(10))];
+        let lines = render_code_block("rust", &code, 30);
+        let body = lines[1..lines.len() - 2]
+            .iter()
+            .map(|line| row_text(line))
+            .collect::<Vec<_>>();
+
+        assert!(body.len() > 1);
+        let boxed = &lines[..lines.len() - 1];
+        assert!(boxed.iter().all(|line| line.width() == 30), "{boxed:#?}");
+        let joined = body
+            .iter()
+            .map(|row| {
+                row.trim_start_matches("  │ ")
+                    .trim_end_matches(" │")
+                    .trim_end()
+            })
+            .collect::<String>();
+        assert!(joined.ends_with("// 終端"), "{joined}");
+    }
+
+    #[test]
+    fn conversation_wraps_by_cells_without_dropping_japanese_text() {
+        let entry = crate::transcript::ChatEntry {
+            speaker: crate::transcript::Speaker::System,
+            body:
+                "差分を確認してから承認してください。e\u{301}と👨\u{200d}👩\u{200d}👧も表示します。"
+                    .into(),
+        };
+        let lines = super::render_entry(&entry, 24);
+        let rows = lines.iter().map(row_text).collect::<Vec<_>>();
+
+        assert!(lines.iter().all(|line| line.width() <= 24), "{rows:#?}");
+        let joined = rows
+            .iter()
+            .map(|row| row.trim_start_matches("! ").trim_start())
+            .collect::<String>();
+        assert_eq!(
+            joined,
+            "差分を確認してから承認してください。e\u{301}と👨\u{200d}👩\u{200d}👧も表示します。"
+        );
     }
 }
