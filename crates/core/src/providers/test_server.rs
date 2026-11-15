@@ -42,3 +42,28 @@ pub(crate) async fn serve_once(
     });
     (base_url, handle)
 }
+
+/// Serves one SSE response whose events arrive with the given delays, then
+/// closes. Returns the base URL.
+pub(crate) async fn serve_paced(events: Vec<(std::time::Duration, String)>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0u8; 65536];
+        let _ = socket.read(&mut buffer).await;
+        let _ = socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        for (delay, event) in events {
+            tokio::time::sleep(delay).await;
+            if socket.write_all(event.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    });
+    base_url
+}

@@ -270,10 +270,21 @@ pub struct AgentService {
     last_measured_usage: Option<TokenUsage>,
 }
 
+/// The client for model requests. There is no deadline for a whole
+/// response: a long answer streams for minutes. Instead the connection must
+/// open within 30 seconds and data must keep arriving (SSE pings count).
 fn provider_http_client() -> Result<reqwest::Client, ProviderError> {
+    http_client(
+        Duration::from_secs(30),
+        crate::providers::error::IDLE_TIMEOUT,
+    )
+}
+
+fn http_client(connect: Duration, idle: Duration) -> Result<reqwest::Client, ProviderError> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(90))
+        .connect_timeout(connect)
+        .read_timeout(idle)
         .build()
         .map_err(ProviderError::Http)
 }

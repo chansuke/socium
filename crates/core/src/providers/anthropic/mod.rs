@@ -122,7 +122,11 @@ impl Provider for AnthropicProvider {
         request: &AgentMessageRequest<'_>,
         on_delta: &mut (dyn FnMut(ProviderEvent) + Send),
     ) -> Result<ProviderResponse, ProviderError> {
-        let mut response = self.build_request(client, request)?.send().await?;
+        let mut response = self
+            .build_request(client, request)?
+            .send()
+            .await
+            .map_err(crate::providers::error::transport)?;
         if !response.status().is_success() {
             return Err(api_error(&self.name, response).await);
         }
@@ -131,7 +135,11 @@ impl Provider for AnthropicProvider {
         let mut builder = StreamingMessageBuilder::default();
         let mut forward = |event: ProviderEvent| on_delta(event);
 
-        while let Some(chunk) = response.chunk().await? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(crate::providers::error::transport)?
+        {
             for event in parser.push(&chunk)? {
                 forward(ProviderEvent::Raw {
                     json: stream::displayable_raw_event(&event),
@@ -259,5 +267,99 @@ id = "deepseek-flash"
         .err()
         .unwrap();
         assert_eq!(err.to_string(), "ANTHROPIC_API_KEY is not set");
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use crate::agent::types::Message;
+    use crate::providers::test_server::serve_paced;
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    fn provider(base_url: &str) -> AnthropicProvider {
+        let registry = crate::models::ModelRegistry::from_toml(&format!(
+            "[providers.local]\nwire = \"anthropic\"\nbase_url = \"{base_url}\"\napi_key_env = \"LOCAL_KEY\"\n[[models]]\nalias = \"m\"\nprovider = \"local\"\nid = \"local-model\""
+        ))
+        .unwrap();
+        AnthropicProvider::from_config(
+            registry.provider("local").unwrap(),
+            registry.find("m").unwrap(),
+            &|key: &str| (key == "LOCAL_KEY").then(|| "k".to_string()),
+        )
+        .unwrap()
+    }
+
+    fn event(value: serde_json::Value) -> String {
+        format!("data: {value}\n\n")
+    }
+
+    fn reply(delays: &[Duration]) -> Vec<(Duration, String)> {
+        let mut events = vec![
+            (
+                Duration::ZERO,
+                event(json!({"type":"message_start","message":{"usage":{"input_tokens":1}}})),
+            ),
+            (
+                Duration::ZERO,
+                event(
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                ),
+            ),
+        ];
+        for delay in delays {
+            events.push((
+                *delay,
+                event(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}})),
+            ));
+        }
+        for value in [
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+            json!({"type":"message_stop"}),
+        ] {
+            events.push((Duration::ZERO, event(value)));
+        }
+        events
+    }
+
+    async fn send(
+        base_url: &str,
+        client: &reqwest::Client,
+    ) -> Result<ProviderResponse, ProviderError> {
+        let messages = [Message::user_text("hi".into())];
+        let request = AgentMessageRequest::new("local-model", 100, &messages, &[]);
+        provider(base_url)
+            .send_message(client, &request, &mut |_| {})
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_keeps_streaming_outlasts_the_idle_limit() {
+        // Six tokens 300 ms apart: 1.8 s in all, past a 1 s idle limit.
+        let base_url = serve_paced(reply(&[Duration::from_millis(300); 6])).await;
+        let client = crate::http_client(Duration::from_secs(5), Duration::from_secs(1)).unwrap();
+        let response = send(&base_url, &client).await.unwrap();
+        assert_eq!(
+            response.message.content,
+            [crate::agent::types::ContentBlock::Text {
+                text: "xxxxxx".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_reply_fails_with_a_plain_message() {
+        let base_url = serve_paced(reply(&[Duration::ZERO, Duration::from_secs(3)])).await;
+        let client = crate::http_client(Duration::from_secs(5), Duration::from_secs(1)).unwrap();
+        let started = Instant::now();
+        let err = send(&base_url, &client).await.err().unwrap();
+        assert!(started.elapsed() < Duration::from_millis(2500));
+        assert!(err.is_retryable());
+        assert!(
+            err.to_string().starts_with("No data from the provider"),
+            "{err}"
+        );
     }
 }

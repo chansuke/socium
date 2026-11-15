@@ -89,7 +89,11 @@ impl Provider for OpenAiChatProvider {
         request: &AgentMessageRequest<'_>,
         on_delta: &mut (dyn FnMut(ProviderEvent) + Send),
     ) -> Result<ProviderResponse, ProviderError> {
-        let mut response = self.build_request(client, request)?.send().await?;
+        let mut response = self
+            .build_request(client, request)?
+            .send()
+            .await
+            .map_err(crate::providers::error::transport)?;
         if !response.status().is_success() {
             return Err(api_error(&self.name, response).await);
         }
@@ -97,7 +101,11 @@ impl Provider for OpenAiChatProvider {
         let mut parser = SseParser::default();
         let mut builder = ChatStreamBuilder::default();
         let mut forward = |event: ProviderEvent| on_delta(event);
-        while let Some(chunk) = response.chunk().await? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(crate::providers::error::transport)?
+        {
             for data in parser.push(&chunk)? {
                 forward(ProviderEvent::Raw { json: data.clone() });
                 builder.apply_chunk(&data, &mut forward)?;

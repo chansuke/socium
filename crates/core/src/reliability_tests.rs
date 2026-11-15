@@ -1078,6 +1078,71 @@ fn without_a_ui_a_call_that_needs_approval_says_how_to_allow_it() {
     assert!(!root.path().join("marker").exists());
 }
 
+fn status(code: u16) -> Result<ProviderResponse, ProviderError> {
+    Err(ProviderError::Status {
+        status: code,
+        retry_after: Some(Duration::ZERO),
+        message: format!("test API error {code}"),
+    })
+}
+
+#[tokio::test]
+async fn overload_and_rate_limits_are_retried_before_any_output() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = ScriptedProvider::new(vec![
+        status(529),
+        status(429),
+        Ok(text_provider_response("third time", None)),
+    ]);
+    let requests = provider.recorded_requests.clone();
+    let mut agent = AgentService::with_provider(
+        root.path().into(),
+        Box::new(provider),
+        "test".into(),
+        1000,
+        reqwest::Client::new(),
+    );
+    let mut warnings = Vec::new();
+    let reply = agent
+        .submit_with_progress("hi".into(), |event| {
+            if let AgentProgress::Activity(ActivityEvent {
+                kind: ActivityKind::Warning { message },
+                ..
+            }) = event
+            {
+                warnings.push(message);
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply.text, "third time");
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(warnings[0].contains("attempt 2 of 4"));
+}
+
+#[tokio::test]
+async fn invalid_requests_fail_at_once_and_retries_stop_after_four_attempts() {
+    let root = tempfile::tempdir().unwrap();
+    for (responses, attempts) in [
+        (vec![status(400)], 1),
+        (vec![status(503), status(503), status(503), status(503)], 4),
+    ] {
+        let provider = ScriptedProvider::new(responses);
+        let requests = provider.recorded_requests.clone();
+        let mut agent = AgentService::with_provider(
+            root.path().into(),
+            Box::new(provider),
+            "test".into(),
+            1000,
+            reqwest::Client::new(),
+        );
+        assert!(agent.submit("hi".into()).await.is_err());
+        assert_eq!(requests.lock().unwrap().len(), attempts);
+        drop(agent);
+    }
+}
+
 #[tokio::test]
 async fn a_call_with_unparsable_arguments_is_reported_and_never_runs() {
     let root = tempfile::tempdir().unwrap();

@@ -19,6 +19,57 @@ pub enum ProviderError {
     /// formatted.
     #[error("{0}")]
     Stream(String),
+    /// A non-2xx response; `message` is already fully formatted.
+    #[error("{message}")]
+    Status {
+        status: u16,
+        /// From the `retry-after` header, in seconds.
+        retry_after: Option<std::time::Duration>,
+        message: String,
+    },
+    /// An overload or internal error the provider reported in the stream.
+    #[error("{0}")]
+    Transient(String),
+    /// No data arrived for the idle limit.
+    #[error("No data from the provider for {} seconds; the connection was closed", .0.as_secs())]
+    Stalled(std::time::Duration),
+}
+
+/// How long the provider may send nothing before the request is given up.
+/// Long responses are fine as long as data keeps arriving.
+pub(crate) const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+impl ProviderError {
+    /// Whether another attempt can succeed: rate limits, overload, server
+    /// errors, and connections that failed or stalled. The caller retries
+    /// only before any output was shown.
+    pub(crate) fn is_retryable(&self) -> bool {
+        match self {
+            Self::Status { status, .. } => {
+                matches!(status, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 529)
+            }
+            Self::Transient(_) | Self::Stalled(_) => true,
+            Self::Http(err) => err.is_connect() || err.is_timeout(),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Status { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+}
+
+/// A transport error, with a stall named as such rather than as a body
+/// decoding failure.
+pub(crate) fn transport(err: reqwest::Error) -> ProviderError {
+    if err.is_timeout() {
+        ProviderError::Stalled(IDLE_TIMEOUT)
+    } else {
+        ProviderError::Http(err)
+    }
 }
 
 const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
@@ -27,6 +78,12 @@ const MAX_ERROR_MESSAGE_CHARS: usize = 300;
 /// Reads a bounded prefix of a non-2xx response and formats it.
 pub(crate) async fn api_error(provider: &str, mut response: reqwest::Response) -> ProviderError {
     let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs);
     let mut body = Vec::new();
     while body.len() < MAX_ERROR_BODY_BYTES
         && let Ok(Some(chunk)) = response.chunk().await
@@ -34,7 +91,11 @@ pub(crate) async fn api_error(provider: &str, mut response: reqwest::Response) -
         body.extend_from_slice(&chunk);
     }
     body.truncate(MAX_ERROR_BODY_BYTES);
-    ProviderError::Api(api_error_message(provider, status, &body))
+    ProviderError::Status {
+        status: status.as_u16(),
+        retry_after,
+        message: api_error_message(provider, status, &body),
+    }
 }
 
 /// Formats a non-2xx response for the UI and persisted transcript. Only the

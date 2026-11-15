@@ -70,6 +70,8 @@ struct StreamUsage {
 #[derive(Debug, Deserialize)]
 struct AnthropicErrorPayload {
     message: String,
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,10 +228,27 @@ impl StreamingMessageBuilder {
             }
             AnthropicStreamEvent::Ping | AnthropicStreamEvent::Unknown => {}
             AnthropicStreamEvent::Error { error } => {
-                return Err(ProviderError::Stream(format!(
-                    "Anthropic streaming error: {}",
+                let message = format!(
+                    "Streaming error: {}{}",
+                    error
+                        .kind
+                        .as_deref()
+                        .map(|kind| format!("{kind}: "))
+                        .unwrap_or_default(),
                     error.message
-                )));
+                );
+                // Overload and internal errors are worth another attempt;
+                // invalid requests are not.
+                return Err(
+                    if matches!(
+                        error.kind.as_deref(),
+                        Some("overloaded_error" | "api_error")
+                    ) {
+                        ProviderError::Transient(message)
+                    } else {
+                        ProviderError::Stream(message)
+                    },
+                );
             }
             AnthropicStreamEvent::ContentBlockStart {
                 index,
@@ -698,6 +717,28 @@ mod tests {
         let response = b.finish().unwrap();
         assert_eq!(response.stop_reason.as_deref(), Some("max_tokens"));
         assert_eq!(response.content.len(), 1);
+    }
+
+    #[test]
+    fn overload_in_the_stream_is_transient() {
+        let mut b = start();
+        let err = apply(
+            &mut b,
+            json!({"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}),
+        )
+        .unwrap_err();
+        assert!(err.is_retryable());
+        assert_eq!(
+            err.to_string(),
+            "Streaming error: overloaded_error: Overloaded"
+        );
+        let mut b = start();
+        let err = apply(
+            &mut b,
+            json!({"type":"error","error":{"type":"invalid_request_error","message":"bad"}}),
+        )
+        .unwrap_err();
+        assert!(!err.is_retryable());
     }
 
     #[test]

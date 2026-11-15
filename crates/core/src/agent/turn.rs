@@ -46,6 +46,10 @@ pub(crate) struct TurnOutcome {
     pub(crate) notices: Vec<String>,
 }
 
+/// Further attempts after a retryable failure before any output arrived.
+const MAX_RETRIES: u32 = 3;
+const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub(crate) async fn run_agent_turn<F>(
     ctx: &TurnContext<'_>,
     messages: &mut Vec<Message>,
@@ -99,36 +103,79 @@ where
             messages,
             ctx.tools,
         );
-        let mut round_activity = RoundActivity::start();
-        let mut on_delta = |event: ProviderEvent| {
-            match &event {
-                ProviderEvent::TextDelta { text, .. } => {
-                    on_progress(AgentProgress::AssistantText { text: text.clone() })
+        let mut attempt = 0;
+        let result = loop {
+            let mut round_activity = RoundActivity::start();
+            let mut received = false;
+            let mut on_delta = |event: ProviderEvent| {
+                match &event {
+                    ProviderEvent::TextDelta { text, .. } => {
+                        received = true;
+                        on_progress(AgentProgress::AssistantText { text: text.clone() })
+                    }
+                    ProviderEvent::ThinkingDelta { text, .. } => {
+                        received = true;
+                        on_progress(AgentProgress::ThinkingText { text: text.clone() })
+                    }
+                    ProviderEvent::Raw { json } => on_progress(AgentProgress::RawProviderEvent {
+                        turn_id: clock.turn_id(),
+                        round: round_number,
+                        json: json.clone(),
+                    }),
+                    ProviderEvent::BlockStarted { .. } | ProviderEvent::ToolInputDelta { .. } => {
+                        received = true
+                    }
+                    _ => {}
                 }
-                ProviderEvent::ThinkingDelta { text, .. } => {
-                    on_progress(AgentProgress::ThinkingText { text: text.clone() })
+                for kind in round_activity.apply(event) {
+                    on_progress(AgentProgress::Activity(clock.event(round_number, kind)));
                 }
-                ProviderEvent::Raw { json } => on_progress(AgentProgress::RawProviderEvent {
-                    turn_id: clock.turn_id(),
-                    round: round_number,
-                    json: json.clone(),
-                }),
-                _ => {}
+            };
+            let result = tokio::select! {
+                biased;
+                _ = ctx.control.cancelled() => Err(AgentError::Cancelled),
+                result = ctx.provider.send_message(ctx.client, &message_request, &mut on_delta) => result.map_err(AgentError::from),
+            };
+            // Retry only while nothing was shown, so the user never sees a
+            // reply restart; the request has no side effects of its own.
+            if let Err(AgentError::Provider(err)) = &result
+                && err.is_retryable()
+                && !received
+                && attempt < MAX_RETRIES
+            {
+                attempt += 1;
+                let delay = err
+                    .retry_after()
+                    .unwrap_or(std::time::Duration::from_secs(1 << attempt))
+                    .min(MAX_RETRY_DELAY);
+                emit(
+                    on_progress,
+                    ActivityKind::Warning {
+                        message: format!(
+                            "{err}; retrying in {}s (attempt {} of {})",
+                            delay.as_secs(),
+                            attempt + 1,
+                            MAX_RETRIES + 1
+                        ),
+                    },
+                );
+                tokio::select! {
+                    biased;
+                    _ = ctx.control.cancelled() => {}
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                if ctx.control.is_cancelled() {
+                    break Err(AgentError::Cancelled);
+                }
+                continue;
             }
-            for kind in round_activity.apply(event) {
-                on_progress(AgentProgress::Activity(clock.event(round_number, kind)));
+            // A response that ended without message_stop (an error, a
+            // cancellation, or a provider that does not stream) closes here.
+            for kind in round_activity.finish(None, result.as_ref().ok().and_then(|r| r.usage)) {
+                emit(on_progress, kind);
             }
+            break result;
         };
-        let result = tokio::select! {
-            biased;
-            _ = ctx.control.cancelled() => Err(AgentError::Cancelled),
-            result = ctx.provider.send_message(ctx.client, &message_request, &mut on_delta) => result.map_err(AgentError::from),
-        };
-        // A response that ended without message_stop (an error, a
-        // cancellation, or a provider that does not stream) closes here.
-        for kind in round_activity.finish(None, result.as_ref().ok().and_then(|r| r.usage)) {
-            emit(on_progress, kind);
-        }
         let response = result?;
         if response.usage.is_some() {
             last_usage = response.usage;
