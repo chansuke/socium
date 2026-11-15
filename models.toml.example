@@ -80,14 +80,24 @@ max_output_tokens = 32000
 # Optional fields:
 #   description = "..."
 #     One line shown in the /model picker.
-#   features = ["adaptive_thinking", "effort", "eager_input_streaming", "anthropic_text_editor"]
+#   features = ["adaptive_thinking", "effort", "eager_input_streaming",
+#               "anthropic_text_editor", "prompt_caching"]
 #     Anthropic extensions to send; omit for compatible endpoints. On the
 #     OpenAI wires only "effort" applies: openai-chat sends it as
 #     reasoning_effort; on openai-responses it marks a reasoning model,
 #     whose summaries are shown and whose encrypted reasoning is sent back
 #     across tool calls, and EFFORT is sent as reasoning.effort.
+#     "prompt_caching" sends a top-level cache_control, so each round reads
+#     the shared history from the cache; built-in Claude models have it.
 #   compact_model = "<alias>"
 #     Model that summarizes history; defaults to this model.
+#   compact_at_tokens = 200000
+#     Prompt size at which history is compacted. Defaults to 200000 or 80%
+#     of the input budget, whichever is lower; must be below context_window.
+#   price = { input = 0.28, output = 0.42, cache_read = 0.028 }
+#     US dollars per million tokens, used only to show the session cost.
+#     cache_read and cache_write default to the input price. Socium ships
+#     no prices, so without this field no cost is shown.
 #
 # A local server (http is allowed only on localhost), such as Ollama's
 # OpenAI-compatible API, which ignores the key:
