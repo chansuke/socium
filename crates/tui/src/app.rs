@@ -434,7 +434,11 @@ impl App {
         }
         let user_input = self.input.trim().to_string();
         if let Err(err) = self.input_history.record_entry(&user_input) {
-            eprintln!("Warning: failed to persist input history: {err}");
+            // Printing would draw over the TUI.
+            self.push_message(
+                Speaker::System,
+                format!("Warning: failed to persist input history: {err}"),
+            );
         }
         self.history_index = None;
         self.history_draft.clear();
