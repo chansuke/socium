@@ -45,7 +45,7 @@ use crate::agent::subagent::catalog::{
     SubagentCatalog, SubagentModel, SubagentType, load_user_types,
 };
 use crate::agent::turn::{TurnContext, run_agent_turn};
-use crate::agent::types::{Message, strip_thinking};
+use crate::agent::types::Message;
 use crate::constants::*;
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::error::ProviderError;
@@ -556,12 +556,10 @@ impl AgentService {
         service.warnings.append(&mut agent_warnings);
         service.install_subagents(SubagentCatalog::new(user_types, subagent_models));
         service.apply_state(state)?;
-        if let Some(alias) = saved {
-            if alias == service.active_model.alias {
-                service.selected_model = Some(alias);
-            } else {
-                strip_thinking(&mut service.messages);
-            }
+        if let Some(alias) = saved
+            && alias == service.active_model.alias
+        {
+            service.selected_model = Some(alias);
         }
         // A new session is written once it has something to save.
         if resumed.is_some() {
@@ -714,12 +712,9 @@ impl AgentService {
         }
         let mut target = ModelTarget::build(&self.registry, model, self.env.as_ref())?;
         let mut warnings = std::mem::take(&mut target.warnings);
-        let original_messages = self.messages.clone();
-        strip_thinking(&mut self.messages);
         let previous = self.install(target);
         let previous_selection = self.selected_model.replace(alias.to_string());
         if let Err(err) = self.persist_state() {
-            self.messages = original_messages;
             self.install(previous);
             self.selected_model = previous_selection;
             return Err(err.into());
@@ -941,7 +936,6 @@ impl AgentService {
                         }
                         Err(reason) => {
                             warnings.push(format!("{reason}; staying on '{current}'"));
-                            strip_thinking(&mut self.messages);
                         }
                     }
                 }
@@ -1295,7 +1289,7 @@ mod security_tests;
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
+    use crate::agent::types::{ContentBlock, Message, MessageContent};
     use crate::constants::CONVERSATION_STATE_FILE_NAME;
     use crate::providers::TokenUsage;
     use crate::providers::anthropic::AnthropicProvider;
@@ -1307,31 +1301,22 @@ mod tests {
     fn transcript_entries_include_text_and_tool_results() {
         let workspace = make_temp_dir("transcript");
         let messages = vec![
-            Message {
-                role: Role::User,
-                content: MessageContent::Text("hello".to_string()),
-            },
-            Message {
-                role: Role::Assistant,
-                content: MessageContent::Blocks(vec![
-                    ContentBlock::Text {
-                        text: "answer".to_string(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "tool_1".to_string(),
-                        name: "read_file".to_string(),
-                        input: json!({"path": "src/lib.rs"}),
-                    },
-                ]),
-            },
-            Message {
-                role: Role::User,
-                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
-                    tool_use_id: "tool_1".to_string(),
-                    content: "Path: src/lib.rs".to_string(),
-                    is_error: None,
-                }]),
-            },
+            Message::user_text("hello".to_string()),
+            Message::assistant_blocks(vec![
+                ContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "tool_1".to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({"path": "src/lib.rs"}),
+                },
+            ]),
+            Message::user_blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_1".to_string(),
+                content: "Path: src/lib.rs".to_string(),
+                is_error: None,
+            }]),
         ];
 
         let mut service = AgentService::with_provider(
@@ -1959,19 +1944,35 @@ max_output_tokens = 32000
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
         }
 
+        /// A turn Sonnet answered with thinking.
         fn thinking_turn() -> Vec<Message> {
             vec![
                 Message::user_text("hi".into()),
-                Message::assistant_blocks(vec![
-                    ContentBlock::Thinking {
-                        thinking: "plan".into(),
-                        signature: "sig".into(),
+                Message::assistant_from(
+                    vec![
+                        ContentBlock::Thinking {
+                            thinking: "plan".into(),
+                            signature: "sig".into(),
+                        },
+                        ContentBlock::Text {
+                            text: "answer".into(),
+                        },
+                    ],
+                    crate::agent::types::Origin {
+                        provider: "anthropic".into(),
+                        model: "claude-sonnet-5-5".into(),
                     },
-                    ContentBlock::Text {
-                        text: "answer".into(),
-                    },
-                ]),
+                ),
             ]
+        }
+
+        /// Whether the next request to the current model carries thinking.
+        fn sends_thinking(service: &AgentService) -> bool {
+            let sent = crate::agent::types::readable_thinking(&service.messages, &|origin| {
+                service.provider.reads_thinking_from(origin)
+            })
+            .unwrap_or_else(|| service.messages.clone());
+            has_thinking(&sent)
         }
 
         fn has_thinking(messages: &[Message]) -> bool {
@@ -2004,23 +2005,33 @@ max_output_tokens = 32000
             let switched = service.switch_model("ds-flash").unwrap();
             assert_eq!(switched.model.model_id, "deepseek-flash");
             assert!(switched.model.active);
-            assert!(!has_thinking(&service.messages));
+            // The history keeps Sonnet's thinking; DeepSeek is not sent it.
+            assert!(has_thinking(&service.messages));
+            assert!(!sends_thinking(&service));
             let state = saved_state(root.path());
             assert_eq!(state["active_model"], "ds-flash");
-            assert!(!state.to_string().contains("\"thinking\""));
+            assert!(state.to_string().contains("\"thinking\""));
             drop(service);
 
-            let service = open(root.path(), &with_model("sonnet"));
+            let mut service = open(root.path(), &with_model("sonnet"));
             assert_eq!(service.active_model().alias, "ds-flash");
             assert!(service.startup_warnings().is_empty());
+            // Back on Anthropic, any Claude model is sent the block.
+            service.messages = thinking_turn();
+            service.switch_model("opus").unwrap();
+            assert!(sends_thinking(&service));
         }
 
         #[test]
-        fn an_unavailable_saved_model_falls_back_with_a_warning_and_strips_thinking() {
+        fn an_unavailable_saved_model_falls_back_with_a_warning_and_keeps_thinking_unsent() {
             let root = make_temp_dir("model_fallback");
             let mut service = open(root.path(), &KEYS);
             service.switch_model("ds-flash").unwrap();
             service.messages = thinking_turn();
+            service.messages[1].origin = Some(crate::agent::types::Origin {
+                provider: "deepseek".into(),
+                model: "deepseek-flash".into(),
+            });
             service.persist_state().unwrap();
             drop(service);
 
@@ -2038,7 +2049,8 @@ max_output_tokens = 32000
             assert_eq!(warnings.len(), 1, "{warnings:?}");
             assert!(warnings[0].contains("'ds-flash'"));
             assert!(warnings[0].contains("DEEPSEEK_API_KEY is not set"));
-            assert!(!has_thinking(&service.messages));
+            assert!(has_thinking(&service.messages));
+            assert!(!sends_thinking(&service));
             assert!(saved_state(root.path()).get("active_model").is_none());
         }
 

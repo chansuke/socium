@@ -8,8 +8,26 @@ pub(crate) struct AgentMessageRequest<'a> {
     pub model: &'a str,
     pub max_tokens: u32,
     pub system: &'a str,
+    #[serde(serialize_with = "wire_messages")]
     pub messages: &'a [Message],
     pub tools: &'a [ToolDefinition],
+}
+
+/// Messages as the API takes them: role and content, never Socium's own
+/// bookkeeping such as `origin`.
+fn wire_messages<S: serde::Serializer>(
+    messages: &&[Message],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Wire<'a> {
+        role: &'a Role,
+        content: &'a MessageContent,
+    }
+    serializer.collect_seq(messages.iter().map(|message| Wire {
+        role: &message.role,
+        content: &message.content,
+    }))
 }
 
 impl<'a> AgentMessageRequest<'a> {
@@ -83,6 +101,18 @@ pub(crate) enum ContentBlock {
 pub(crate) struct Message {
     pub role: Role,
     pub content: MessageContent,
+    /// Which provider and model wrote an assistant message. Its thinking is
+    /// sent back only to a provider that can read it (ADR 13); `None` in
+    /// history saved before this was recorded, and on user messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
+}
+
+/// The registry provider name and model ID that produced a message.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub(crate) struct Origin {
+    pub provider: String,
+    pub model: String,
 }
 
 impl Message {
@@ -90,6 +120,7 @@ impl Message {
         Self {
             role: Role::User,
             content: MessageContent::Text(content),
+            origin: None,
         }
     }
 
@@ -97,6 +128,15 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: MessageContent::Blocks(content),
+            origin: None,
+        }
+    }
+
+    /// An assistant message the given provider and model wrote.
+    pub fn assistant_from(content: Vec<ContentBlock>, origin: Origin) -> Self {
+        Self {
+            origin: Some(origin),
+            ..Self::assistant_blocks(content)
         }
     }
 
@@ -104,6 +144,7 @@ impl Message {
         Self {
             role: Role::User,
             content: MessageContent::Blocks(content),
+            origin: None,
         }
     }
 }
@@ -139,6 +180,30 @@ pub(crate) fn strip_thinking(messages: &mut [Message]) -> usize {
         }
     }
     removed
+}
+
+/// `messages` with the thinking a provider cannot read left out, or `None`
+/// when it can read all of it. The saved history keeps every block, so a
+/// later switch back to the model that wrote them sends them again.
+/// Unreadable blocks always precede readable ones from the current model,
+/// so dropping them only removes a leading run, which keeps later blocks
+/// valid.
+pub(crate) fn readable_thinking(
+    messages: &[Message],
+    reads: &dyn Fn(Option<&Origin>) -> bool,
+) -> Option<Vec<Message>> {
+    let unreadable = |message: &Message| {
+        matches!(&message.content, MessageContent::Blocks(blocks) if blocks.iter().any(ContentBlock::is_thinking))
+            && !reads(message.origin.as_ref())
+    };
+    if !messages.iter().any(unreadable) {
+        return None;
+    }
+    let mut projected = messages.to_vec();
+    for message in projected.iter_mut().filter(|message| unreadable(message)) {
+        strip_thinking(std::slice::from_mut(message));
+    }
+    Some(projected)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -21,6 +21,7 @@ use stream::ResponsesStreamBuilder;
 
 pub(crate) struct OpenAiResponsesProvider {
     name: String,
+    model: String,
     responses_url: String,
     api_key: String,
     features: ModelFeatures,
@@ -45,6 +46,7 @@ impl OpenAiResponsesProvider {
         options.warn_unsupported(&model.alias, model.features);
         Ok(Self {
             name: provider.name.clone(),
+            model: model.id.clone(),
             responses_url: format!("{}/responses", provider.base_url),
             api_key,
             features: model.features,
@@ -83,6 +85,11 @@ impl Provider for OpenAiResponsesProvider {
 
     fn startup_warnings(&self) -> Vec<String> {
         self.options.warnings.clone()
+    }
+
+    /// Encrypted reasoning items go back only to the model that wrote them.
+    fn reads_thinking_from(&self, origin: Option<&crate::agent::types::Origin>) -> bool {
+        origin.is_some_and(|origin| origin.provider == self.name && origin.model == self.model)
     }
 
     async fn send_message(

@@ -96,11 +96,16 @@ where
             )
             .into());
         }
+        // Thinking another provider or model wrote stays in the history
+        // but is not sent where it cannot be read.
+        let readable = crate::agent::types::readable_thinking(messages, &|origin| {
+            ctx.provider.reads_thinking_from(origin)
+        });
         let message_request = AgentMessageRequest::with_system_prompt(
             ctx.model,
             ctx.max_tokens,
             ctx.system,
-            messages,
+            readable.as_deref().unwrap_or(messages),
             ctx.tools,
         );
         let mut attempt = 0;
@@ -225,7 +230,13 @@ where
             )
             .into());
         }
-        messages.push(Message::assistant_blocks(assistant_blocks));
+        messages.push(Message::assistant_from(
+            assistant_blocks,
+            crate::agent::types::Origin {
+                provider: ctx.provider.label(),
+                model: ctx.model.to_string(),
+            },
+        ));
         // Persist intent before side effects. On restart unresolved calls become
         // explicitly unknown results and are never automatically re-executed.
         checkpoint(

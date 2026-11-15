@@ -83,6 +83,11 @@ impl Provider for OpenAiChatProvider {
         self.options.warnings.clone()
     }
 
+    /// Chat Completions has no field for thinking; nothing is sent back.
+    fn reads_thinking_from(&self, _: Option<&crate::agent::types::Origin>) -> bool {
+        false
+    }
+
     async fn send_message(
         &self,
         client: &reqwest::Client,

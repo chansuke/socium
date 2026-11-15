@@ -15,6 +15,11 @@ use stream::StreamingMessageBuilder;
 
 pub(crate) struct AnthropicProvider {
     name: String,
+    /// The model this provider was built for.
+    model: String,
+    /// Anthropic's own API, where any Claude model's thinking can be sent
+    /// back: the API drops what the current model cannot read, unbilled.
+    first_party: bool,
     messages_url: String,
     auth: AuthScheme,
     api_key: String,
@@ -43,6 +48,8 @@ impl AnthropicProvider {
         options.warn_unsupported(&model.alias, model.features);
         Ok(Self {
             name: provider.name.clone(),
+            model: model.id.clone(),
+            first_party: provider.base_url == crate::models::ANTHROPIC_BASE_URL,
             messages_url: format!("{}/v1/messages", provider.base_url),
             auth: provider.auth,
             api_key,
@@ -59,6 +66,8 @@ impl AnthropicProvider {
     ) -> Self {
         Self {
             name: "anthropic".into(),
+            model: String::new(),
+            first_party: true,
             messages_url: "https://api.anthropic.com/v1/messages".into(),
             auth: AuthScheme::ApiKeyHeader,
             api_key: api_key.into(),
@@ -114,6 +123,14 @@ impl Provider for AnthropicProvider {
 
     fn startup_warnings(&self) -> Vec<String> {
         self.options.warnings.clone()
+    }
+
+    /// Anthropic's API takes thinking from any Claude model it served. A
+    /// compatible endpoint is only known to accept its own model's.
+    fn reads_thinking_from(&self, origin: Option<&crate::agent::types::Origin>) -> bool {
+        origin.is_some_and(|origin| {
+            origin.provider == self.name && (self.first_party || origin.model == self.model)
+        })
     }
 
     async fn send_message(

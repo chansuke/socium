@@ -849,7 +849,7 @@ fn resume_refuses_the_open_or_an_unknown_session_and_keeps_the_current_one() {
 }
 
 #[test]
-fn resume_applies_the_sessions_model_or_stays_and_drops_thinking() {
+fn resume_applies_the_sessions_model_or_stays_and_keeps_thinking_unsent() {
     let root = tempfile::tempdir().unwrap();
     let mut agent = open_session(root.path(), SessionStart::New).unwrap();
     agent.switch_model("sonnet").unwrap();
@@ -893,7 +893,18 @@ fn resume_applies_the_sessions_model_or_stays_and_drops_thinking() {
     let saved: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert!(saved.get("active_model").is_none());
-    assert!(!saved.to_string().contains("\"thinking\""));
+    // The saved history keeps the block; it has no recorded origin, so no
+    // provider is sent it.
+    assert!(saved.to_string().contains("\"thinking\""));
+    let sent = crate::agent::types::readable_thinking(&agent.messages, &|origin| {
+        agent.provider.reads_thinking_from(origin)
+    })
+    .unwrap();
+    assert!(
+        !serde_json::to_string(&sent)
+            .unwrap()
+            .contains("\"thinking\"")
+    );
 }
 
 #[test]

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 pub(crate) const MODELS_FILE_ENV: &str = "SOCIUM_MODELS_FILE";
 pub(crate) const BUILTIN_PROVIDER: &str = "anthropic";
 const BUILTIN_DEFAULT_MODEL: &str = "opus";
-const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
+pub(crate) const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
 /// Request format spoken to a provider endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

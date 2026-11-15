@@ -49,6 +49,11 @@ impl Provider for ScriptedProvider {
         }
     }
 
+    /// Tests script their own histories; every block goes back.
+    fn reads_thinking_from(&self, _: Option<&crate::agent::types::Origin>) -> bool {
+        true
+    }
+
     async fn send_message(
         &self,
         _client: &reqwest::Client,

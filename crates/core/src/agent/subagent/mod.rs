@@ -14,7 +14,7 @@ use crate::activity::{ActivityKind, summarize_tool_input};
 use crate::agent::subagent::record::{SubagentRecord, SubagentStatus};
 use crate::agent::turn::repair_incomplete_tools;
 use crate::agent::turn::{TurnContext, extract_text, run_agent_turn};
-use crate::agent::types::{Message, strip_thinking};
+use crate::agent::types::Message;
 use crate::constants::{AGENT_TOOL_NAME, MAX_SUBAGENT_REPORT_CHARACTERS, MAX_TOOL_ROUNDS};
 use crate::error::AgentError;
 use crate::providers::TokenUsage;
@@ -115,12 +115,10 @@ pub(crate) fn run_subagent<'a>(
                         record.agent_type
                     )));
                 }
-                // A crash may have cut its last tool batch short, and its
-                // thinking only goes back to the model that produced it.
+                // A crash may have cut its last tool batch short. Thinking
+                // from another model stays in the record; the turn sends
+                // only what the current model can read.
                 repair_incomplete_tools(&mut record.messages);
-                if record.model != child.model {
-                    strip_thinking(&mut record.messages);
-                }
                 record
             }
             None => {

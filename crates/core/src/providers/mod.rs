@@ -123,6 +123,12 @@ pub(crate) trait Provider: Send + Sync {
     fn startup_warnings(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Whether this provider accepts thinking that `origin` wrote; `None`
+    /// is history saved before origins were recorded. By default only its
+    /// own, from any of its models.
+    fn reads_thinking_from(&self, origin: Option<&crate::agent::types::Origin>) -> bool {
+        origin.is_some_and(|origin| origin.provider == self.label())
+    }
     async fn send_message(
         &self,
         client: &reqwest::Client,
