@@ -77,7 +77,7 @@
               ./Cargo.lock
               ./crates
               # Example files that tests read with include_str!, such as
-              # models.toml.example and agent.md.example.
+              # models.toml.example, config.toml.example and agent.md.example.
               (lib.fileset.fileFilter (file: lib.hasSuffix ".example" file.name) ./.)
             ];
           };

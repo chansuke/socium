@@ -609,6 +609,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_example_file_is_valid() {
+        let home = tempfile::tempdir().unwrap();
+        for dir in [".cargo/registry", ".cargo/git", ".rustup"] {
+            std::fs::create_dir_all(home.path().join(dir)).unwrap();
+        }
+        let (settings, warnings) = Settings::from_toml(
+            include_str!("../../../config.toml.example"),
+            Some(home.path().to_str().unwrap()),
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(settings.sandbox.read_only.len(), 3);
+        assert_eq!(
+            settings.sandbox.max_command_timeout,
+            Duration::from_secs(600)
+        );
+        assert_eq!(settings.approval.allow.len(), 3);
+    }
+
+    #[test]
     fn name_patterns_match_at_any_depth_and_last_match_wins() {
         let patterns = PathPatterns::new(DEFAULT_SENSITIVE);
         for path in [

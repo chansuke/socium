@@ -1,0 +1,60 @@
+# Socium settings: copy to ~/.config/socium/config.toml (or
+# $XDG_CONFIG_HOME/socium/config.toml, or the file named by
+# SOCIUM_CONFIG_FILE). The file must be outside every workspace you open, so
+# the model can never change it. Startup lists what it adds to the sandbox.
+
+[sandbox]
+# Host directories commands may read but never change. Toolchains and
+# dependency caches that live in your home directory go here. Never list
+# your whole home directory: ~/.ssh and other credentials would become
+# readable. A directory that does not exist is skipped with a warning.
+read_only = [
+  "~/.cargo/registry",
+  "~/.cargo/git",
+  "~/.rustup",
+  # "~/.local/share/mise/installs",
+  # "~/go/pkg/mod",
+]
+
+# Directories added to PATH after the system runtimes. Each must lie inside
+# a read_only directory or a system runtime such as /nix/store.
+path = [
+  # "~/.local/share/mise/installs/node/24.22.1/bin",
+]
+
+# The longest a command may run, in seconds (default 120, at most 86400).
+# The model may ask for less, never more.
+command_timeout = 600
+
+# Variables set for every command. PATH, HOME, TMPDIR, and GIT_* are
+# refused. A value that starts with ~/ is expanded.
+[sandbox.env]
+CARGO_HOME = "~/.cargo"
+RUSTUP_HOME = "~/.rustup"
+
+[approval]
+# "ask" (default): a command runs after you approve it, once or for the
+# rest of the session. "auto": commands run without asking, in a narrower
+# sandbox where secret files read as empty and files the host runs (see
+# `protected`) cannot change. Commits always ask.
+commands = "ask"
+
+# Command prefixes, split on whitespace, that never ask (they run in the
+# narrower sandbox) or are always refused. Deny wins over allow.
+allow = [
+  "cargo test",
+  "cargo check",
+  "cargo clippy",
+]
+deny = [
+  "git push",
+]
+
+# Paths whose edits always ask, because a host tool runs or loads them on
+# its own (direnv, rust-analyzer, CI, editors). Setting this replaces the
+# built-in list; patterns follow .gitignore rules and the last match wins.
+# protected = ["build.rs", ".envrc", ".github/workflows/**", "!docs/**"]
+
+# Paths whose reads always ask, because what a tool reads is sent to the
+# model provider. Setting this replaces the built-in list.
+# sensitive = [".env", ".env.*", "!.env.example", "*.pem", "*.key"]
