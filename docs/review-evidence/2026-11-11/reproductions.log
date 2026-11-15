@@ -1,6 +1,6 @@
    Compiling socium-core v0.1.0 (/tmp/socium-review-copy/crates/core)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.23s
-     Running unittests src/lib.rs (/home/chansuke/code/myprojects/socium/target/debug/deps/socium_core-663d3b2dea0bd9f5)
+     Running unittests src/lib.rs (<repo>/target/debug/deps/socium_core-663d3b2dea0bd9f5)
 
 running 16 tests
 test providers::anthropic::stream::review_stream_repros::review_incomplete_stream_can_finish_with_executable_tool ... ok

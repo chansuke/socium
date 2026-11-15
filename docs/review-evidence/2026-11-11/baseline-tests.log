@@ -181,8 +181,8 @@
    Compiling rustls-platform-verifier v0.6.2
    Compiling hyper-rustls v0.27.7
    Compiling reqwest v0.13.4
-   Compiling socium-core v0.1.0 (/home/chansuke/code/myprojects/socium/crates/core)
-   Compiling socium-tui v0.1.0 (/home/chansuke/code/myprojects/socium/crates/tui)
+   Compiling socium-core v0.1.0 (<repo>/crates/core)
+   Compiling socium-tui v0.1.0 (<repo>/crates/tui)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 17.04s
      Running unittests src/lib.rs (target/debug/deps/socium_core-a7b5d239aca740b3)
 

@@ -19,19 +19,19 @@ sociumの既存テストはcore 95件、TUI 13件、計108件が成功した。f
 
 Cargoの標準キャッシュが読み取り専用だったため、依存キャッシュを一時領域にコピーしてオフラインで検証した。既存のコードを一時コピーして再現テストを注入し、削除・書き込み・Git操作はそのテストが作る一時ファイル／一時リポジトリだけで行った。
 
-[既存テスト結果](/home/chansuke/code/myprojects/socium/docs/review-evidence/2026-11-11/baseline-tests.log)、[Clippy結果](/home/chansuke/code/myprojects/socium/docs/review-evidence/2026-11-11/clippy.log)、[再現結果](/home/chansuke/code/myprojects/socium/docs/review-evidence/2026-11-11/reproductions.log)、[再現用ランナー](/home/chansuke/code/myprojects/socium/docs/review-evidence/2026-11-11/run_repros.py)を添付する。
+[既存テスト結果](../docs/review-evidence/2026-11-11/baseline-tests.log)、[Clippy結果](../docs/review-evidence/2026-11-11/clippy.log)、[再現結果](../docs/review-evidence/2026-11-11/reproductions.log)、[再現用ランナー](../docs/review-evidence/2026-11-11/run_repros.py)を添付する。
 
 **まず維持すべき良い点。**
 
 | 良い点 | 根拠と価値 | 留保 |
 |---|---|---|
-| coreとTUIの分離 | UIを触らずツール・provider・contextを試験できる。[AgentService](/home/chansuke/code/myprojects/socium/crates/core/src/lib.rs:100) | 公開SDKとしての拡張口はまだ不足 |
+| coreとTUIの分離 | UIを触らずツール・provider・contextを試験できる。[AgentService](../crates/core/src/lib.rs#L100) | 公開SDKとしての拡張口はまだ不足 |
 | 小さく追える構造 | Rustファイル42個、テスト・example込み9,965行。巨大な制御フレームワークが不要な規模 | 行数自体は品質や速度の証拠ではない |
-| ツール定義と実行の同居 | [Tool traitと登録表](/home/chansuke/code/myprojects/socium/crates/core/src/tools/mod.rs:59)により名前・schema・実装の対応を追いやすい | 固定登録とprovider固有schemaは分離する余地がある |
+| ツール定義と実行の同居 | [Tool traitと登録表](../crates/core/src/tools/mod.rs#L59)により名前・schema・実装の対応を追いやすい | 固定登録とprovider固有schemaは分離する余地がある |
 | 構造化argv | シェル文字列の暗黙評価を避ける設計は妥当 | argv方式でも権限境界にはならない |
 | ファイルツールの境界検査 | 既存パスのcanonicalize、絶対パス拒否、symlinkテストがある | 新規パスの検査に実際の穴がある |
-| 編集時の曖昧性拒否 | str_replaceは0件・複数一致を拒否する。[実装](/home/chansuke/code/myprojects/socium/crates/core/src/tools/text_editor.rs:94) | apply_patchには同等の曖昧性拒否がない |
-| UIの応答性への配慮 | blockingツールを専用OSスレッドに逃がす。[実装](/home/chansuke/code/myprojects/socium/crates/tui/src/agent_task.rs:47) | 中断・終了・panic時の所有権管理が未完成 |
+| 編集時の曖昧性拒否 | str_replaceは0件・複数一致を拒否する。[実装](../crates/core/src/tools/text_editor.rs#L94) | apply_patchには同等の曖昧性拒否がない |
+| UIの応答性への配慮 | blockingツールを専用OSスレッドに逃がす。[実装](../crates/tui/src/agent_task.rs#L47) | 中断・終了・panic時の所有権管理が未完成 |
 | ストリーミングの分離 | SSE parserとmessage builderを分け、分割chunkやusageをテストする | 終端・stop reasonを検証していない |
 | 要約を生履歴と分離 | summaryとraw messagesを分けた方向は正しい | 保存の原子性とrequestへの投影が不十分 |
 | CIと再現性 | fmt、Clippy、tests、Nix buildをCI化し、Actionの参照をSHA固定 | Linux中心。意味論上の欠陥はこれらのチェックでは拾えていない |
@@ -57,7 +57,7 @@ Cargoの標準キャッシュが読み取り専用だったため、依存キャ
 
 **F1 — 承認はユーザーの意思ではなく、モデルが出した文字列になっている。**
 
-[run_command](/home/chansuke/code/myprojects/socium/crates/core/src/tools/run_command.rs:140)はJSONの `approval` を読み、必要水準以上なら実行する。tool schemaはこのフィールドをモデルに公開しており、不足時のエラーも「その値を設定して再実行せよ」と伝える。[git_commit](/home/chansuke/code/myprojects/socium/crates/core/src/tools/git.rs:327)の `confirmed: true` も同じ構造だ。承認イベントは[TUI](/home/chansuke/code/myprojects/socium/crates/tui/src/progress.rs:13)で表示されるだけで、ユーザー応答を待つ双方向経路がない。
+[run_command](../crates/core/src/tools/run_command.rs#L140)はJSONの `approval` を読み、必要水準以上なら実行する。tool schemaはこのフィールドをモデルに公開しており、不足時のエラーも「その値を設定して再実行せよ」と伝える。[git_commit](../crates/core/src/tools/git.rs#L327)の `confirmed: true` も同じ構造だ。承認イベントは[TUI](../crates/tui/src/progress.rs#L13)で表示されるだけで、ユーザー応答を待つ双方向経路がない。
 
 一時ファイルに対して `{"command":["rm","disposable.txt"],"approval":"destructive"}` を与えると、人間の応答を一度も入力せず削除できた。これは「モデルがユーザーの承認を忠実に転記するはず」という期待であって、承認機構の保証ではない。
 
@@ -67,7 +67,7 @@ dshの参考点は[UserApproval.request](https://github.com/deepseek-ai/deepseek
 
 **F2 — 新規ファイルのパス境界に、競合なしで成立する脱出がある。**
 
-[resolve_workspace_path_for_create](/home/chansuke/code/myprojects/socium/crates/core/src/tools/workspace.rs:69)は、対象が未作成だと存在する祖先まで遡る。祖先がworkspace内かを検証した後、未正規化の `joined` を返す。
+[resolve_workspace_path_for_create](../crates/core/src/tools/workspace.rs#L69)は、対象が未作成だと存在する祖先まで遡る。祖先がworkspace内かを検証した後、未正規化の `joined` を返す。
 
 workspace直下の `missing` が存在しないとき、`missing/../../escaped.txt` をAdd Fileに与えると、後続の `create_dir_all` が `missing` を作り、`..` が実際に解決され、workspaceの親へ書き込めた。symlink差替えや別プロセスとのraceを必要としない。text editorのcreate系も同じresolverを共有している。
 
@@ -75,7 +75,7 @@ workspace直下の `missing` が存在しないとき、`missing/../../escaped.t
 
 **F3 — コマンド名の分類は、read-onlyやworkspace内実行の保証になっていない。**
 
-[is_safe_read_only_command](/home/chansuke/code/myprojects/socium/crates/core/src/tools/run_command.rs:349)は `sed`、`find`、`env`、`sort` などを引数を見ずに許可する。`sed -i` で書き換えられ、`env` 経由なら任意のプログラムを起動できる。実行ファイルはbasenameだけで分類するため、別の実体が同名でも同じ扱いになる。
+[is_safe_read_only_command](../crates/core/src/tools/run_command.rs#L349)は `sed`、`find`、`env`、`sort` などを引数を見ずに許可する。`sed -i` で書き換えられ、`env` 経由なら任意のプログラムを起動できる。実行ファイルはbasenameだけで分類するため、別の実体が同名でも同じ扱いになる。
 
 実際に `sed -i s/before/after/ file.txt` が「safe-read-only」として承認なしで書き換えた。また、一時workspace外の非機密fixtureを絶対パス指定した `cat` で読めた。`current_dir` とcwd検証は作業開始位置を決めるだけで、ファイル・ネットワーク・環境変数へのアクセスを制限しない。子プロセスには親の環境が引き継がれるので、provider用credentialとtool実行環境も分離して考えるべきだ。
 
@@ -85,7 +85,7 @@ piも[標準ではpermission制限を持たないと明記](https://github.com/e
 
 **F4 — コマンド実行は、普通のビルドログでも止まり得る。**
 
-[execute_command](/home/chansuke/code/myprojects/socium/crates/core/src/tools/run_command.rs:218)はstdout/stderrをpipeにしたまま `try_wait` で終了を待ち、最後にだけ `wait_with_output` で読む。出力がpipe容量を超えると、子はwriteを待ち、親は子の終了を待つ。
+[execute_command](../crates/core/src/tools/run_command.rs#L218)はstdout/stderrをpipeにしたまま `try_wait` で終了を待ち、最後にだけ `wait_with_output` で読む。出力がpipe容量を超えると、子はwriteを待ち、親は子の終了を待つ。
 
 1 MiBの一時ファイルを `cat` するだけで、正常なコマンドが150msのtimeoutになった。表示用の20,000文字上限は取得後に適用されるので、この詰まりも、取得時のメモリ増加も防がない。
 
@@ -99,7 +99,7 @@ piも[標準ではpermission制限を持たないと明記](https://github.com/e
 
 **F5 — 「失敗したがファイルは変わった」を記録できない。**
 
-[submit_with_progress](/home/chansuke/code/myprojects/socium/crates/core/src/lib.rs:275)はcontextのローカルコピーでturnを実行し、成功した場合だけ差分を `self.messages` へ戻して保存する。turn内のツールには実際の副作用がある。
+[submit_with_progress](../crates/core/src/lib.rs#L275)はcontextのローカルコピーでturnを実行し、成功した場合だけ差分を `self.messages` へ戻して保存する。turn内のツールには実際の副作用がある。
 
 「1回目の応答でapply_patch成功 → 2回目のprovider呼び出しが失敗」のScriptedProviderを作ると、ファイルは作成されたが、AgentServiceにはユーザー入力1件しか残らず、conversation.jsonも作られなかった。20 tool roundsの上限でエラーになる場合にも同種の経路がある。再起動後の監査だけでなく、同じプロセスで次に入力したときのモデル認識も実ファイルとずれる。
 
@@ -109,9 +109,9 @@ piの[session-manager](https://github.com/earendil-works/pi/blob/682c7b93ce3e0a5
 
 **F6 — 長い会話は予算以前に、メッセージ構造で壊れる。**
 
-[prepare_context_with_budget](/home/chansuke/code/myprojects/socium/crates/core/src/agent/context.rs:128)はまず最新24メッセージだけを保持する候補を作る。全履歴が予算内ならそのまま送る、という初期候補がない。25個の短いmessageで、推定入力1万token未満でも1件を要約することを確認した。24はユーザーの24ターンではなく、assistant/tool-resultを含む内部message数である。
+[prepare_context_with_budget](../crates/core/src/agent/context.rs#L128)はまず最新24メッセージだけを保持する候補を作る。全履歴が予算内ならそのまま送る、という初期候補がない。25個の短いmessageで、推定入力1万token未満でも1件を要約することを確認した。24はユーザーの24ターンではなく、assistant/tool-resultを含む内部message数である。
 
-その要約を[summary_message](/home/chansuke/code/myprojects/socium/crates/core/src/agent/context.rs:264)が `messages[0].role = "system"` として送る。Anthropic adapterはこれをトップレベルsystemへ変換しない。現在の[公式仕様](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages#limitations)でも、本文を持つsystem messageをmessages配列の先頭に置けない。新しいモデルにmid-conversation system対応があることと、この配列が有効であることは別問題だ。
+その要約を[summary_message](../crates/core/src/agent/context.rs#L264)が `messages[0].role = "system"` として送る。Anthropic adapterはこれをトップレベルsystemへ変換しない。現在の[公式仕様](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages#limitations)でも、本文を持つsystem messageをmessages配列の先頭に置けない。新しいモデルにmid-conversation system対応があることと、この配列が有効であることは別問題だ。
 
 加えて、emergency trimmingは任意message数で切り、先頭に孤立したtool_resultを残せることを再現した。LLM compaction側にある `retention_boundary` の配慮が、通常のcontext準備経路には使われていない。
 
@@ -126,7 +126,7 @@ piの[session-manager](https://github.com/earendil-works/pi/blob/682c7b93ce3e0a5
 
 **F7 — streamの完了と回答の完了を区別していない。**
 
-[StreamingMessageBuilder](/home/chansuke/code/myprojects/socium/crates/core/src/providers/anthropic/stream.rs:130)は `message_stop` と `content_block_stop` を無視し、`message_delta` のstop_reasonを持たない。`finish()` は完了イベントを受けたか確認しない。
+[StreamingMessageBuilder](../crates/core/src/providers/anthropic/stream.rs#L130)は `message_stop` と `content_block_stop` を無視し、`message_delta` のstop_reasonを持たない。`finish()` は完了イベントを受けたか確認しない。
 
 message_stopなしでもtool-use blockを正常な結果として返すこと、`max_tokens` が来ても通常のtext結果になることをbuilderテストで確認した。ネットワークのchunk読取りがエラーになった場合は別途Errになるが、HTTP bodyが正常なEOFとして終わった不完全streamは区別できない。完成したJSONだけあっても、モデル応答全体が正常に終了したとは限らない。
 
@@ -136,9 +136,9 @@ message_stopなしでもtool-use blockを正常な結果として返すこと、
 
 **F8 — patchのdry-runと本適用の意味が一致しない。**
 
-[apply_patch](/home/chansuke/code/myprojects/socium/crates/core/src/tools/apply_patch.rs:88)はactionsを順に書き込む。後のファイルで失敗しても前のファイルは戻らない。「Add first.txt → Delete nonexistent.txt」でErrとfirst.txtの残存を再現した。呼出元に部分適用済みの構造化結果も返らない。
+[apply_patch](../crates/core/src/tools/apply_patch.rs#L88)はactionsを順に書き込む。後のファイルで失敗しても前のファイルは戻らない。「Add first.txt → Delete nonexistent.txt」でErrとfirst.txtの残存を再現した。呼出元に部分適用済みの構造化結果も返らない。
 
-[preview_patch_actions](/home/chansuke/code/myprojects/socium/crates/core/src/tools/apply_patch.rs:362)はAdd/Updateの実在・境界・hunk一致・移動先競合を本適用と同じ方法で検証しない。存在しないファイルのUpdateでもdry_runは成功、本適用は失敗した。diff表示も行の `contains` 判定なので、同じ行の順序変更や重複の増減を正確には表現できない。
+[preview_patch_actions](../crates/core/src/tools/apply_patch.rs#L362)はAdd/Updateの実在・境界・hunk一致・移動先競合を本適用と同じ方法で検証しない。存在しないファイルのUpdateでもdry_runは成功、本適用は失敗した。diff表示も行の `contains` 判定なので、同じ行の順序変更や重複の増減を正確には表現できない。
 
 最低限、全actionsを読み取り・検証してMutationPlanを構築し、同じplanからpreviewとapplyを行う。適用直前には元内容のhash等を照合する。複数ファイルの完全なatomicityを約束できないなら、書込み済み操作と復旧情報を返す。apply_patchはtext_editorのedit historyに参加していないため、現状のundoは全編集を戻せる機能でもない。
 
@@ -146,23 +146,23 @@ message_stopなしでもtool-use blockを正常な結果として返すこと、
 
 **F9 — commitはユーザーが選んだ変更範囲を尊重できない。**
 
-[git_commit](/home/chansuke/code/myprojects/socium/crates/core/src/tools/git.rs:351)は必ず `git add -A` を呼ぶ。既にrequested.txtだけstageされた一時repoで、無関係なunstagedのunrelated.txtまでcommitに入ることを確認した。一般的な「この修正をcommitして」という依頼と、全未追跡・全変更をcommitする操作は一致しない。
+[git_commit](../crates/core/src/tools/git.rs#L351)は必ず `git add -A` を呼ぶ。既にrequested.txtだけstageされた一時repoで、無関係なunstagedのunrelated.txtまでcommitに入ることを確認した。一般的な「この修正をcommitして」という依頼と、全未追跡・全変更をcommitする操作は一致しない。
 
 パスを明示する入力、staged-onlyの既定、stage差分の提示、事前indexを壊さない失敗処理が必要。`confirmed` の自己申告問題はF1と同時に直す。編集後にdirty警告を付けるだけでは、既存のユーザー変更の保護にはならない。
 
 **F10 — 中断できないのに、中断できるUIを出している。**
 
-[thinking表示](/home/chansuke/code/myprojects/socium/crates/tui/src/view/text_layout.rs:105)には「esc to cancel」とある。実際の[Esc処理](/home/chansuke/code/myprojects/socium/crates/tui/src/app.rs:312)は入力モードをNormalに変えるだけで、HTTP・ツール・子プロセスへcancelを送らない。進行中は通常の入力も拒否するため、ユーザーによる方針修正や承認応答の入力もできない。
+[thinking表示](../crates/tui/src/view/text_layout.rs#L105)には「esc to cancel」とある。実際の[Esc処理](../crates/tui/src/app.rs#L312)は入力モードをNormalに変えるだけで、HTTP・ツール・子プロセスへcancelを送らない。進行中は通常の入力も拒否するため、ユーザーによる方針修正や承認応答の入力もできない。
 
-専用threadのhandleやcancel tokenはPendingTaskが持っていない。さらにoneshotの `try_recv` がClosedになった場合を[poll_pending_task](/home/chansuke/code/myprojects/socium/crates/tui/src/agent_task.rs:136)が処理しないため、worker panic等では待機状態から回復できない経路がある。これは静的追跡の指摘で、実UIでpanicを注入した再現ではない。
+専用threadのhandleやcancel tokenはPendingTaskが持っていない。さらにoneshotの `try_recv` がClosedになった場合を[poll_pending_task](../crates/tui/src/agent_task.rs#L136)が処理しないため、worker panic等では待機状態から回復できない経路がある。これは静的追跡の指摘で、実UIでpanicを注入した再現ではない。
 
 最初に表示を実態に合わせ、次にAgentControlを導入する。CancelとApprovalResponseはUI→core、ProgressとResultはcore→UIとし、HTTP、tool、process tree、保存に一貫した中断理由を渡す。steeringキューはその後でよい。終了時も実行中processをどう収束させるか決める。
 
 **F11 — 保存は正常終了時以外の一貫性が弱い。**
 
-[save_json_file](/home/chansuke/code/myprojects/socium/crates/core/src/agent/state.rs:45)はJSON全体を `fs::write` する。truncate後の中断に弱く、conversationとsummaryは別ファイルへ順次書くためpairとしての原子性もない。load失敗時は空会話へ進む。複数sociumプロセスが同じcwdで動けば同じ保存先を上書きできる。
+[save_json_file](../crates/core/src/agent/state.rs#L45)はJSON全体を `fs::write` する。truncate後の中断に弱く、conversationとsummaryは別ファイルへ順次書くためpairとしての原子性もない。load失敗時は空会話へ進む。複数sociumプロセスが同じcwdで動けば同じ保存先を上書きできる。
 
-[from_env](/home/chansuke/code/myprojects/socium/crates/core/src/lib.rs:153)は2,000件超の履歴を先頭からdrainするが、summaryのcovered_messagesを同じ量だけ調整しない。`covered_messages <= messages.len()` なら古いsummary indexがそのまま通り、違う範囲を要約済みと扱い得る。切り詰め境界もtool pairを考慮しない。実行中メモリはこの上限で抑制されない。
+[from_env](../crates/core/src/lib.rs#L153)は2,000件超の履歴を先頭からdrainするが、summaryのcovered_messagesを同じ量だけ調整しない。`covered_messages <= messages.len()` なら古いsummary indexがそのまま通り、違う範囲を要約済みと扱い得る。切り詰め境界もtool pairを考慮しない。実行中メモリはこの上限で抑制されない。
 
 当面はtemp-file＋rename、書込エラーの明示、単一writerロック、schema versionで改善できる。その後、session ID・event sequence・parent/compaction参照を持つappend-onlyログへ移す。JSONLであるだけで安全になるわけではなく、tail切断、flush方針、未知version、writer競合、部分実行の回復を定義する。piにも全entryを書き直す経路があるため、「piは常にatomicで完全」とは評価していない。
 
@@ -189,7 +189,7 @@ message_stopなしでもtool-use blockを正常な結果として返すこと、
 | 配布 | Nixでgit/rgの実行時PATHを包んでいない。rgなしでは検索意味が変わる | 必須/任意依存を明示してpackageに同梱または起動時確認 |
 | 品質基盤 | CIは良好だが、仕様違反を許すmockや正常系中心のテストが残る | wire contract・故障注入・再開・権限・プロセス管理を優先して追加 |
 
-[provider契約](/home/chansuke/code/myprojects/socium/crates/core/src/providers/mod.rs:37)、[tool schema](/home/chansuke/code/myprojects/socium/crates/core/src/tools/mod.rs:33)、[token推定](/home/chansuke/code/myprojects/socium/crates/core/src/agent/context.rs:305)、[要約](/home/chansuke/code/myprojects/socium/crates/core/src/agent/compaction.rs:106)、[rg実行](/home/chansuke/code/myprojects/socium/crates/core/src/tools/ripgrep.rs:100)、[UI layout](/home/chansuke/code/myprojects/socium/crates/tui/src/view/mod.rs:19)、[Nix配布](/home/chansuke/code/myprojects/socium/flake.nix:22)を参照。
+[provider契約](../crates/core/src/providers/mod.rs#L37)、[tool schema](../crates/core/src/tools/mod.rs#L33)、[token推定](../crates/core/src/agent/context.rs#L305)、[要約](../crates/core/src/agent/compaction.rs#L106)、[rg実行](../crates/core/src/tools/ripgrep.rs#L100)、[UI layout](../crates/tui/src/view/mod.rs#L19)、[Nix配布](../flake.nix#L22)を参照。
 
 ここでの不足は全部を今すぐ実装する意味ではない。たとえば全toolをasync化したり、providerを大量に増やしたりする前に、既存の12ツールに共通するExecutorとSessionの保証を固める方が効果が高い。AGENTS.mdがないことは実装品質の欠陥というより製品能力の不足だが、実プロジェクトで一貫したコードを出すための投資対効果は高い。
 
@@ -246,7 +246,7 @@ dshはpluginの初期化・破棄順、serviceの有無、context scope、profil
 
 **既存の改善計画への批判。**
 
-[improvement-plan.md](/home/chansuke/code/myprojects/socium/docs/improvement-plan.md:1)は旧 `tools/runtime.rs` や `providers/anthropic.rs` を前提とし、ツール分割とtrait化を重要な未解決作業として扱う箇所がある。しかし現在は既に分割・trait化されている。一方、[todo.md](/home/chansuke/code/myprojects/socium/docs/todo.md:1)は権限、context budgeting、dirty warning等を完了扱いにしている。
+[improvement-plan.md](../docs/improvement-plan.md#L1)は旧 `tools/runtime.rs` や `providers/anthropic.rs` を前提とし、ツール分割とtrait化を重要な未解決作業として扱う箇所がある。しかし現在は既に分割・trait化されている。一方、[todo.md](../docs/todo.md#L1)は権限、context budgeting、dirty warning等を完了扱いにしている。
 
 | 既存記述 | 今回の評価 |
 |---|---|
@@ -337,7 +337,7 @@ pi/dsh/sociumの比較は可能な限り同じmodel、provider endpoint、sampli
 再実行例（書込可能な依存キャッシュを利用する場合）:
 
 ```bash
-CARGO_HOME=/tmp/socium-review-cargo python3 /home/chansuke/code/myprojects/socium/docs/review-evidence/2026-11-11/run_repros.py
+CARGO_HOME=/tmp/socium-review-cargo python3 docs/review-evidence/2026-11-11/run_repros.py
 ```
 
 ランナーは一時ソースコピーにだけ試験を追加する。今後実装を修正すると、これらの「欠陥がある」assertionは失敗する。その時点で通常の回帰テストへ移し、期待を安全な振る舞いに反転する必要がある。
