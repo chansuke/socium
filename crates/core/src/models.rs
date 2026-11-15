@@ -108,7 +108,7 @@ impl ModelFeatures {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ModelConfig {
     pub(crate) alias: String,
     pub(crate) provider: String,
@@ -122,6 +122,8 @@ pub(crate) struct ModelConfig {
     pub(crate) compact_model: Option<String>,
     /// Prompt size at which history is compacted; `None` uses the default.
     pub(crate) compact_at_tokens: Option<u32>,
+    /// The user's prices, for the session cost; `None` shows no cost.
+    pub(crate) price: Option<crate::usage::Price>,
 }
 
 impl ModelConfig {
@@ -138,11 +140,12 @@ impl ModelConfig {
             max_output_tokens: None,
             compact_model: Some("haiku".to_string()),
             compact_at_tokens: None,
+            price: None,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ModelRegistry {
     pub(crate) default: String,
     pub(crate) providers: BTreeMap<String, ProviderConfig>,
@@ -181,6 +184,7 @@ struct RawModel {
     max_output_tokens: Option<u32>,
     compact_model: Option<String>,
     compact_at_tokens: Option<u32>,
+    price: Option<crate::usage::Price>,
 }
 
 /// The window of the built-in Claude models, from Anthropic's model table
@@ -207,6 +211,7 @@ impl ModelRegistry {
                 max_output_tokens: None,
                 compact_model: compact_model.map(str::to_string),
                 compact_at_tokens: None,
+                price: None,
             };
         Self {
             default: BUILTIN_DEFAULT_MODEL.to_string(),
@@ -485,6 +490,7 @@ fn parse_model(raw: RawModel) -> Result<ModelConfig, String> {
         max_output_tokens: raw.max_output_tokens,
         compact_model: raw.compact_model,
         compact_at_tokens: raw.compact_at_tokens,
+        price: raw.price,
     })
 }
 
@@ -539,6 +545,11 @@ max_output_tokens = 32000
         };
         let registry = model("compact_at_tokens = 50000").unwrap();
         assert_eq!(registry.find("m").unwrap().compact_at_tokens, Some(50_000));
+        let registry = model("price = { input = 4.0, output = 20.0, cache_read = 0.2 }").unwrap();
+        assert_eq!(
+            registry.find("m").unwrap().price.unwrap().cache_read,
+            Some(0.2)
+        );
         for bad in ["compact_at_tokens = 0", "compact_at_tokens = 100000"] {
             assert!(model(bad).is_err(), "{bad}");
         }

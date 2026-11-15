@@ -11,12 +11,14 @@ mod process;
 mod session;
 mod settings;
 mod transcript;
+mod usage;
 pub use approval::Grant;
 pub use control::{ApprovalAnswer, TaskControl};
 pub use execution::SANDBOX_DESCRIPTION;
 pub use session::{SessionStart, SessionSummary, list_sessions};
 pub use settings::Settings;
 pub use transcript::{TranscriptEntry, TranscriptRole};
+pub use usage::SessionUsage;
 pub mod agent;
 pub mod constants;
 pub mod error;
@@ -274,6 +276,8 @@ pub struct AgentService {
     /// How far the current model's measured prompts are from the estimate;
     /// see `ContextBudget::estimate_scale`. Reset when the model changes.
     estimate_scale: f32,
+    /// Tokens used by this conversation since it was opened in this process.
+    session_usage: Arc<std::sync::Mutex<SessionUsage>>,
 }
 
 /// The client for model requests. There is no deadline for a whole
@@ -364,6 +368,7 @@ impl AgentService {
             warnings: target.warnings,
             last_measured_usage: None,
             estimate_scale: 1.0,
+            session_usage: Default::default(),
         };
         service.apply_model_limits();
         service
@@ -874,6 +879,7 @@ impl AgentService {
         {
             summary.thinking_valid_from = Some(self.messages.len());
         }
+        *self.session_usage.lock().unwrap_or_else(|e| e.into_inner()) = SessionUsage::default();
         Ok(())
     }
 
@@ -887,7 +893,22 @@ impl AgentService {
         self.events.clear();
         self.summary_state = ConversationSummaryState::default();
         self.last_measured_usage = None;
+        *self.session_usage.lock().unwrap_or_else(|e| e.into_inner()) = SessionUsage::default();
         Ok(())
+    }
+
+    /// Tokens this conversation used since it was opened, and their cost
+    /// when every model used has a `price` in models.toml.
+    pub fn session_usage(&self) -> (TokenUsage, Option<f64>) {
+        let usage = self.session_usage.lock().unwrap_or_else(|e| e.into_inner());
+        let cost = usage.cost(|model| {
+            self.registry
+                .models
+                .iter()
+                .find(|config| config.id == model)
+                .and_then(|config| config.price)
+        });
+        (usage.total(), cost)
     }
 
     /// Other saved sessions in this workspace, most recently saved first.
@@ -1056,9 +1077,16 @@ impl AgentService {
         let turn_id = self.messages.len();
         let clock = ActivityClock::start(turn_id);
         let mut recorder = ActivityRecorder::new(self.activity_log_path());
+        let session_usage = self.session_usage.clone();
         let mut on_progress = move |event: AgentProgress| {
             let warning = match &event {
-                AgentProgress::Activity(activity) => recorder.observe(activity),
+                AgentProgress::Activity(activity) => {
+                    session_usage
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .observe(activity);
+                    recorder.observe(activity)
+                }
                 _ => None,
             };
             on_progress(event);

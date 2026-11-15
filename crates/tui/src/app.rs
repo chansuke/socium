@@ -12,7 +12,7 @@ use ratatui::{
     DefaultTerminal,
     crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
 };
-use socium_core::{AgentService, ContextMetrics};
+use socium_core::{AgentService, ContextMetrics, providers::TokenUsage};
 use std::{
     env,
     path::PathBuf,
@@ -33,6 +33,8 @@ pub(crate) struct App {
     pub(crate) workspace_label: String,
     pub(crate) model_label: String,
     pub(crate) context_metrics: ContextMetrics,
+    /// Tokens this conversation used, and their cost when priced.
+    pub(crate) session_usage: (TokenUsage, Option<f64>),
     pub(crate) last_latency_ms: Option<u128>,
     pub(crate) pending_task: Option<PendingTask>,
     pub(crate) approval: Option<ApprovalPrompt>,
@@ -79,6 +81,7 @@ impl App {
             workspace_label,
             model_label,
             context_metrics: ContextMetrics::default(),
+            session_usage: Default::default(),
             last_latency_ms: None,
             pending_task: None,
             approval: None,
@@ -135,6 +138,7 @@ impl App {
             workspace_label: "test".into(),
             model_label: "test".into(),
             context_metrics: Default::default(),
+            session_usage: Default::default(),
             last_latency_ms: None,
             pending_task: None,
             approval: None,
@@ -660,6 +664,9 @@ impl App {
             && let Ok(metrics) = agent.context_metrics(&self.input)
         {
             self.context_metrics = metrics;
+        }
+        if let Some(agent) = self.agent.as_ref() {
+            self.session_usage = agent.session_usage();
         }
     }
 }

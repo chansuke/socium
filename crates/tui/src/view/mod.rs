@@ -17,6 +17,7 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph},
 };
 use socium_core::activity::Phase;
+use socium_core::providers::TokenUsage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const SLASH_POPUP_MAX_ROWS: usize = 8;
@@ -518,6 +519,11 @@ impl App {
                 ),
                 Span::styled(" ", Style::default().fg(MUTED)),
                 Span::styled(
+                    format_session_usage(&self.session_usage.0, self.session_usage.1),
+                    Style::default().fg(SOFT),
+                ),
+                Span::styled(" ", Style::default().fg(MUTED)),
+                Span::styled(
                     if self.context_metrics.summary_active {
                         format!("summary {}", self.context_metrics.summarized_messages)
                     } else {
@@ -989,5 +995,50 @@ mod tests {
         let mut app = App::for_test();
         app.input = "hello".into();
         assert!(!render(&app).iter().any(|row| row.contains(" commands ")));
+    }
+}
+
+/// Tokens sent and received so far, the share of input read from the
+/// cache, and the cost when every model used has a price.
+pub(crate) fn format_session_usage(usage: &TokenUsage, cost: Option<f64>) -> String {
+    let compact = |tokens: u32| match tokens {
+        0..=999 => tokens.to_string(),
+        1_000..=999_999 => format!("{:.1}k", tokens as f64 / 1_000.0),
+        _ => format!("{:.1}M", tokens as f64 / 1_000_000.0),
+    };
+    let input = usage.total_input_tokens();
+    let mut text = format!("in {} out {}", compact(input), compact(usage.output_tokens));
+    if input > 0 && usage.cache_read_input_tokens > 0 {
+        text.push_str(&format!(
+            " ({}% cached)",
+            u64::from(usage.cache_read_input_tokens) * 100 / u64::from(input)
+        ));
+    }
+    if let Some(cost) = cost {
+        text.push_str(&format!(" ${cost:.2}"));
+    }
+    text
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[test]
+    fn session_usage_is_short_and_shows_cache_share_and_cost() {
+        let usage = TokenUsage {
+            input_tokens: 2_000,
+            output_tokens: 1_234,
+            cache_read_input_tokens: 8_000,
+            ..TokenUsage::default()
+        };
+        assert_eq!(
+            format_session_usage(&usage, Some(0.4167)),
+            "in 10.0k out 1.2k (80% cached) $0.42"
+        );
+        assert_eq!(
+            format_session_usage(&TokenUsage::default(), None),
+            "in 0 out 0"
+        );
     }
 }
