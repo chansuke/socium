@@ -2,7 +2,7 @@
 
 | 項目 | 値 |
 |---|---|
-| 状態 | 決定済み・実装中 |
+| 状態 | 実装済み (Phase 0〜4) |
 | ADR | [5](adr/0005-実行の事実から導いたシグナルでエージェントの状態をactivity欄に示す.md)、[2](adr/0002-activity欄でllmの思考とエージェントの実行を構造化したイベントとして表示する.md)、[3](adr/0003-adaptive-thinkingの表示を既定でsummarizedにしthinking-budget-tokensを廃止する.md)、[4](adr/0004-activityの記録をセッション単位のjsonlに保存し起動時に再生する.md) |
 | 作成日 | 2026-11-12 |
 | 関連チケット | [SOC-020](tickets/SOC-020-usage-and-observability.md)、[SOC-026](tickets/SOC-026-named-sessions-and-replay.md)、[SOC-027](tickets/SOC-027-tui-layout-and-output.md)、[SOC-031](tickets/SOC-031-headless-jsonl.md) |
@@ -260,7 +260,7 @@ Phase 1 の `ActivityEvent` はそのまま SOC-031 の headless JSONL の event
 
 ## 9. 検討事項
 
-- **未知 block の扱い**: SOC-007 で stream を厳格に検証している。未知 block を黙って捨てると履歴の往復で thinking の検証（preserved thinking）を壊しうるため、「生 JSON のまま保持して送り返す」か「従来どおりエラー」かを Phase 1 で決める。`redacted_thinking` は型（`ContentBlock::RedactedThinking`）を追加して保持した。`data` は変更せず履歴に保存して送り返し、Activity には本文も Raw view の `data` も出さない（Raw view では `[encrypted, N bytes]` に置き換える）。他の未知 block は従来どおりエラー。
+- **未知 block の扱い**: SOC-007 で stream を厳格に検証している。未知 block を黙って捨てると履歴の往復で thinking の検証（preserved thinking）を壊しうるため、「生 JSON のまま保持して送り返す」か「従来どおりエラー」かを Phase 1 で決める。`redacted_thinking` は型（`ContentBlock::RedactedThinking`）を追加して保持した。`data` は変更せず履歴に保存して送り返し、Activity には本文も Raw view の `data` も出さない（Raw view では `[encrypted, N bytes]` に置き換える）。他の未知 block は当初エラーにしていたが、2026-11-14 のレビュー (N11) を受けて読み飛ばし、履歴に残さないことにした。Socium は server tool を使わないので、通常の応答に未知 block が来るのは API が新しい種別を足したときに限られる。その block を外した履歴は以後の thinking の接頭辞と一致しなくなりうるが、応答全体を失敗させるよりはよいと判断した。未知のイベントと delta も同じく読み飛ばし、停止理由と block の完了の検査は緩めない。
 - **要約後の thinking**: 自前の要約や budget trimming で古い turn を置き換えると、残した turn の thinking は prefix が変わり無効になる（Anthropic の prefix check）。要約ごとに `thinking_valid_from` を記録し、それより前に生成された残存 turn の `thinking` / `redacted_thinking` は送らない。要約後に生成された thinking は送り返す。raw 履歴からは削除しない。
 - **summarized での区別精度**: 「直後が tool_use なら progress update」は近似。誤判定しても表示の色が変わるだけで、実行には影響しない。
 - **他ツールとの比較**: Claude Code / Codex の現行表示は実装前に実機で確認し、差分を README の訴求に使う。

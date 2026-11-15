@@ -12,14 +12,14 @@
 |---|---|---|
 | PLAN-01 | ツールモジュール分割 | 完了。`crates/core/src/tools/`に分離済み。旧runtime.rsの分割作業は不要。 |
 | PLAN-02 | 型付きツール入力 | 部分実装。各ツールに入力解析あり。共通の出力・契約整備はSOC-014 / SOC-023。 |
-| PLAN-03 | リトライとエラー分類 | 未完了。SOC-019。中断・逐次保存は実装済みだが自動retryは未実装。 |
-| PLAN-04 | システムプロンプト | 部分実装。`constants.rs`に最小規約あり。project instructionsはSOC-022。 |
+| PLAN-03 | リトライとエラー分類 | 実装済み。SOC-019。出力が出る前の過負荷・レート制限・接続失敗・無通信を最大3回再試行する。 |
+| PLAN-04 | システムプロンプト | 実装済み。サンドボックス・承認・検証の進め方を伝え、ワークスペース直下の`AGENTS.md`を読む (SOC-022)。 |
 | PLAN-05 | 中断 | 完了。SOC-011 / SOC-038。HTTP・承認・コマンドの中断と結果保存を検証。 |
 | PLAN-06 | スラッシュコマンド | 基本操作は実装済み。`crates/tui/src/app.rs`。session操作（`/resume`、`/rename`）はSOC-026で実装。 |
-| PLAN-07 | コスト追跡 | 未完了。SOC-020。最新requestのtoken計測と全attemptの費用集計は別。 |
-| PLAN-08 | 設定ファイル | 未着手。SOC-015。現在は環境変数。架空の自動承認クラスは公開仕様にしない。 |
+| PLAN-07 | コスト追跡 | 実装済み。SOC-020。会話の累積トークンと、`models.toml`の`price`がある場合の費用を状態行に出す。 |
+| PLAN-08 | 設定ファイル | 実装済み。モデルは`models.toml` (SOC-015)、サンドボックスと承認は`config.toml` (ADR 11、12)。 |
 | PLAN-09 | Extended Thinking | 部分実装。環境変数・stream表示あり。model capability検証はSOC-015、provider契約はSOC-014。 |
-| PLAN-10 | SOCIUM.mdメモリ | 未着手。scope付きAGENTS.mdのSOC-022へ置換。 |
+| PLAN-10 | SOCIUM.mdメモリ | SOC-022へ置換。ワークスペース直下の`AGENTS.md` (なければ`CLAUDE.md`) を読む。scope付きの読み込みは未実装。 |
 | PLAN-11 | MCPクライアント | 保留。SOC-036の需要・費用評価後に採否判断。 |
 | PLAN-12 | セッション管理 | 実装済み。同一workspaceの再開はSOC-005 / SOC-012、複数sessionはSOC-026で実装。 |
 | PLAN-13 | LLM要約 | 部分実装。`agent/compaction.rs`に実装。品質・予算はSOC-017 / SOC-018。 |
