@@ -625,8 +625,6 @@ impl App {
                     if key.code == KeyCode::Esc
                         || (key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL))
-                        || (matches!(self.input_mode, InputMode::Normal)
-                            && key.code == KeyCode::Char('q'))
                     {
                         task.control.cancel();
                         self.approval = None;
@@ -657,7 +655,6 @@ impl App {
                         KeyCode::Down | KeyCode::Char('j') => self.scroll_transcript_down(1),
                         KeyCode::PageUp => self.scroll_transcript_up(10),
                         KeyCode::PageDown => self.scroll_transcript_down(10),
-                        KeyCode::Char('q') => return Ok(()),
                         _ => {}
                     },
                     InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
