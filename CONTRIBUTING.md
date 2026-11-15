@@ -1,7 +1,9 @@
 # Contributing
 
-Socium is an early Rust coding agent. Anthropic is currently the only implemented
-provider; other providers and Web search are tracked work, not available features.
+Socium is an early Rust coding agent. It speaks three wire formats: Anthropic
+Messages (Anthropic and compatible endpoints such as DeepSeek and Z.ai), OpenAI
+Chat Completions, and the OpenAI Responses API. Web search is tracked work
+(SOC-037), not an available feature.
 
 Use Linux with Rust, Git, ripgrep, bubblewrap 0.12+, and working unprivileged user
 namespaces. The pinned Nix development shell supplies the compiler and native
