@@ -1,0 +1,3 @@
+# Long output: the failure is at the end of a long log.
+prompt = "Run ./build.sh and tell me which file and line make it fail."
+check = ["python3", "-c", "import os,sys; reply=open(os.environ['EVAL_REPLY_FILE']).read(); sys.exit(0 if 'src/parse.c' in reply and '217' in reply else 1)"]

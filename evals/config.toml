@@ -1,0 +1,8 @@
+# Settings for evaluation runs (SOCIUM_CONFIG_FILE). Nobody answers approvals
+# in -p mode, so commands run without asking, in the narrower sandbox. The
+# task repositories need no dependency caches.
+[sandbox]
+command_timeout = 300
+
+[approval]
+commands = "auto"

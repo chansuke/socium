@@ -1,0 +1,14 @@
+# Long requests: the requirement at the end must not be lost.
+prompt = """We publish blog posts whose titles come from many authors, so they \
+contain mixed case, punctuation, accents, repeated spaces, and sometimes emoji. \
+The site needs a URL fragment for each title. The textkit package already has \
+helpers for trimming and case folding; read them first and reuse what fits \
+rather than duplicating it. The fragment must contain only lowercase ASCII \
+letters, digits, and single hyphens between words, with no hyphen at either \
+end. Accented letters should become their unaccented ASCII letter where \
+Python's unicodedata can decompose them; anything else that is not a letter \
+or digit separates words. Keep it in the standard library only. Add a short \
+docstring. Do not change the existing functions. Finally, and this matters \
+for the importers that call it: name the new function slugify_title and put \
+it in textkit/slug.py."""
+check = ["python3", "-c", "import sys; sys.path.insert(0, '.'); from textkit.slug import slugify_title as s; sys.exit(0 if s('  Héllo,  Wörld!! Été 2026 ') == 'hello-world-ete-2026' and s('---') == '' else 1)"]
