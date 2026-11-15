@@ -7,22 +7,16 @@ use crate::constants::{
 };
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, ProviderEvent};
-use std::env;
 
-/// Prompt-token level at which auto-compaction fires. The env override
-/// takes precedence; otherwise the model's `compact_at_tokens` or the
-/// default, capped at a fixed ratio of the input budget (the context window
-/// minus the output allowance) so compaction runs before a request in the
-/// tool loop outgrows the budget.
+/// Prompt-token level at which auto-compaction fires: the model's
+/// `compact_at_tokens` or the default, capped at a fixed ratio of the input
+/// budget (the context window minus the output allowance) so compaction
+/// runs before a request in the tool loop outgrows the budget. The caller
+/// applies `COMPACTION_TOKEN_THRESHOLD` before this.
 pub(crate) fn compaction_threshold_tokens(
     input_budget_tokens: u32,
     compact_at: Option<u32>,
 ) -> u32 {
-    if let Ok(value) = env::var("COMPACTION_TOKEN_THRESHOLD")
-        && let Ok(threshold) = value.trim().parse::<u32>()
-    {
-        return threshold;
-    }
     let ratio = (input_budget_tokens as f32 * COMPACTION_TRIGGER_RATIO) as u32;
     compact_at.unwrap_or(DEFAULT_COMPACT_AT_TOKENS).min(ratio)
 }

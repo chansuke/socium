@@ -91,7 +91,7 @@ where
         );
         validate_protocol(messages)?;
         let budget =
-            crate::agent::context::resolve_context_budget(ctx.context_window, ctx.max_tokens)?
+            crate::agent::context::resolve_context_budget(ctx.context_window, ctx.max_tokens)
                 .with_scale(estimate_scale.unwrap_or(ctx.estimate_scale));
         let limit = budget.input_budget_tokens();
         let mut estimate = budget.estimate(ctx.model, messages, ctx.tools);

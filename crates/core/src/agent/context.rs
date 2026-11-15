@@ -8,7 +8,6 @@ use crate::constants::{
     MAX_SUMMARY_LINES, MIN_SHRUNK_TOOL_RESULT_CHARACTERS, TARGET_RECENT_CONTEXT_MESSAGES,
 };
 use crate::tools::ToolDefinition;
-use std::env;
 use std::io::{self, Error, ErrorKind};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -87,27 +86,18 @@ pub(crate) struct PreparedContext {
     pub metrics: ContextMetrics,
 }
 
-/// `CONTEXT_WINDOW_TOKENS` overrides the model's configured window, which
-/// defaults to `DEFAULT_CONTEXT_WINDOW_TOKENS`.
+/// The budget for a model with this window (`CONTEXT_WINDOW_TOKENS` or the
+/// model's configured one, read by the caller), which defaults to
+/// `DEFAULT_CONTEXT_WINDOW_TOKENS`.
 pub(crate) fn resolve_context_budget(
     configured_window: Option<u32>,
     max_output_tokens: u32,
-) -> io::Result<ContextBudget> {
-    let context_window_tokens = match env::var("CONTEXT_WINDOW_TOKENS") {
-        Ok(value) => value.parse::<u32>().map_err(|e| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                format!("CONTEXT_WINDOW_TOKENS must be an unsigned integer: {e}"),
-            )
-        })?,
-        Err(_) => configured_window.unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS),
-    };
-
-    Ok(ContextBudget {
-        context_window_tokens,
+) -> ContextBudget {
+    ContextBudget {
+        context_window_tokens: configured_window.unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS),
         max_output_tokens,
         estimate_scale: 1.0,
-    })
+    }
 }
 
 pub(crate) fn prepare_context_messages(
@@ -816,7 +806,7 @@ mod tests {
             &messages,
             "new pending input",
             &ConversationSummaryState::default(),
-            super::resolve_context_budget(None, 1_000).unwrap(),
+            super::resolve_context_budget(None, 1_000),
             "claude-sonnet-4-5",
             &default_tools(),
         )

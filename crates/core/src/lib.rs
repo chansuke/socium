@@ -261,6 +261,10 @@ pub struct AgentService {
     env: EnvLookup,
     /// `MAX_TOKENS`, used when the model sets no `max_output_tokens`.
     max_tokens_override: Option<u32>,
+    /// `CONTEXT_WINDOW_TOKENS`, which replaces every model's window.
+    context_window_override: Option<u32>,
+    /// `COMPACTION_TOKEN_THRESHOLD`, which replaces every model's threshold.
+    compaction_threshold_override: Option<u32>,
     max_tokens: u32,
     tools: Vec<ToolDefinition>,
     /// Types the `agent` tool can start, user types loaded at startup.
@@ -366,6 +370,8 @@ impl AgentService {
             compaction_model: target.compaction_model,
             env,
             max_tokens_override,
+            context_window_override: None,
+            compaction_threshold_override: None,
             max_tokens: DEFAULT_MAX_TOKENS,
             tools: Vec::new(),
             subagents: SubagentCatalog::builtin(),
@@ -378,9 +384,27 @@ impl AgentService {
             system_prompt: String::new(),
             project_instructions: None,
         };
+        service.context_window_override = service.limit_override("CONTEXT_WINDOW_TOKENS");
+        service.compaction_threshold_override =
+            service.limit_override("COMPACTION_TOKEN_THRESHOLD");
         service.apply_model_limits();
         service.refresh_system_prompt();
         service
+    }
+
+    /// A positive token count from the environment, read through the
+    /// injected lookup. A value that is not one is reported and ignored.
+    fn limit_override(&mut self, name: &str) -> Option<u32> {
+        let raw = (self.env)(name)?;
+        match raw.trim().parse::<u32>() {
+            Ok(value) if value > 0 => Some(value),
+            _ => {
+                self.warnings.push(format!(
+                    "{name} must be a positive integer; '{raw}' is ignored"
+                ));
+                None
+            }
+        }
     }
 
     pub fn from_env(workspace_root: PathBuf, start: SessionStart) -> Result<Self, AgentError> {
@@ -781,7 +805,7 @@ impl AgentService {
     /// The estimated history and input budget when the history reaches the
     /// compaction threshold of the current model.
     fn history_pressure(&self) -> std::io::Result<Option<(u32, u32)>> {
-        let budget = self.context_budget()?;
+        let budget = self.context_budget();
         let history = history_input_tokens(
             &self.messages,
             &self.summary_state,
@@ -790,16 +814,24 @@ impl AgentService {
             &self.tools,
         );
         let input_budget = budget.input_budget_tokens();
-        Ok((history
-            >= compaction_threshold_tokens(input_budget, self.active_model.compact_at_tokens))
-        .then_some((history, input_budget)))
+        Ok((history >= self.compaction_threshold(input_budget)).then_some((history, input_budget)))
     }
 
-    fn context_budget(&self) -> std::io::Result<crate::agent::context::ContextBudget> {
-        Ok(
-            resolve_context_budget(self.active_model.context_window, self.max_tokens)?
-                .with_scale(self.estimate_scale),
-        )
+    fn compaction_threshold(&self, input_budget: u32) -> u32 {
+        self.compaction_threshold_override.unwrap_or_else(|| {
+            compaction_threshold_tokens(input_budget, self.active_model.compact_at_tokens)
+        })
+    }
+
+    /// The window in effect: `CONTEXT_WINDOW_TOKENS`, then the model's.
+    fn context_window(&self) -> Option<u32> {
+        self.context_window_override
+            .or(self.active_model.context_window)
+    }
+
+    fn context_budget(&self) -> crate::agent::context::ContextBudget {
+        resolve_context_budget(self.context_window(), self.max_tokens)
+            .with_scale(self.estimate_scale)
     }
 
     pub fn task_control(&self) -> TaskControl {
@@ -1189,7 +1221,7 @@ impl AgentService {
         let prepared_context = prepare_context_messages(
             &self.messages,
             &self.summary_state,
-            self.context_budget()?,
+            self.context_budget(),
             &self.active_model.id,
             &self.tools,
         )?;
@@ -1201,7 +1233,7 @@ impl AgentService {
             model: &self.active_model.id,
             system: &self.system_prompt,
             project_instructions: self.project_instructions.as_deref().unwrap_or(""),
-            context_window: self.active_model.context_window,
+            context_window: self.context_window(),
             max_tokens: self.max_tokens,
             estimate_scale: self.estimate_scale,
             tools: &self.tools,
@@ -1297,7 +1329,7 @@ impl AgentService {
             &self.messages,
             pending_user_input,
             &self.summary_state,
-            self.context_budget()?,
+            self.context_budget(),
             &self.active_model.id,
             &self.tools,
         )?;
@@ -1320,11 +1352,8 @@ impl AgentService {
         let Some(usage) = self.last_measured_usage else {
             return Ok(false);
         };
-        let budget = self.context_budget()?;
-        let threshold = compaction_threshold_tokens(
-            budget.input_budget_tokens(),
-            self.active_model.compact_at_tokens,
-        );
+        let budget = self.context_budget();
+        let threshold = self.compaction_threshold(budget.input_budget_tokens());
         Ok(usage.total_input_tokens() >= threshold)
     }
 
@@ -2076,6 +2105,35 @@ max_output_tokens = 32000
             let mut env = KEYS.to_vec();
             env.push(("MODEL", model));
             env
+        }
+
+        #[test]
+        fn limit_overrides_come_from_the_injected_environment() {
+            // Review N15: these two were read with env::var, so a test
+            // could not set them and they bypassed the lookup.
+            let root = make_temp_dir("limit_overrides");
+            let mut env = KEYS.to_vec();
+            env.extend([
+                ("CONTEXT_WINDOW_TOKENS", "50000"),
+                ("COMPACTION_TOKEN_THRESHOLD", "lots"),
+            ]);
+            let service = open(root.path(), &env);
+            assert_eq!(
+                service.context_metrics("").unwrap().context_window_tokens,
+                50_000
+            );
+            let warnings = service.startup_warnings();
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.contains("COMPACTION_TOKEN_THRESHOLD must be a positive integer")),
+                "{warnings:?}"
+            );
+            let input_budget = service.context_budget().input_budget_tokens();
+            assert_eq!(
+                service.compaction_threshold(input_budget),
+                crate::agent::compaction::compaction_threshold_tokens(input_budget, None)
+            );
         }
 
         /// The most recently saved conversation; null when none is saved.
