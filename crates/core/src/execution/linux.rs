@@ -265,9 +265,23 @@ fn network_filter() -> io::Result<fs::File> {
             (0x35, 0, 1, 0x40000000), // also reject x32 syscall numbering
             (0x06, 0, 0, 0x80000000),
         ];
+        // socketpair yields a connected pair with no address. A stream or
+        // seqpacket pair can only talk to its own peer, and process spawning
+        // (Rust's std::process, Python's asyncio, Node's child_process) needs
+        // one. A datagram pair could still send to a host pathname socket
+        // with sendto, so that type stays denied. Flags in the type argument
+        // (SOCK_CLOEXEC, SOCK_NONBLOCK) are masked off before comparing.
+        instructions.extend([
+            (0x15, 0, 6, libc::SYS_socketpair as u32),
+            (0x20, 0, 0, 24), // A = low word of args[1], the socket type
+            (0x54, 0, 0, 0xf),
+            (0x15, 2, 0, libc::SOCK_STREAM as u32),
+            (0x15, 1, 0, libc::SOCK_SEQPACKET as u32),
+            (0x06, 0, 0, 0x00050000 | libc::EPERM as u32),
+            (0x06, 0, 0, 0x7fff0000),
+        ]);
         for syscall in [
             libc::SYS_socket,
-            libc::SYS_socketpair,
             libc::SYS_io_uring_setup,
             libc::SYS_keyctl,
             libc::SYS_add_key,

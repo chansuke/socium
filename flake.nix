@@ -116,6 +116,9 @@
               ++ lib.optionals pkgs.stdenv.isLinux [
                 (sandboxBackend pkgs)
                 pkgs.util-linux # setsid for detached-descendant enforcement tests
+                # Toolchains the sandbox acceptance test runs.
+                pkgs.python3
+                pkgs.nodejs
               ];
 
               postFixup = ''
@@ -171,6 +174,8 @@
             ++ lib.optionals pkgs.stdenv.isLinux [
               (sandboxBackend pkgs)
               pkgs.util-linux
+              pkgs.python3
+              pkgs.nodejs
             ]
             ++ lib.optionals pkgs.stdenv.isDarwin [
               pkgs.darwin.apple_sdk.frameworks.Security

@@ -171,7 +171,7 @@ fn network_probe() {
     if !Path::new("host.sock").exists() {
         return;
     }
-    // A connected socketpair can still address a host pathname Unix datagram
+    // A datagram socketpair can still address a host pathname Unix datagram
     // socket. Denying socket() alone does not enforce network/daemon isolation.
     let pair = std::os::unix::net::UnixDatagram::pair();
     if let Ok((socket, _peer)) = &pair {
@@ -183,6 +183,40 @@ fn network_probe() {
         );
     }
     assert_eq!(pair.unwrap_err().raw_os_error(), Some(libc::EPERM));
+    // Stream and seqpacket pairs only reach their own peer; process spawning
+    // needs them, with or without flags in the type argument.
+    for kind in [
+        libc::SOCK_STREAM,
+        libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+        libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+    ] {
+        let mut fds = [0; 2];
+        // SAFETY: fds is a valid two-element buffer for the kernel to fill.
+        assert_eq!(
+            unsafe { libc::socketpair(libc::AF_UNIX, kind, 0, fds.as_mut_ptr()) },
+            0,
+            "socketpair type {kind:#x} must be allowed"
+        );
+        // SAFETY: both descriptors were just created and are owned here.
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        assert!(std::os::unix::net::UnixStream::connect("host.sock").is_err());
+    }
+    let mut fds = [0; 2];
+    // SAFETY: as above; the call is expected to fail.
+    assert_eq!(
+        unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+                0,
+                fds.as_mut_ptr(),
+            )
+        },
+        -1
+    );
     for domain in [
         libc::AF_INET,
         libc::AF_INET6,
@@ -372,4 +406,64 @@ fn approved_git_hooks_inherit_the_sandbox() {
         &["git", "commit", "--allow-empty", "-m", "allowed hook"],
     ));
     assert!(root.path().join("hook-ran").exists());
+}
+
+fn run_with(policy: &ExecutionPolicy, cwd: &Path, args: &[&str], seconds: u64) -> ProcessOutput {
+    run_observed(
+        &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        cwd,
+        Duration::from_secs(seconds),
+        &TaskControl::default(),
+        &mut |_, _| Ok(()),
+        policy,
+    )
+    .unwrap()
+}
+
+/// The sandbox must run the tools a coding agent verifies with, not only
+/// shell utilities: each of these spawns child processes through a
+/// socketpair.
+#[test]
+fn real_toolchains_build_and_spawn_processes_inside_the_sandbox() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("app/src")).unwrap();
+    fs::write(
+        root.path().join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("app/src/main.rs"),
+        "fn main() { println!(\"built-in-sandbox\"); }\n",
+    )
+    .unwrap();
+    let policy = ExecutionPolicy::new(root.path(), WorkspaceAccess::Write).unwrap();
+    let app = root.path().join("app");
+    let output = run_with(&policy, &app, &["cargo", "run", "--offline", "-q"], 120);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("built-in-sandbox"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    success(output);
+    for (program, script, marker) in [
+        (
+            "python3",
+            "import asyncio, subprocess\nasync def main():\n    p = await asyncio.create_subprocess_exec('echo', 'py-async-ok', stdout=subprocess.PIPE)\n    print((await p.communicate())[0].decode().strip())\nasyncio.run(main())",
+            "py-async-ok",
+        ),
+        (
+            "node",
+            "console.log(require('child_process').execSync('echo node-child-ok').toString().trim())",
+            "node-child-ok",
+        ),
+    ] {
+        let flag = if program == "node" { "-e" } else { "-c" };
+        let output = run_with(&policy, root.path(), &[program, flag, script], 30);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(marker),
+            "{program}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
