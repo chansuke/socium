@@ -182,10 +182,22 @@ fn parse_matches(root: &Path, bytes: &[u8], truncated: bool) -> Result<Vec<Searc
         let line_number = data["line_number"]
             .as_u64()
             .ok_or("Missing search line number")? as usize;
+        // Minified or generated files can put a whole file on one line.
+        let text = text.trim_end_matches(['\r', '\n']);
+        let text = if text.chars().count() > MAX_SEARCH_LINE_CHARACTERS {
+            format!(
+                "{}… [line cut at {MAX_SEARCH_LINE_CHARACTERS} characters]",
+                text.chars()
+                    .take(MAX_SEARCH_LINE_CHARACTERS)
+                    .collect::<String>()
+            )
+        } else {
+            text.to_string()
+        };
         matches.push(SearchMatch {
             path,
             line_number,
-            text: text.trim_end_matches(['\r', '\n']).into(),
+            text,
         });
         if matches.len() > MAX_SEARCH_RESULTS {
             break;

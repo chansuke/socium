@@ -19,7 +19,7 @@ impl Tool for ListFilesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::Custom(CustomToolDefinition {
             name: "list_files".to_string(),
-            description: "List files and directories at a given path. Supports optional recursive traversal and file glob filtering for repo navigation."
+            description: "List files and directories at a given path. With recursive, lists the files beneath it as ripgrep sees them: ignored files (.gitignore, .ignore) and .git are left out. Supports file glob filtering for repo navigation."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -122,6 +122,9 @@ fn list_files_controlled(
     if glob.is_some_and(|g| g.len() > 512) {
         return Err("Glob exceeds 512 bytes".into());
     }
+    if recursive {
+        return list_recursively(&resolved_path, path, glob, control);
+    }
     let entries = collect_entries(&resolved_path, glob, recursive, control)?;
     Ok(format_list_file_entries(path, glob, recursive, entries)?)
 }
@@ -188,6 +191,77 @@ fn collect_entries(
     Ok(entries)
 }
 
+/// Files beneath `resolved`, from `rg --files`, so build output and
+/// dependencies that the project ignores do not crowd out its sources.
+fn list_recursively(
+    resolved: &Path,
+    path: &str,
+    glob: Option<&str>,
+    control: &crate::TaskControl,
+) -> Result<String, ToolError> {
+    let mut command = vec![
+        "rg".to_string(),
+        "--no-config".into(),
+        "--files".into(),
+        "--hidden".into(),
+        "--glob=!.git".into(),
+        "--glob=!.socium".into(),
+    ];
+    if let Some(glob) = glob {
+        command.extend(["--glob".into(), glob.into()]);
+    }
+    let output = crate::process::run(
+        &command,
+        resolved,
+        std::time::Duration::from_secs(5),
+        control,
+    )
+    .map_err(|e| format!("Listing requires ripgrep (rg); cannot execute it: {e}"))?;
+    if output.cancelled {
+        return Err("Listing cancelled".into());
+    }
+    if output.timed_out {
+        return Err("Listing exceeded the 5 second deadline; narrow the path".into());
+    }
+    // Exit 1 is "no files"; anything else, or a diagnostic, is a failure.
+    if !matches!(output.status.code(), Some(0 | 1)) || !output.stderr.is_empty() {
+        return Err(format!(
+            "Listing process or sandbox failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut files = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| line.strip_prefix("./").unwrap_or(line).to_string())
+        .collect::<Vec<_>>();
+    // A cut capture may end in a partial name.
+    if output.truncated {
+        files.pop();
+    }
+    let total = files.len();
+    files.sort_unstable();
+    let entries = files
+        .into_iter()
+        .take(MAX_LIST_ENTRIES)
+        .map(|file| {
+            let line = format!("[file] {file}");
+            (file, line)
+        })
+        .collect::<Vec<_>>();
+    let mut listing = format_list_file_entries(path, glob, true, entries)?;
+    if total > MAX_LIST_ENTRIES || output.truncated {
+        listing.push_str(&format!(
+            "\n(truncated: showing {MAX_LIST_ENTRIES} of {}{} files; narrow the path or add a glob)",
+            if output.truncated { "more than " } else { "" },
+            total
+        ));
+    }
+    Ok(listing)
+}
+
 fn format_list_file_entries(
     path: &str,
     glob: Option<&str>,
@@ -234,6 +308,40 @@ mod tests {
     use super::*;
     use crate::test_support::make_temp_dir;
     use serde_json::json;
+
+    #[test]
+    fn a_recursive_listing_skips_git_and_ignored_build_output() {
+        // Review R8: target/ took 999 of 1,000 entries and src/lib.rs was
+        // not listed; without target/, most lines were under .git/.
+        let workspace = make_temp_dir("workspace");
+        let root = workspace.path();
+        crate::test_support::init_git_repo(root);
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        for n in 0..1_500 {
+            fs::write(root.join(format!("target/debug/{n}.o")), "").unwrap();
+        }
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::create_dir_all(root.join(".github")).unwrap();
+        fs::write(root.join(".github/ci.yml"), "").unwrap();
+
+        let output = list_files_from_workspace(root, &json!({"recursive": true})).unwrap();
+        assert!(output.contains("[file] src/lib.rs"), "{output}");
+        assert!(output.contains("[file] .github/ci.yml"), "{output}");
+        assert!(!output.contains("target/"), "{output}");
+        assert!(!output.contains(".git/"), "{output}");
+
+        for n in 0..1_100 {
+            fs::write(root.join(format!("src/m{n}.rs")), "").unwrap();
+        }
+        let output =
+            list_files_from_workspace(root, &json!({"recursive": true, "glob": "*.rs"})).unwrap();
+        assert!(
+            output.contains("(truncated: showing 1000 of 1101 files"),
+            "{output}"
+        );
+    }
 
     #[test]
     fn lists_directory_from_workspace_with_default_path() {

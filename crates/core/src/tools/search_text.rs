@@ -146,6 +146,17 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn a_match_in_a_minified_line_is_cut() {
+        let workspace = make_temp_dir("workspace");
+        let line = format!("{}needle{}", "a".repeat(5_000), "b".repeat(5_000));
+        fs::write(workspace.path().join("min.js"), line).unwrap();
+        let output =
+            search_text_from_workspace(workspace.path(), &json!({"pattern": "needle"})).unwrap();
+        assert!(output.contains("[line cut at 500 characters]"), "{output}");
+        assert!(output.len() < 1_000, "{}", output.len());
+    }
+
+    #[test]
     fn search_text_returns_line_addressable_matches() {
         let workspace = make_temp_dir("workspace");
         fs::create_dir_all(workspace.path().join("src")).unwrap();

@@ -16,6 +16,7 @@ pub const MAX_TOOL_ROUNDS: usize = 20;
 pub const MAX_LIST_ENTRIES: usize = 1000;
 pub const DEFAULT_SEARCH_RESULTS: usize = 50;
 pub const MAX_SEARCH_RESULTS: usize = 200;
+pub const MAX_SEARCH_LINE_CHARACTERS: usize = 500;
 pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_COMMAND_OUTPUT_CHARACTERS: usize = 20_000;
 pub const TEXT_EDITOR_TOOL_NAME: &str = "str_replace_based_edit_tool";
