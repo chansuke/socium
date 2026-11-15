@@ -1,17 +1,55 @@
 # socium
 
-A Rust coding agent for the terminal.
+A Rust coding agent for the terminal that runs every command in a Linux
+sandbox with no network and no access to your home directory.
 
 Our goal is a Rust coding agent that is easy to install and customize, works with
 your preferred model, preserves your existing changes, and lets you stop and
 resume work.
 
+Socium is pre-release software developed by one person. It runs on Linux only,
+expects breaking changes, and has no tagged releases yet.
+
+## Install
+
+With Nix, run it straight from GitHub, or install it into your profile:
+
+```bash
+nix run github:chansuke/socium
+nix profile install github:chansuke/socium
+```
+
+The Nix package brings Git, ripgrep, and bubblewrap 0.12 with it. Without Nix,
+build with Cargo (Rust 1.92 or newer, a C compiler, and CMake for the TLS
+library), and install Git, ripgrep, and bubblewrap 0.12 or newer yourself:
+
+```bash
+cargo install --locked --git https://github.com/chansuke/socium socium-tui
+```
+
+On Ubuntu 24.04 and later, bubblewrap also needs an AppArmor `userns` profile;
+see the [Linux sandbox guide](docs/linux-sandbox.md#installation-and-support).
+
+## Quick start
+
+```bash
+export ANTHROPIC_API_KEY=...   # or register another provider; see Models below
+cd your-project
+socium-tui
+```
+
+Ask for something in the composer and press Enter. Commands ask for your
+approval before they run; `/help` lists commands and keys, and `/exit` quits.
+To let builds see your toolchains and caches, copy
+[`config.toml.example`](config.toml.example) to `~/.config/socium/config.toml`.
+
 ## Workspace layout
 
 - `crates/core`: domain logic, providers, tool runtime, and input handling.
 - `crates/tui`: Ratatui application entrypoint (binary crate).
+- `evals/`: fixed tasks for comparing changes against a real model.
 
-## Run
+## Run from a checkout
 
 ```bash
 nix develop -c cargo run --locked -p socium-tui
