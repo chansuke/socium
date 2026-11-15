@@ -513,17 +513,19 @@ fn build_metrics(
     }
 }
 
+/// How much of the input budget is still free. The output allowance is
+/// already outside the budget, so an empty conversation starts near 100%
+/// rather than at the window's share left after the allowance.
 fn context_left_percentage(
     context_window_tokens: u32,
     input_tokens: u32,
     max_output_tokens: u32,
 ) -> u32 {
-    if context_window_tokens == 0 {
+    let budget = context_window_tokens.saturating_sub(max_output_tokens);
+    if budget == 0 {
         return 0;
     }
-    let remaining_tokens =
-        context_window_tokens.saturating_sub(input_tokens.saturating_add(max_output_tokens));
-    remaining_tokens.saturating_mul(100) / context_window_tokens
+    (u64::from(budget.saturating_sub(input_tokens)) * 100 / u64::from(budget)) as u32
 }
 
 pub(crate) fn estimate_request_tokens(
@@ -769,6 +771,16 @@ mod tests {
         ));
         assert!(prepared.metrics.summary_active);
         assert!(prepared.metrics.summarized_messages > 0);
+    }
+
+    #[test]
+    fn context_left_is_a_share_of_the_input_budget() {
+        // Review N13: an empty conversation started at "68% context left"
+        // because the output allowance was counted as used.
+        assert_eq!(super::context_left_percentage(200_000, 0, 64_000), 100);
+        assert_eq!(super::context_left_percentage(200_000, 68_000, 64_000), 50);
+        assert_eq!(super::context_left_percentage(200_000, 500_000, 64_000), 0);
+        assert_eq!(super::context_left_percentage(1_000, 0, 1_000), 0);
     }
 
     #[test]
