@@ -81,9 +81,9 @@ GitHub設定の読取りではリポジトリはprivate、mainのbranch protecti
 
 ### 所有者が決めること
 
+2026-11-15 に決めたこと: コマンド名は `socium` (パッケージ名は `socium-tui` のまま)、crates.io には公開しない (`publish = false`)、最初のタグを打つ、作者のメールアドレスとセッション URL を消すために履歴を書き換える、古い PR は閉じる。
+
+残り:
+
 - リポジトリの説明 (今は "A tiny coding agent for personal use") と topics。
-- バイナリ名を `socium-tui` のままにするか、`socium` にするか。
-- crates.io に公開するか。しないなら各 crate に `publish = false` を書く。
-- 最初のタグ (例: `v0.1.0`) とリリースノート、CHANGELOG を持つか。
-- メールアドレスとセッション URL のために履歴を書き換えるか。書き換えるなら公開の前に一度だけ行い、既存の clone と PR の参照が切れることを受け入れる。
 - Code of Conduct を置くか、Discussions を開くか。
