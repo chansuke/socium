@@ -41,6 +41,11 @@ pub(crate) fn run_observed(
         os::{fd::AsRawFd, unix::process::CommandExt},
     };
     const LIMIT: usize = 256 * 1024;
+    // Errors and summaries come last, so a long stream keeps its start
+    // and its newest output, and drops the middle.
+    const HEAD: usize = 32 * 1024;
+    const CUT: &[u8] =
+        b"\n[... middle of the output omitted; the saved artifact has all of it ...]\n";
     fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
         // SAFETY: the pipe owns a live descriptor throughout both fcntl calls.
         let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
@@ -66,9 +71,16 @@ pub(crate) fn run_observed(
                 Ok(0) => return Ok(true),
                 Ok(n) => {
                     observer(stderr, &buf[..n])?;
-                    let keep = n.min(LIMIT.saturating_sub(bytes.len()));
-                    bytes.extend_from_slice(&buf[..keep]);
-                    *truncated |= keep < n;
+                    bytes.extend_from_slice(&buf[..n]);
+                    if bytes.len() > LIMIT {
+                        if !*truncated {
+                            bytes.splice(HEAD..HEAD, CUT.iter().copied());
+                            *truncated = true;
+                        }
+                        let excess = bytes.len() - LIMIT;
+                        let from = HEAD + CUT.len();
+                        bytes.drain(from..from + excess);
+                    }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -183,6 +195,27 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn a_long_stream_keeps_its_start_and_its_end() {
+        // Review N12: capture kept the first 256 KiB, so the failure at the
+        // end of a long build log was lost.
+        let out = shell(
+            "echo first; head -c 1048576 /dev/zero | tr '\\0' x; echo; echo the last line",
+            10_000,
+            &TaskControl::default(),
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.truncated);
+        assert!(text.starts_with("first\n"));
+        assert!(
+            text.ends_with("the last line\n"),
+            "{}",
+            &text[text.len() - 100..]
+        );
+        assert!(text.contains("middle of the output omitted"));
+        assert!(out.stdout.len() <= 256 * 1024);
+    }
+
     #[test]
     fn drains_both_pipes_with_bounded_memory() {
         let out = shell(

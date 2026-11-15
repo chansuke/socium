@@ -3,7 +3,6 @@ use crate::constants::*;
 use crate::execution::{ExecutionPolicy, WorkspaceAccess};
 use crate::tools::error::ToolError;
 use crate::tools::input::{optional_string_field, optional_timeout_ms, require_string_array_field};
-use crate::tools::text_file::truncate_by_characters;
 use crate::tools::workspace::resolve_workspace_command_cwd;
 use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
@@ -272,9 +271,7 @@ fn execute_command(
     let timed_out = output.timed_out;
     let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    if output.truncated {
-        stdout.push_str("\n(output capture truncated at 256 KiB per stream)");
-    }
+
     if output.cancelled {
         stdout.push_str("\n(command cancelled)");
     }
@@ -319,15 +316,20 @@ fn format_command_stream(stream: &str) -> String {
         return "(empty)".to_string();
     }
 
-    let (truncated, was_truncated) = truncate_by_characters(stream, MAX_COMMAND_OUTPUT_CHARACTERS);
-    if was_truncated {
-        format!(
-            "{truncated}\n(truncated: showing first {} characters)",
-            MAX_COMMAND_OUTPUT_CHARACTERS
-        )
-    } else {
-        truncated
+    // Failures and summaries are at the end, so most of the room goes to
+    // the tail.
+    let length = stream.chars().count();
+    if length <= MAX_COMMAND_OUTPUT_CHARACTERS {
+        return stream.to_string();
     }
+    let head = MAX_COMMAND_OUTPUT_CHARACTERS / 10;
+    let tail = MAX_COMMAND_OUTPUT_CHARACTERS - head;
+    format!(
+        "{}\n[... {} characters omitted; the artifact file has the whole stream ...]\n{}",
+        stream.chars().take(head).collect::<String>(),
+        length - head - tail,
+        stream.chars().skip(length - tail).collect::<String>()
+    )
 }
 
 fn display_command(command: &[String]) -> String {
@@ -402,5 +404,18 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn long_output_shows_mostly_its_end() {
+        let stream = format!(
+            "head\n{}\nerror: the real failure\n",
+            "noise\n".repeat(10_000)
+        );
+        let shown = super::format_command_stream(&stream);
+        assert!(shown.starts_with("head\n"));
+        assert!(shown.ends_with("error: the real failure\n"));
+        assert!(shown.contains("characters omitted"));
+        assert!(shown.chars().count() < MAX_COMMAND_OUTPUT_CHARACTERS + 100);
     }
 }
