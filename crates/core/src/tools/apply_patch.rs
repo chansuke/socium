@@ -141,6 +141,13 @@ pub(crate) fn apply_patch_from_workspace(
     ))
 }
 
+/// The diff a patch would make, for its approval request.
+pub(crate) fn preview(workspace_root: &Path, input: &Value) -> Result<String, ToolError> {
+    let ApplyPatchInput { patch, .. } = ApplyPatchInput::parse(input)?;
+    let plan = plan_patch(workspace_root, &parse_patch_actions(patch)?)?;
+    Ok(crate::tools::edit_history::describe(&plan))
+}
+
 fn plan_patch(
     root: &Path,
     actions: &[PatchAction],

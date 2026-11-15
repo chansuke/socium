@@ -284,6 +284,14 @@ where
                             .into(),
                     );
                 }
+                if let Some(review) = &ask.review
+                    && name != "git_commit"
+                    && crate::approval::edit_review(name, input, workspace_root) != *review
+                {
+                    return Err(
+                        "The file changed during approval; edit refused, request it again".into(),
+                    );
+                }
                 authorization = HUMAN_APPROVED;
                 None
             }

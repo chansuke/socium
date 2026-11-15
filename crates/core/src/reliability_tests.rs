@@ -1400,3 +1400,37 @@ fn undo_reverts_the_last_edit_and_tells_the_model() {
     assert!(note.contains("undid your last edit of a.txt"), "{note}");
     assert!(agent.undo(Some("a.txt")).is_err());
 }
+
+#[test]
+fn a_protected_file_that_changes_during_approval_is_not_edited() {
+    let root = tempfile::tempdir().unwrap();
+    let build = root.path().join("build.rs");
+    std::fs::write(&build, "fn main() {}\n// one\n").unwrap();
+    let settings = crate::settings::Settings::default();
+    let control = TaskControl::default();
+    control.enable_interactive_approval();
+    let (ok, output) = run_with_settings(
+        root.path(),
+        &settings,
+        &control,
+        crate::constants::TEXT_EDITOR_TOOL_NAME,
+        json!({"command": "str_replace", "path": "build.rs", "old_str": "// one", "new_str": "// two"}),
+        &mut |event| {
+            if let AgentProgress::ApprovalRequested {
+                request_id, input, ..
+            } = event
+            {
+                assert!(input.contains("+// two"), "{input}");
+                // Someone else edits the file before the answer.
+                std::fs::write(&build, "fn main() { other(); }\n// one\n").unwrap();
+                control.answer(request_id, crate::ApprovalAnswer::AllowOnce);
+            }
+        },
+    );
+    assert!(!ok);
+    assert!(output.contains("changed during approval"), "{output}");
+    assert_eq!(
+        std::fs::read_to_string(&build).unwrap(),
+        "fn main() { other(); }\n// one\n"
+    );
+}

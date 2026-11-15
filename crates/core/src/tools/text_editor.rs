@@ -145,6 +145,14 @@ pub(crate) fn text_editor_str_replace(
     workspace_root: &Path,
     input: &serde_json::Map<String, Value>,
 ) -> Result<String, ToolError> {
+    let plan = plan_str_replace(workspace_root, input)?;
+    apply_plan(workspace_root, plan)
+}
+
+fn plan_str_replace(
+    workspace_root: &Path,
+    input: &serde_json::Map<String, Value>,
+) -> Result<(Vec<Mutation>, String), ToolError> {
     let path = require_string_field(input, "path", "text_editor str_replace path")?;
     let old_str = require_string_field(input, "old_str", "text_editor str_replace old_str")?;
     let new_str = require_string_field(input, "new_str", "text_editor str_replace new_str")?;
@@ -183,18 +191,21 @@ pub(crate) fn text_editor_str_replace(
         after: Some(updated),
         ..Mutation::default()
     }];
-    let diff = describe(&changes);
-    apply_changes(workspace_root, changes)?;
-    Ok(maybe_prepend_dirty_worktree_warning(
-        workspace_root,
-        format!("Path: {path}\nReplaced 1 occurrence\n{diff}"),
-    ))
+    Ok((changes, format!("Path: {path}\nReplaced 1 occurrence")))
 }
 
 pub(crate) fn text_editor_create(
     workspace_root: &Path,
     input: &serde_json::Map<String, Value>,
 ) -> Result<String, ToolError> {
+    let plan = plan_create(workspace_root, input)?;
+    apply_plan(workspace_root, plan)
+}
+
+fn plan_create(
+    workspace_root: &Path,
+    input: &serde_json::Map<String, Value>,
+) -> Result<(Vec<Mutation>, String), ToolError> {
     let path = require_string_field(input, "path", "text_editor create path")?;
     let file_text = require_string_field(input, "file_text", "text_editor create file_text")?;
     let target_path = resolve_workspace_path_for_create(workspace_root, path)?;
@@ -208,18 +219,21 @@ pub(crate) fn text_editor_create(
         after: Some(file_text.into()),
         ..Mutation::default()
     }];
-    let diff = describe(&changes);
-    apply_changes(workspace_root, changes)?;
-    Ok(maybe_prepend_dirty_worktree_warning(
-        workspace_root,
-        format!("Path: {path}\nCreated file\n{diff}"),
-    ))
+    Ok((changes, format!("Path: {path}\nCreated file")))
 }
 
 pub(crate) fn text_editor_insert(
     workspace_root: &Path,
     input: &serde_json::Map<String, Value>,
 ) -> Result<String, ToolError> {
+    let plan = plan_insert(workspace_root, input)?;
+    apply_plan(workspace_root, plan)
+}
+
+fn plan_insert(
+    workspace_root: &Path,
+    input: &serde_json::Map<String, Value>,
+) -> Result<(Vec<Mutation>, String), ToolError> {
     let path = require_string_field(input, "path", "text_editor insert path")?;
     let insert_line = require_i64_field(input, "insert_line", "text_editor insert insert_line")?;
     if insert_line < 0 {
@@ -263,12 +277,38 @@ pub(crate) fn text_editor_insert(
         after: Some(updated),
         ..Mutation::default()
     }];
+    Ok((
+        changes,
+        format!("Path: {path}\nInserted text after line {line}"),
+    ))
+}
+
+/// Writes a planned edit and reports what it did, with its diff.
+fn apply_plan(
+    workspace_root: &Path,
+    (changes, done): (Vec<Mutation>, String),
+) -> Result<String, ToolError> {
     let diff = describe(&changes);
     apply_changes(workspace_root, changes)?;
     Ok(maybe_prepend_dirty_worktree_warning(
         workspace_root,
-        format!("Path: {path}\nInserted text after line {line}\n{diff}"),
+        format!("{done}\n{diff}"),
     ))
+}
+
+/// The diff an edit call would make, for its approval request; `None` for
+/// commands that change nothing.
+pub(crate) fn preview(workspace_root: &Path, input: &Value) -> Result<Option<String>, ToolError> {
+    let input = input
+        .as_object()
+        .ok_or("text_editor tool requires an object input")?;
+    let plan = match require_string_field(input, "command", "text_editor command")? {
+        "str_replace" => plan_str_replace(workspace_root, input)?,
+        "create" => plan_create(workspace_root, input)?,
+        "insert" => plan_insert(workspace_root, input)?,
+        _ => return Ok(None),
+    };
+    Ok(Some(describe(&plan.0)))
 }
 
 pub(crate) fn text_editor_undo_edit(

@@ -77,6 +77,21 @@ pub(crate) struct Ask {
     pub(crate) grant: Option<Grant>,
 }
 
+/// The diff an edit call would make, as its approval shows it. The call is
+/// planned again after the answer, and refused if the diff changed.
+pub(crate) fn edit_review(name: &str, input: &Value, root: &Path) -> String {
+    let preview = match name {
+        "apply_patch" => crate::tools::apply_patch::preview(root, input).map(Some),
+        crate::constants::TEXT_EDITOR_TOOL_NAME => crate::tools::text_editor::preview(root, input),
+        _ => Ok(None),
+    };
+    match preview {
+        Ok(Some(diff)) => format!("Edit:\n{diff}"),
+        Ok(None) => String::new(),
+        Err(err) => format!("Edit: cannot be previewed ({err}); it will fail the same way"),
+    }
+}
+
 /// Decides how `name` with `input` may run.
 pub(crate) fn gate(
     name: &str,
@@ -142,7 +157,7 @@ pub(crate) fn gate(
                         protected.join(", "),
                         if protected.len() == 1 { "is" } else { "are" }
                     ),
-                    review: None,
+                    review: Some(edit_review(name, input, root)),
                     grant: Some(Grant::Edit(protected)),
                 }));
             }
@@ -524,6 +539,27 @@ mod tests {
             ),
             Gate::Ask(Ask { grant: None, .. })
         ));
+    }
+
+    #[test]
+    fn a_protected_edit_shows_its_diff_for_approval() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("build.rs"), "fn main() {}\n").unwrap();
+        let gate = decide(
+            root.path(),
+            &Settings::default(),
+            crate::constants::TEXT_EDITOR_TOOL_NAME,
+            json!({"command": "str_replace", "path": "build.rs", "old_str": "fn main() {}", "new_str": "fn main() { run(); }"}),
+        );
+        let Gate::Ask(ask) = gate else {
+            panic!("a protected edit must ask")
+        };
+        let review = ask.review.unwrap();
+        assert!(
+            review.contains("-fn main() {}\n+fn main() { run(); }"),
+            "{review}"
+        );
+        assert!(review.contains("build.rs (+1 -1)"), "{review}");
     }
 
     #[test]
