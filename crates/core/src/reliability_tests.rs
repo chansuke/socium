@@ -1199,3 +1199,141 @@ async fn a_reply_cut_at_the_output_limit_ends_the_turn_with_a_notice() {
         reply.notices
     );
 }
+
+/// Writes `count` files of about `bytes` each and returns a response that
+/// reads them all in one round.
+fn large_reads(root: &std::path::Path, count: usize, bytes: usize) -> ProviderResponse {
+    let line = "let value = compute(input, 1234567890); // filler line\n";
+    let names = (0..count).map(|i| format!("f{i}.rs")).collect::<Vec<_>>();
+    for name in &names {
+        std::fs::write(root.join(name), line.repeat(bytes / line.len())).unwrap();
+    }
+    let calls = names
+        .iter()
+        .map(|name| ("read_file", json!({ "path": name })))
+        .collect::<Vec<_>>();
+    response(&calls)
+}
+
+fn scripted_agent(
+    root: &std::path::Path,
+    responses: Vec<Result<ProviderResponse, ProviderError>>,
+    max_tokens: u32,
+) -> (AgentService, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+    let provider = ScriptedProvider::new(responses);
+    let requests = provider.recorded_requests.clone();
+    let agent = AgentService::with_provider(
+        root.into(),
+        Box::new(provider),
+        "test".into(),
+        max_tokens,
+        reqwest::Client::new(),
+    );
+    (agent, requests)
+}
+
+#[tokio::test]
+async fn large_parallel_reads_reach_the_model_instead_of_stranding_the_session() {
+    // Review R3: three ~199 KB reads in a 200k window used to fail the
+    // turn, then the next seven messages.
+    let root = tempfile::tempdir().unwrap();
+    let reads = large_reads(root.path(), 3, 199_000);
+    let (mut agent, requests) = scripted_agent(
+        root.path(),
+        vec![Ok(reads), Ok(text_provider_response("compared", None))],
+        64_000,
+    );
+    for turn in 0..5 {
+        agent
+            .messages
+            .push(Message::user_text(format!("earlier question {turn}")));
+        agent
+            .messages
+            .push(Message::assistant_blocks(vec![ContentBlock::Text {
+                text: format!("earlier answer {turn}"),
+            }]));
+    }
+    let reply = agent.submit("Compare the files".into()).await.unwrap();
+    assert_eq!(reply.text, "compared");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].to_string().contains("compute(input"));
+}
+
+#[tokio::test]
+async fn results_that_overflow_the_window_mid_turn_are_cut_and_saved_as_sent() {
+    let root = tempfile::tempdir().unwrap();
+    let reads = large_reads(root.path(), 3, 90_000);
+    let (mut agent, requests) = scripted_agent(
+        root.path(),
+        vec![Ok(reads), Ok(text_provider_response("done", None))],
+        10_000,
+    );
+    // 60k window - 10k output = 50k tokens, about 175k characters.
+    agent.active_model.context_window = Some(60_000);
+    let mut warnings = Vec::new();
+    agent
+        .submit_with_progress("read them".into(), |event| {
+            if let AgentProgress::Activity(ActivityEvent {
+                kind: ActivityKind::Warning { message },
+                ..
+            }) = event
+            {
+                warnings.push(message);
+            }
+        })
+        .await
+        .unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("cut to fit")),
+        "{warnings:?}"
+    );
+    let sent = requests.lock().unwrap()[1].to_string();
+    assert!(sent.contains("omitted to fit the context window"));
+    let saved = serde_json::to_string(&agent.messages).unwrap();
+    assert!(saved.contains("omitted to fit the context window"));
+}
+
+#[tokio::test]
+async fn a_window_that_fills_mid_turn_is_compacted_at_once() {
+    let root = tempfile::tempdir().unwrap();
+    // Twenty results cannot shrink below 2,000 characters each.
+    let reads = large_reads(root.path(), 20, 20_000);
+    let (mut agent, requests) = scripted_agent(
+        root.path(),
+        vec![
+            Ok(reads),
+            Ok(text_provider_response(
+                "1. User request: earlier work",
+                None,
+            )),
+            Ok(text_provider_response("continuing", None)),
+        ],
+        10_000,
+    );
+    agent.active_model.context_window = Some(60_000);
+    // Earlier turns hold most of the 50k-token budget, about 210k
+    // characters at the estimate's 4.2 per token for this model name.
+    for turn in 0..2 {
+        agent
+            .messages
+            .push(Message::user_text(format!("question {turn}")));
+        agent
+            .messages
+            .push(Message::assistant_blocks(vec![ContentBlock::Text {
+                text: "x".repeat(90_000),
+            }]));
+    }
+    let err = agent
+        .submit("read all".into())
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("filled during the tool loop"), "{err}");
+    assert!(err.contains("The history was compacted"), "{err}");
+    assert!(agent.summary_state.summary.is_some());
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    let reply = agent.submit("continue".into()).await.unwrap();
+    assert_eq!(reply.text, "continuing");
+}

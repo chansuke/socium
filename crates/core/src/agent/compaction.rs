@@ -2,23 +2,51 @@ use crate::agent::turn::extract_text;
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
 use crate::constants::{
     COMPACTION_MAX_OUTPUT_TOKENS, COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS,
-    COMPACTION_SYSTEM_PROMPT, COMPACTION_TRIGGER_RATIO,
+    COMPACTION_SYSTEM_PROMPT, COMPACTION_TRIGGER_RATIO, DEFAULT_COMPACT_AT_TOKENS,
 };
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, ProviderEvent};
 use std::env;
 
 /// Prompt-token level at which auto-compaction fires. The env override
-/// takes precedence; otherwise a fixed ratio of the input budget, the
-/// context window minus the output allowance, so compaction runs before a
-/// request in the tool loop outgrows the budget.
-pub(crate) fn compaction_threshold_tokens(input_budget_tokens: u32) -> u32 {
+/// takes precedence; otherwise the model's `compact_at_tokens` or the
+/// default, capped at a fixed ratio of the input budget (the context window
+/// minus the output allowance) so compaction runs before a request in the
+/// tool loop outgrows the budget.
+pub(crate) fn compaction_threshold_tokens(
+    input_budget_tokens: u32,
+    compact_at: Option<u32>,
+) -> u32 {
     if let Ok(value) = env::var("COMPACTION_TOKEN_THRESHOLD")
         && let Ok(threshold) = value.trim().parse::<u32>()
     {
         return threshold;
     }
-    (input_budget_tokens as f32 * COMPACTION_TRIGGER_RATIO) as u32
+    let ratio = (input_budget_tokens as f32 * COMPACTION_TRIGGER_RATIO) as u32;
+    compact_at.unwrap_or(DEFAULT_COMPACT_AT_TOKENS).min(ratio)
+}
+
+/// Like [`retention_boundary`], but keeps at most `retain_messages` of the
+/// newest messages and only as many as fit in about `retain_tokens`, so a
+/// few huge tool results cannot make compaction a no-op. At least the last
+/// message is kept.
+pub(crate) fn retention_boundary_by_tokens(
+    messages: &[Message],
+    model: &str,
+    retain_messages: usize,
+    retain_tokens: u32,
+) -> usize {
+    let mut kept_tokens = 0u32;
+    let mut keep = 0;
+    for message in messages.iter().rev().take(retain_messages.max(1)) {
+        let tokens = crate::agent::context::estimate_message_tokens(model, message);
+        if keep > 0 && kept_tokens.saturating_add(tokens) > retain_tokens {
+            break;
+        }
+        kept_tokens = kept_tokens.saturating_add(tokens);
+        keep += 1;
+    }
+    retention_boundary(messages, keep)
 }
 
 /// Index separating messages to compact (before) from messages kept
@@ -195,6 +223,36 @@ mod tests {
                 is_error: Some(true),
             }]),
         ]
+    }
+
+    #[test]
+    fn retention_by_tokens_lets_compaction_cover_huge_recent_messages() {
+        let big = || Message::user_text("z".repeat(100_000));
+        let small = |i: usize| Message::user_text(format!("message {i}"));
+        // Three huge messages at the end: only the last stays verbatim.
+        let mut messages = (0..4).map(small).collect::<Vec<_>>();
+        messages.extend([big(), big(), big()]);
+        assert_eq!(
+            super::retention_boundary_by_tokens(&messages, "claude", 16, 20_000),
+            6
+        );
+        // Small messages keep the count limit.
+        let messages = (0..30).map(small).collect::<Vec<_>>();
+        assert_eq!(
+            super::retention_boundary_by_tokens(&messages, "claude", 16, 20_000),
+            14
+        );
+    }
+
+    #[test]
+    fn compaction_threshold_uses_the_lowest_of_model_default_and_ratio() {
+        // A 1M window compacts at the default, not at 80% of the budget.
+        assert_eq!(super::compaction_threshold_tokens(936_000, None), 200_000);
+        assert_eq!(
+            super::compaction_threshold_tokens(936_000, Some(400_000)),
+            400_000
+        );
+        assert_eq!(super::compaction_threshold_tokens(136_000, None), 108_800);
     }
 
     #[test]

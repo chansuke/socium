@@ -209,9 +209,9 @@ async fn live_request_after_a_summary_is_accepted() {
     let prepared = crate::agent::context::prepare_context_messages(
         &messages,
         &summary,
-        model.context_window,
+        crate::agent::context::resolve_context_budget(model.context_window, LIVE_MAX_TOKENS)
+            .unwrap(),
         &model.id,
-        LIVE_MAX_TOKENS,
         &tools,
     )
     .unwrap();

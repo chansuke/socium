@@ -17,4 +17,7 @@ pub enum AgentError {
     ToolRoundsExhausted,
     #[error("Nothing to compact: the conversation is already within the retained window")]
     NothingToCompact,
+    /// The window filled during a tool loop; the message says what next.
+    #[error("{0}")]
+    ContextFull(String),
 }

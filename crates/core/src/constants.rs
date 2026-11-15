@@ -17,19 +17,30 @@ pub const STATE_DIR_NAME: &str = ".socium";
 pub const CONVERSATION_STATE_FILE_NAME: &str = "conversation.json";
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 pub const TARGET_RECENT_CONTEXT_MESSAGES: usize = 24;
-pub const MIN_RECENT_CONTEXT_MESSAGES: usize = 8;
+/// One tool result is cut to its head and tail beyond this, so a single
+/// call cannot fill the window.
+pub const MAX_TOOL_RESULT_CHARACTERS: usize = 100_000;
+/// A result shrunk to fit the window keeps at least this much.
+pub const MIN_SHRUNK_TOOL_RESULT_CHARACTERS: usize = 2_000;
 pub const MAX_SUMMARY_LINES: usize = 24;
 pub const MAX_SUMMARY_LINE_CHARACTERS: usize = 240;
 pub const MAX_SUMMARY_CHARACTERS: usize = 4_000;
 // Compaction: summarize old conversation with a cheap dedicated model so
 // long sessions stop resending their full history on every call.
-// Auto-compaction fires when the last measured prompt size exceeds
-// COMPACTION_TRIGGER_RATIO of the input budget (override with the
-// COMPACTION_TOKEN_THRESHOLD env var). COMPACTION_RETAIN_RECENT_MESSAGES
-// messages are kept verbatim; TARGET/MIN_RECENT_CONTEXT_MESSAGES remain
-// the emergency budget-based trimming path for uncompacted overflow.
+// Auto-compaction fires when the last measured prompt size reaches the
+// model's compact_at_tokens, DEFAULT_COMPACT_AT_TOKENS, or
+// COMPACTION_TRIGGER_RATIO of the input budget, whichever is lowest
+// (override with the COMPACTION_TOKEN_THRESHOLD env var). Up to
+// COMPACTION_RETAIN_RECENT_MESSAGES of the newest messages are kept
+// verbatim, as long as they fit in COMPACTION_RETAIN_RECENT_TOKENS;
+// TARGET_RECENT_CONTEXT_MESSAGES is the emergency budget-based trimming
+// path for uncompacted overflow.
 pub const COMPACTION_TRIGGER_RATIO: f32 = 0.8;
+/// Long prompts cost more per round and the model attends to them less
+/// well, so a 1M window is not filled before compacting.
+pub const DEFAULT_COMPACT_AT_TOKENS: u32 = 200_000;
 pub const COMPACTION_RETAIN_RECENT_MESSAGES: usize = 16;
+pub const COMPACTION_RETAIN_RECENT_TOKENS: u32 = 20_000;
 pub const DEFAULT_COMPACTION_MODEL: &str = "claude-haiku-5-5";
 pub const COMPACTION_MAX_OUTPUT_TOKENS: u32 = 1_500;
 pub const COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS: usize = 600;

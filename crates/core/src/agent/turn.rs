@@ -26,6 +26,8 @@ pub(crate) struct TurnContext<'a> {
     pub(crate) system: &'a str,
     pub(crate) context_window: Option<u32>,
     pub(crate) max_tokens: u32,
+    /// See [`crate::agent::context::ContextBudget::estimate_scale`].
+    pub(crate) estimate_scale: f32,
     /// The tools offered to the model; a call to any other is refused.
     pub(crate) tools: &'a [ToolDefinition],
     /// The types the `agent` tool can start.
@@ -44,6 +46,8 @@ pub(crate) struct TurnOutcome {
     /// Things the user should know about how the turn ended, such as an
     /// answer cut at the output limit.
     pub(crate) notices: Vec<String>,
+    /// Measured input per estimated token on the last call, when measured.
+    pub(crate) estimate_scale: Option<f32>,
 }
 
 /// Further attempts after a retryable failure before any output arrived.
@@ -64,6 +68,7 @@ where
     let mut assistant_text_chunks = Vec::new();
     let mut last_usage = None;
     let mut notices = Vec::new();
+    let mut estimate_scale = None;
     let max_rounds = if supports_tools { MAX_TOOL_ROUNDS } else { 1 };
     let clock = ctx.clock;
     for round in 0..max_rounds {
@@ -83,19 +88,46 @@ where
         );
         validate_protocol(messages)?;
         let budget =
-            crate::agent::context::resolve_context_budget(ctx.context_window, ctx.max_tokens)?;
-        if crate::agent::context::estimate_request_tokens(
+            crate::agent::context::resolve_context_budget(ctx.context_window, ctx.max_tokens)?
+                .with_scale(estimate_scale.unwrap_or(ctx.estimate_scale));
+        let limit = budget.input_budget_tokens();
+        let mut estimate = budget.estimate(ctx.model, messages, ctx.tools);
+        if estimate > limit
+            && let Some(Message {
+                content: crate::agent::types::MessageContent::Blocks(results),
+                role: crate::agent::types::Role::User,
+                ..
+            }) = messages.last_mut()
+        {
+            // The newest results overflowed. Nothing was produced against
+            // them yet, so cutting them leaves every thinking block valid;
+            // the history keeps what the model is shown.
+            let excess = crate::agent::context::excess_characters(
+                ctx.model,
+                estimate - limit,
+                budget.estimate_scale,
+            );
+            if crate::agent::context::shrink_tool_results(results, excess) > 0 {
+                emit(
+                    on_progress,
+                    ActivityKind::Warning {
+                        message: "Tool output was cut to fit the context window".into(),
+                    },
+                );
+                estimate = budget.estimate(ctx.model, messages, ctx.tools);
+            }
+        }
+        if estimate > limit {
+            return Err(AgentError::ContextFull(format!(
+                "The context window filled during the tool loop (about {estimate} of {limit} tokens)."
+            )));
+        }
+        let estimated_input = crate::agent::context::estimate_request_tokens(
             ctx.model,
             ctx.max_tokens,
             messages,
             ctx.tools,
-        ) > budget.input_budget_tokens()
-        {
-            return Err(std::io::Error::other(
-                "Context budget exceeded during tool loop; compact before continuing",
-            )
-            .into());
-        }
+        );
         // Thinking another provider or model wrote stays in the history
         // but is not sent where it cannot be read.
         let readable = crate::agent::types::readable_thinking(messages, &|origin| {
@@ -182,8 +214,11 @@ where
             break result;
         };
         let response = result?;
-        if response.usage.is_some() {
-            last_usage = response.usage;
+        if let Some(usage) = response.usage {
+            last_usage = Some(usage);
+            estimate_scale =
+                crate::agent::context::estimate_scale(usage.total_input_tokens(), estimated_input)
+                    .or(estimate_scale);
         }
         let assistant_blocks = response.message.content;
         let invalid_inputs = response.message.invalid_tool_inputs;
@@ -342,7 +377,7 @@ where
                             ..
                         }
                     );
-                    results.push(result);
+                    results.push(bounded(result));
                     *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
                     checkpoint(messages,serde_json::json!({"type":"tool_finished","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"is_error":failed,"result_index":results.len()-1})).map_err(|e|std::io::Error::other(format!("Tool finished but its result could not be saved; outcome may be unknown after restart: {e}")))?;
                 }
@@ -487,7 +522,7 @@ where
                     },
                 );
             }
-            results.push(result);
+            results.push(bounded(result));
             *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
             checkpoint(messages,serde_json::json!({"type":"tool_finished","round":round+1,"attempt":1,"tool_call_id":call_id,"tool":tool_name,"is_error":failed,"result_index":results.len()-1})).map_err(|e|std::io::Error::other(format!("Tool finished but its result could not be saved; outcome may be unknown after restart: {e}")))?;
         }
@@ -503,6 +538,7 @@ where
         assistant_text_chunks,
         last_usage,
         notices,
+        estimate_scale,
     })
 }
 
@@ -550,6 +586,27 @@ async fn join_all<'a, T>(mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send 
         .into_iter()
         .map(|output| output.expect("every future finished"))
         .collect()
+}
+
+/// One result keeps at most `MAX_TOOL_RESULT_CHARACTERS`, its head and
+/// tail, so a single call cannot fill the window.
+fn bounded(result: ContentBlock) -> ContentBlock {
+    match result {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => ContentBlock::ToolResult {
+            tool_use_id,
+            content: crate::agent::context::elide_tool_output(
+                &content,
+                crate::constants::MAX_TOOL_RESULT_CHARACTERS,
+                "from this result",
+            ),
+            is_error,
+        },
+        other => other,
+    }
 }
 
 fn tool_error(tool_use_id: String, err: ToolError) -> ContentBlock {
@@ -676,6 +733,7 @@ mod tests {
             system: "s",
             context_window: None,
             max_tokens: 100,
+            estimate_scale: 1.0,
             tools: &tools,
             subagents: &subagents,
             control: &control,

@@ -31,7 +31,8 @@ pub use crate::error::AgentError;
 use crate::activity::ActivityClock;
 use crate::activity_log::{ACTIVITY_LOG_FILE_NAME, ActivityRecorder};
 use crate::agent::compaction::{
-    CompactionRequest, compaction_threshold_tokens, retention_boundary, summarize_with_llm,
+    CompactionRequest, compaction_threshold_tokens, retention_boundary_by_tokens,
+    summarize_with_llm,
 };
 use crate::agent::context::{
     context_metrics_for_input, extend_summary_text, history_input_tokens, prepare_context_messages,
@@ -268,6 +269,9 @@ pub struct AgentService {
     /// persisted, so the first turn after a restart falls back to the
     /// heuristic estimate.
     last_measured_usage: Option<TokenUsage>,
+    /// How far the current model's measured prompts are from the estimate;
+    /// see `ContextBudget::estimate_scale`. Reset when the model changes.
+    estimate_scale: f32,
 }
 
 /// The client for model requests. There is no deadline for a whole
@@ -357,6 +361,7 @@ impl AgentService {
             client,
             warnings: target.warnings,
             last_measured_usage: None,
+            estimate_scale: 1.0,
         };
         service.apply_model_limits();
         service
@@ -721,6 +726,7 @@ impl AgentService {
         }
         // The last measurement described another model's prompt.
         self.last_measured_usage = None;
+        self.estimate_scale = 1.0;
         warnings.extend(self.provider.startup_warnings());
         let needs_compaction = match self.history_pressure()? {
             Some((history, budget)) => {
@@ -741,7 +747,7 @@ impl AgentService {
     /// The estimated history and input budget when the history reaches the
     /// compaction threshold of the current model.
     fn history_pressure(&self) -> std::io::Result<Option<(u32, u32)>> {
-        let budget = resolve_context_budget(self.active_model.context_window, self.max_tokens)?;
+        let budget = self.context_budget()?;
         let history = history_input_tokens(
             &self.messages,
             &self.summary_state,
@@ -750,8 +756,16 @@ impl AgentService {
             &self.tools,
         );
         let input_budget = budget.input_budget_tokens();
-        Ok((history >= compaction_threshold_tokens(input_budget))
-            .then_some((history, input_budget)))
+        Ok((history
+            >= compaction_threshold_tokens(input_budget, self.active_model.compact_at_tokens))
+        .then_some((history, input_budget)))
+    }
+
+    fn context_budget(&self) -> std::io::Result<crate::agent::context::ContextBudget> {
+        Ok(
+            resolve_context_budget(self.active_model.context_window, self.max_tokens)?
+                .with_scale(self.estimate_scale),
+        )
     }
 
     pub fn task_control(&self) -> TaskControl {
@@ -1085,9 +1099,8 @@ impl AgentService {
         let prepared_context = prepare_context_messages(
             &self.messages,
             &self.summary_state,
-            self.active_model.context_window,
+            self.context_budget()?,
             &self.active_model.id,
-            self.max_tokens,
             &self.tools,
         )?;
         let initial_len = prepared_context.messages.len();
@@ -1099,6 +1112,7 @@ impl AgentService {
             system: DEFAULT_SYSTEM_PROMPT,
             context_window: self.active_model.context_window,
             max_tokens: self.max_tokens,
+            estimate_scale: self.estimate_scale,
             tools: &self.tools,
             subagents: &self.subagents,
             workspace_root: &self.workspace_root,
@@ -1154,9 +1168,32 @@ impl AgentService {
             ))
             .into());
         }
+        if let Err(AgentError::ContextFull(_)) = &result {
+            // The window filled in the middle of the turn. Compacting now
+            // makes the next message fit; the user decides how to go on.
+            self.last_measured_usage = None;
+            let compacted = match self.run_compaction().await {
+                Ok(report) => {
+                    on_progress(AgentProgress::CompactionFinished {
+                        covered_messages: report.covered_messages,
+                        used_llm: report.used_llm,
+                    });
+                    "The history was compacted; ask Socium to continue.".to_string()
+                }
+                Err(err) => {
+                    format!("Compaction also failed ({err}); start a new session with /clear.")
+                }
+            };
+            if let Err(AgentError::ContextFull(message)) = result {
+                return Err(AgentError::ContextFull(format!("{message} {compacted}")));
+            }
+        }
         let outcome = result?;
         if outcome.last_usage.is_some() {
             self.last_measured_usage = outcome.last_usage;
+        }
+        if let Some(scale) = outcome.estimate_scale {
+            self.estimate_scale = scale;
         }
         Ok(AgentReply {
             text: outcome.assistant_text_chunks.join("\n"),
@@ -1169,9 +1206,8 @@ impl AgentService {
             &self.messages,
             pending_user_input,
             &self.summary_state,
-            self.active_model.context_window,
+            self.context_budget()?,
             &self.active_model.id,
-            self.max_tokens,
             &self.tools,
         )?;
         metrics.apply_measured_input(
@@ -1193,13 +1229,21 @@ impl AgentService {
         let Some(usage) = self.last_measured_usage else {
             return Ok(false);
         };
-        let budget = resolve_context_budget(self.active_model.context_window, self.max_tokens)?;
-        let threshold = compaction_threshold_tokens(budget.input_budget_tokens());
+        let budget = self.context_budget()?;
+        let threshold = compaction_threshold_tokens(
+            budget.input_budget_tokens(),
+            self.active_model.compact_at_tokens,
+        );
         Ok(usage.total_input_tokens() >= threshold)
     }
 
     async fn run_compaction(&mut self) -> Result<CompactionReport, AgentError> {
-        let boundary = retention_boundary(&self.messages, COMPACTION_RETAIN_RECENT_MESSAGES);
+        let boundary = retention_boundary_by_tokens(
+            &self.messages,
+            &self.active_model.id,
+            COMPACTION_RETAIN_RECENT_MESSAGES,
+            COMPACTION_RETAIN_RECENT_TOKENS,
+        );
         let covered = self
             .summary_state
             .summary

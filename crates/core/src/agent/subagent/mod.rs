@@ -83,6 +83,7 @@ pub(crate) fn run_subagent<'a>(
                     model: &model.config.id,
                     context_window: model.config.context_window,
                     max_tokens: model.max_tokens,
+                    estimate_scale: 1.0,
                     tools: &model_tools,
                     ..*ctx
                 }

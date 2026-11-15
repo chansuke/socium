@@ -5,16 +5,20 @@ use crate::agent::types::{
 };
 use crate::constants::{
     DEFAULT_CONTEXT_WINDOW_TOKENS, MAX_SUMMARY_CHARACTERS, MAX_SUMMARY_LINE_CHARACTERS,
-    MAX_SUMMARY_LINES, MIN_RECENT_CONTEXT_MESSAGES, TARGET_RECENT_CONTEXT_MESSAGES,
+    MAX_SUMMARY_LINES, MIN_SHRUNK_TOOL_RESULT_CHARACTERS, TARGET_RECENT_CONTEXT_MESSAGES,
 };
 use crate::tools::ToolDefinition;
 use std::env;
 use std::io::{self, Error, ErrorKind};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ContextBudget {
     pub context_window_tokens: u32,
     pub max_output_tokens: u32,
+    /// Measured input tokens per estimated token on the last request, so
+    /// text the character heuristic undercounts (such as Japanese) still
+    /// fits. 1.0 until a provider reports usage.
+    pub estimate_scale: f32,
 }
 
 impl ContextBudget {
@@ -23,6 +27,28 @@ impl ContextBudget {
             .saturating_sub(self.max_output_tokens)
             .max(1)
     }
+
+    pub(crate) fn with_scale(mut self, estimate_scale: f32) -> Self {
+        self.estimate_scale = estimate_scale;
+        self
+    }
+
+    /// The estimate for a request, corrected by the last measurement.
+    pub(crate) fn estimate(
+        self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> u32 {
+        let raw = estimate_request_tokens(model, self.max_output_tokens, messages, tools);
+        (raw as f32 * self.estimate_scale).ceil() as u32
+    }
+}
+
+/// The measured-to-estimated ratio, bounded so one odd measurement (a
+/// cached prompt, a provider that counts differently) cannot swing it far.
+pub(crate) fn estimate_scale(measured: u32, estimated: u32) -> Option<f32> {
+    (measured > 0 && estimated > 0).then(|| (measured as f32 / estimated as f32).clamp(0.5, 3.0))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -80,23 +106,26 @@ pub(crate) fn resolve_context_budget(
     Ok(ContextBudget {
         context_window_tokens,
         max_output_tokens,
+        estimate_scale: 1.0,
     })
 }
 
 pub(crate) fn prepare_context_messages(
     raw_messages: &[Message],
     summary_state: &ConversationSummaryState,
-    context_window: Option<u32>,
+    budget: ContextBudget,
     model: &str,
-    max_output_tokens: u32,
     tools: &[ToolDefinition],
 ) -> io::Result<PreparedContext> {
-    let budget = resolve_context_budget(context_window, max_output_tokens)?;
     let prepared = prepare_context_with_budget(raw_messages, summary_state, model, budget, tools);
     if prepared.metrics.estimated_input_tokens > budget.input_budget_tokens() {
         return Err(Error::new(
             ErrorKind::InvalidInput,
-            "Context exceeds input budget even after compaction; shorten input or increase CONTEXT_WINDOW_TOKENS",
+            format!(
+                "The latest message alone is about {} tokens, over the input budget of {}; send a shorter message",
+                prepared.metrics.estimated_input_tokens,
+                budget.input_budget_tokens()
+            ),
         ));
     }
     Ok(prepared)
@@ -106,9 +135,8 @@ pub(crate) fn context_metrics_for_input(
     raw_messages: &[Message],
     pending_user_input: &str,
     summary_state: &ConversationSummaryState,
-    context_window: Option<u32>,
+    budget: ContextBudget,
     model: &str,
-    max_output_tokens: u32,
     tools: &[ToolDefinition],
 ) -> io::Result<ContextMetrics> {
     let mut candidate_messages = raw_messages.to_vec();
@@ -116,7 +144,6 @@ pub(crate) fn context_metrics_for_input(
     if !trimmed.is_empty() {
         candidate_messages.push(Message::user_text(trimmed.to_string()));
     }
-    let budget = resolve_context_budget(context_window, max_output_tokens)?;
     Ok(
         prepare_context_with_budget(&candidate_messages, summary_state, model, budget, tools)
             .metrics,
@@ -205,12 +232,9 @@ fn prepare_context_with_budget(
         return best;
     }
 
-    let min_keep_recent = if raw_messages.len() > MIN_RECENT_CONTEXT_MESSAGES {
-        MIN_RECENT_CONTEXT_MESSAGES
-    } else {
-        0
-    };
-    for keep_recent in (min_keep_recent..base_keep_recent).rev() {
+    // Keep fewer messages, down to the latest one, before cutting into
+    // what is kept.
+    for keep_recent in (1..base_keep_recent).rev() {
         let candidate = compose_context(
             raw_messages,
             summary_state,
@@ -228,7 +252,91 @@ fn prepare_context_with_budget(
         best = candidate;
     }
 
+    // Still too large: a kept message holds huge tool output. Shrink the
+    // oldest results first. Thinking after a shrunk result was produced
+    // against the full text, so it is not sent.
+    let limit = budget.input_budget_tokens();
+    let mut estimate = best.metrics.estimated_input_tokens;
+    for index in 0..best.messages.len() {
+        if estimate <= limit {
+            break;
+        }
+        let MessageContent::Blocks(blocks) = &mut best.messages[index].content else {
+            continue;
+        };
+        let excess = excess_characters(model, estimate - limit, budget.estimate_scale);
+        if shrink_tool_results(blocks, excess) == 0 {
+            continue;
+        }
+        strip_thinking(&mut best.messages[index + 1..]);
+        estimate = budget.estimate(model, &best.messages, tools);
+    }
+    best.metrics = build_metrics(
+        budget,
+        estimate,
+        best.metrics.summary_active,
+        best.metrics.summarized_messages,
+    );
     best
+}
+
+/// Roughly how many characters hold `tokens` tokens of `model`'s text.
+pub(crate) fn excess_characters(model: &str, tokens: u32, estimate_scale: f32) -> usize {
+    // A small margin: the cut adds a marker, and the estimate rounds.
+    ((tokens as f32 * chars_per_token_for_model(model) / estimate_scale) * 1.05) as usize + 256
+}
+
+/// Cuts the largest tool results in `blocks` to their head and tail until
+/// about `excess` characters are gone, never below
+/// `MIN_SHRUNK_TOOL_RESULT_CHARACTERS` each. Returns how many characters
+/// were removed.
+pub(crate) fn shrink_tool_results(blocks: &mut [ContentBlock], excess: usize) -> usize {
+    // A cut adds a marker line; cutting less than this would not shorten.
+    const MARKER: usize = 160;
+    let mut removed = 0;
+    while removed < excess {
+        let largest = blocks
+            .iter_mut()
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .max_by_key(|content| content.chars().count());
+        let Some(content) = largest else {
+            break;
+        };
+        let length = content.chars().count();
+        let keep = length
+            .saturating_sub((excess - removed).saturating_add(MARKER))
+            .max(MIN_SHRUNK_TOOL_RESULT_CHARACTERS);
+        if keep + MARKER >= length {
+            break;
+        }
+        *content = elide_tool_output(content, keep, "to fit the context window");
+        let shortened = content.chars().count();
+        if shortened >= length {
+            break;
+        }
+        removed += length - shortened;
+    }
+    removed
+}
+
+/// Keeps the head and tail of a tool output within about `keep`
+/// characters, saying how much was left out and why.
+pub(crate) fn elide_tool_output(text: &str, keep: usize, why: &str) -> String {
+    let length = text.chars().count();
+    if length <= keep {
+        return text.to_string();
+    }
+    let head = keep / 2;
+    let tail = keep - head;
+    let start = text.chars().take(head).collect::<String>();
+    let end = text.chars().skip(length - tail).collect::<String>();
+    format!(
+        "{start}\n[... {} characters omitted {why}; ask for a narrower range to see them ...]\n{end}",
+        length - keep
+    )
 }
 
 fn compose_context(
@@ -262,8 +370,7 @@ fn compose_context(
         strip_thinking(&mut messages[1..=stale]);
     }
 
-    let estimated_input_tokens =
-        estimate_request_tokens(model, budget.max_output_tokens, &messages, tools);
+    let estimated_input_tokens = budget.estimate(model, &messages, tools);
     PreparedContext {
         messages,
         metrics: build_metrics(
@@ -421,6 +528,12 @@ pub(crate) fn estimate_request_tokens(
     ((serialized.chars().count() as f32) / chars_per_token).ceil() as u32
 }
 
+/// One message's share of a request estimate.
+pub(crate) fn estimate_message_tokens(model: &str, message: &Message) -> u32 {
+    let serialized = serde_json::to_string(&message.content).unwrap_or_default();
+    ((serialized.chars().count() as f32) / chars_per_token_for_model(model)).ceil() as u32
+}
+
 fn chars_per_token_for_model(model: &str) -> f32 {
     let normalized = model.trim().to_ascii_lowercase();
     if normalized.contains("claude") {
@@ -570,6 +683,7 @@ mod tests {
             ContextBudget {
                 context_window_tokens: 10000,
                 max_output_tokens: 100,
+                estimate_scale: 1.0,
             },
             &[],
         );
@@ -599,6 +713,7 @@ mod tests {
             ContextBudget {
                 context_window_tokens: 10000,
                 max_output_tokens: 100,
+                estimate_scale: 1.0,
             },
             &[],
         );
@@ -629,6 +744,7 @@ mod tests {
             ContextBudget {
                 context_window_tokens: 2_000,
                 max_output_tokens: 500,
+                estimate_scale: 1.0,
             },
             &default_tools(),
         );
@@ -646,15 +762,40 @@ mod tests {
     }
 
     #[test]
+    fn shrinking_cuts_the_largest_results_and_always_stops() {
+        let result = |id: &str, size: usize| ContentBlock::ToolResult {
+            tool_use_id: id.into(),
+            content: "y".repeat(size),
+            is_error: None,
+        };
+        let mut blocks = vec![result("a", 50_000), result("b", 3_000)];
+        let removed = super::shrink_tool_results(&mut blocks, 20_000);
+        assert!(removed >= 20_000, "{removed}");
+        let sizes = blocks
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => content.chars().count(),
+                _ => 0,
+            })
+            .collect::<Vec<_>>();
+        assert!(sizes[0] < 30_100, "{sizes:?}");
+        assert_eq!(sizes[1], 3_000);
+        // Asking for more than can go stops at the floor; a tiny excess
+        // that the marker would outweigh changes nothing.
+        super::shrink_tool_results(&mut blocks, usize::MAX);
+        assert_eq!(super::shrink_tool_results(&mut blocks, 10), 0);
+        assert_eq!(super::shrink_tool_results(&mut [result("c", 2_100)], 50), 0);
+    }
+
+    #[test]
     fn context_metrics_include_pending_input() {
         let messages = vec![Message::user_text("hello".to_string())];
         let metrics = context_metrics_for_input(
             &messages,
             "new pending input",
             &ConversationSummaryState::default(),
-            None,
+            super::resolve_context_budget(None, 1_000).unwrap(),
             "claude-sonnet-4-5",
-            1_000,
             &default_tools(),
         )
         .unwrap();
@@ -711,6 +852,7 @@ mod tests {
             ContextBudget {
                 context_window_tokens: 200_000,
                 max_output_tokens: 500,
+                estimate_scale: 1.0,
             },
             &default_tools(),
         );
@@ -763,6 +905,7 @@ mod tests {
         let budget = ContextBudget {
             context_window_tokens: 4_000,
             max_output_tokens: 500,
+            estimate_scale: 1.0,
         };
         let mut messages = (0..20).flat_map(thinking_turn).collect::<Vec<_>>();
 

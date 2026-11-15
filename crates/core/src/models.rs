@@ -115,6 +115,8 @@ pub(crate) struct ModelConfig {
     pub(crate) max_output_tokens: Option<u32>,
     /// Alias of the model that summarizes history; `None` means this model.
     pub(crate) compact_model: Option<String>,
+    /// Prompt size at which history is compacted; `None` uses the default.
+    pub(crate) compact_at_tokens: Option<u32>,
 }
 
 impl ModelConfig {
@@ -130,6 +132,7 @@ impl ModelConfig {
             context_window: None,
             max_output_tokens: None,
             compact_model: Some("haiku".to_string()),
+            compact_at_tokens: None,
         }
     }
 }
@@ -172,7 +175,12 @@ struct RawModel {
     context_window: Option<u32>,
     max_output_tokens: Option<u32>,
     compact_model: Option<String>,
+    compact_at_tokens: Option<u32>,
 }
+
+/// The window of the built-in Claude models, from Anthropic's model table
+/// (https://platform.claude.com/docs/en/about-claude/models/overview).
+const BUILTIN_CONTEXT_WINDOW: u32 = 1_000_000;
 
 impl ModelRegistry {
     pub(crate) fn builtin() -> Self {
@@ -190,9 +198,10 @@ impl ModelRegistry {
                 id: id.to_string(),
                 description: Some(description.to_string()),
                 features: ModelFeatures::ALL,
-                context_window: None,
+                context_window: Some(BUILTIN_CONTEXT_WINDOW),
                 max_output_tokens: None,
                 compact_model: compact_model.map(str::to_string),
+                compact_at_tokens: None,
             };
         Self {
             default: BUILTIN_DEFAULT_MODEL.to_string(),
@@ -439,8 +448,20 @@ fn parse_model(raw: RawModel) -> Result<ModelConfig, String> {
     {
         return Err("description must be a single line".into());
     }
-    if raw.context_window == Some(0) || raw.max_output_tokens == Some(0) {
-        return Err("context_window and max_output_tokens must be positive".into());
+    if raw.context_window == Some(0)
+        || raw.max_output_tokens == Some(0)
+        || raw.compact_at_tokens == Some(0)
+    {
+        return Err(
+            "context_window, max_output_tokens, and compact_at_tokens must be positive".into(),
+        );
+    }
+    if let (Some(window), Some(compact_at)) = (raw.context_window, raw.compact_at_tokens)
+        && compact_at >= window
+    {
+        return Err(format!(
+            "compact_at_tokens ({compact_at}) must be smaller than context_window ({window})"
+        ));
     }
     if let (Some(window), Some(output)) = (raw.context_window, raw.max_output_tokens)
         && output >= window
@@ -458,6 +479,7 @@ fn parse_model(raw: RawModel) -> Result<ModelConfig, String> {
         context_window: raw.context_window,
         max_output_tokens: raw.max_output_tokens,
         compact_model: raw.compact_model,
+        compact_at_tokens: raw.compact_at_tokens,
     })
 }
 
@@ -490,9 +512,31 @@ max_output_tokens = 32000
         assert_eq!(opus.id, "claude-opus-5-5");
         assert_eq!(opus.features, ModelFeatures::ALL);
         assert_eq!(opus.compact_model.as_deref(), Some("haiku"));
+        // Review N3: a missing window fell back to 200k, so the input
+        // budget was about an eighth of the real one.
+        for alias in ["opus", "sonnet", "haiku"] {
+            assert_eq!(
+                registry.find(alias).unwrap().context_window,
+                Some(1_000_000)
+            );
+        }
         let provider = registry.provider(&opus.provider).unwrap();
         assert_eq!(provider.base_url, "https://api.anthropic.com");
         assert_eq!(provider.auth, AuthScheme::ApiKeyHeader);
+    }
+
+    #[test]
+    fn compact_at_tokens_is_read_and_must_fit_the_window() {
+        let model = |extra: &str| {
+            ModelRegistry::from_toml(&format!(
+                "[[models]]\nalias = \"m\"\nprovider = \"anthropic\"\nid = \"x\"\ncontext_window = 100000\n{extra}"
+            ))
+        };
+        let registry = model("compact_at_tokens = 50000").unwrap();
+        assert_eq!(registry.find("m").unwrap().compact_at_tokens, Some(50_000));
+        for bad in ["compact_at_tokens = 0", "compact_at_tokens = 100000"] {
+            assert!(model(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
