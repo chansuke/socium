@@ -1,15 +1,20 @@
-# Copy to .envrc only if you use direnv; .envrc is ignored by Git. Keys can
-# also come from your shell or a secret manager instead.
+# Copy to .envrc only if you use direnv; .envrc is ignored by Git. Keep the
+# keys themselves outside the workspace: what tools read can be sent to the
+# model provider, and Socium asks before reading .envrc or .env files. Put
+# the exports in a file such as ~/.config/socium/keys.env and source it here,
+# or set them in your shell or a secret manager instead.
 #
 # Provider keys, named as api_key_env in models.toml.example. Set only the
 # providers you use; models whose key is missing are listed but unavailable
-# in /model.
-export ANTHROPIC_API_KEY=''
-# export DEEPSEEK_API_KEY=''    # https://platform.deepseek.com
-# export ZAI_API_KEY=''         # https://z.ai/manage-apikey/apikey-list
-# export OPENAI_API_KEY=''      # https://platform.openai.com
-# export OLLAMA_API_KEY=''      # https://ollama.com
-# export OPENROUTER_API_KEY=''  # https://openrouter.ai
+# in /model:
+#
+#   export ANTHROPIC_API_KEY='...'
+#   export DEEPSEEK_API_KEY='...'    # https://platform.deepseek.com
+#   export ZAI_API_KEY='...'         # https://z.ai/manage-apikey/apikey-list
+#   export OPENAI_API_KEY='...'      # https://platform.openai.com
+#   export OLLAMA_API_KEY='...'      # https://ollama.com
+#   export OPENROUTER_API_KEY='...'  # https://openrouter.ai
+source_env_if_exists ~/.config/socium/keys.env
 
 # Register other models in ~/.config/socium/models.toml
 # (start from models.toml.example).
