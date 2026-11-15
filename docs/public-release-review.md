@@ -67,10 +67,11 @@ GitHub設定の読取りではリポジトリはprivate、mainのbranch protecti
 
 ### 公開すると見えるようになるもの
 
-- コミットの作者・コミッターのメールアドレス (`[personal address]`、`[personal address]`)。隠すには履歴の書き換えが要る。
-- main の 46 コミットのメッセージと、PR 14 件 (#33、#100〜#105、#108〜#110、#112〜#114、#118) の本文にある Claude Code のセッション URL。開くにはログインが要るが、セッション ID は見える。消すには履歴の書き換えと PR 本文の編集が要る。
-- 未マージの PR #116 (`clear-activity`) と #120 (`fix-nix-fileset`) とそのブランチ。#120 はマージ済みの #119 と同じ目的に見える。
+- コミットの作者・コミッターの個人のメールアドレス 2 つ。
+- main の 46 コミットのメッセージと、PR 14 件の本文にある Claude Code のセッション URL。開くにはログインが要るが、セッション ID は見える。
 - Issue 47 件、`docs/tickets/`、レビューの記録 (日本語)。
+
+履歴を書き換えて force push しても、PR が参照する古いコミット (`refs/pull/*`) は読み取り専用で残り、PR のページから辿れる。消すには GitHub Support への依頼が要る ([Removing sensitive data from a repository](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository))。そこで、今のリポジトリは `socium-archive` に改名して private のまま残し、メールアドレスを GitHub の noreply に置き換えセッション URL の行を除いた履歴を、新しい `chansuke/socium` に置いて公開する。Issue は移管する ([private から public へは移管できない](https://docs.github.com/en/issues/tracking-your-work-with-issues/administering-issues/transferring-an-issue-to-another-repository) ので、新しいリポジトリが private のうちに移す)。PR とその議論は archive に残り、文書中の PR 番号は archive のものを指す。
 
 ### 公開した後でないと設定できないもの
 
@@ -81,7 +82,7 @@ GitHub設定の読取りではリポジトリはprivate、mainのbranch protecti
 
 ### 所有者が決めること
 
-2026-11-15 に決めたこと: コマンド名は `socium` (パッケージ名は `socium-tui` のまま)、crates.io には公開しない (`publish = false`)、最初のタグを打つ、作者のメールアドレスとセッション URL を消すために履歴を書き換える、古い PR は閉じる。
+2026-11-15 に決めたこと: コマンド名は `socium` (パッケージ名は `socium-tui` のまま)、crates.io には公開しない (`publish = false`)、最初のタグを打つ、作者のメールアドレスとセッション URL を消すために履歴を書き換えて新しいリポジトリで公開する、古い PR は閉じる (#120 を閉じた。#116 は新しい機能なので archive に残す)。
 
 残り:
 
