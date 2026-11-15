@@ -461,7 +461,7 @@ async fn failed_result_save_recovers_unknown_without_repeating_edit() {
     );
     assert_eq!(
         std::fs::read_to_string(root.path().join("created")).unwrap(),
-        "done"
+        "done\n"
     );
     drop(agent);
     std::fs::remove_dir(&state).unwrap();
@@ -475,7 +475,7 @@ async fn failed_result_save_recovers_unknown_without_repeating_edit() {
     );
     assert_eq!(
         std::fs::read_to_string(root.path().join("created")).unwrap(),
-        "done"
+        "done\n"
     );
 }
 

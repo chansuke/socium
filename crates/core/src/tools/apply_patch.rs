@@ -23,18 +23,18 @@ impl Tool for ApplyPatchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::Custom(CustomToolDefinition {
             name: "apply_patch".to_string(),
-            description: "Apply a structured patch with add, delete, or multi-hunk update operations inside the workspace."
+            description: "Apply a structured patch with add, delete, or multi-hunk update operations inside the workspace. The result shows the unified diff of what changed."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "dry_run": {
                         "type": "boolean",
-                        "description": "If true, validates the patch and returns a preview without writing files."
+                        "description": "If true, validates the patch and returns the unified diff it would make, without writing files."
                     },
                     "patch": {
                         "type": "string",
-                        "description": "Patch text using *** Begin Patch / *** End Patch blocks with Add File, Delete File, or Update File sections."
+                        "description": "Patch text using *** Begin Patch / *** End Patch blocks with Add File, Delete File, or Update File sections. In Update File, @@ starts a hunk; lines start with ' ' (context), '-', or '+'; *** End of File anchors the hunk at the end of the file."
                     }
                 },
                 "required": ["patch"],
@@ -70,6 +70,8 @@ enum PatchAction {
 
 struct PatchHunk {
     lines: Vec<HunkLine>,
+    /// Marked `*** End of File`: the hunk matches the file's last lines.
+    at_end: bool,
 }
 
 enum HunkLine {
@@ -114,8 +116,9 @@ pub(crate) fn apply_patch_from_workspace(
     let ApplyPatchInput { patch, dry_run } = ApplyPatchInput::parse(input)?;
     let actions = parse_patch_actions(patch)?;
     let plan = plan_patch(workspace_root, &actions)?;
+    let diff = crate::tools::edit_history::describe(&plan);
     if dry_run {
-        return Ok(preview_plan(&plan));
+        return Ok(format!("Preview: true\n{diff}"));
     }
     let report = actions
         .iter()
@@ -132,7 +135,10 @@ pub(crate) fn apply_patch_from_workspace(
         .collect::<Vec<_>>()
         .join("\n");
     crate::tools::edit_history::apply_changes(workspace_root, plan)?;
-    Ok(maybe_prepend_dirty_worktree_warning(workspace_root, report))
+    Ok(maybe_prepend_dirty_worktree_warning(
+        workspace_root,
+        format!("{report}\n{diff}"),
+    ))
 }
 
 fn plan_patch(
@@ -232,39 +238,6 @@ fn plan_patch(
     Ok(plan)
 }
 
-fn preview_plan(plan: &[crate::tools::edit_history::Mutation]) -> String {
-    // A full before/after diff preserves duplicates, line order and exact CRLF
-    // bytes. It deliberately makes no minimal-diff claim.
-    let mut out = String::from("Preview: true\n");
-    for change in plan {
-        out.push_str(&format!(
-            "--- {}\n+++ {}\n@@ full file replacement @@\n",
-            if change.before.is_some() {
-                &change.path
-            } else {
-                "/dev/null"
-            },
-            if change.after.is_some() {
-                &change.path
-            } else {
-                "/dev/null"
-            }
-        ));
-        for (prefix, text) in [("-", &change.before), ("+", &change.after)] {
-            if let Some(text) = text {
-                for line in text.split_inclusive('\n') {
-                    out.push_str(prefix);
-                    out.push_str(line);
-                }
-                if !text.is_empty() && !text.ends_with('\n') {
-                    out.push_str("\n\\ No newline at end of file\n");
-                }
-            }
-        }
-    }
-    out
-}
-
 /// Every path a patch names, move destinations included, before any of
 /// them is resolved.
 pub(crate) fn patch_paths(patch: &str) -> Result<Vec<String>, String> {
@@ -294,18 +267,23 @@ fn parse_patch_actions(patch: &str) -> Result<Vec<PatchAction>, String> {
         let line = lines[index];
         if let Some(path) = line.strip_prefix("*** Add File: ") {
             index += 1;
-            let mut content_lines = Vec::new();
+            let mut content = String::new();
             while index < lines.len() - 1 && !lines[index].starts_with("*** ") {
                 let patch_line = lines[index];
                 let added = patch_line
                     .strip_prefix('+')
                     .ok_or_else(|| format!("Add File section for '{}' requires '+' lines", path))?;
-                content_lines.push(added.to_string());
+                // Every added line ends with a newline, the last one too.
+                content.push_str(added);
+                content.push('\n');
+                index += 1;
+            }
+            if lines[index] == END_OF_FILE {
                 index += 1;
             }
             actions.push(PatchAction::Add {
                 path: path.to_string(),
-                content: content_lines.join("\n"),
+                content,
             });
             continue;
         }
@@ -329,7 +307,9 @@ fn parse_patch_actions(patch: &str) -> Result<Vec<PatchAction>, String> {
                 index += 1;
             }
             let mut body = Vec::new();
-            while index < lines.len() - 1 && !lines[index].starts_with("*** ") {
+            while index < lines.len() - 1
+                && (!lines[index].starts_with("*** ") || lines[index] == END_OF_FILE)
+            {
                 body.push(lines[index]);
                 index += 1;
             }
@@ -351,6 +331,8 @@ fn parse_patch_actions(patch: &str) -> Result<Vec<PatchAction>, String> {
     Ok(actions)
 }
 
+const END_OF_FILE: &str = "*** End of File";
+
 fn parse_patch_hunks(path: &str, lines: &[&str]) -> Result<Vec<PatchHunk>, String> {
     let mut hunks = Vec::new();
     let mut current = Vec::new();
@@ -360,15 +342,28 @@ fn parse_patch_hunks(path: &str, lines: &[&str]) -> Result<Vec<PatchHunk>, Strin
             if !current.is_empty() {
                 hunks.push(PatchHunk {
                     lines: std::mem::take(&mut current),
+                    at_end: false,
                 });
             }
             continue;
         }
+        if *line == END_OF_FILE {
+            if current.is_empty() {
+                return Err(format!("'{END_OF_FILE}' must follow a hunk in '{path}'"));
+            }
+            hunks.push(PatchHunk {
+                lines: std::mem::take(&mut current),
+                at_end: true,
+            });
+            continue;
+        }
+        // An empty line is a blank context line whose leading space was
+        // trimmed, as editors and models often do.
         let (prefix, content) = line
             .chars()
             .next()
             .map(|prefix| (prefix, &line[prefix.len_utf8()..]))
-            .ok_or_else(|| format!("Invalid empty patch line in '{}'", path))?;
+            .unwrap_or((' ', ""));
         if content.contains('\r') {
             return Err(format!(
                 "Patch line for '{}' contains a carriage return; line endings are kept from the file",
@@ -389,7 +384,10 @@ fn parse_patch_hunks(path: &str, lines: &[&str]) -> Result<Vec<PatchHunk>, Strin
     }
 
     if !current.is_empty() {
-        hunks.push(PatchHunk { lines: current });
+        hunks.push(PatchHunk {
+            lines: current,
+            at_end: false,
+        });
     }
     if hunks.is_empty() {
         return Err(format!(
@@ -434,8 +432,15 @@ fn apply_patch_hunks_to_text(
             .iter()
             .map(|line| line.text.as_str())
             .collect::<Vec<_>>();
-        let position = find_hunk_position(&texts, &old_lines, search_start)
-            .ok_or_else(|| format!("Failed to match patch hunk in '{}'", path))?;
+        let position = if hunk.at_end {
+            let start = texts.len().checked_sub(old_lines.len());
+            start
+                .filter(|start| *start >= search_start && texts[*start..] == old_lines[..])
+                .ok_or_else(|| format!("Failed to match patch hunk at the end of '{}'", path))?
+        } else {
+            find_hunk_position(&texts, &old_lines, search_start)
+                .ok_or_else(|| format!("Failed to match patch hunk in '{}'", path))?
+        };
         let old = lines
             .splice(position..position + old_lines.len(), [])
             .collect::<Vec<_>>();
@@ -595,22 +600,55 @@ mod tests {
         assert_eq!(fs::read_to_string(&file).unwrap(), before, "dry run wrote");
         apply_patch_from_workspace(workspace.path(), &input(false)).map_err(|e| e.to_string())?;
         let after = fs::read_to_string(&file).unwrap();
-        let mut previewed = String::new();
-        for line in preview.split_inclusive('\n').filter(|l| l.starts_with('+')) {
-            if !line.starts_with("+++ ") {
-                previewed.push_str(&line[1..]);
-            }
-        }
-        // Without a final newline the preview ends the last line before its
-        // "\ No newline at end of file" note.
-        let previewed = if after.ends_with('\n') {
-            previewed
-        } else {
-            assert!(preview.contains("\\ No newline at end of file"));
-            previewed.strip_suffix('\n').unwrap().to_string()
-        };
-        assert_eq!(previewed, after, "preview and write differ");
+        assert_eq!(
+            apply_unified(before, &preview),
+            after,
+            "preview and write differ"
+        );
         Ok(after)
+    }
+
+    /// Applies the unified diff in a preview to `before`, byte for byte.
+    fn apply_unified(before: &str, preview: &str) -> String {
+        let old = before.split_inclusive('\n').collect::<Vec<_>>();
+        let lines = preview.split_inclusive('\n').collect::<Vec<_>>();
+        let mut out = String::new();
+        let mut at = 0;
+        let mut index = lines.iter().position(|l| l.starts_with("@@")).unwrap();
+        while index < lines.len() {
+            let line = lines[index];
+            if let Some(header) = line.strip_prefix("@@ -") {
+                let start = header
+                    .split([',', ' '])
+                    .next()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                let empty = header.split(' ').next().unwrap().ends_with(",0");
+                let start = if empty { start } else { start - 1 };
+                while at < start {
+                    out.push_str(old[at]);
+                    at += 1;
+                }
+            } else if let Some(text) = line.strip_prefix('+') {
+                // Only the "\ No newline" note leaves a line unterminated.
+                let text = text.strip_suffix('\n').unwrap_or(text);
+                out.push_str(text);
+                if !lines.get(index + 1).is_some_and(|n| n.starts_with('\\')) {
+                    out.push('\n');
+                }
+            } else if line.starts_with(' ') {
+                out.push_str(old[at]);
+                at += 1;
+            } else if line.starts_with('-') {
+                at += 1;
+            }
+            index += 1;
+        }
+        for line in &old[at..] {
+            out.push_str(line);
+        }
+        out
     }
 
     #[test]
@@ -724,12 +762,52 @@ mod tests {
             } => {
                 assert_eq!(is_error, None);
                 assert!(content.contains("Added file: created.txt"));
+                assert!(content.contains("created.txt (+2 -0)"));
+                assert!(content.contains("+hello\n+world"));
             }
             _ => panic!("expected tool_result"),
         }
 
+        // Review R13: the last added line had no newline.
         let created = fs::read_to_string(workspace.path().join("created.txt")).unwrap();
-        assert_eq!(created, "hello\nworld");
+        assert_eq!(created, "hello\nworld\n");
+    }
+
+    #[test]
+    fn end_of_file_markers_and_blank_context_lines_are_accepted() {
+        // Review R13: both are common in patches models write.
+        let workspace = make_temp_dir("workspace");
+        let file = workspace.path().join("f.txt");
+        fs::write(&file, "a\n\nb\nend\nend\n").unwrap();
+        let patch = "*** Begin Patch\n*** Update File: f.txt\n@@\n a\n\n-b\n+B\n@@\n end\n-end\n+last\n*** End of File\n*** End Patch";
+        apply_patch_from_workspace(workspace.path(), &json!({ "patch": patch })).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "a\n\nB\nend\nlast\n");
+
+        let wrong =
+            "*** Begin Patch\n*** Update File: f.txt\n@@\n-a\n+A\n*** End of File\n*** End Patch";
+        let err = apply_patch_from_workspace(workspace.path(), &json!({ "patch": wrong }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at the end of 'f.txt'"), "{err}");
+    }
+
+    #[test]
+    fn a_preview_shows_only_the_changed_lines() {
+        // Review R13: a one-line change in a 20 KB file previewed 48 KB.
+        let workspace = make_temp_dir("workspace");
+        let text = (1..=2_000)
+            .map(|n| format!("line {n}\n"))
+            .collect::<String>();
+        fs::write(workspace.path().join("big.txt"), &text).unwrap();
+        let patch = "*** Begin Patch\n*** Update File: big.txt\n@@\n-line 1000\n+line one thousand\n*** End Patch";
+        let preview = apply_patch_from_workspace(
+            workspace.path(),
+            &json!({ "patch": patch, "dry_run": true }),
+        )
+        .unwrap();
+        assert!(preview.len() < 400, "{}", preview.len());
+        assert!(preview.contains("@@ -997,7 +997,7 @@\n line 997"));
+        assert!(preview.contains("-line 1000\n+line one thousand"));
     }
 
     #[test]

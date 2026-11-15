@@ -10,6 +10,8 @@ pub const READ_FILE_DEFAULT_LINES: usize = 2_000;
 pub const MAX_READ_OUTPUT_CHARACTERS: usize = 80_000;
 /// A longer line (minified code, data) is cut in read and search results.
 pub const MAX_LINE_CHARACTERS: usize = 2_000;
+/// Diff lines an edit result shows; the change itself is never cut.
+pub const MAX_EDIT_DIFF_LINES: usize = 80;
 pub const MAX_TOOL_ROUNDS: usize = 20;
 pub const MAX_LIST_ENTRIES: usize = 1000;
 pub const DEFAULT_SEARCH_RESULTS: usize = 50;

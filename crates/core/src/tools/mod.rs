@@ -2,6 +2,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 pub(crate) mod apply_patch;
+pub(crate) mod diff;
 pub(crate) mod edit_history;
 pub(crate) mod error;
 pub(crate) mod find_symbol;

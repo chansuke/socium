@@ -126,6 +126,44 @@ fn write(path: &Path, content: &Option<String>, mode: Option<u32>) -> Result<(),
 /// All semantic validation precedes the first write. The history entry is
 /// durable before mutation; incomplete groups require inspection, never blind
 /// rollback. Each file replacement is atomic; a group of files is not.
+/// What a set of changes did, for the tool result: per file the added and
+/// removed line counts, then the unified diff, cut after
+/// `MAX_EDIT_DIFF_LINES` lines.
+pub(crate) fn describe(changes: &[Mutation]) -> String {
+    let mut summary = Vec::new();
+    let mut diff_lines = Vec::new();
+    for change in changes {
+        let diff = crate::tools::diff::unified(
+            &change.path,
+            change.before.as_deref(),
+            change.after.as_deref(),
+        );
+        summary.push(format!(
+            "{} (+{} -{})",
+            change.path, diff.added, diff.removed
+        ));
+        // Not `lines()`: it would drop the CR of a CRLF line.
+        diff_lines.extend(diff.text.split_terminator('\n').map(str::to_string));
+    }
+    let limit = crate::constants::MAX_EDIT_DIFF_LINES;
+    let mut text = format!("Changed: {}\n", summary.join(", "));
+    text.push_str(
+        &diff_lines
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    if diff_lines.len() > limit {
+        text.push_str(&format!(
+            "\n... {} more diff lines",
+            diff_lines.len() - limit
+        ));
+    }
+    text
+}
+
 pub(crate) fn apply_changes(root: &Path, mut changes: Vec<Mutation>) -> Result<(), String> {
     let canonical = root.canonicalize().map_err(|e| e.to_string())?;
     let mut seen: Vec<PathBuf> = Vec::new();

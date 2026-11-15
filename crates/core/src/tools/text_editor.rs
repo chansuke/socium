@@ -1,6 +1,6 @@
 use crate::AgentProgress;
 use crate::constants::*;
-use crate::tools::edit_history::{Mutation, apply_changes, undo};
+use crate::tools::edit_history::{Mutation, apply_changes, describe, undo};
 use crate::tools::error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{require_i64_field, require_string_field};
@@ -177,18 +177,17 @@ pub(crate) fn text_editor_str_replace(
     }
 
     let updated = content.replacen(old_str, new_str, 1);
-    apply_changes(
-        workspace_root,
-        vec![Mutation {
-            path: path.into(),
-            before: Some(content),
-            after: Some(updated),
-            ..Mutation::default()
-        }],
-    )?;
+    let changes = vec![Mutation {
+        path: path.into(),
+        before: Some(content),
+        after: Some(updated),
+        ..Mutation::default()
+    }];
+    let diff = describe(&changes);
+    apply_changes(workspace_root, changes)?;
     Ok(maybe_prepend_dirty_worktree_warning(
         workspace_root,
-        format!("Path: {}\nReplaced 1 occurrence", path),
+        format!("Path: {path}\nReplaced 1 occurrence\n{diff}"),
     ))
 }
 
@@ -203,18 +202,17 @@ pub(crate) fn text_editor_create(
     if target_path.exists() {
         return Err(format!("Cannot create file '{}': path already exists", path).into());
     }
-    apply_changes(
-        workspace_root,
-        vec![Mutation {
-            path: path.into(),
-            before: None,
-            after: Some(file_text.into()),
-            ..Mutation::default()
-        }],
-    )?;
+    let changes = vec![Mutation {
+        path: path.into(),
+        before: None,
+        after: Some(file_text.into()),
+        ..Mutation::default()
+    }];
+    let diff = describe(&changes);
+    apply_changes(workspace_root, changes)?;
     Ok(maybe_prepend_dirty_worktree_warning(
         workspace_root,
-        format!("Path: {}\nCreated file", path),
+        format!("Path: {path}\nCreated file\n{diff}"),
     ))
 }
 
@@ -259,18 +257,17 @@ pub(crate) fn text_editor_insert(
     updated.push_str(insert_text);
     updated.push_str(&content[insert_at..]);
 
-    apply_changes(
-        workspace_root,
-        vec![Mutation {
-            path: path.into(),
-            before: Some(content),
-            after: Some(updated),
-            ..Mutation::default()
-        }],
-    )?;
+    let changes = vec![Mutation {
+        path: path.into(),
+        before: Some(content),
+        after: Some(updated),
+        ..Mutation::default()
+    }];
+    let diff = describe(&changes);
+    apply_changes(workspace_root, changes)?;
     Ok(maybe_prepend_dirty_worktree_warning(
         workspace_root,
-        format!("Path: {}\nInserted text after line {}", path, line),
+        format!("Path: {path}\nInserted text after line {line}\n{diff}"),
     ))
 }
 
