@@ -1,7 +1,7 @@
 ---
 number: 8
 title: agentツールで独立した文脈のサブエージェントに作業を委ねる
-status: proposed
+status: accepted
 date: 2026-11-14
 ---
 

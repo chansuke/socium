@@ -67,3 +67,7 @@ core の単体テストで、保存→再読込で同じ木になること、途
 ## More Information
 
 ADR 2 の event を保存の単位にする。SOC-026（named session）の実装時に保存先を session ごとに分け、この ADR を改める。
+
+### 後の変更
+
+[ADR 7](0007-会話をワークスペース内のセッションとして保存し-cと-rで再開する.md) で、保存先はセッションごとの `.socium/sessions/<id>/activity.jsonl` になった。`/clear` は記録を回さず、新しいセッションを始める。前のセッションの記録はそのまま残る。

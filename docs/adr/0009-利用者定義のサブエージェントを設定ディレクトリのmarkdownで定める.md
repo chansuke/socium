@@ -1,7 +1,7 @@
 ---
 number: 9
 title: 利用者定義のサブエージェントを設定ディレクトリのMarkdownで定める
-status: proposed
+status: accepted
 date: 2026-11-14
 ---
 

@@ -77,3 +77,7 @@ core は SSE の fixture から `ActivityEvent` の列を検証する（summariz
 ## More Information
 
 詳しい仕様は [設計: Activity ストリーム](../design-agent-activity-stream.md)。thinking の表示設定は ADR 3、永続化は ADR 4。関連チケットは SOC-020、SOC-026、SOC-027、SOC-031。
+
+### 後の変更
+
+2026-11-15 の時点で、`AgentProgress` と `ActivityEvent` はまだ二系統のまま並んでいる。TUI の transcript と承認は `AgentProgress`、Activity 欄、記録、headless の出力 ([ADR 17](0017-tuiなしで一つのturnを実行しjson-linesで報告する.md)) は `ActivityEvent` を使う。重複を削る作業は残っている。

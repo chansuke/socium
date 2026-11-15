@@ -125,3 +125,9 @@ core の単体テストで、設定の解析と検証（不明な wire、http �
 ## More Information
 
 前提となる議論と各社の endpoint は 2026-11-13 時点の公開文書による。DeepSeek: https://api-docs.deepseek.com/guides/anthropic_api 、Z.ai: `https://api.z.ai/api/anthropic`。モデル ID は各社の文書で確かめてから設定する。2026-11-13 の確認では、DeepSeek-V4.1-Flash の ID は `deepseek-flash`（`deepseek-v4.1-flash` は 400 で拒否される）、GLM-5.3 は `glm-5.3`（1M context、最大出力 128K、推論は常に有効）。DeepSeek の Anthropic 互換口は `x-api-key` と Bearer の両方を受け付け、`output_config.effort` に対応し、`thinking` の adaptive を enabled として扱う。Z.ai の Anthropic 互換口は Bearer（`ANTHROPIC_AUTH_TOKEN`）を使う。関連チケット: SOC-014、SOC-015、SOC-016、SOC-041、SOC-042。
+
+### 後の変更
+
+* 選んだ alias の保存先は、[ADR 7](0007-会話をワークスペース内のセッションとして保存し-cと-rで再開する.md) でセッションの snapshot になった。新しいセッションは、直前に保存したセッションの選択を引き継ぐ。
+* 切り替え時に履歴から thinking を取り除くのはやめた。[ADR 14](0014-応答ごとに出所を記録しthinkingは読める送り先にだけ送る.md) で、応答ごとに出所を記録し、送るときに送り先が読める thinking だけを残す。
+* `features` に `prompt_caching` が加わり、組み込みの Claude モデルは五つを持つ。
