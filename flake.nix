@@ -12,11 +12,10 @@
       ...
     }:
     let
+      # Commands run only in the Linux sandbox; there is no macOS backend.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
-        "aarch64-darwin"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       # The pinned nixpkgs contains 0.11.0. Require the upstream fix for
@@ -88,13 +87,7 @@
             version = "0.1.0";
             strictDeps = true;
             nativeBuildInputs = [ pkgs.pkg-config ];
-            buildInputs = [
-              pkgs.openssl
-            ]
-            ++ lib.optionals pkgs.stdenv.isDarwin [
-              pkgs.darwin.apple_sdk.frameworks.Security
-              pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
-            ];
+            buildInputs = [ pkgs.openssl ];
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           };
@@ -176,10 +169,6 @@
               pkgs.util-linux
               pkgs.python3
               pkgs.nodejs
-            ]
-            ++ lib.optionals pkgs.stdenv.isDarwin [
-              pkgs.darwin.apple_sdk.frameworks.Security
-              pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
             ];
           };
         }
