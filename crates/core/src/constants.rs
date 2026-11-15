@@ -42,8 +42,16 @@ pub const DEFAULT_COMPACT_AT_TOKENS: u32 = 200_000;
 pub const COMPACTION_RETAIN_RECENT_MESSAGES: usize = 16;
 pub const COMPACTION_RETAIN_RECENT_TOKENS: u32 = 20_000;
 pub const DEFAULT_COMPACTION_MODEL: &str = "claude-haiku-5-5";
-pub const COMPACTION_MAX_OUTPUT_TOKENS: u32 = 1_500;
+// Room for the summary and the compaction model's own thinking, which
+// counts toward the limit.
+pub const COMPACTION_MAX_OUTPUT_TOKENS: u32 = 8_000;
 pub const COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS: usize = 600;
+/// User messages carry requirements, so they go to the compaction model
+/// nearly whole.
+pub const COMPACTION_USER_MESSAGE_MAX_CHARACTERS: usize = 8_000;
+/// The whole transcript sent for compaction; the middle goes first.
+pub const COMPACTION_TRANSCRIPT_MAX_CHARACTERS: usize = 400_000;
+pub const MAX_FIRST_REQUEST_CHARACTERS: usize = 8_000;
 pub const COMPACTION_SYSTEM_PROMPT: &str = "You compact the conversation history of Socium, a coding agent. You receive the transcript of an agent session, possibly preceded by a summary of even earlier conversation in <previous_summary>. Merge everything into one summary with exactly these five sections:\n1. User request\n2. Files touched (use path:line where known)\n3. Decisions\n4. Errors and unresolved issues\n5. Immediate next step\nBe specific and concise. Preserve exact file paths, command names, identifiers, and error messages. Output only the five numbered sections, with no preamble and no commentary.";
 
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Socium, a coding agent working inside the user's current workspace. Be concise and concrete. When you refer to repository code, cite exact locations using path:line notation such as src/main.rs:42. If you discuss a specific function, edit, bug, or search result, include at least one line-addressable reference when the exact line is available from the repo or tool output.";

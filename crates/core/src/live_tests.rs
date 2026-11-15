@@ -204,6 +204,7 @@ async fn live_request_after_a_summary_is_accepted() {
             covered_messages: 1,
             text: "1. User request: read notes/a.md".into(),
             thinking_valid_from: Some(messages.len()),
+            ..Default::default()
         }),
     };
     let prepared = crate::agent::context::prepare_context_messages(

@@ -1337,3 +1337,46 @@ async fn a_window_that_fills_mid_turn_is_compacted_at_once() {
     let reply = agent.submit("continue".into()).await.unwrap();
     assert_eq!(reply.text, "continuing");
 }
+
+#[tokio::test]
+async fn the_first_request_survives_compaction_word_for_word() {
+    let root = tempfile::tempdir().unwrap();
+    let request = format!(
+        "{} Finally, keep the public API unchanged.",
+        "Context for the task. ".repeat(80)
+    );
+    let (mut agent, requests) = scripted_agent(
+        root.path(),
+        vec![
+            Err(ProviderError::Api("compaction model down".into())),
+            Ok(text_provider_response("next", None)),
+        ],
+        1_000,
+    );
+    agent.messages.push(Message::user_text(request.clone()));
+    for turn in 0..20 {
+        agent
+            .messages
+            .push(Message::assistant_blocks(vec![ContentBlock::Text {
+                text: format!("answer {turn}"),
+            }]));
+        agent
+            .messages
+            .push(Message::user_text(format!("follow-up {turn}")));
+    }
+    let report = agent.compact().await.unwrap();
+    assert!(!report.used_llm);
+    assert!(
+        report
+            .fallback_reason
+            .as_deref()
+            .unwrap()
+            .contains("compaction model down"),
+        "{:?}",
+        report.fallback_reason
+    );
+    agent.submit("go on".into()).await.unwrap();
+    let sent = requests.lock().unwrap()[1].to_string();
+    assert!(sent.contains("keep the public API unchanged"), "{sent}");
+    assert!(sent.contains("first request, word for word"));
+}

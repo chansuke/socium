@@ -158,7 +158,7 @@ pub(crate) struct ConversationSummaryState {
     pub summary: Option<ConversationSummary>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ConversationSummary {
     pub covered_messages: usize,
     pub text: String,
@@ -168,6 +168,30 @@ pub(crate) struct ConversationSummary {
     /// `None` in state saved before the field existed; loading fills it in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_valid_from: Option<usize>,
+    /// The user's first message, kept word for word (up to
+    /// `MAX_FIRST_REQUEST_CHARACTERS`) beside the summary, so its later
+    /// requirements survive any number of compactions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_request: Option<String>,
+}
+
+impl ConversationSummary {
+    /// The first request of `messages`, for a summary that does not have
+    /// one yet.
+    pub(crate) fn first_request_of(messages: &[crate::agent::types::Message]) -> Option<String> {
+        use crate::agent::types::{MessageContent, Role};
+        let text = messages
+            .iter()
+            .find_map(|message| match (&message.role, &message.content) {
+                (Role::User, MessageContent::Text(text)) => Some(text.trim()),
+                _ => None,
+            })?;
+        Some(crate::agent::context::elide_tool_output(
+            text,
+            crate::constants::MAX_FIRST_REQUEST_CHARACTERS,
+            "from the first request",
+        ))
+    }
 }
 
 #[derive(Debug, Serialize)]

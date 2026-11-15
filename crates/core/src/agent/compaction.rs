@@ -2,7 +2,8 @@ use crate::agent::turn::extract_text;
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
 use crate::constants::{
     COMPACTION_MAX_OUTPUT_TOKENS, COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS,
-    COMPACTION_SYSTEM_PROMPT, COMPACTION_TRIGGER_RATIO, DEFAULT_COMPACT_AT_TOKENS,
+    COMPACTION_SYSTEM_PROMPT, COMPACTION_TRANSCRIPT_MAX_CHARACTERS, COMPACTION_TRIGGER_RATIO,
+    COMPACTION_USER_MESSAGE_MAX_CHARACTERS, DEFAULT_COMPACT_AT_TOKENS,
 };
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, ProviderEvent};
@@ -134,17 +135,23 @@ fn render_transcript_for_compaction(messages: &[Message]) -> String {
             Role::Assistant => "Assistant",
             Role::System => "System",
         };
+        let text_limit = match message.role {
+            Role::User => COMPACTION_USER_MESSAGE_MAX_CHARACTERS,
+            _ => COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS,
+        };
         let detail = match &message.content {
-            MessageContent::Text(text) => {
-                truncate_for_transcript(text, COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS)
-            }
+            MessageContent::Text(text) => truncate_for_transcript(text, text_limit),
             MessageContent::Blocks(blocks) => render_blocks_for_transcript(blocks),
         };
         if !detail.is_empty() {
             lines.push(format!("{label}: {detail}"));
         }
     }
-    lines.join("\n")
+    crate::agent::context::elide_tool_output(
+        &lines.join("\n"),
+        COMPACTION_TRANSCRIPT_MAX_CHARACTERS,
+        "from the middle of the transcript",
+    )
 }
 
 fn render_blocks_for_transcript(blocks: &[ContentBlock]) -> String {
@@ -159,7 +166,7 @@ fn render_blocks_for_transcript(blocks: &[ContentBlock]) -> String {
     for block in blocks {
         match block {
             ContentBlock::ToolUse { name, input, .. } => {
-                let input_preview = truncate_for_transcript(&input.to_string(), 120);
+                let input_preview = truncate_for_transcript(&input.to_string(), 300);
                 parts.push(format!("[tool_use {name} {input_preview}]"));
             }
             ContentBlock::ToolResult {
@@ -298,13 +305,29 @@ mod tests {
     }
 
     #[test]
-    fn transcript_rendering_truncates_long_messages() {
-        let messages = vec![Message::user_text("word ".repeat(1_000))];
+    fn transcript_rendering_keeps_user_requests_and_truncates_the_rest() {
+        // Review R5: a requirement at the end of a 1,400-character request
+        // was cut at 600 characters and never reached the summary.
+        let request = format!(
+            "{} Also keep the public API unchanged.",
+            "word ".repeat(280)
+        );
+        let messages = vec![
+            Message::user_text(request),
+            Message::assistant_blocks(vec![ContentBlock::Text {
+                text: "word ".repeat(1_000),
+            }]),
+            Message::user_text("word ".repeat(3_000)),
+        ];
 
         let rendered = render_transcript_for_compaction(&messages);
+        let lines = rendered.lines().collect::<Vec<_>>();
 
-        assert!(rendered.chars().count() < 700);
-        assert!(rendered.ends_with('…'));
+        assert!(lines[0].ends_with("keep the public API unchanged."));
+        assert!(lines[1].chars().count() < 700);
+        assert!(lines[1].ends_with('…'));
+        assert!(lines[2].chars().count() < 8_100);
+        assert!(lines[2].ends_with('…'));
     }
 
     #[tokio::test]

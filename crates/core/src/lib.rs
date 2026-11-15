@@ -159,6 +159,8 @@ pub struct CompactionReport {
     pub covered_messages: usize,
     pub retained_messages: usize,
     pub used_llm: bool,
+    /// Why the compaction model was not used, when it failed.
+    pub fallback_reason: Option<String>,
     pub metrics: ContextMetrics,
 }
 
@@ -1078,6 +1080,14 @@ impl AgentService {
             emit(&mut on_progress, ActivityKind::CompactionStarted);
             match self.run_compaction().await {
                 Ok(report) => {
+                    if let Some(reason) = &report.fallback_reason {
+                        emit(
+                            &mut on_progress,
+                            ActivityKind::Warning {
+                                message: reason.clone(),
+                            },
+                        );
+                    }
                     on_progress(AgentProgress::CompactionFinished {
                         covered_messages: report.covered_messages,
                         used_llm: report.used_llm,
@@ -1093,7 +1103,12 @@ impl AgentService {
                 // Compaction must never block the conversation; the
                 // budget-based trimming below still bounds the prompt.
                 Err(AgentError::NothingToCompact) => {}
-                Err(err) => eprintln!("Auto-compaction failed: {err}"),
+                Err(err) => emit(
+                    &mut on_progress,
+                    ActivityKind::Warning {
+                        message: format!("Auto-compaction failed: {err}"),
+                    },
+                ),
             }
         }
         let prepared_context = prepare_context_messages(
@@ -1273,19 +1288,29 @@ impl AgentService {
                 &compaction_request,
             ) => result,
         };
-        let (text, used_llm) = match summary_result {
-            Ok(text) => (text, true),
+        let (text, fallback_reason) = match summary_result {
+            Ok(text) => (text, None),
             Err(err) => {
-                eprintln!("LLM compaction failed, falling back to deterministic summary: {err}");
                 let text = match previous_summary.as_deref() {
                     Some(previous) => {
                         extend_summary_text(previous, &self.messages, covered, boundary)
                     }
                     None => summarize_messages(&self.messages[..boundary]),
                 };
-                (text, false)
+                (
+                    text,
+                    Some(format!(
+                        "The compaction model failed ({err}); kept a shorter line-by-line summary instead"
+                    )),
+                )
             }
         };
+        let first_request = self
+            .summary_state
+            .summary
+            .as_ref()
+            .and_then(|summary| summary.first_request.clone())
+            .or_else(|| ConversationSummary::first_request_of(&self.messages[..boundary]));
 
         self.summary_state = ConversationSummaryState {
             summary: Some(ConversationSummary {
@@ -1294,6 +1319,7 @@ impl AgentService {
                 // Everything after the cut so far was produced against the
                 // replaced history.
                 thinking_valid_from: Some(self.messages.len()),
+                first_request,
             }),
         };
         self.persist_state()?;
@@ -1305,7 +1331,8 @@ impl AgentService {
         Ok(CompactionReport {
             covered_messages: boundary,
             retained_messages: self.messages.len() - boundary,
-            used_llm,
+            used_llm: fallback_reason.is_none(),
+            fallback_reason,
             metrics,
         })
     }

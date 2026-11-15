@@ -233,6 +233,9 @@ impl App {
                 );
                 self.push_message(Speaker::System, message.clone());
                 self.push_activity(message);
+                if let Some(reason) = report.fallback_reason {
+                    self.push_message(Speaker::System, reason);
+                }
                 self.status = Some("Compacted".to_string());
             }
             TaskReply::Compaction(Err(AgentError::NothingToCompact)) => {
