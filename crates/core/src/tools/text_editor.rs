@@ -7,7 +7,6 @@ use crate::tools::input::{require_i64_field, require_string_field};
 use crate::tools::list_files::list_files_from_workspace;
 use crate::tools::text_file::{
     apply_view_range, byte_index_after_line, count_lines, read_utf8_file_with_limit,
-    truncate_by_characters,
 };
 use crate::tools::workspace::{resolve_workspace_path, resolve_workspace_path_for_create};
 use crate::tools::{
@@ -112,17 +111,34 @@ pub(crate) fn text_editor_view(
 
     let content = read_utf8_file_with_limit(&resolved_path, path, MAX_TEXT_EDITOR_VIEW_READ_BYTES)?;
     let selected_content = apply_view_range(&content, input.get("view_range"))?;
-    let (display_content, truncated) =
-        truncate_by_characters(&selected_content, MAX_TEXT_EDITOR_VIEW_CHARACTERS);
-
-    if truncated {
-        Ok(format!(
-            "Path: {}\n{}\n(truncated: showing first {} characters)",
-            path, display_content, MAX_TEXT_EDITOR_VIEW_CHARACTERS
-        ))
-    } else {
-        Ok(format!("Path: {}\n{}", path, display_content))
+    // Numbered from the range's first line, so the numbers are the file's.
+    let first = input
+        .get("view_range")
+        .and_then(|range| range.get(0))
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as usize;
+    let window = crate::tools::text_file::numbered_lines(
+        &content,
+        first,
+        count_lines(&selected_content),
+        MAX_TEXT_EDITOR_VIEW_CHARACTERS,
+    );
+    if window.total == 0 {
+        return Ok(format!("Path: {path} (empty file)"));
     }
+    let wanted_last = first + count_lines(&selected_content).saturating_sub(1);
+    let more = if window.last < wanted_last {
+        format!(
+            "\n(truncated: continue with view_range [{}, {wanted_last}])",
+            window.last + 1
+        )
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "Path: {path} (lines {first}-{} of {})\n{}{more}",
+        window.last, window.total, window.text
+    ))
 }
 
 pub(crate) fn text_editor_str_replace(
@@ -349,7 +365,10 @@ mod tests {
                 content, is_error, ..
             } => {
                 assert_eq!(is_error, None);
-                assert_eq!(content, "Path: crlf.txt\nline2\r\n");
+                assert_eq!(
+                    content,
+                    "Path: crlf.txt (lines 2-2 of 3)\n     2\tline2\r\n"
+                );
             }
             _ => panic!("expected tool_result"),
         }
@@ -359,7 +378,9 @@ mod tests {
     fn text_editor_view_large_file_is_truncated_instead_of_rejected() {
         let workspace = make_temp_dir("workspace");
         let file_path = workspace.path().join("large-view.txt");
-        let large = vec![b'a'; MAX_READ_FILE_BYTES + 1];
+        // One huge line, then many lines past the output limit.
+        let mut large = vec![b'a'; MAX_READ_FILE_BYTES + 1];
+        large.extend(b"\nshort line".repeat(20_000));
         fs::write(&file_path, large).unwrap();
 
         let result = run_tool_call(
@@ -375,7 +396,8 @@ mod tests {
             } => {
                 assert_eq!(is_error, None);
                 assert!(content.contains("Path: large-view.txt"));
-                assert!(content.contains("(truncated: showing first"));
+                assert!(content.contains("[line cut at 2000 characters]"));
+                assert!(content.contains("(truncated: continue with view_range ["));
                 assert!(!content.contains("File too large"));
             }
             _ => panic!("expected tool_result"),

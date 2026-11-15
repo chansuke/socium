@@ -885,7 +885,7 @@ mod tests {
             texts,
             [
                 "Where does a.txt say hello?",
-                "read_file a.txt\nPath: a.txt",
+                "read_file a.txt\nPath: a.txt (lines 1-2 of 2)",
                 "a.txt:1 says hello",
                 "And line 2?",
                 "a.txt:2 says world",

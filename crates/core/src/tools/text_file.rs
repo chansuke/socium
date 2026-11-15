@@ -73,19 +73,54 @@ pub(crate) fn apply_view_range(
     Ok(content[start_offset..end_offset].to_string())
 }
 
-pub(crate) fn truncate_by_characters(content: &str, max_characters: usize) -> (String, bool) {
-    if max_characters == 0 {
-        return (String::new(), !content.is_empty());
-    }
+/// A window of `content` numbered like `cat -n`, starting at 1-based line
+/// `first`: at most `max_lines` lines and about `max_chars` characters,
+/// each line cut at `MAX_LINE_CHARACTERS`.
+pub(crate) struct NumberedLines {
+    pub text: String,
+    /// The last line shown; `first - 1` when none was.
+    pub last: usize,
+    /// Lines in the whole content.
+    pub total: usize,
+}
 
-    let mut end = 0usize;
-    for (count, (index, ch)) in content.char_indices().enumerate() {
-        if count == max_characters {
-            return (content[..end].to_string(), true);
+pub(crate) fn numbered_lines(
+    content: &str,
+    first: usize,
+    max_lines: usize,
+    max_chars: usize,
+) -> NumberedLines {
+    let total = count_lines(content);
+    let mut text = String::new();
+    let mut last = first.saturating_sub(1);
+    for (index, line) in content
+        .split_inclusive('\n')
+        .enumerate()
+        .skip(first.saturating_sub(1))
+        .take(max_lines)
+    {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let shown = if line.chars().count() > crate::constants::MAX_LINE_CHARACTERS {
+            let cut = line
+                .chars()
+                .take(crate::constants::MAX_LINE_CHARACTERS)
+                .collect::<String>();
+            format!(
+                "{cut}… [line cut at {} characters]",
+                crate::constants::MAX_LINE_CHARACTERS
+            )
+        } else {
+            line.to_string()
+        };
+        let row = format!("{:>6}\t{shown}\n", index + 1);
+        // Always show at least one line, however long.
+        if !text.is_empty() && text.chars().count() + row.chars().count() > max_chars {
+            break;
         }
-        end = index + ch.len_utf8();
+        text.push_str(&row);
+        last = index + 1;
     }
-    (content.to_string(), false)
+    NumberedLines { text, last, total }
 }
 
 pub(crate) fn count_lines(content: &str) -> usize {

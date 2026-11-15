@@ -424,7 +424,7 @@ mod tests {
             } => {
                 assert_eq!(tool_use_id, "tool_te_1");
                 assert!(content.contains("Path: edit.txt"));
-                assert!(content.contains("second\nthird"));
+                assert!(content.contains("     2\tsecond\n     3\tthird"));
                 assert_eq!(is_error, None);
             }
             _ => panic!("expected tool_result"),

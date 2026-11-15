@@ -3,6 +3,13 @@ pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 // max_tokens, so leave room for it as well as the visible answer.
 pub const DEFAULT_MAX_TOKENS: u32 = 64_000;
 pub const MAX_READ_FILE_BYTES: usize = 200 * 1024;
+/// Lines `read_file` returns when no limit is given.
+pub const READ_FILE_DEFAULT_LINES: usize = 2_000;
+/// Characters one `read_file` or `view` result holds; the rest is read
+/// with the next offset.
+pub const MAX_READ_OUTPUT_CHARACTERS: usize = 80_000;
+/// A longer line (minified code, data) is cut in read and search results.
+pub const MAX_LINE_CHARACTERS: usize = 2_000;
 pub const MAX_TOOL_ROUNDS: usize = 20;
 pub const MAX_LIST_ENTRIES: usize = 1000;
 pub const DEFAULT_SEARCH_RESULTS: usize = 50;
