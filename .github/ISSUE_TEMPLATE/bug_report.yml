@@ -1,0 +1,70 @@
+name: Bug report
+description: Something does not work as the documentation says.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not paste API keys, private prompts, conversation files from
+        `.socium/`, or code you cannot share. Report security problems
+        privately; see SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest steps or workspace that shows it. `socium-tui -p` output (JSON Lines) helps.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Socium commit
+      description: "`git rev-parse --short HEAD`, or the flake revision you ran."
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Linux distribution and kernel
+      placeholder: Ubuntu 24.04, 6.8.0
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - nix run / nix profile
+        - nix develop and cargo run
+        - cargo install
+        - other
+    validations:
+      required: true
+  - type: input
+    id: bwrap
+    attributes:
+      label: bubblewrap version
+      description: "`bwrap --version`"
+  - type: dropdown
+    id: wire
+    attributes:
+      label: Model wire format
+      options:
+        - anthropic (Anthropic)
+        - anthropic (a compatible endpoint)
+        - openai-chat
+        - openai-responses
+        - not related to a model
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error messages
+      description: Messages from the screen or the Activity pane, with keys and private text removed.
+      render: text
