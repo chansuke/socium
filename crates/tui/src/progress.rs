@@ -34,22 +34,18 @@ impl App {
                 summary,
                 input,
                 requested_by,
+                session_option,
             } => {
                 self.pop_thinking_message();
                 let (summary, details) = match requested_by {
                     Some(origin) => (
                         format!("{origin}: {summary}"),
-                        format!(
-                            "Approve sandboxed command: {tool}\nRequested by: {origin}\n{input}"
-                        ),
+                        format!("Approve {tool}\nRequested by: {origin}\n{input}"),
                     ),
-                    None => (
-                        summary,
-                        format!("Approve sandboxed command: {tool}\n{input}"),
-                    ),
+                    None => (summary, format!("Approve {tool}\n{input}")),
                 };
                 self.push_message(Speaker::System, details.clone());
-                self.open_approval(request_id, tool, summary, details);
+                self.open_approval(request_id, tool, summary, details, session_option);
             }
             AgentProgress::ApprovalResolved { request_id, .. } => {
                 self.close_unanswered_approval(request_id);
@@ -192,6 +188,7 @@ mod tests {
             summary: "cargo test".into(),
             input: "Arguments: ...".into(),
             requested_by: Some("worker subagent \"Fix the test\"".into()),
+            session_option: None,
         });
 
         let prompt = app.approval.as_ref().unwrap();
@@ -201,7 +198,7 @@ mod tests {
         );
         assert_eq!(
             prompt.details,
-            "Approve sandboxed command: run_command\nRequested by: worker subagent \"Fix the test\"\nArguments: ..."
+            "Approve run_command\nRequested by: worker subagent \"Fix the test\"\nArguments: ..."
         );
     }
 }

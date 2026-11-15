@@ -1,5 +1,6 @@
 //! Execution authority is chosen by the application, never by model arguments
 //! or executable names. Every subprocess (including Git/rg helpers) uses it.
+use crate::settings::{ReadOnlyMount, SandboxSettings};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -26,6 +27,17 @@ pub(crate) struct ExecutionPolicy {
     pub workspace: PathBuf,
     pub access: WorkspaceAccess,
     pub network: NetworkAccess,
+    /// Host directories the user listed in `sandbox.read_only`.
+    pub read_only: Vec<ReadOnlyMount>,
+    /// Directories the user listed in `sandbox.path`.
+    pub path: Vec<PathBuf>,
+    /// Variables the user listed in `sandbox.env`.
+    pub env: Vec<(String, String)>,
+    /// Workspace files replaced by an empty file, so a command nobody
+    /// reviewed cannot read their secrets.
+    pub hidden: Vec<PathBuf>,
+    /// Workspace paths a command nobody reviewed cannot change.
+    pub frozen: Vec<PathBuf>,
 }
 
 impl ExecutionPolicy {
@@ -38,7 +50,34 @@ impl ExecutionPolicy {
             workspace,
             access,
             network: NetworkAccess::Deny,
+            read_only: Vec::new(),
+            path: Vec::new(),
+            env: Vec::new(),
+            hidden: Vec::new(),
+            frozen: Vec::new(),
         })
+    }
+
+    /// Adds what the user's `[sandbox]` settings expose to commands.
+    pub fn with_settings(mut self, settings: &SandboxSettings) -> Self {
+        self.read_only = settings.read_only.clone();
+        self.path = settings.path.clone();
+        self.env = settings.env.clone();
+        self
+    }
+}
+
+/// Whether `path` lies in a public system runtime the sandbox always mounts
+/// read-only.
+pub(crate) fn is_runtime_path(path: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::runtime_path(path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        false
     }
 }
 

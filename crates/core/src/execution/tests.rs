@@ -467,3 +467,91 @@ fn real_toolchains_build_and_spawn_processes_inside_the_sandbox() {
         );
     }
 }
+
+#[test]
+fn user_mounts_path_and_env_reach_commands_read_only() {
+    let root = tempfile::tempdir().unwrap();
+    let tools = tempfile::tempdir().unwrap();
+    fs::create_dir(tools.path().join("bin")).unwrap();
+    let hello = tools.path().join("bin/hello-tool");
+    fs::write(&hello, "#!/bin/sh\necho \"hello $TOOL_SETTING\"\n").unwrap();
+    fs::set_permissions(&hello, fs::Permissions::from_mode(0o755)).unwrap();
+    let (settings, warnings) = crate::settings::Settings::from_toml(
+        &format!(
+            "[sandbox]\nread_only = [\"{dir}\"]\npath = [\"{dir}/bin\"]\n[sandbox.env]\nTOOL_SETTING = \"from-config\"\n",
+            dir = tools.path().display()
+        ),
+        None,
+    )
+    .unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let policy = ExecutionPolicy::new(root.path(), WorkspaceAccess::Write)
+        .unwrap()
+        .with_settings(&settings.sandbox);
+    let output = run_with(&policy, root.path(), &["hello-tool"], 5);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "hello from-config\n"
+    );
+    success(output);
+    let target = tools.path().join("bin/changed");
+    assert!(
+        !run_with(
+            &policy,
+            root.path(),
+            &["sh", "-c", &format!("echo x > {}", target.display())],
+            5
+        )
+        .status
+        .success()
+    );
+    assert!(!target.exists());
+    // Without the settings the same directory is invisible.
+    let plain = ExecutionPolicy::new(root.path(), WorkspaceAccess::Write).unwrap();
+    assert!(SandboxExecutor::command(&plain, &["hello-tool".into()], root.path()).is_err());
+}
+
+#[test]
+fn hidden_files_read_empty_and_frozen_paths_refuse_writes() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join(".env"), "TOKEN=fake-secret\n").unwrap();
+    fs::write(root.path().join("build.rs"), "fn main() {}\n").unwrap();
+    fs::create_dir_all(root.path().join(".github/workflows")).unwrap();
+    fs::write(root.path().join(".github/workflows/ci.yaml"), "on: push\n").unwrap();
+    let mut policy = ExecutionPolicy::new(root.path(), WorkspaceAccess::Write).unwrap();
+    policy.hidden = vec![root.path().join(".env")];
+    policy.frozen = vec![
+        root.path().join("build.rs"),
+        root.path().join(".github/workflows"),
+    ];
+    let read = run_with(&policy, root.path(), &["cat", ".env"], 5);
+    assert!(read.stdout.is_empty());
+    for command in [
+        "echo x > build.rs",
+        "echo x >> .github/workflows/ci.yaml",
+        "echo x > .github/workflows/new.yaml",
+        "rm build.rs",
+        "echo x > .env",
+    ] {
+        assert!(
+            !run_with(&policy, root.path(), &["sh", "-c", command], 5)
+                .status
+                .success(),
+            "{command}"
+        );
+    }
+    success(run_with(
+        &policy,
+        root.path(),
+        &["sh", "-c", "echo ok > other.txt"],
+        5,
+    ));
+    assert_eq!(
+        fs::read_to_string(root.path().join(".env")).unwrap(),
+        "TOKEN=fake-secret\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("build.rs")).unwrap(),
+        "fn main() {}\n"
+    );
+}

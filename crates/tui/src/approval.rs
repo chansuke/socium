@@ -1,26 +1,28 @@
-//! The approval picker shown in place of the composer while a sandboxed
-//! command waits for the user's decision, and the request details it
-//! shows in place of the transcript. Reading keys only scroll the details;
-//! only Enter, 1/2, and y/n answer.
+//! The approval picker shown in place of the composer while a tool call
+//! waits for the user's decision, and the request details it shows in
+//! place of the transcript. Reading keys only scroll the details; only
+//! Enter, the number keys, and y/a/n answer.
 
 use crate::app::App;
 use crate::transcript::Speaker;
 use ratatui::crossterm::event::KeyCode;
+use socium_core::ApprovalAnswer;
 use std::cell::Cell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApprovalChoice {
     AllowOnce,
+    /// Allow, and stop asking about what the request offered.
+    AllowForSession,
     Deny,
 }
 
 impl ApprovalChoice {
-    pub(crate) const ALL: [Self; 2] = [Self::AllowOnce, Self::Deny];
-
-    pub(crate) fn label(self) -> &'static str {
+    fn answer(self) -> ApprovalAnswer {
         match self {
-            Self::AllowOnce => "Allow once",
-            Self::Deny => "Deny",
+            Self::AllowOnce => ApprovalAnswer::AllowOnce,
+            Self::AllowForSession => ApprovalAnswer::AllowForSession,
+            Self::Deny => ApprovalAnswer::Deny,
         }
     }
 }
@@ -29,6 +31,9 @@ pub(crate) struct ApprovalPrompt {
     pub(crate) request_id: u64,
     pub(crate) tool: String,
     pub(crate) summary: String,
+    /// What "allow for this session" would cover, when the request offers
+    /// it; see `socium_core::Grant::label`.
+    pub(crate) session_option: Option<String>,
     pub(crate) choice: ApprovalChoice,
     /// The whole request, Git diff included, as the user reviews it.
     pub(crate) details: String,
@@ -46,6 +51,37 @@ pub(crate) struct DetailsViewport {
 }
 
 impl ApprovalPrompt {
+    /// The choices in the order shown; their positions are the number keys.
+    pub(crate) fn choices(&self) -> Vec<ApprovalChoice> {
+        let mut choices = vec![ApprovalChoice::AllowOnce];
+        if self.session_option.is_some() {
+            choices.push(ApprovalChoice::AllowForSession);
+        }
+        choices.push(ApprovalChoice::Deny);
+        choices
+    }
+
+    pub(crate) fn label(&self, choice: ApprovalChoice) -> String {
+        match choice {
+            ApprovalChoice::AllowOnce => "Allow once".into(),
+            ApprovalChoice::AllowForSession => format!(
+                "Allow {} until Socium exits",
+                self.session_option.as_deref().unwrap_or("this")
+            ),
+            ApprovalChoice::Deny => "Deny (tell Socium what to do instead)".into(),
+        }
+    }
+
+    fn move_choice(&mut self, step: isize) {
+        let choices = self.choices();
+        let at = choices
+            .iter()
+            .position(|choice| *choice == self.choice)
+            .unwrap_or(0);
+        let next = at.saturating_add_signed(step).min(choices.len() - 1);
+        self.choice = choices[next];
+    }
+
     fn scroll_by(&mut self, rows: isize) {
         let max = self.viewport.get().max_scroll;
         self.scroll = self.scroll.saturating_add_signed(rows).min(max);
@@ -63,11 +99,13 @@ impl App {
         tool: String,
         summary: String,
         details: String,
+        session_option: Option<String>,
     ) {
         self.approval = Some(ApprovalPrompt {
             request_id,
             tool,
             summary,
+            session_option,
             choice: ApprovalChoice::AllowOnce,
             details,
             scroll: 0,
@@ -88,29 +126,42 @@ impl App {
             KeyCode::PageUp | KeyCode::Char('b') => prompt.scroll_by(-prompt.page()),
             KeyCode::Home | KeyCode::Char('g') => prompt.scroll = 0,
             KeyCode::End | KeyCode::Char('G') => prompt.scroll = prompt.viewport.get().max_scroll,
-            KeyCode::Up | KeyCode::Char('k') => prompt.choice = ApprovalChoice::AllowOnce,
-            KeyCode::Down | KeyCode::Char('j') => prompt.choice = ApprovalChoice::Deny,
+            KeyCode::Up | KeyCode::Char('k') => prompt.move_choice(-1),
+            KeyCode::Down | KeyCode::Char('j') => prompt.move_choice(1),
             KeyCode::Enter => {
-                let allow = prompt.choice == ApprovalChoice::AllowOnce;
-                self.answer_approval(allow);
+                let choice = prompt.choice;
+                self.answer_approval(choice);
             }
-            KeyCode::Char('1' | 'y') => self.answer_approval(true),
-            KeyCode::Char('2' | 'n') => self.answer_approval(false),
+            KeyCode::Char('y') => self.answer_approval(ApprovalChoice::AllowOnce),
+            KeyCode::Char('a') if prompt.session_option.is_some() => {
+                self.answer_approval(ApprovalChoice::AllowForSession)
+            }
+            KeyCode::Char('n') => self.answer_approval(ApprovalChoice::Deny),
+            KeyCode::Char(digit @ '1'..='9') => {
+                let index = digit as usize - '1' as usize;
+                if let Some(choice) = prompt.choices().get(index).copied() {
+                    self.answer_approval(choice);
+                }
+            }
             _ => {}
         }
     }
 
-    fn answer_approval(&mut self, allow: bool) {
+    fn answer_approval(&mut self, choice: ApprovalChoice) {
         let Some(prompt) = self.approval.take() else {
             return;
         };
         if let Some(task) = self.pending_task.as_ref() {
-            task.control.answer_approval(prompt.request_id, allow);
+            task.control.answer(prompt.request_id, choice.answer());
         }
-        let outcome = if allow {
-            format!("✓ {} allowed once", prompt.tool)
-        } else {
-            format!("✗ {} denied", prompt.tool)
+        let outcome = match choice {
+            ApprovalChoice::AllowOnce => format!("✓ {} allowed once", prompt.tool),
+            ApprovalChoice::AllowForSession => format!(
+                "✓ {} allowed; {} allowed until Socium exits",
+                prompt.tool,
+                prompt.session_option.as_deref().unwrap_or("this")
+            ),
+            ApprovalChoice::Deny => format!("✗ {} denied", prompt.tool),
         };
         self.push_message(Speaker::System, outcome);
         self.status = Some("Approval answered".into());
@@ -144,8 +195,59 @@ mod tests {
             "run_command".into(),
             "cargo test".into(),
             "Tool call: c1".into(),
+            None,
         );
         app
+    }
+
+    fn app_with_session_option() -> App {
+        let mut app = App::for_test();
+        app.open_approval(
+            8,
+            "run_command".into(),
+            "cargo test".into(),
+            "Tool call: c2".into(),
+            Some("commands starting with `cargo test`".into()),
+        );
+        app
+    }
+
+    #[test]
+    fn a_request_that_offers_it_can_be_allowed_for_the_session() {
+        let mut app = app_with_session_option();
+        let prompt = app.approval.as_ref().unwrap();
+        assert_eq!(
+            prompt.choices(),
+            [
+                ApprovalChoice::AllowOnce,
+                ApprovalChoice::AllowForSession,
+                ApprovalChoice::Deny
+            ]
+        );
+        app.handle_approval_key(KeyCode::Down);
+        assert_eq!(
+            app.approval.as_ref().unwrap().choice,
+            ApprovalChoice::AllowForSession
+        );
+        app.handle_approval_key(KeyCode::Enter);
+        assert_eq!(
+            last_message(&app),
+            "✓ run_command allowed; commands starting with `cargo test` allowed until Socium exits"
+        );
+
+        for (key, expected) in [
+            (KeyCode::Char('2'), "allowed until Socium exits"),
+            (KeyCode::Char('a'), "allowed until Socium exits"),
+            (KeyCode::Char('3'), "denied"),
+        ] {
+            let mut app = app_with_session_option();
+            app.handle_approval_key(key);
+            assert!(last_message(&app).contains(expected), "{key:?}");
+        }
+        // Without the offer, 'a' does nothing and 2 denies.
+        let mut app = app_with_prompt();
+        app.handle_approval_key(KeyCode::Char('a'));
+        assert!(app.approval.is_some());
     }
 
     fn last_message(app: &App) -> &str {

@@ -139,16 +139,17 @@ pub(crate) fn require_i64_field(
 
 pub(crate) fn optional_timeout_ms(
     input: &serde_json::Map<String, Value>,
+    max_ms: u64,
 ) -> Result<u64, ToolError> {
     let Some(timeout_ms) = input.get("timeout_ms") else {
-        return Ok(DEFAULT_COMMAND_TIMEOUT_MS);
+        return Ok(DEFAULT_COMMAND_TIMEOUT_MS.min(max_ms));
     };
     let timeout_ms = timeout_ms
         .as_u64()
         .ok_or("run_command timeout_ms requires an integer field: timeout_ms")?;
-    if !(1..=MAX_COMMAND_TIMEOUT_MS).contains(&timeout_ms) {
+    if !(1..=max_ms).contains(&timeout_ms) {
         return Err(ToolError::Message(format!(
-            "run_command timeout_ms must be between 1 and {MAX_COMMAND_TIMEOUT_MS}"
+            "run_command timeout_ms must be between 1 and {max_ms}; the user sets the limit with sandbox.command_timeout"
         )));
     }
     Ok(timeout_ms)

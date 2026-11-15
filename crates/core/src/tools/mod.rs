@@ -64,6 +64,10 @@ pub struct AnthropicTextEditorToolDefinition {
 pub(crate) struct ToolContext<'a> {
     pub(crate) workspace_root: &'a Path,
     pub(crate) control: &'a crate::TaskControl,
+    pub(crate) settings: &'a crate::settings::Settings,
+    /// What a command nobody reviewed may not touch; `None` when a person
+    /// approved this call or it needs no review.
+    pub(crate) restrictions: Option<&'a crate::approval::Restrictions>,
 }
 
 /// A built-in tool: its wire schema and its execution, colocated so the
@@ -102,11 +106,22 @@ pub fn default_tools() -> Vec<ToolDefinition> {
 /// with the built-in subagent types. Without the native text editor, the text
 /// editor is sent as an ordinary schema tool of the same name and input.
 pub(crate) fn tools_for_model(native_text_editor: bool) -> Vec<ToolDefinition> {
+    tools_with_settings(native_text_editor, &crate::settings::Settings::default())
+}
+
+/// As `tools_for_model`, with the command time limit the user set.
+pub(crate) fn tools_with_settings(
+    native_text_editor: bool,
+    settings: &crate::settings::Settings,
+) -> Vec<ToolDefinition> {
     BUILTIN_TOOLS
         .iter()
         .map(|tool| match tool.definition() {
             ToolDefinition::AnthropicTextEditor(_) if !native_text_editor => {
                 text_editor::portable_text_editor_definition()
+            }
+            ToolDefinition::Custom(_) if tool.name() == "run_command" => {
+                run_command::definition(settings.sandbox.max_command_timeout)
             }
             definition => definition,
         })
@@ -194,19 +209,27 @@ where
         name,
         input,
         control,
+        &crate::settings::Settings::default(),
         on_progress,
-        &mut || Ok(()),
+        &mut |_| Ok(()),
     )
 }
 
+/// How a call was authorized, as the turn records it before the call runs.
+pub(crate) const HUMAN_APPROVED: &str = "human-approved";
+pub(crate) const ALLOWED_BY_POLICY: &str = "allowed-by-policy";
+pub(crate) const WORKSPACE_FILE_POLICY: &str = "workspace-file-policy";
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_tool_call_checkpointed<F>(
     workspace_root: &Path,
     tool_use_id: &str,
     name: &str,
     input: &Value,
     control: &crate::TaskControl,
+    settings: &crate::settings::Settings,
     on_progress: &mut F,
-    before_execute: &mut dyn FnMut() -> std::io::Result<()>,
+    before_execute: &mut dyn FnMut(&str) -> std::io::Result<()>,
 ) -> ContentBlock
 where
     F: FnMut(AgentProgress),
@@ -218,31 +241,53 @@ where
         if control.is_cancelled() {
             return Err("Cancelled before execution".into());
         }
-        if matches!(name, "run_command" | "git_commit") {
-            let review = if name == "git_commit" {
-                Some(git::commit_review(workspace_root, input)?)
-            } else {
+        let gate = crate::approval::gate(name, input, workspace_root, settings, &|grant| {
+            control.is_granted(grant)
+        })?;
+        let mut authorization = WORKSPACE_FILE_POLICY;
+        let restrictions = match gate {
+            crate::approval::Gate::Deny(reason) => return Err(reason.into()),
+            crate::approval::Gate::Run(restrictions) => {
+                if restrictions.is_some() {
+                    authorization = ALLOWED_BY_POLICY;
+                }
+                restrictions
+            }
+            crate::approval::Gate::Ask(ask) => {
+                let permissions = match name {
+                    "git_commit" => {
+                        "Linux sandbox: workspace and Git metadata writable; agent state hidden; network denied"
+                    }
+                    "run_command" => {
+                        "Linux sandbox: workspace writable; existing Git metadata read-only; agent state hidden; network denied"
+                    }
+                    _ => "Socium's file tools inside the workspace; nothing runs",
+                };
+                let request = serde_json::json!({"workspace":workspace_root,"tool_call_id":tool_use_id,"arguments":input,"review":ask.review,"permissions":permissions,"reason":ask.reason});
+                if !control.is_interactive() {
+                    return Err(format!(
+                        "Needs approval, but no one can answer here: {} Allow it with an approval rule in Socium's config.toml, or run it from the TUI.",
+                        ask.reason
+                    )
+                    .into());
+                }
+                if !control.approve(name, &request, ask.grant, on_progress) {
+                    return Err("Denied by the user. Do not retry the same call; ask the user how to proceed if it is needed.".into());
+                }
+                if let Some(review) = &ask.review
+                    && name == "git_commit"
+                    && git::commit_review(workspace_root, input)? != *review
+                {
+                    return Err(
+                        "Repository changed during approval; commit refused, request a new review"
+                            .into(),
+                    );
+                }
+                authorization = HUMAN_APPROVED;
                 None
-            };
-            let permissions = if name == "git_commit" {
-                "Linux sandbox: workspace and Git metadata writable; agent state hidden; network denied"
-            } else {
-                "Linux sandbox: workspace writable; existing Git metadata read-only; agent state hidden; network denied"
-            };
-            let request = serde_json::json!({"workspace":workspace_root,"tool_call_id":tool_use_id,"arguments":input,"review":review,"permissions":permissions});
-            if !control.approve(name, &request, on_progress) {
-                return Err("Sandbox command denied: explicit human approval required; model approval/confirmed fields grant no authority".into());
             }
-            if let Some(review) = review
-                && git::commit_review(workspace_root, input)? != review
-            {
-                return Err(
-                    "Repository changed during approval; commit refused, request a new review"
-                        .into(),
-                );
-            }
-        }
-        before_execute().map_err(|e| {
+        };
+        before_execute(authorization).map_err(|e| {
             format!("Could not persist execution intent; tool was not started: {e}")
         })?;
         if control.is_cancelled() {
@@ -253,6 +298,8 @@ where
                 &ToolContext {
                     workspace_root,
                     control,
+                    settings,
+                    restrictions: restrictions.as_ref(),
                 },
                 input,
                 on_progress,

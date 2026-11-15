@@ -265,6 +265,20 @@ fn preview_plan(plan: &[crate::tools::edit_history::Mutation]) -> String {
     out
 }
 
+/// Every path a patch names, move destinations included, before any of
+/// them is resolved.
+pub(crate) fn patch_paths(patch: &str) -> Result<Vec<String>, String> {
+    Ok(parse_patch_actions(patch)?
+        .into_iter()
+        .flat_map(|action| match action {
+            PatchAction::Add { path, .. } | PatchAction::Delete { path } => vec![path],
+            PatchAction::Update { path, move_to, .. } => {
+                std::iter::once(path).chain(move_to).collect()
+            }
+        })
+        .collect())
+}
+
 fn parse_patch_actions(patch: &str) -> Result<Vec<PatchAction>, String> {
     let lines = patch.lines().collect::<Vec<_>>();
     if lines.first().copied() != Some("*** Begin Patch") {

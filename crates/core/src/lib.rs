@@ -3,15 +3,19 @@ pub use crate::agent::state::{
 };
 pub mod activity;
 mod activity_log;
+mod approval;
 mod control;
 mod execution;
 mod models;
 mod process;
 mod session;
+mod settings;
 mod transcript;
-pub use control::TaskControl;
+pub use approval::Grant;
+pub use control::{ApprovalAnswer, TaskControl};
 pub use execution::SANDBOX_DESCRIPTION;
 pub use session::{SessionStart, SessionSummary, list_sessions};
+pub use settings::Settings;
 pub use transcript::{TranscriptEntry, TranscriptRole};
 pub mod agent;
 pub mod constants;
@@ -46,7 +50,7 @@ use crate::constants::*;
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, TokenUsage, build_provider};
-use crate::tools::{ToolDefinition, tools_for_model};
+use crate::tools::ToolDefinition;
 use std::env;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
@@ -169,6 +173,8 @@ pub enum AgentProgress {
         /// The subagent that asked, such as `worker subagent "Fix the
         /// test"`; `None` when the main agent asked.
         requested_by: Option<String>,
+        /// The "allow for this session" choice to offer, when there is one.
+        session_option: Option<String>,
     },
     ApprovalRequired {
         tool: String,
@@ -250,6 +256,8 @@ pub struct AgentService {
     tools: Vec<ToolDefinition>,
     /// Types the `agent` tool can start, user types loaded at startup.
     subagents: SubagentCatalog,
+    /// The user's sandbox and approval settings from `config.toml`.
+    settings: Arc<Settings>,
     client: reqwest::Client,
     /// Configuration problems found while choosing the startup model.
     warnings: Vec<String>,
@@ -331,6 +339,7 @@ impl AgentService {
             max_tokens: DEFAULT_MAX_TOKENS,
             tools: Vec::new(),
             subagents: SubagentCatalog::builtin(),
+            settings: Arc::new(Settings::default()),
             client,
             warnings: target.warnings,
             last_measured_usage: None,
@@ -353,6 +362,8 @@ impl AgentService {
             })
             .transpose()?;
         let client = provider_http_client()?;
+        settings::ensure_config_outside(&workspace_root, lookup.as_ref())?;
+        let (settings, settings_warnings) = Settings::load(lookup.as_ref())?;
 
         // Check actual enforcement before advertising a usable agent. A missing
         // backend or disabled namespaces is a startup error, never a downgrade.
@@ -371,14 +382,24 @@ impl AgentService {
             .into());
         }
 
-        Self::open(
+        let mut service = Self::open(
             workspace_root,
             start,
             registry,
             lookup,
             max_tokens_override,
             client,
-        )
+        )?;
+        service.warnings.extend(settings_warnings);
+        service.warnings.extend(settings.summary());
+        service.install_settings(settings);
+        Ok(service)
+    }
+
+    /// Makes `settings` the ones tools and commands follow.
+    pub(crate) fn install_settings(&mut self, settings: Settings) {
+        self.settings = Arc::new(settings);
+        self.apply_model_limits();
     }
 
     /// Opens the session `start` names and selects its model: the alias
@@ -555,7 +576,10 @@ impl AgentService {
             .max_output_tokens
             .or(self.max_tokens_override)
             .unwrap_or(DEFAULT_MAX_TOKENS);
-        self.tools = tools_for_model(self.active_model.features.anthropic_text_editor);
+        self.tools = crate::tools::tools_with_settings(
+            self.active_model.features.anthropic_text_editor,
+            &self.settings,
+        );
         if let Some(agent) = self
             .tools
             .iter_mut()
@@ -1071,6 +1095,7 @@ impl AgentService {
             subagents: &self.subagents,
             workspace_root: &self.workspace_root,
             control: &self.control,
+            settings: &self.settings,
             clock,
         };
         let raw_len = self.messages.len();

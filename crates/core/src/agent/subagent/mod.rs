@@ -20,7 +20,6 @@ use crate::error::AgentError;
 use crate::providers::TokenUsage;
 use crate::tools::error::ToolError;
 use crate::tools::input::{optional_string_field, require_object_input, require_string_field};
-use crate::tools::tools_for_model;
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
@@ -75,7 +74,10 @@ pub(crate) fn run_subagent<'a>(
         let child = match model {
             None => *ctx,
             Some(model) => {
-                model_tools = tools_for_model(model.config.features.anthropic_text_editor);
+                model_tools = crate::tools::tools_with_settings(
+                    model.config.features.anthropic_text_editor,
+                    ctx.settings,
+                );
                 TurnContext {
                     provider: model.provider.as_ref(),
                     model: &model.config.id,
@@ -161,12 +163,14 @@ pub(crate) fn run_subagent<'a>(
                 summary,
                 input,
                 requested_by: _,
+                session_option,
             } => on_progress(AgentProgress::ApprovalRequested {
                 request_id,
                 tool,
                 summary,
                 input,
                 requested_by: Some(requested_by.clone()),
+                session_option,
             }),
             // These would read as the main agent's own stream.
             AgentProgress::AssistantText { .. }
@@ -683,7 +687,7 @@ mod tests {
             denied["content"]
                 .as_str()
                 .unwrap()
-                .starts_with("Sandbox command denied")
+                .starts_with("Denied by the user")
         );
     }
 

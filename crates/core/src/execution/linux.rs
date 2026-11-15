@@ -14,11 +14,13 @@ use std::{
 const RUNTIMES: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/nix/store"];
 const HOME: &str = "/socium-home";
 
-fn runtime_path(path: &Path) -> bool {
+pub(super) fn runtime_path(path: &Path) -> bool {
     RUNTIMES.iter().any(|root| path.starts_with(root))
 }
 
-fn search_path() -> Vec<PathBuf> {
+/// System runtime directories from the launcher's PATH. Only these can
+/// provide the sandbox backend itself.
+fn system_search_path() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for path in env::split_paths(&env::var_os("PATH").unwrap_or_default())
         .chain([PathBuf::from("/usr/bin"), PathBuf::from("/bin")])
@@ -32,6 +34,25 @@ fn search_path() -> Vec<PathBuf> {
         }
     }
     paths
+}
+
+/// The command PATH: the system runtime directories, then the user's
+/// `sandbox.path` entries that lie in a mounted directory.
+fn search_path(policy: &ExecutionPolicy) -> Vec<PathBuf> {
+    let mut paths = system_search_path();
+    for path in &policy.path {
+        if (runtime_path(path) || mounted_read_only(policy, path)) && !paths.contains(path) {
+            paths.push(path.clone());
+        }
+    }
+    paths
+}
+
+fn mounted_read_only(policy: &ExecutionPolicy, path: &Path) -> bool {
+    policy
+        .read_only
+        .iter()
+        .any(|mount| path.starts_with(&mount.source))
 }
 
 fn executable(path: &Path) -> bool {
@@ -122,21 +143,32 @@ pub(super) fn command(
     if !cwd.starts_with(root) {
         return Err(io::Error::other("sandbox cwd is outside the workspace"));
     }
-    let paths = search_path();
+    for mount in &policy.read_only {
+        for path in std::iter::once(&mount.source).chain(&mount.alias) {
+            if overlaps_reserved(path) {
+                return Err(io::Error::other(
+                    "a sandbox.read_only directory overlaps a reserved sandbox path",
+                ));
+            }
+        }
+    }
+    let paths = search_path(policy);
     let program = resolve(
         argv.first()
             .ok_or_else(|| io::Error::other("empty command"))?,
         &cwd,
         &paths,
     )?;
-    if !program.starts_with(root) && !runtime_path(&program) {
+    if !program.starts_with(root) && !runtime_path(&program) && !mounted_read_only(policy, &program)
+    {
         return Err(io::Error::other(
-            "executable is outside the workspace and system runtimes",
+            "executable is outside the workspace, the system runtimes and sandbox.read_only",
         ));
     }
     // The backend must itself come from a system installation; ./bwrap or a
-    // project-controlled PATH entry can never replace the sandbox boundary.
-    let backend = resolve("bwrap", Path::new("/"), &paths).map_err(|e| {
+    // project-controlled or user-added PATH entry can never replace the
+    // sandbox boundary.
+    let backend = resolve("bwrap", Path::new("/"), &system_search_path()).map_err(|e| {
         io::Error::other(format!(
             "Linux sandbox requires bubblewrap (bwrap): {e}; no host fallback"
         ))
@@ -167,6 +199,15 @@ pub(super) fn command(
     cmd.args([
         "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", HOME,
     ]);
+    // After the fresh /tmp, which would hide them, and before the workspace,
+    // so a listed ancestor of the workspace cannot make it read-only or
+    // reveal the state directory.
+    for mount in &policy.read_only {
+        cmd.arg("--ro-bind").arg(&mount.source).arg(&mount.source);
+        if let Some(alias) = &mount.alias {
+            cmd.arg("--ro-bind").arg(&mount.source).arg(alias);
+        }
+    }
     cmd.arg(if policy.access == WorkspaceAccess::ReadOnly {
         "--ro-bind"
     } else {
@@ -203,6 +244,21 @@ pub(super) fn command(
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
+    // Files a command nobody reviewed must not change or read. Each was found
+    // inside the workspace; a path that left it since is refused.
+    for (paths, source) in [(&policy.frozen, None), (&policy.hidden, Some("/dev/null"))] {
+        for path in paths {
+            let canonical = path.canonicalize()?;
+            if !canonical.starts_with(root) {
+                return Err(io::Error::other(
+                    "a protected path left the workspace before the command started",
+                ));
+            }
+            cmd.arg("--ro-bind")
+                .arg(source.map_or(canonical.as_path(), Path::new))
+                .arg(&canonical);
+        }
+    }
     cmd.arg("--chdir").arg(&cwd);
     cmd.env("PATH", env::join_paths(&paths).map_err(io::Error::other)?)
         .env("HOME", HOME)
@@ -216,6 +272,11 @@ pub(super) fn command(
         .env("GIT_NO_LAZY_FETCH", "1");
     // Intentionally no inherited environment, including credentials, proxies,
     // agent sockets, loader variables and Git execution/configuration overrides.
+    // The user's own sandbox.env settings are the only additions; settings
+    // validation keeps them away from PATH, HOME, TMPDIR and GIT_*.
+    for (name, value) in &policy.env {
+        cmd.env(name, value);
+    }
     cmd.arg("--seccomp")
         .arg(filter.as_raw_fd().to_string())
         // Preserve argv[0] when pinning a symlink to its canonical executable:
@@ -236,6 +297,16 @@ pub(super) fn command(
         });
     }
     Ok(cmd)
+}
+
+/// Whether mounting `path` would replace or cover a mount the sandbox makes
+/// itself. A directory inside `/tmp` is fine, since it is mounted after the
+/// fresh `/tmp`; `/tmp` itself or an ancestor of it is not.
+fn overlaps_reserved(path: &Path) -> bool {
+    ["/proc", "/dev", HOME]
+        .iter()
+        .any(|reserved| path.starts_with(reserved) || Path::new(reserved).starts_with(path))
+        || Path::new("/tmp").starts_with(path)
 }
 
 /// Network namespaces alone do not isolate pathname Unix sockets (e.g. a

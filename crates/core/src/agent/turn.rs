@@ -31,6 +31,7 @@ pub(crate) struct TurnContext<'a> {
     /// The types the `agent` tool can start.
     pub(crate) subagents: &'a SubagentCatalog,
     pub(crate) control: &'a crate::TaskControl,
+    pub(crate) settings: &'a crate::settings::Settings,
     pub(crate) workspace_root: &'a Path,
     pub(crate) clock: ActivityClock,
 }
@@ -192,10 +193,10 @@ where
                 // Every intent is saved before any of them starts.
                 let mut outcomes = batch_calls
                     .iter()
-                    .map(|(id, name, input)| {
+                    .map(|(id, name, _)| {
                         checkpoint(
                             messages,
-                            serde_json::json!({"type":"tool_started","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"input":input,"authorization":"subagent-tools-only","concurrent":true}),
+                            serde_json::json!({"type":"tool_started","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"authorization":"subagent-tools-only","concurrent":true}),
                         )
                         .err()
                         .map(|e| {
@@ -335,7 +336,7 @@ where
                 tool_progress(AgentProgress::ToolCallStarted { name: name.clone() });
                 let started = checkpoint(
                     messages,
-                    serde_json::json!({"type":"tool_started","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"input":input,"authorization":"subagent-tools-only"}),
+                    serde_json::json!({"type":"tool_started","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"authorization":"subagent-tools-only"}),
                 );
                 let report = match started {
                     Err(e) => Err(ToolError::Message(format!(
@@ -362,11 +363,14 @@ where
                     &name,
                     &input,
                     ctx.control,
+                    ctx.settings,
                     &mut tool_progress,
-                    &mut || {
+                    &mut |authorization| {
+                        // The input is already in the message; the event
+                        // records only what decided the call.
                         checkpoint(
                             messages,
-                            serde_json::json!({"type":"tool_started","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"input":input,"authorization":if matches!(name.as_str(),"run_command"|"git_commit"){"human-approved-once"}else{"workspace-file-policy"}}),
+                            serde_json::json!({"type":"tool_started","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"authorization":authorization}),
                         )
                     },
                 )
@@ -589,6 +593,7 @@ mod tests {
             tools: &tools,
             subagents: &subagents,
             control: &control,
+            settings: &crate::settings::Settings::default(),
             workspace_root: workspace.path(),
             clock: ActivityClock::start(0),
         };

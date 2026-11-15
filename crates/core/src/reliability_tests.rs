@@ -489,12 +489,13 @@ fn failed_execution_intent_after_approval_has_no_side_effects() {
         "run_command",
         &json!({"command":["touch","must-not-exist"]}),
         &control,
+        &crate::settings::Settings::default(),
         &mut |e| {
             if let AgentProgress::ApprovalRequested { request_id, .. } = e {
                 control.answer_approval(request_id, true);
             }
         },
-        &mut || Err(std::io::Error::other("injected disk failure")),
+        &mut |_| Err(std::io::Error::other("injected disk failure")),
     );
     assert!(matches!(
         result,
@@ -972,4 +973,106 @@ fn delete_refuses_a_session_path_that_is_a_symlink() {
 
     assert!(agent.delete_session("20000101-000000-0000").is_err());
     assert!(outside.path().join("keep").exists());
+}
+
+fn run_with_settings(
+    root: &std::path::Path,
+    settings: &crate::settings::Settings,
+    control: &TaskControl,
+    name: &str,
+    input: serde_json::Value,
+    on_progress: &mut dyn FnMut(AgentProgress),
+) -> (bool, String) {
+    match crate::tools::run_tool_call_checkpointed(
+        root,
+        "call",
+        name,
+        &input,
+        control,
+        settings,
+        &mut |event| on_progress(event),
+        &mut |_| Ok(()),
+    ) {
+        ContentBlock::ToolResult {
+            content, is_error, ..
+        } => (is_error != Some(true), content),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn auto_approved_commands_run_unasked_without_secrets_or_host_run_files() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join(".env"), "TOKEN=fake-secret\n").unwrap();
+    std::fs::write(root.path().join("build.rs"), "fn main() {}\n").unwrap();
+    let (settings, _) =
+        crate::settings::Settings::from_toml("[approval]\ncommands = \"auto\"", None).unwrap();
+    let control = TaskControl::default();
+    let mut asked = false;
+    let (_, output) = run_with_settings(
+        root.path(),
+        &settings,
+        &control,
+        "run_command",
+        json!({"command": ["sh", "-c", "cat .env; echo changed > build.rs; echo ok > out.txt"]}),
+        &mut |event| asked |= matches!(event, AgentProgress::ApprovalRequested { .. }),
+    );
+    assert!(!asked);
+    assert!(!output.contains("fake-secret"), "{output}");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("build.rs")).unwrap(),
+        "fn main() {}\n"
+    );
+    assert!(root.path().join("out.txt").exists());
+}
+
+#[test]
+fn a_session_grant_stops_asking_for_the_same_command_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    let settings = crate::settings::Settings::default();
+    let control = TaskControl::default();
+    control.enable_interactive_approval();
+    let mut asked = 0;
+    for _ in 0..2 {
+        let (ok, _) = run_with_settings(
+            root.path(),
+            &settings,
+            &control,
+            "run_command",
+            json!({"command": ["touch", "marker"]}),
+            &mut |event| {
+                if let AgentProgress::ApprovalRequested {
+                    request_id,
+                    session_option,
+                    ..
+                } = event
+                {
+                    asked += 1;
+                    assert!(session_option.unwrap().contains("`touch marker`"));
+                    control.answer(request_id, crate::ApprovalAnswer::AllowForSession);
+                }
+            },
+        );
+        assert!(ok);
+    }
+    assert_eq!(asked, 1);
+}
+
+#[test]
+fn without_a_ui_a_call_that_needs_approval_says_how_to_allow_it() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join(".env"), "TOKEN=fake-secret\n").unwrap();
+    let settings = crate::settings::Settings::default();
+    let control = TaskControl::default();
+    for (name, input) in [
+        ("run_command", json!({"command": ["touch", "marker"]})),
+        ("read_file", json!({"path": ".env"})),
+    ] {
+        let (ok, output) =
+            run_with_settings(root.path(), &settings, &control, name, input, &mut |_| {});
+        assert!(!ok);
+        assert!(output.contains("config.toml"), "{output}");
+        assert!(!output.contains("fake-secret"));
+    }
+    assert!(!root.path().join("marker").exists());
 }

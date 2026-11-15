@@ -4,7 +4,7 @@ pub(crate) mod text_layout;
 pub(crate) mod theme;
 
 use crate::app::{App, InputMode};
-use crate::approval::{ApprovalChoice, ApprovalPrompt};
+use crate::approval::ApprovalPrompt;
 use crate::model_picker::{ModelPicker, model_label};
 use crate::transcript::transcript_window_start;
 use crate::view::text_layout::*;
@@ -83,7 +83,7 @@ fn approval_lines(prompt: &ApprovalPrompt, width: u16) -> Vec<Line<'static>> {
         .map(|row| Line::from(Span::styled(format!(" {row}"), Style::default().fg(TEXT))))
         .collect::<Vec<_>>();
     lines.push(Line::from(""));
-    for (index, choice) in ApprovalChoice::ALL.into_iter().enumerate() {
+    for (index, choice) in prompt.choices().into_iter().enumerate() {
         let selected = choice == prompt.choice;
         let (marker, style) = if selected {
             ("❯", Style::default().fg(LILAC).add_modifier(Modifier::BOLD))
@@ -91,7 +91,7 @@ fn approval_lines(prompt: &ApprovalPrompt, width: u16) -> Vec<Line<'static>> {
             (" ", Style::default().fg(SOFT))
         };
         lines.push(Line::from(Span::styled(
-            format!(" {marker} {}. {}", index + 1, choice.label()),
+            format!(" {marker} {}. {}", index + 1, prompt.label(choice)),
             style,
         )));
     }
@@ -672,6 +672,7 @@ mod tests {
             "git_commit".into(),
             "fix parser".into(),
             long_commit_review(),
+            None,
         );
 
         let rows = render_at(&app, 80, 24);
@@ -719,6 +720,7 @@ mod tests {
             "run_command".into(),
             "cargo test".into(),
             "Approve sandboxed command: run_command".into(),
+            None,
         );
         let rows = render(&app);
         let top = rows

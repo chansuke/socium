@@ -27,7 +27,7 @@ pub struct TranscriptEntry {
 
 /// The tool calls that ran after a human approved them, as the turn
 /// records them at the execution boundary.
-const HUMAN_APPROVED: &str = "human-approved-once";
+const HUMAN_APPROVED: &[&str] = &[crate::tools::HUMAN_APPROVED, "human-approved-once"];
 
 /// One tool call and its result. `approved` marks a call that ran after
 /// the human allowed it.
@@ -96,7 +96,11 @@ pub(crate) fn transcript_entries(messages: &[Message], events: &[Value]) -> Vec<
     for event in events {
         let body = event_body(event);
         match body["type"].as_str() {
-            Some("tool_started") if body["authorization"] == HUMAN_APPROVED => {
+            Some("tool_started")
+                if body["authorization"]
+                    .as_str()
+                    .is_some_and(|value| HUMAN_APPROVED.contains(&value)) =>
+            {
                 if let Some(id) = body["tool_call_id"].as_str() {
                     approved.insert(id);
                 }

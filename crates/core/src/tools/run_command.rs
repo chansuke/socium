@@ -18,9 +18,33 @@ impl Tool for RunCommandTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::Custom(CustomToolDefinition {
+        definition(crate::settings::DEFAULT_MAX_COMMAND_TIMEOUT)
+    }
+
+    fn run(
+        &self,
+        ctx: &ToolContext<'_>,
+        input: &Value,
+        on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> Result<String, ToolError> {
+        let mut forward = |progress| on_progress(progress);
+        run_command_controlled(
+            ctx.workspace_root,
+            input,
+            ctx.control,
+            &ctx.settings.sandbox,
+            ctx.restrictions,
+            &mut forward,
+        )
+    }
+}
+
+/// The tool definition with the user's longest allowed timeout.
+pub(crate) fn definition(max_timeout: Duration) -> ToolDefinition {
+    let max_ms = max_timeout.as_millis();
+    ToolDefinition::Custom(CustomToolDefinition {
             name: "run_command".to_string(),
-            description: "Run an explicitly human-approved command in the Linux OS sandbox. Pass executable and arguments as an array. Workspace files are writable; existing Git metadata is read-only and agent state is hidden. System runtimes are read-only. Network, host HOME, credentials and other host paths are unavailable. No unconfined fallback. Use git_commit for approved commits."
+            description: "Run a command in the Linux OS sandbox. Pass the executable and its arguments as an array; nothing is interpreted by a shell unless you run one. Workspace files are writable; Git metadata is read-only and agent state is hidden. System runtimes and directories the user exposed are read-only. There is no network, and the host HOME and credentials are unavailable. Depending on the user's settings the command runs at once or after the user approves it; a denied command must not be retried. Output beyond the limit is cut from the middle and saved in full under .socium/outputs. Use git_commit for commits."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -39,7 +63,7 @@ impl Tool for RunCommandTool {
                     },
                     "timeout_ms": {
                         "type": "integer",
-                        "description": format!("Optional timeout in milliseconds. Must be between 1 and {MAX_COMMAND_TIMEOUT_MS}.")
+                        "description": format!("Optional timeout in milliseconds, default {DEFAULT_COMMAND_TIMEOUT_MS}. Must be between 1 and {max_ms}.")
                     }
 
                 },
@@ -47,17 +71,6 @@ impl Tool for RunCommandTool {
                 "additionalProperties": false
             }),
         })
-    }
-
-    fn run(
-        &self,
-        ctx: &ToolContext<'_>,
-        input: &Value,
-        on_progress: &mut dyn FnMut(AgentProgress),
-    ) -> Result<String, ToolError> {
-        let mut forward = |progress| on_progress(progress);
-        run_command_controlled(ctx.workspace_root, input, ctx.control, &mut forward)
-    }
 }
 
 struct CommandExecution {
@@ -79,13 +92,13 @@ struct RunCommandInput<'a> {
 }
 
 impl<'a> RunCommandInput<'a> {
-    fn parse(input: &'a Value) -> Result<Self, ToolError> {
+    fn parse(input: &'a Value, max_timeout: Duration) -> Result<Self, ToolError> {
         let input_object = input
             .as_object()
             .ok_or("run_command requires an object input")?;
         let command = require_string_array_field(input_object, "command", "run_command")?;
         let cwd = optional_string_field(input_object, "cwd", "run_command cwd")?.unwrap_or(".");
-        let timeout_ms = optional_timeout_ms(input_object)?;
+        let timeout_ms = optional_timeout_ms(input_object, max_timeout.as_millis() as u64)?;
         Ok(Self {
             command,
             cwd,
@@ -107,6 +120,8 @@ where
         workspace_root,
         input,
         &crate::TaskControl::default(),
+        &crate::settings::SandboxSettings::default(),
+        None,
         on_progress,
     )
 }
@@ -115,6 +130,8 @@ fn run_command_controlled<F>(
     workspace_root: &Path,
     input: &Value,
     control: &crate::TaskControl,
+    sandbox: &crate::settings::SandboxSettings,
+    restrictions: Option<&crate::approval::Restrictions>,
     on_progress: &mut F,
 ) -> Result<String, ToolError>
 where
@@ -124,12 +141,19 @@ where
         command,
         cwd,
         timeout_ms,
-    } = RunCommandInput::parse(input)?;
+    } = RunCommandInput::parse(input, sandbox.max_command_timeout)?;
     let resolved_cwd = resolve_workspace_command_cwd(workspace_root, cwd)?;
     on_progress(AgentProgress::CommandStarted {
         command: display_command(&command),
         cwd: cwd.to_string(),
     });
+    let mut policy = ExecutionPolicy::new(workspace_root, WorkspaceAccess::Write)
+        .map_err(|e| e.to_string())?
+        .with_settings(sandbox);
+    if let Some(restrictions) = restrictions {
+        policy.hidden = restrictions.hidden.clone();
+        policy.frozen = restrictions.frozen.clone();
+    }
     let execution = execute_command(
         &command,
         &resolved_cwd,
@@ -137,6 +161,7 @@ where
         timeout_ms,
         control,
         workspace_root,
+        &policy,
         on_progress,
     )?;
     on_progress(AgentProgress::CommandFinished {
@@ -159,6 +184,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_command(
     command: &[String],
     cwd: &Path,
@@ -166,6 +192,7 @@ fn execute_command(
     timeout_ms: u64,
     control: &crate::TaskControl,
     workspace_root: &Path,
+    policy: &ExecutionPolicy,
     on_progress: &mut dyn FnMut(AgentProgress),
 ) -> Result<CommandExecution, String> {
     use std::io::Write;
@@ -213,9 +240,7 @@ fn execute_command(
         }
         Ok(())
     };
-    let policy =
-        ExecutionPolicy::new(workspace_root, WorkspaceAccess::Write).map_err(|e| e.to_string())?;
-    let output=crate::process::run_observed(command,cwd,Duration::from_millis(timeout_ms),control,&mut observer, &policy)
+    let output=crate::process::run_observed(command,cwd,Duration::from_millis(timeout_ms),control,&mut observer, policy)
         .map_err(|e|format!("Command failed or output capture failed: {e}; partial artifacts: {stem}.stdout / {stem}.stderr"))?;
     for file in &files {
         file.sync_all()
