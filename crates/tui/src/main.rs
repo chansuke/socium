@@ -3,6 +3,7 @@ mod agent_task;
 mod app;
 mod approval;
 mod cli;
+mod headless;
 mod input_history;
 mod model_picker;
 mod progress;
@@ -26,12 +27,15 @@ async fn main() -> Result<()> {
         .next()
         .and_then(|arg| Some(Path::new(&arg).file_name()?.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "socium-tui".to_string());
-    let launch = match cli::parse(args) {
-        Ok(Launch::Help) => {
+    let cli::Args { launch, print } = match cli::parse(args) {
+        Ok(cli::Args {
+            launch: Launch::Help,
+            ..
+        }) => {
             println!("{}", cli::usage(&program));
             return Ok(());
         }
-        Ok(launch) => launch,
+        Ok(args) => args,
         Err(message) => {
             eprintln!("{message}\n\n{}", cli::usage(&program));
             std::process::exit(2);
@@ -45,6 +49,9 @@ async fn main() -> Result<()> {
         // A new session opens under the picker; closing it keeps that one.
         Launch::Resume(None) => (SessionStart::New, true),
     };
+    if let Some(prompt) = print {
+        std::process::exit(headless::main(start, &prompt).await);
+    }
     let agent = AgentService::from_current_dir(start).map_err(|err| eyre!(err.to_string()))?;
     let mut app = App::new(agent)?;
     if pick_session {
