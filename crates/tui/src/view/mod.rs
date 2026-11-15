@@ -22,6 +22,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const SLASH_POPUP_MAX_ROWS: usize = 8;
 const COMPOSER_ROWS: u16 = 2;
+/// Lines of a multi-line message shown at once; the rest scroll.
+const COMPOSER_MAX_LINES: usize = 8;
 const APPROVAL_SUMMARY_MAX_ROWS: usize = 3;
 const MODEL_PICKER_MAX_ROWS: usize = 8;
 /// Terminal width from which the Activity pane becomes a right-hand column.
@@ -229,7 +231,8 @@ impl App {
         } else if let Some(picker) = &self.model_picker {
             model_picker_lines(picker, width).len() as u16 + 2
         } else {
-            COMPOSER_ROWS
+            let lines = self.input.split('\n').count().min(COMPOSER_MAX_LINES);
+            COMPOSER_ROWS + lines as u16 - 1
         };
         let areas = layout(frame.area(), self.activity.fullscreen, composer_rows);
 
@@ -415,6 +418,10 @@ impl App {
             return;
         }
         let available_cells = area.width.saturating_sub(2) as usize;
+        if self.input.contains('\n') {
+            self.draw_multiline_composer(frame, area, available_cells);
+            return;
+        }
         let (visible_input, visible_cursor, visible_start) =
             self.visible_input_window(available_cells);
 
@@ -450,6 +457,63 @@ impl App {
 
         if matches!(self.input_mode, InputMode::Editing) {
             frame.set_cursor_position(Position::new(area.x + 2 + visible_cursor as u16, area.y));
+        }
+    }
+
+    /// A message of several lines: the lines around the cursor, each
+    /// scrolled sideways on its own, with a count of hidden ones.
+    fn draw_multiline_composer(&self, frame: &mut Frame, area: Rect, width: usize) {
+        let lines = self.input.split('\n').collect::<Vec<_>>();
+        let before = self
+            .input
+            .chars()
+            .take(self.character_index)
+            .collect::<String>();
+        let cursor_row = before.matches('\n').count();
+        let cursor_column = before
+            .rsplit('\n')
+            .next()
+            .map_or(0, |line| line.chars().count());
+        let first = (cursor_row + 1).saturating_sub(COMPOSER_MAX_LINES);
+        let mut rows = Vec::new();
+        let mut cursor_cell = 0;
+        for (index, line) in lines
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(COMPOSER_MAX_LINES)
+        {
+            let column = if index == cursor_row {
+                cursor_column
+            } else {
+                0
+            };
+            let (visible, cell, _) = visible_window(line, column, width);
+            if index == cursor_row {
+                cursor_cell = cell;
+            }
+            let prefix = if index == 0 { "> " } else { "  " };
+            rows.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(MUTED)),
+                Span::styled(visible, Style::default().fg(MUTED)),
+            ]));
+        }
+        let hidden = lines.len() - rows.len();
+        if hidden > 0 {
+            rows.push(Line::from(Span::styled(
+                format!("  ({hidden} more lines)"),
+                Style::default().fg(SOFT),
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(Text::from(rows)).style(Style::default().bg(BG)),
+            area,
+        );
+        if matches!(self.input_mode, InputMode::Editing) {
+            frame.set_cursor_position(Position::new(
+                area.x + 2 + cursor_cell as u16,
+                area.y + (cursor_row - first) as u16,
+            ));
         }
     }
 
@@ -540,42 +604,7 @@ impl App {
     /// The visible slice of the input, the cursor's cell within it, and the
     /// index of its first char in the whole input.
     fn visible_input_window(&self, width: usize) -> (String, usize, usize) {
-        if width == 0 {
-            return (String::new(), 0, 0);
-        }
-
-        // Terminal cells, not chars: CJK and other wide characters take two
-        // cells, and the cursor must land on the cell after the preceding text.
-        let widths = self
-            .input
-            .chars()
-            .map(|c| c.width().unwrap_or(0))
-            .collect::<Vec<_>>();
-        let cursor = self.character_index.min(widths.len());
-        let cursor_cell = |end: usize| widths.get(end).copied().unwrap_or(1).max(1);
-
-        // Scroll just far enough that the text before the cursor plus the
-        // cursor cell itself fits in the window.
-        let mut start = 0;
-        let mut before_cursor = widths[..cursor].iter().sum::<usize>();
-        while start < cursor && before_cursor + cursor_cell(cursor) > width {
-            before_cursor -= widths[start];
-            start += 1;
-        }
-
-        let mut used = 0;
-        let visible = self
-            .input
-            .chars()
-            .zip(&widths)
-            .skip(start)
-            .take_while(|(_, w)| {
-                used += **w;
-                used <= width
-            })
-            .map(|(c, _)| c)
-            .collect::<String>();
-        (visible, before_cursor, start)
+        visible_window(&self.input, self.character_index, width)
     }
 
     fn visible_transcript(&self, width: usize, height: usize) -> Text<'static> {
@@ -638,6 +667,16 @@ mod tests {
                 row
             })
             .collect()
+    }
+
+    #[test]
+    fn a_message_of_several_lines_shows_each_line() {
+        let mut app = App::for_test();
+        app.insert_text("first line\nsecond line");
+        let rows = render(&app);
+        let first = rows.iter().position(|row| row.starts_with("> first line"));
+        let first = first.expect("first line shown");
+        assert!(rows[first + 1].starts_with("  second line"), "{rows:#?}");
     }
 
     /// A commit review as the core sends it: status, then a long diff.
@@ -1041,4 +1080,44 @@ mod usage_tests {
             "in 0 out 0"
         );
     }
+}
+
+/// The slice of `text` that fits in `width` cells with the cursor (a char
+/// index) visible, the cursor's cell within it, and the index of its
+/// first char.
+fn visible_window(text: &str, cursor: usize, width: usize) -> (String, usize, usize) {
+    if width == 0 {
+        return (String::new(), 0, 0);
+    }
+
+    // Terminal cells, not chars: CJK and other wide characters take two
+    // cells, and the cursor must land on the cell after the preceding text.
+    let widths = text
+        .chars()
+        .map(|c| c.width().unwrap_or(0))
+        .collect::<Vec<_>>();
+    let cursor = cursor.min(widths.len());
+    let cursor_cell = |end: usize| widths.get(end).copied().unwrap_or(1).max(1);
+
+    // Scroll just far enough that the text before the cursor plus the
+    // cursor cell itself fits in the window.
+    let mut start = 0;
+    let mut before_cursor = widths[..cursor].iter().sum::<usize>();
+    while start < cursor && before_cursor + cursor_cell(cursor) > width {
+        before_cursor -= widths[start];
+        start += 1;
+    }
+
+    let mut used = 0;
+    let visible = text
+        .chars()
+        .zip(&widths)
+        .skip(start)
+        .take_while(|(_, w)| {
+            used += **w;
+            used <= width
+        })
+        .map(|(c, _)| c)
+        .collect::<String>();
+    (visible, before_cursor, start)
 }

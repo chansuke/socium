@@ -51,6 +51,12 @@ async fn main() -> Result<()> {
         app.open_session_picker();
     }
     let terminal = ratatui::init();
+    // Pasted text arrives whole, newlines included, instead of as keys
+    // where the first newline would send the message.
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::EnableBracketedPaste
+    );
     // Ratatui's global panic hook restores the terminal. Worker panics are
     // caught and reported through the task channel, so leave the UI running.
     let previous_hook = std::panic::take_hook();
@@ -60,6 +66,10 @@ async fn main() -> Result<()> {
         }
     }));
     let app_result = app.run(terminal).await;
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::DisableBracketedPaste
+    );
     ratatui::restore();
     if let Ok(Some(id)) = &app_result {
         println!("Resume this conversation with: {program} -r {id}");

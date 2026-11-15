@@ -171,6 +171,74 @@ impl App {
         self.refresh_context_metrics();
     }
 
+    /// Inserts pasted text at the cursor, newlines included, with CRLF and
+    /// lone CR turned into LF.
+    pub(crate) fn insert_text(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        if self.history_index.is_some() {
+            self.history_index = None;
+            self.history_draft.clear();
+        }
+        let index = self.byte_index();
+        self.input.insert_str(index, &text);
+        self.character_index += text.chars().count();
+        self.reset_slash_popup();
+        self.refresh_context_metrics();
+    }
+
+    /// Enter ends the message unless it asks for a new line: with Alt or
+    /// Shift, or after a backslash, which works in every terminal.
+    fn enter_wants_newline(&self, modifiers: KeyModifiers) -> bool {
+        modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT)
+            || self
+                .character_index
+                .checked_sub(1)
+                .and_then(|before| self.input.chars().nth(before))
+                == Some('\\')
+    }
+
+    fn insert_newline(&mut self) {
+        if self.character_index > 0
+            && self.input.chars().nth(self.character_index - 1) == Some('\\')
+        {
+            self.delete_char();
+        }
+        self.enter_char('\n');
+    }
+
+    /// Moves the cursor to the same column of the line above (`-1`) or
+    /// below (`1`), as far as that line reaches.
+    fn move_cursor_vertically(&mut self, step: isize) {
+        let chars = self.input.chars().collect::<Vec<_>>();
+        let line_start = |at: usize| {
+            chars[..at]
+                .iter()
+                .rposition(|c| *c == '\n')
+                .map_or(0, |newline| newline + 1)
+        };
+        let start = line_start(self.character_index);
+        let column = self.character_index - start;
+        let target_start = if step < 0 {
+            if start == 0 {
+                return;
+            }
+            line_start(start - 1)
+        } else {
+            match chars[self.character_index..]
+                .iter()
+                .position(|c| *c == '\n')
+            {
+                Some(offset) => self.character_index + offset + 1,
+                None => return,
+            }
+        };
+        let target_end = chars[target_start..]
+            .iter()
+            .position(|c| *c == '\n')
+            .map_or(chars.len(), |offset| target_start + offset);
+        self.character_index = (target_start + column).min(target_end);
+    }
+
     fn byte_index(&self) -> usize {
         self.input
             .char_indices()
@@ -517,7 +585,18 @@ impl App {
                 continue;
             }
 
-            if let Event::Key(key) = event::read()? {
+            let event = event::read()?;
+            if let Event::Paste(text) = &event {
+                if matches!(self.input_mode, InputMode::Editing)
+                    && self.approval.is_none()
+                    && self.model_picker.is_none()
+                    && self.session_picker.is_none()
+                {
+                    self.insert_text(text);
+                }
+                continue;
+            }
+            if let Event::Key(key) = event {
                 if key.kind == KeyEventKind::Press && self.session_picker.is_some() {
                     if self.handle_session_picker_key(key.code, key.modifiers) {
                         terminal.draw(|frame| self.draw(frame))?;
@@ -582,6 +661,9 @@ impl App {
                         KeyCode::Tab => {
                             self.complete_model_alias();
                         }
+                        KeyCode::Enter if self.enter_wants_newline(key.modifiers) => {
+                            self.insert_newline();
+                        }
                         KeyCode::Enter => match self.begin_submit()? {
                             SubmitAction::None => {}
                             SubmitAction::Exit => return Ok(()),
@@ -596,6 +678,12 @@ impl App {
                         },
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             return Ok(());
+                        }
+                        // In a message of several lines the arrows move
+                        // between them; otherwise they recall history.
+                        KeyCode::Up if self.input.contains('\n') => self.move_cursor_vertically(-1),
+                        KeyCode::Down if self.input.contains('\n') => {
+                            self.move_cursor_vertically(1)
                         }
                         KeyCode::Up if self.pending_task.is_none() => self.history_prev(),
                         KeyCode::Down if self.pending_task.is_none() => self.history_next(),
@@ -726,6 +814,44 @@ mod tests {
             .into_iter()
             .map(|command| command.name)
             .collect()
+    }
+
+    #[test]
+    fn a_paste_keeps_every_line_with_unix_line_endings() {
+        // Review N13: only the first pasted line was sent.
+        let mut app = App::for_test();
+        type_text(&mut app, "> ");
+        app.insert_text("first\r\nsecond\rthird");
+        assert_eq!(app.input, "> first\nsecond\nthird");
+        assert_eq!(app.character_index, app.input.chars().count());
+    }
+
+    #[test]
+    fn enter_after_a_backslash_or_with_alt_adds_a_line() {
+        let mut app = App::for_test();
+        type_text(&mut app, "line one\\");
+        assert!(app.enter_wants_newline(KeyModifiers::NONE));
+        app.insert_newline();
+        assert_eq!(app.input, "line one\n");
+        type_text(&mut app, "two");
+        assert!(!app.enter_wants_newline(KeyModifiers::NONE));
+        assert!(app.enter_wants_newline(KeyModifiers::ALT));
+        assert!(app.enter_wants_newline(KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn arrows_move_between_the_lines_of_a_message() {
+        let mut app = App::for_test();
+        app.insert_text("abcd\nef");
+        app.move_cursor_vertically(-1);
+        assert_eq!(app.character_index, 2);
+        app.move_cursor_vertically(-1);
+        assert_eq!(app.character_index, 2);
+        app.character_index = 4;
+        app.move_cursor_vertically(1);
+        assert_eq!(app.character_index, 7, "clamped to the shorter line");
+        app.move_cursor_vertically(1);
+        assert_eq!(app.character_index, 7);
     }
 
     #[test]
