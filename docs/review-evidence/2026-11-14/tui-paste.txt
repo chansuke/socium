@@ -1,0 +1,107 @@
+=== screen after start ===
+Tips for getting started:
+1. Ask questions, edit files, or run commands.
+2. Be specific for the best results.
+3. /help for more information.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+┌ activity · Ctrl+A focus ───────────────────────────────────────────────────────────────────────────────────┐
+│Thoughts, tool calls, and token use appear here                                                             │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+> Ask Socium to inspect files, explain code, or run tasks
+
+/tmp/claude-1000/-home-chansuke-code-myprohost (ask)              local/local-model (68% context left, --) 0/1
+
+=== screen 3 seconds after pasting three lines (tmux paste-buffer -p) ===
+> first pasted line
+
+✦ Socium is thinking · Ctrl+A to follow in activity · esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+┌ activity · thinking · Ctrl+A focus ────────────────────────────────────────────────────────────────────────┐
+│  ━ turn 1  running…                                                                                        │
+│  ◆ round 1  local-model  streaming…                                                                        │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+> Ask Socium to inspect files, explain code, or run tasks
+
+/tmp/claude-1000/-home-chansuke-code-myprohost (ask)              local/local-model (66% context left, --) 203
+
+=== screen after Esc (cancel) ===
+> first pasted line
+
+! Request failed: Task cancelled; completed tool results have been saved
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+┌ activity · Ctrl+A focus ───────────────────────────────────────────────────────────────────────────────────┐
+│  ━ turn 1  ✗ 3.0s                                                                                          │
+│    Task cancelled; completed tool results have been saved                                                  │
+│  ◆ round 1  local-model  usage n/a · 3.0s                                                                  │
+│  • Request failed: Task cancelled; completed tool results have been saved                                  │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+> Ask Socium to inspect files, explain code, or run tasks
+
+/tmp/claude-1000/-home-chansuke-code-myprohost (ask)              local/local-model (66% context left, 2981ms)

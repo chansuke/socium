@@ -1,0 +1,56 @@
+Sources read for the 2026-11-14 review. Nothing outside socium was built or
+run. "read" means the file was read at that commit; "README" means only the
+project's own description was read.
+
+socium
+  ddb44dfbf65867521c3ff6a33aaa7eed2294068a  main when the review started
+  c3b8790af0521244f37bf3f16560162096fa766f  main 8 commits later; first full
+                                            verification
+  2d4ac914051e974efa24b926d96e9b42e97904d5  main 8 more commits later; the
+                                            commit the review judges
+
+pi  https://github.com/earendil-works/pi
+  c1d4b0ac3e35dc4eb1c5d00d90bf54003cf517c0  (2026-11-14)
+  previous review: 682c7b93ce3e0a52b579c2b65b4c06bb392e7180, 176 commits earlier
+  commit subjects since then: docs 66, fix 60, feat 43 (subjects only)
+  read:
+    packages/coding-agent/src/core/tools/truncate.ts   lines 11-13, 78, 168
+    packages/coding-agent/src/core/tools/bash.ts       timeout, fullOutputPath
+    packages/coding-agent/src/core/tools/read.ts       lines 16-17
+    packages/coding-agent/src/core/agent-session.ts    lines 223-250, 439-449
+    packages/coding-agent/src/core/compaction/compaction.ts  lines 122-129, 269
+    packages/coding-agent/src/core/resource-loader.ts  line 213
+    packages/coding-agent/src/core/project-trust.ts    lines 1-40
+    packages/coding-agent/src/core/usage-totals.ts
+    packages/ai/src/api/transform-messages.ts          lines 103-180
+    packages/tui/src/terminal.ts                       line 219
+  README: packages/evals/README.md
+  size: packages/coding-agent/src 74,960 lines of TypeScript;
+        packages/agent, ai and tui src together 31,033
+
+DSH  https://github.com/deepseek-ai/deepseek-harness
+  39163dd30f703a79079e2d2446545cff3c453738  (2026-11-13)
+  previous review: fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159, 1,371 commits earlier
+  non-merge subjects since then: fix 306, test 174, feat 169, docs 113,
+  refactor 101; 66 mention sandbox, approval, permission, compaction or worktree
+  read:
+    packages/sandbox/sandbox-local/src/profiles.ts     lines 30-60
+  README:
+    SAFETY.md
+    packages/sandbox/sandbox-local/README.md
+    packages/interaction/permission-presets/README.md
+    packages/compaction/compaction-tool-result-pruner/README.md
+
+Codex CLI  https://github.com/openai/codex
+  b1573f102413e96a6481087922bf425231222dee  (2026-11-14)
+  read:
+    codex-rs/linux-sandbox/src/seccomp.rs              lines 236-280
+
+Anthropic API
+  https://platform.claude.com/docs/en/build-with-claude/streaming
+    fetched 2026-11-14; the sentence on unknown event types
+  claude-api reference bundled with Claude Code (cached 2026-10-06):
+    model table (context window, prices), shared/model-migration.md
+    (thinking blocks across models and after history edits, client-side
+    compaction, text editor tool versions), prompt caching quick reference.
+    Not compared with the live site or the live API.

@@ -1,0 +1,105 @@
+Aggregates of real use and of the review host, collected 2026-11-14.
+Counts, sizes, timings and error classes only. No conversation text, prompts,
+tool output or key material is reproduced here.
+
+Source: .socium/ in the repository working tree (pre-session layout, written
+by socium builds before c3b8790), read only.
+
+== .socium/activity.jsonl (100,119 bytes) ==
+
+Event counts
+  round_started 53, round_finished 53, turn_started 28, turn_finished 28
+  tool_started 34, tool_finished 34, approval_waiting 8, approval_resolved 8
+
+Tool results (name, failed)
+  apply_patch                  1 ok
+  git_status                   2 ok
+  list_files                   5 ok
+  read_file                    5 ok
+  search_text                  4 ok
+  str_replace_based_edit_tool  9 ok
+  run_command                  4 ok, 4 failed
+
+Approvals (approved, waited)
+  true  3,050 ms      true  3,973 ms      true  8,067 ms
+  true 16,854 ms      true 24,846 ms      true 61,755 ms
+  false 10,014 ms (answered)
+  false 120,012 ms (no answer: the 120 second limit)
+
+Turns
+  11 ok, 17 failed
+  failed, by error class:
+    11  zai API error 401 (authentication)
+     2  zai API error 429 (insufficient balance)
+     2  openai API error 400 (function tools with reasoning_effort on
+        /v1/chat/completions)
+     1  openai API error 429 (insufficient quota)
+     1  stop reason max_tokens
+
+Rounds by stop reason
+  tool_use 25, end_turn 11, max_tokens 1, none (failed request) 16
+
+Token use by model (rounds that reported usage)
+  model            rounds  input    output  cache_read  cache_write
+  claude-opus-5-5  28      688,901  23,064  0           0
+  deepseek-flash    6       28,808     912  138,496     0
+  glm-5.3           1       26,914     544  0           0
+  gpt-6-astra       2            6      40  28,320      28,336
+
+  claude-opus-5-5: summing, for every round after the first of its turn, the
+  input of the round before it gives 500,459 tokens. That is the part of the
+  688,901 that repeated the previous request of the same turn.
+
+Slowest rounds (all claude-opus-5-5)
+  48,497 ms for 5,216 output tokens (first token after 1,800 ms)
+  25,132 ms for 3,000 output tokens
+  22,961 ms for 2,984 output tokens
+
+== .socium/conversation.json (174,017 bytes on disk) ==
+
+  messages: 93, 80,538 bytes when serialized compactly
+  events:  165, 44,495 bytes, of which 21,031 bytes are the inputs repeated
+           in tool_started events
+
+== .socium/edit_history.json (114,287 bytes on disk) ==
+
+  records: 9, all complete; 88,402 bytes when serialized compactly
+
+== .socium/outputs/ ==
+
+  12 files from 6 commands on 2026-11-13. One stderr (6,144 bytes) is rustc
+  reporting: could not exec the linker `cc`, Operation not permitted
+  (os error 1). The same error is reproduced in repros.log (R6).
+
+== Review host (Ubuntu 24.04.4 LTS) ==
+
+  /proc/sys/kernel/apparmor_restrict_unprivileged_userns = 1
+
+  bubblewrap 0.12.0 is present at three store paths:
+    /nix/store/8l0ndczj...-bubblewrap-0.12.0   socium dev shell
+    /nix/store/zri6pfys...-bubblewrap-0.12.0   another tool
+    /nix/store/3hqwbwxi...-bubblewrap-0.12.0   first on the login PATH
+  AppArmor profiles granting userns: socium-nix-bwrap and codex-nix-bwrap,
+  each for one exact store path. The third path has none. A profile for
+  another program on this host uses a glob over the store hash instead.
+
+  Programs of the same name inside and outside the sandbox PATH filter.
+  The filter drops PATH entries under $HOME that do not resolve into a
+  system runtime directory, so the next install of that name answers:
+    python3  first on PATH: ~/.local/share/mise/... 3.13.0
+             inside the sandbox: 3.13.11 from /nix/store (repros.log, R6)
+             also present: /usr/bin/python3 3.12.3
+    node     first on PATH: ~/.local/share/mise/... v24.22.1
+             inside the sandbox: v24.22.1 from ~/.nix-profile, which resolves
+             into /nix/store; the same version here by coincidence
+             also present: /usr/bin/node v18.19.1
+
+  Linked worktrees of this repository (their .git is a gitfile):
+    ../socium-wt/add-resume, ../socium-wt/add-subagent,
+    ../socium-wt/clear-activity
+
+== GitHub issue state (gh issue list, 2026-11-14) ==
+
+  Open although implemented in the code: #68 (SOC-016), #80 (SOC-028),
+  #93 (SOC-040). Closed: #53-#64, #76, #78, #86, #91, #92, #106, #107.
+  All other SOC issues are open.

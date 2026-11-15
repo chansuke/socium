@@ -24,10 +24,12 @@ Start with the [README](../README.md) for installation and everyday use.
 
 ## Historical evidence
 
-The [2026-11-11 comparison review](review-socium-pi-dsh-2026-11-11.md) and its
-[reproduction files](review-evidence/2026-11-11/) describe the reviewed commit,
-not the current release. The reproduction assertions intentionally demonstrate
-old failures and are not part of the current test suite.
+The [2026-11-11 comparison review](review-socium-pi-dsh-2026-11-11.md) and the
+[2026-11-14 review](review-socium-2026-11-14.md) (in Japanese), with their
+reproduction files ([2026-11-11](review-evidence/2026-11-11/),
+[2026-11-14](review-evidence/2026-11-14/)), describe the reviewed commits, not
+the current release. The reproduction assertions intentionally demonstrate old
+failures and are not part of the current test suite.
 
 The [first reliability milestone](daily-reliability-validation.md) records what
 PR #94 validated. Subsequent changes and test counts are documented in their PRs.
