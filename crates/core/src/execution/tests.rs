@@ -555,3 +555,87 @@ fn hidden_files_read_empty_and_frozen_paths_refuse_writes() {
         "fn main() {}\n"
     );
 }
+
+#[test]
+fn a_linked_worktree_runs_git_with_its_metadata_protected() {
+    let parent = tempfile::tempdir().unwrap();
+    let main = parent.path().join("main");
+    fs::create_dir(&main).unwrap();
+    crate::test_support::init_git_repo(&main);
+    let linked = parent.path().join("linked");
+    crate::test_support::run_git(
+        &main,
+        &["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
+    );
+    let read_only = ExecutionPolicy::new(&linked, WorkspaceAccess::Write).unwrap();
+    success(run_with(
+        &read_only,
+        &linked,
+        &["git", "status", "--short"],
+        10,
+    ));
+    for command in [
+        "echo 'gitdir: /tmp' > .git",
+        &format!("echo tampered > {}/config", main.join(".git").display()),
+    ] {
+        assert!(
+            !run_with(&read_only, &linked, &["sh", "-c", command], 5)
+                .status
+                .success(),
+            "{command}"
+        );
+    }
+    // The main checkout's files stay invisible: only its Git directory is
+    // mounted.
+    assert!(
+        !run_with(
+            &read_only,
+            &linked,
+            &["cat", main.join("tracked.txt").to_str().unwrap()],
+            5
+        )
+        .status
+        .success()
+    );
+    let commit = ExecutionPolicy::new(&linked, WorkspaceAccess::GitCommit).unwrap();
+    success(run_with(
+        &commit,
+        &linked,
+        &["git", "commit", "--allow-empty", "-m", "from the worktree"],
+        10,
+    ));
+    assert_eq!(
+        crate::test_support::git_stdout(&main, &["log", "-1", "--format=%s", "feature"]).trim(),
+        "from the worktree"
+    );
+}
+
+#[test]
+fn a_gitfile_that_is_not_a_real_linked_worktree_is_refused() {
+    let parent = tempfile::tempdir().unwrap();
+    let main = parent.path().join("main");
+    fs::create_dir(&main).unwrap();
+    crate::test_support::init_git_repo(&main);
+    let linked = parent.path().join("linked");
+    crate::test_support::run_git(
+        &main,
+        &["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
+    );
+    let gitdir = main.join(".git/worktrees/linked");
+    let impostor = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    for target in [
+        // Another worktree's metadata: its backlink names the real one.
+        gitdir.to_string_lossy().into_owned(),
+        // A directory that is not Git metadata at all.
+        elsewhere.path().to_string_lossy().into_owned(),
+        "/".into(),
+    ] {
+        fs::write(impostor.path().join(".git"), format!("gitdir: {target}\n")).unwrap();
+        let policy = ExecutionPolicy::new(impostor.path(), WorkspaceAccess::ReadOnly).unwrap();
+        assert!(
+            SandboxExecutor::command(&policy, &["true".into()], impostor.path()).is_err(),
+            "{target}"
+        );
+    }
+}

@@ -228,18 +228,30 @@ pub(super) fn command(
     let git = root.join(".git");
     match git.symlink_metadata() {
         // A symlink itself could be unlinked even when its target is mounted
-        // read-only; gitfiles/commondir can also redirect to other metadata.
-        // Support ordinary checkouts only, rather than pretend those layouts
-        // inherit the same metadata protection.
-        Ok(meta) if !meta.file_type().is_dir() || git.join("commondir").exists() => {
-            return Err(io::Error::other(
-                "sandbox requires an ordinary .git directory; linked worktrees, gitfiles and symlinked metadata are unsupported",
-            ));
-        }
-        Ok(_) => {
+        // read-only, and commondir in a plain directory redirects to other
+        // metadata. Neither layout gets the same protection, so both fail.
+        Ok(meta) if meta.file_type().is_dir() && !git.join("commondir").exists() => {
             if policy.access != WorkspaceAccess::GitCommit {
                 cmd.arg("--ro-bind").arg(&git).arg(&git);
             }
+        }
+        Ok(meta) if meta.file_type().is_file() => {
+            // A linked worktree: its metadata lives in the main checkout's
+            // Git directory, which is mounted like an ordinary `.git`. The
+            // gitfile itself is never writable, so it cannot be redirected.
+            let common = linked_worktree_common_dir(root, &git)?;
+            let mode = if policy.access == WorkspaceAccess::GitCommit {
+                "--bind"
+            } else {
+                "--ro-bind"
+            };
+            cmd.arg(mode).arg(&common).arg(&common);
+            cmd.arg("--ro-bind").arg(&git).arg(&git);
+        }
+        Ok(_) => {
+            return Err(io::Error::other(
+                "sandbox requires an ordinary .git directory or a linked worktree; symlinked metadata, submodule gitfiles and redirected layouts are unsupported",
+            ));
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
@@ -297,6 +309,68 @@ pub(super) fn command(
         });
     }
     Ok(cmd)
+}
+
+/// The main checkout's Git directory for a linked worktree at `root`, after
+/// checking every link `git worktree add` creates: the gitfile names a
+/// directory under `<common>/worktrees/`, that directory's `gitdir` file
+/// points back to this gitfile, and its `commondir` names `<common>`. A
+/// gitfile written by hand (or by a hostile repository) to expose some other
+/// directory fails these checks, so nothing outside a real Git directory is
+/// ever mounted.
+fn linked_worktree_common_dir(root: &Path, gitfile: &Path) -> io::Result<PathBuf> {
+    let refused = |reason: &str| {
+        io::Error::other(format!(
+            "sandbox supports a gitfile only for a linked worktree created by `git worktree add`: {reason}"
+        ))
+    };
+    let read = |path: &Path| -> io::Result<String> {
+        use std::io::Read;
+        let mut text = String::new();
+        fs::File::open(path)?.take(4096).read_to_string(&mut text)?;
+        Ok(text.trim().to_string())
+    };
+    let gitfile_text = read(gitfile)?;
+    let target = gitfile_text
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .ok_or_else(|| refused("`.git` is not a gitfile"))?;
+    let gitdir = root
+        .join(target)
+        .canonicalize()
+        .map_err(|_| refused("its gitdir does not exist"))?;
+    let back =
+        PathBuf::from(read(&gitdir.join("gitdir")).map_err(|_| refused("no gitdir backlink"))?);
+    let back = if back.is_absolute() {
+        back
+    } else {
+        gitdir.join(back)
+    };
+    if back.canonicalize().ok().as_deref() != Some(gitfile.canonicalize()?.as_path()) {
+        return Err(refused("its gitdir belongs to another worktree"));
+    }
+    let common = read(&gitdir.join("commondir")).map_err(|_| refused("no commondir"))?;
+    let common = gitdir
+        .join(common)
+        .canonicalize()
+        .map_err(|_| refused("its commondir does not exist"))?;
+    if gitdir.parent() != Some(common.join("worktrees").as_path())
+        || !common.join("objects").is_dir()
+        || !common.join("HEAD").is_file()
+    {
+        return Err(refused("its metadata is not laid out as Git creates it"));
+    }
+    if common.starts_with(root) {
+        return Err(refused("its metadata is inside the worktree"));
+    }
+    if overlaps_reserved(&common)
+        || RUNTIMES
+            .iter()
+            .any(|runtime| common.starts_with(runtime) || Path::new(runtime).starts_with(&common))
+    {
+        return Err(refused("its metadata overlaps a reserved sandbox path"));
+    }
+    Ok(common)
 }
 
 /// Whether mounting `path` would replace or cover a mount the sandbox makes
