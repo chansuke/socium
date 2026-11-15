@@ -1,7 +1,7 @@
 //! User settings from `config.toml` in the Socium config directory
 //! (`$XDG_CONFIG_HOME/socium/`, else `~/.config/socium/`, or the file named
 //! by `SOCIUM_CONFIG_FILE`): what sandboxed commands may additionally see,
-//! and when tool calls need the user's approval (ADR 11, ADR 12).
+//! and when tool calls need the user's approval (ADR 12, ADR 13).
 //!
 //! The config directory must lie outside the workspace, so neither the
 //! model's file tools nor its commands can change these settings.

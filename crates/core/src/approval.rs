@@ -1,4 +1,4 @@
-//! Whether a tool call runs, asks the user, or is refused (ADR 12).
+//! Whether a tool call runs, asks the user, or is refused (ADR 13).
 //!
 //! The model's arguments never grant anything. Commands ask by default
 //! (`approval.commands = "ask"`); an allow rule in `config.toml`, a grant the

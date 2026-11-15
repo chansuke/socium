@@ -17,7 +17,7 @@
 | PLAN-05 | 中断 | 完了。SOC-011 / SOC-038。HTTP・承認・コマンドの中断と結果保存を検証。 |
 | PLAN-06 | スラッシュコマンド | 基本操作は実装済み。`crates/tui/src/app.rs`。session操作（`/resume`、`/rename`）はSOC-026で実装。 |
 | PLAN-07 | コスト追跡 | 実装済み。SOC-020。会話の累積トークンと、`models.toml`の`price`がある場合の費用を状態行に出す。 |
-| PLAN-08 | 設定ファイル | 実装済み。モデルは`models.toml` (SOC-015)、サンドボックスと承認は`config.toml` (ADR 11、12)。 |
+| PLAN-08 | 設定ファイル | 実装済み。モデルは`models.toml` (SOC-015)、サンドボックスと承認は`config.toml` (ADR 12、13)。 |
 | PLAN-09 | Extended Thinking | 部分実装。環境変数・stream表示あり。model capability検証はSOC-015、provider契約はSOC-014。 |
 | PLAN-10 | SOCIUM.mdメモリ | SOC-022へ置換。ワークスペース直下の`AGENTS.md` (なければ`CLAUDE.md`) を読む。scope付きの読み込みは未実装。 |
 | PLAN-11 | MCPクライアント | 保留。SOC-036の需要・費用評価後に採否判断。 |

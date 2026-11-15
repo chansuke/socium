@@ -102,7 +102,7 @@ pub(crate) struct Message {
     pub role: Role,
     pub content: MessageContent,
     /// Which provider and model wrote an assistant message. Its thinking is
-    /// sent back only to a provider that can read it (ADR 13); `None` in
+    /// sent back only to a provider that can read it (ADR 14); `None` in
     /// history saved before this was recorded, and on user messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
@@ -184,10 +184,9 @@ pub(crate) fn strip_thinking(messages: &mut [Message]) -> usize {
 
 /// `messages` with the thinking a provider cannot read left out, or `None`
 /// when it can read all of it. The saved history keeps every block, so a
-/// later switch back to the model that wrote them sends them again.
-/// Unreadable blocks always precede readable ones from the current model,
-/// so dropping them only removes a leading run, which keeps later blocks
-/// valid.
+/// later switch back to the model that wrote them sends them again. What is
+/// left out depends only on the destination, so every block the current
+/// model wrote was produced against this same projection and stays valid.
 pub(crate) fn readable_thinking(
     messages: &[Message],
     reads: &dyn Fn(Option<&Origin>) -> bool,
