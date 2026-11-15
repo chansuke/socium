@@ -148,9 +148,22 @@ fn render_tool_entry(body: &str, width: usize, failed: bool) -> Vec<Line<'static
     if !result.is_empty() {
         lines.pop();
         let color = if failed { PINK } else { MUTED };
+        let (summary, diff) = result.split_once('\n').unwrap_or((result, ""));
         lines.extend(render_wrapped_text(
-            result, width, "  ⎿ ", "    ", MUTED, color, None,
+            summary, width, "  ⎿ ", "    ", MUTED, color, None,
         ));
+        // An edit's preview: counts, then diff lines colored by kind.
+        for line in diff.lines() {
+            let color = match line.chars().next() {
+                Some('+') => DIFF_ADDED,
+                Some('-') => PINK,
+                _ => MUTED,
+            };
+            lines.pop();
+            lines.extend(render_wrapped_text(
+                line, width, "    ", "    ", MUTED, color, None,
+            ));
+        }
     }
     lines
 }
@@ -424,6 +437,34 @@ mod tests {
             joined,
             "差分を確認してから承認してください。e\u{301}と👨\u{200d}👩\u{200d}👧も表示します。"
         );
+    }
+
+    #[test]
+    fn an_edit_entry_shows_its_diff_colored_by_kind() {
+        let entry = crate::transcript::ChatEntry {
+            speaker: crate::transcript::Speaker::Tool { failed: false },
+            body: "apply_patch a.rs\nUpdated file: a.rs\nChanged: a.rs (+1 -1)\n@@ -1 +1 @@\n-old\n+new".into(),
+        };
+        let lines = super::render_entry(&entry, 40);
+        let rows = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            [
+                "⏺ apply_patch a.rs",
+                "  ⎿ Updated file: a.rs",
+                "    Changed: a.rs (+1 -1)",
+                "    @@ -1 +1 @@",
+                "    -old",
+                "    +new",
+                ""
+            ]
+        );
+        let color = |row: usize| lines[row].spans[1].style.fg;
+        assert_eq!(color(4), Some(super::PINK));
+        assert_eq!(color(5), Some(super::DIFF_ADDED));
     }
 
     #[test]

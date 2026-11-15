@@ -10,6 +10,7 @@ pub(crate) const MUTED: Color = Color::Rgb(118, 124, 151);
 pub(crate) const BLUE: Color = Color::Rgb(102, 160, 255);
 pub(crate) const LILAC: Color = Color::Rgb(187, 145, 255);
 pub(crate) const PINK: Color = Color::Rgb(232, 126, 169);
+pub(crate) const DIFF_ADDED: Color = Color::Rgb(126, 200, 140);
 pub(crate) const SOFT: Color = Color::Rgb(83, 91, 117);
 pub(crate) const CODE_BORDER: Color = Color::Rgb(104, 94, 72);
 pub(crate) const CODE_TEXT: Color = Color::Rgb(198, 204, 225);

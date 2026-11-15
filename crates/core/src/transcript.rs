@@ -53,6 +53,9 @@ pub(crate) fn tool_entry(
                 text.push('\n');
                 text.push_str(&line);
             }
+            if !failed {
+                text.push_str(&diff_preview(content));
+            }
             failed
         }
         None => {
@@ -64,6 +67,35 @@ pub(crate) fn tool_entry(
         role: TranscriptRole::Tool { failed },
         text,
     }
+}
+
+/// Diff lines an edit shows in the conversation; the tool result has more.
+const PREVIEW_DIFF_LINES: usize = 12;
+
+/// What an edit changed, from the "Changed:" summary and the unified diff
+/// that edit results end with: the counts, then the first changed lines,
+/// each on its own line after a newline. Empty for other results.
+fn diff_preview(content: &str) -> String {
+    let Some(start) = content.find("\nChanged: ") else {
+        return String::new();
+    };
+    let mut lines = content[start + 1..].lines();
+    let mut preview = format!("\n{}", lines.next().unwrap_or_default());
+    let body = lines
+        .filter(|line| !line.starts_with("--- ") && !line.starts_with("+++ "))
+        .take_while(|line| line.starts_with(['@', '+', '-', ' ', '\\']))
+        .collect::<Vec<_>>();
+    for line in body.iter().take(PREVIEW_DIFF_LINES) {
+        preview.push('\n');
+        preview.push_str(line);
+    }
+    if body.len() > PREVIEW_DIFF_LINES {
+        preview.push_str(&format!(
+            "\n… {} more diff lines",
+            body.len() - PREVIEW_DIFF_LINES
+        ));
+    }
+    preview
 }
 
 /// The event's own record: checkpoints nest it under `event`.
@@ -211,6 +243,38 @@ mod tests {
             role,
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn an_edit_shows_its_counts_and_first_diff_lines() {
+        // Review N13: an edit appeared as one "Path: …" line.
+        let mut diff = String::from(
+            "Updated file: a.rs\nChanged: a.rs (+20 -1)\n--- a.rs\n+++ a.rs\n@@ -1 +1,20 @@\n-old\n",
+        );
+        for n in 0..20 {
+            diff.push_str(&format!("+new {n}\n"));
+        }
+        let entry = tool_entry(
+            "apply_patch",
+            &json!({"patch": "*** Begin Patch"}),
+            Some((&diff, false)),
+            false,
+        );
+        let lines = entry.text.lines().collect::<Vec<_>>();
+        assert_eq!(lines[1], "Updated file: a.rs");
+        assert_eq!(lines[2], "Changed: a.rs (+20 -1)");
+        assert_eq!(lines[3], "@@ -1 +1,20 @@");
+        assert_eq!(lines[4], "-old");
+        assert_eq!(lines.len(), 3 + 12 + 1);
+        assert_eq!(lines.last().unwrap(), &"… 10 more diff lines");
+
+        let plain = tool_entry(
+            "read_file",
+            &json!({"path": "a.rs"}),
+            Some(("Path: a.rs", false)),
+            false,
+        );
+        assert_eq!(plain.text.lines().count(), 2);
     }
 
     #[test]
