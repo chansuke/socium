@@ -17,6 +17,7 @@ fn response(calls: &[(&str, serde_json::Value)]) -> ProviderResponse {
                     input: input.clone(),
                 })
                 .collect(),
+            ..Default::default()
         },
         streamed_text: false,
         usage: None,
@@ -1075,4 +1076,50 @@ fn without_a_ui_a_call_that_needs_approval_says_how_to_allow_it() {
         assert!(!output.contains("fake-secret"));
     }
     assert!(!root.path().join("marker").exists());
+}
+
+#[tokio::test]
+async fn a_call_with_unparsable_arguments_is_reported_and_never_runs() {
+    let root = tempfile::tempdir().unwrap();
+    let mut first = response(&[("apply_patch", json!({}))]);
+    first.message.invalid_tool_inputs = vec![("call-0".into(), "EOF while parsing".into())];
+    let provider = ScriptedProvider::new(vec![
+        Ok(first),
+        Ok(text_provider_response("understood", None)),
+    ]);
+    let requests = provider.recorded_requests.clone();
+    let mut agent = AgentService::with_provider(
+        root.path().into(),
+        Box::new(provider),
+        "test".into(),
+        1000,
+        reqwest::Client::new(),
+    );
+    assert_eq!(
+        agent.submit("edit".into()).await.unwrap().text,
+        "understood"
+    );
+    let second = requests.lock().unwrap()[1].to_string();
+    assert!(second.contains("were not valid JSON"), "{second}");
+}
+
+#[tokio::test]
+async fn a_reply_cut_at_the_output_limit_ends_the_turn_with_a_notice() {
+    let root = tempfile::tempdir().unwrap();
+    let mut cut = text_provider_response("partial answer", None);
+    cut.message.stop_reason = Some("max_tokens".into());
+    let mut agent = AgentService::with_provider(
+        root.path().into(),
+        Box::new(ScriptedProvider::new(vec![Ok(cut)])),
+        "test".into(),
+        1000,
+        reqwest::Client::new(),
+    );
+    let reply = agent.submit("long".into()).await.unwrap();
+    assert_eq!(reply.text, "partial answer");
+    assert!(
+        reply.notices[0].contains("output limit"),
+        "{:?}",
+        reply.notices
+    );
 }

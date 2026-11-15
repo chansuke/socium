@@ -30,6 +30,7 @@ pub(crate) fn text_provider_response(text: &str, usage: Option<TokenUsage>) -> P
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+            ..Default::default()
         },
         streamed_text: false,
         usage,

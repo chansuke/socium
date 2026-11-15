@@ -34,6 +34,11 @@ enum AnthropicStreamEvent {
     Ping,
     #[serde(rename = "error")]
     Error { error: AnthropicErrorPayload },
+    /// An event type added after this parser was written. The API's
+    /// versioning policy allows new types; they are skipped, and the block
+    /// and stop checks below still decide whether the response is complete.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +95,10 @@ enum StreamContentBlockStart {
         #[serde(default)]
         input: Value,
     },
+    /// A block type this parser does not know, such as a server tool
+    /// result. Its deltas are skipped and it is left out of the history.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,6 +112,9 @@ enum StreamDelta {
     Signature { signature: String },
     #[serde(rename = "input_json_delta")]
     InputJson { partial_json: String },
+    /// A delta type added later, such as citations; skipped.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Default)]
@@ -123,6 +135,7 @@ enum StreamingContentBlock {
     Thinking(ThinkingBlockState),
     RedactedThinking(String),
     ToolUse(ToolUseBlockState),
+    Ignored,
 }
 
 struct TextBlockState {
@@ -211,7 +224,7 @@ impl StreamingMessageBuilder {
                     usage: self.usage,
                 });
             }
-            AnthropicStreamEvent::Ping => {}
+            AnthropicStreamEvent::Ping | AnthropicStreamEvent::Unknown => {}
             AnthropicStreamEvent::Error { error } => {
                 return Err(ProviderError::Stream(format!(
                     "Anthropic streaming error: {}",
@@ -270,28 +283,9 @@ impl StreamingMessageBuilder {
             .blocks
             .iter()
             .any(|b| matches!(b, Some(StreamingContentBlock::ToolUse(_))));
-        match self.stop_reason.as_deref() {
-            Some("tool_use") if has_tools => {}
-            Some("end_turn" | "stop_sequence") if !has_tools => {}
-            Some("max_tokens") => {
-                return Err(ProviderError::Stream(
-                    "Response stopped at the output token limit (stop reason: max_tokens); \
-                     raise MAX_TOKENS to allow longer responses"
-                        .into(),
-                ));
-            }
-            Some(reason) => {
-                return Err(ProviderError::Stream(format!(
-                    "Response stopped without safe completion (stop reason: {reason})"
-                )));
-            }
-            None => {
-                return Err(ProviderError::Stream(
-                    "Response ended without a stop reason".into(),
-                ));
-            }
-        }
+        crate::providers::stop_reason_allows_release(self.stop_reason.as_deref(), has_tools)?;
         let mut content = Vec::with_capacity(self.blocks.len());
+        let mut invalid_tool_inputs = Vec::new();
         for block in self.blocks {
             let Some(block) = block else {
                 continue;
@@ -309,7 +303,23 @@ impl StreamingMessageBuilder {
                     let input = if state.input_json.trim().is_empty() {
                         state.initial_input
                     } else {
-                        serde_json::from_str(&state.input_json)?
+                        // Eager streaming skips the API's own validation.
+                        // A malformed input is reported back to the model
+                        // as that call's error instead of failing the turn.
+                        match serde_json::from_str::<Value>(&state.input_json) {
+                            Ok(input) if input.is_object() => input,
+                            Ok(_) => {
+                                invalid_tool_inputs.push((
+                                    state.id.clone(),
+                                    "the input is not a JSON object".into(),
+                                ));
+                                Value::Object(Default::default())
+                            }
+                            Err(err) => {
+                                invalid_tool_inputs.push((state.id.clone(), err.to_string()));
+                                Value::Object(Default::default())
+                            }
+                        }
                     };
                     ContentBlock::ToolUse {
                         id: state.id,
@@ -317,9 +327,14 @@ impl StreamingMessageBuilder {
                         input,
                     }
                 }
+                StreamingContentBlock::Ignored => continue,
             });
         }
-        Ok(AgentMessageResponse { content })
+        Ok(AgentMessageResponse {
+            content,
+            stop_reason: self.stop_reason,
+            invalid_tool_inputs,
+        })
     }
 
     fn start_block(
@@ -329,18 +344,19 @@ impl StreamingMessageBuilder {
         on_delta: &mut impl FnMut(ProviderEvent),
     ) {
         ensure_block_capacity(&mut self.blocks, index);
-        on_delta(ProviderEvent::BlockStarted {
-            index,
-            kind: match &content_block {
-                StreamContentBlockStart::Text { .. } => BlockKind::Text,
-                StreamContentBlockStart::Thinking { .. }
-                | StreamContentBlockStart::RedactedThinking { .. } => BlockKind::Thinking,
-                StreamContentBlockStart::ToolUse { id, name, .. } => BlockKind::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                },
-            },
-        });
+        let kind = match &content_block {
+            StreamContentBlockStart::Text { .. } => Some(BlockKind::Text),
+            StreamContentBlockStart::Thinking { .. }
+            | StreamContentBlockStart::RedactedThinking { .. } => Some(BlockKind::Thinking),
+            StreamContentBlockStart::ToolUse { id, name, .. } => Some(BlockKind::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+            }),
+            StreamContentBlockStart::Unknown => None,
+        };
+        if let Some(kind) = kind {
+            on_delta(ProviderEvent::BlockStarted { index, kind });
+        }
         let block = match content_block {
             StreamContentBlockStart::Text { text } => {
                 let separator_pending = self.text_block_count > 0;
@@ -386,6 +402,7 @@ impl StreamingMessageBuilder {
                     input_json: String::new(),
                 })
             }
+            StreamContentBlockStart::Unknown => StreamingContentBlock::Ignored,
         };
         self.blocks[index] = Some(block);
     }
@@ -403,6 +420,7 @@ impl StreamingMessageBuilder {
         };
 
         match (block, delta) {
+            (StreamingContentBlock::Ignored, _) | (_, StreamDelta::Unknown) => {}
             (StreamingContentBlock::Text(state), StreamDelta::Text { text }) => {
                 let emitted = append_text_to_state(state, &text);
                 if !emitted.is_empty() {
@@ -539,8 +557,9 @@ mod tests {
         };
         assert_eq!(
             finish_with("max_tokens"),
-            "Response stopped at the output token limit (stop reason: max_tokens); raise MAX_TOKENS to allow longer responses"
+            "Response stopped at the output token limit (stop reason: max_tokens) while writing a tool call; raise MAX_TOKENS or the model's max_output_tokens"
         );
+        assert!(finish_with("refusal").contains("declined"));
         assert_eq!(
             finish_with("end_turn"),
             "Response stopped without safe completion (stop reason: end_turn)"
@@ -586,10 +605,15 @@ mod tests {
                 },
             ]
         );
-        // The model stopped mid-object: the fragments were shown, but no
-        // tool call is released.
+        // The model stopped mid-object: the fragments were shown, but the
+        // call carries no input and is marked so the turn never runs it.
         stop(&mut b, "tool_use");
-        assert!(b.finish().is_err());
+        let response = b.finish().unwrap();
+        assert!(matches!(
+            &response.content[0],
+            ContentBlock::ToolUse { input, .. } if *input == json!({})
+        ));
+        assert_eq!(response.invalid_tool_inputs[0].0, "t1");
     }
 
     #[test]
@@ -642,6 +666,38 @@ mod tests {
         assert!(
             matches!(&b.finish().unwrap().content[0],ContentBlock::Thinking{signature,..} if signature=="sig")
         );
+    }
+
+    #[test]
+    fn unknown_events_blocks_and_deltas_are_skipped() {
+        let mut b = start();
+        for event in [
+            json!({"type": "some_future_event", "detail": {}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"server_tool_result","data":{}}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"future_delta","x":1}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":"hi"}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{}}}),
+            json!({"type":"content_block_stop","index":1}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+            json!({"type":"message_stop"}),
+        ] {
+            apply(&mut b, event).unwrap();
+        }
+        assert_eq!(
+            b.finish().unwrap().content,
+            [ContentBlock::Text { text: "hi".into() }]
+        );
+    }
+
+    #[test]
+    fn a_text_reply_cut_at_the_limit_is_kept_and_marked() {
+        let mut b = start();
+        apply(&mut b, json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"long answer"}})).unwrap();
+        stop(&mut b, "max_tokens");
+        let response = b.finish().unwrap();
+        assert_eq!(response.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(response.content.len(), 1);
     }
 
     #[test]

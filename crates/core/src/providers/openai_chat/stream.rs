@@ -223,21 +223,8 @@ impl ChatStreamBuilder {
             stop_reason: stop_reason.clone(),
             usage: self.usage,
         });
-        match stop_reason.as_str() {
-            "tool_use" | "end_turn" => {}
-            "max_tokens" => {
-                return Err(ProviderError::Stream(
-                    "Response stopped at the output token limit (finish reason: length); \
-                     raise max_output_tokens or MAX_TOKENS to allow longer responses"
-                        .into(),
-                ));
-            }
-            other => {
-                return Err(ProviderError::Stream(format!(
-                    "Response stopped without safe completion (finish reason: {other})"
-                )));
-            }
-        }
+        crate::providers::stop_reason_allows_release(Some(&stop_reason), has_tools)?;
+        let mut invalid_tool_inputs = Vec::new();
 
         let mut blocks = Vec::with_capacity(1 + self.tool_calls.len());
         if let Some((index, text)) = self.text {
@@ -247,12 +234,19 @@ impl ChatStreamBuilder {
             let input = if call.arguments.trim().is_empty() {
                 Value::Object(Default::default())
             } else {
-                serde_json::from_str(&call.arguments).map_err(|_| {
-                    ProviderError::Stream(format!(
-                        "Arguments of the {} tool call are not valid JSON",
-                        call.name
-                    ))
-                })?
+                match serde_json::from_str::<Value>(&call.arguments) {
+                    Ok(input) if input.is_object() => input,
+                    parsed => {
+                        invalid_tool_inputs.push((
+                            call.id.clone(),
+                            parsed.err().map_or_else(
+                                || "the input is not a JSON object".to_string(),
+                                |err| err.to_string(),
+                            ),
+                        ));
+                        Value::Object(Default::default())
+                    }
+                }
             };
             blocks.push((
                 call.block,
@@ -267,6 +261,8 @@ impl ChatStreamBuilder {
         Ok(ProviderResponse {
             message: AgentMessageResponse {
                 content: blocks.into_iter().map(|(_, block)| block).collect(),
+                stop_reason: Some(stop_reason).filter(|reason| reason == "max_tokens"),
+                invalid_tool_inputs,
             },
             streamed_text: self.streamed_text,
             usage: self.usage,
@@ -462,18 +458,28 @@ mod tests {
 
     #[test]
     fn unsafe_or_incomplete_endings_are_errors() {
+        // A text reply cut at the limit is kept and marked; a tool call cut
+        // there may be truncated, so it is refused.
         let (length, events) = run(&[delta(json!({"content": "cut"}), Some("length"))]);
-        assert!(
-            length
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("output token limit")
+        assert_eq!(
+            length.unwrap().message.stop_reason.as_deref(),
+            Some("max_tokens")
         );
         assert!(events.contains(&ProviderEvent::MessageFinished {
             stop_reason: "max_tokens".into(),
             usage: None
         }));
+        let (cut_call, _) = run(&[delta(
+            json!({"tool_calls": [{"index": 0, "id": "c", "function": {"name": "read_file", "arguments": "{}"}}]}),
+            Some("length"),
+        )]);
+        assert!(
+            cut_call
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("output token limit")
+        );
 
         let (filtered, _) = run(&[delta(json!({}), Some("content_filter"))]);
         assert!(
@@ -481,7 +487,7 @@ mod tests {
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("finish reason: content_filter")
+                .contains("stop reason: content_filter")
         );
 
         let (cut, _) = run(&[delta(json!({"content": "partial"}), None)]);
@@ -492,17 +498,13 @@ mod tests {
                 .contains("without a finish reason")
         );
 
+        // Malformed arguments are that call's problem, not the turn's.
         let (bad_args, _) = run(&[delta(
             json!({"tool_calls": [{"index": 0, "id": "c", "function": {"name": "read_file", "arguments": "{"}}]}),
             Some("tool_calls"),
         )]);
-        assert!(
-            bad_args
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("not valid JSON")
-        );
+        let bad_args = bad_args.unwrap();
+        assert_eq!(bad_args.message.invalid_tool_inputs[0].0, "c");
     }
 
     #[test]

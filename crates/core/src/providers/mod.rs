@@ -151,6 +151,37 @@ pub(crate) fn build_provider(
     }
 }
 
+/// Whether a response with this stop reason may be used. A reply cut at
+/// the output limit is kept when it calls no tool, since its text is
+/// complete as far as it goes; a tool call cut there may be truncated.
+pub(crate) fn stop_reason_allows_release(
+    stop_reason: Option<&str>,
+    has_tools: bool,
+) -> Result<(), ProviderError> {
+    match stop_reason {
+        Some("tool_use") if has_tools => Ok(()),
+        Some("end_turn" | "stop_sequence") if !has_tools => Ok(()),
+        Some("max_tokens") if !has_tools => Ok(()),
+        Some("max_tokens") => Err(ProviderError::Stream(
+            "Response stopped at the output token limit (stop reason: max_tokens) while writing a tool call; \
+             raise MAX_TOKENS or the model's max_output_tokens"
+                .into(),
+        )),
+        Some("refusal") => Err(ProviderError::Stream(
+            "The model declined to continue (stop reason: refusal)".into(),
+        )),
+        Some("model_context_window_exceeded") => Err(ProviderError::Stream(
+            "The request filled the model's context window; run /compact and continue".into(),
+        )),
+        Some(reason) => Err(ProviderError::Stream(format!(
+            "Response stopped without safe completion (stop reason: {reason})"
+        ))),
+        None => Err(ProviderError::Stream(
+            "Response ended without a stop reason".into(),
+        )),
+    }
+}
+
 /// `Authorization: Bearer <key>`, marked sensitive so it is never logged.
 pub(crate) fn bearer(api_key: &str) -> Result<reqwest::header::HeaderValue, ProviderError> {
     let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}"))

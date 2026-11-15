@@ -340,27 +340,10 @@ impl ResponsesStreamBuilder {
             stop_reason: stop_reason.clone(),
             usage: self.usage,
         });
-        match (&outcome, stop_reason.as_str()) {
-            (Outcome::Completed, "tool_use" | "end_turn") => {}
-            (Outcome::Completed, other) => {
-                return Err(ProviderError::Stream(format!(
-                    "Response stopped without safe completion (stop reason: {other})"
-                )));
-            }
-            (Outcome::Incomplete(reason), "max_tokens") => {
-                return Err(ProviderError::Stream(format!(
-                    "Response stopped at the output token limit (incomplete reason: {reason}); \
-                     raise max_output_tokens or MAX_TOKENS to allow longer responses"
-                )));
-            }
-            (Outcome::Incomplete(reason), _) => {
-                return Err(ProviderError::Stream(format!(
-                    "Response stopped without safe completion (incomplete reason: {reason})"
-                )));
-            }
-        }
+        crate::providers::stop_reason_allows_release(Some(&stop_reason), has_tools)?;
 
         let mut blocks = Vec::with_capacity(self.items.len());
+        let mut invalid_tool_inputs = Vec::new();
         for state in self.items {
             match state.kind {
                 ItemKind::Message { text } if !text.is_empty() => {
@@ -383,11 +366,19 @@ impl ResponsesStreamBuilder {
                     let input = if arguments.trim().is_empty() {
                         Value::Object(Default::default())
                     } else {
-                        serde_json::from_str(&arguments).map_err(|_| {
-                            ProviderError::Stream(format!(
-                                "Arguments of the {name} tool call are not valid JSON"
-                            ))
-                        })?
+                        match serde_json::from_str::<Value>(&arguments) {
+                            Ok(input) if input.is_object() => input,
+                            parsed => {
+                                invalid_tool_inputs.push((
+                                    call_id.clone(),
+                                    parsed.err().map_or_else(
+                                        || "the input is not a JSON object".to_string(),
+                                        |err| err.to_string(),
+                                    ),
+                                ));
+                                Value::Object(Default::default())
+                            }
+                        }
                     };
                     blocks.push(ContentBlock::ToolUse {
                         id: call_id,
@@ -398,7 +389,11 @@ impl ResponsesStreamBuilder {
             }
         }
         Ok(ProviderResponse {
-            message: AgentMessageResponse { content: blocks },
+            message: AgentMessageResponse {
+                content: blocks,
+                stop_reason: Some(stop_reason).filter(|reason| reason == "max_tokens"),
+                invalid_tool_inputs,
+            },
             streamed_text: self.streamed_text,
             usage: self.usage,
         })
@@ -697,13 +692,18 @@ mod tests {
     }
 
     #[test]
-    fn the_output_token_limit_is_reported_with_its_reason() {
+    fn a_reply_cut_at_the_output_limit_is_kept_and_marked() {
         let mut events = message_events(0, "partial");
         events.push(incomplete("max_output_tokens"));
         let (result, emitted) = run(&events);
-        let err = result.err().unwrap().to_string();
-        assert!(err.contains("output token limit"), "{err}");
-        assert!(err.contains("max_output_tokens"), "{err}");
+        let response = result.unwrap();
+        assert_eq!(response.message.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(
+            response.message.content,
+            [ContentBlock::Text {
+                text: "partial".into()
+            }]
+        );
         assert!(matches!(
             emitted.last(),
             Some(ProviderEvent::MessageFinished { stop_reason, .. }) if stop_reason == "max_tokens"
@@ -717,7 +717,7 @@ mod tests {
         let err = run(&filtered).0.err().unwrap().to_string();
         assert_eq!(
             err,
-            "Response stopped without safe completion (incomplete reason: content_filter)"
+            "Response stopped without safe completion (stop reason: content_filter)"
         );
 
         let refused = [
@@ -731,10 +731,7 @@ mod tests {
         ];
         let (result, emitted) = run(&refused);
         let err = result.err().unwrap().to_string();
-        assert_eq!(
-            err,
-            "Response stopped without safe completion (stop reason: refusal)"
-        );
+        assert_eq!(err, "The model declined to continue (stop reason: refusal)");
         assert!(matches!(
             emitted.last(),
             Some(ProviderEvent::MessageFinished { stop_reason, .. }) if stop_reason == "refusal"
@@ -767,10 +764,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_arguments_fail_the_response() {
+    fn invalid_arguments_are_reported_for_that_call_only() {
         let mut events = function_call_events(0, r#"{"path":"#);
         events.push(completed());
-        let err = run(&events).0.err().unwrap().to_string();
-        assert!(err.contains("read_file"), "{err}");
+        let response = run(&events).0.unwrap();
+        assert!(matches!(
+            &response.message.content[0],
+            ContentBlock::ToolUse { input, .. } if *input == json!({})
+        ));
+        assert_eq!(response.message.invalid_tool_inputs.len(), 1);
     }
 }

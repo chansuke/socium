@@ -39,9 +39,18 @@ impl<'a> AgentMessageRequest<'a> {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub(crate) struct AgentMessageResponse {
     pub content: Vec<ContentBlock>,
+    /// Why the response ended, in Anthropic's terms, when it ended in a way
+    /// the turn has to handle: `max_tokens` for a reply cut at the output
+    /// limit.
+    #[serde(skip)]
+    pub stop_reason: Option<String>,
+    /// Tool calls whose input was not valid JSON, with the parse error.
+    /// Their `ToolUse` blocks carry an empty object and must not run.
+    #[serde(skip)]
+    pub invalid_tool_inputs: Vec<(String, String)>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]

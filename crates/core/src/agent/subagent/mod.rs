@@ -342,6 +342,7 @@ mod tests {
                         input: input.clone(),
                     })
                     .collect(),
+                ..Default::default()
             },
             streamed_text: false,
             usage: None,

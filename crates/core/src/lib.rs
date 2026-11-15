@@ -145,6 +145,9 @@ impl ModelTarget {
 
 pub struct AgentReply {
     pub text: String,
+    /// What the user should know about how the turn ended, such as an
+    /// answer cut at the output limit.
+    pub notices: Vec<String>,
 }
 
 /// Outcome of a compaction run: how much history the summary now covers
@@ -1152,6 +1155,7 @@ impl AgentService {
         }
         Ok(AgentReply {
             text: outcome.assistant_text_chunks.join("\n"),
+            notices: outcome.notices,
         })
     }
 
@@ -1568,7 +1572,10 @@ mod tests {
 
         fn response(blocks: Vec<ContentBlock>) -> Result<ProviderResponse, ProviderError> {
             Ok(ProviderResponse {
-                message: AgentMessageResponse { content: blocks },
+                message: AgentMessageResponse {
+                    content: blocks,
+                    ..Default::default()
+                },
                 streamed_text: false,
                 usage: None,
             })

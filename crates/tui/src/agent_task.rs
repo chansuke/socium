@@ -208,6 +208,9 @@ impl App {
                         self.push_message(Speaker::Socium, reply.text);
                     }
                 }
+                for notice in reply.notices {
+                    self.push_message(Speaker::System, notice);
+                }
                 self.push_activity("Request completed");
                 self.status = Some("Done".to_string());
             }

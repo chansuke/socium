@@ -41,6 +41,9 @@ pub(crate) struct TurnOutcome {
     /// Usage measured on the last model call of the turn; approximates the
     /// prompt size the next turn will start from.
     pub(crate) last_usage: Option<TokenUsage>,
+    /// Things the user should know about how the turn ended, such as an
+    /// answer cut at the output limit.
+    pub(crate) notices: Vec<String>,
 }
 
 pub(crate) async fn run_agent_turn<F>(
@@ -56,6 +59,7 @@ where
     let mut finished = false;
     let mut assistant_text_chunks = Vec::new();
     let mut last_usage = None;
+    let mut notices = Vec::new();
     let max_rounds = if supports_tools { MAX_TOOL_ROUNDS } else { 1 };
     let clock = ctx.clock;
     for round in 0..max_rounds {
@@ -130,6 +134,20 @@ where
             last_usage = response.usage;
         }
         let assistant_blocks = response.message.content;
+        let invalid_inputs = response.message.invalid_tool_inputs;
+        if response.message.stop_reason.as_deref() == Some("max_tokens") {
+            let notice = format!(
+                "The answer stopped at the output limit of {} tokens; raise MAX_TOKENS or the model's max_output_tokens, or ask it to continue.",
+                ctx.max_tokens
+            );
+            emit(
+                on_progress,
+                ActivityKind::Warning {
+                    message: notice.clone(),
+                },
+            );
+            notices.push(notice);
+        }
 
         let message_text = extract_text(&assistant_blocks);
         if !response.streamed_text && !message_text.is_empty() {
@@ -322,12 +340,21 @@ where
                 }
             };
             let offered = ctx.tools.iter().any(|tool| tool.name() == name);
+            let invalid = invalid_inputs.iter().find(|(invalid, _)| *invalid == id);
             let result = if ctx.control.is_cancelled() {
                 ContentBlock::ToolResult {
                     tool_use_id: id,
                     content: "Cancelled before execution; no side effects".into(),
                     is_error: Some(true),
                 }
+            } else if let Some((_, error)) = invalid {
+                // Never run a call whose arguments did not parse.
+                tool_error(
+                    id,
+                    ToolError::Message(format!(
+                        "The arguments of this {name} call were not valid JSON ({error}); nothing ran. Send the call again with complete arguments."
+                    )),
+                )
             } else if !offered {
                 // A model may name a tool it was not given, such as a
                 // subagent asking for one outside its type.
@@ -417,6 +444,7 @@ where
     Ok(TurnOutcome {
         assistant_text_chunks,
         last_usage,
+        notices,
     })
 }
 
