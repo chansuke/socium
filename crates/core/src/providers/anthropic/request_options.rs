@@ -117,6 +117,12 @@ impl RequestOptions {
         if let Some(effort) = self.effort.filter(|_| features.effort) {
             body["output_config"] = json!({ "effort": effort });
         }
+        // The history only grows (summaries replace a prefix rarely), so the
+        // automatic breakpoint on the last block keeps hitting the cache
+        // from one round to the next.
+        if features.prompt_caching {
+            body["cache_control"] = json!({ "type": "ephemeral" });
+        }
         // Stream tool inputs as they are generated so the Activity pane can
         // show intent early. Anthropic-defined tools have no input schema and
         // keep their default buffering. Execution still waits for the
@@ -165,6 +171,9 @@ mod tests {
         assert!(body.get("output_config").is_none());
         assert_eq!(options.beta_header(ModelFeatures::ALL), None);
         assert!(options.warnings.is_empty());
+        // Review N4: no request asked for caching, so every round paid the
+        // full input price.
+        assert_eq!(body["cache_control"], json!({"type": "ephemeral"}));
     }
 
     #[test]
@@ -239,6 +248,7 @@ mod tests {
 
         assert!(body.get("thinking").is_none());
         assert!(body.get("output_config").is_none());
+        assert!(body.get("cache_control").is_none());
         assert!(body["tools"][0].get("eager_input_streaming").is_none());
         assert_eq!(options.beta_header(ModelFeatures::default()), None);
     }

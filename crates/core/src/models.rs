@@ -73,6 +73,9 @@ pub(crate) struct ModelFeatures {
     pub(crate) effort: bool,
     pub(crate) eager_input_streaming: bool,
     pub(crate) anthropic_text_editor: bool,
+    /// Top-level `cache_control`: the API caches the request up to its last
+    /// block, so each round re-reads the shared history at the cache price.
+    pub(crate) prompt_caching: bool,
 }
 
 impl ModelFeatures {
@@ -81,6 +84,7 @@ impl ModelFeatures {
         effort: true,
         eager_input_streaming: true,
         anthropic_text_editor: true,
+        prompt_caching: true,
     };
 
     fn parse(names: &[String]) -> Result<Self, String> {
@@ -91,9 +95,10 @@ impl ModelFeatures {
                 "effort" => &mut features.effort,
                 "eager_input_streaming" => &mut features.eager_input_streaming,
                 "anthropic_text_editor" => &mut features.anthropic_text_editor,
+                "prompt_caching" => &mut features.prompt_caching,
                 other => {
                     return Err(format!(
-                        "unknown feature '{other}'; expected adaptive_thinking, effort, eager_input_streaming, or anthropic_text_editor"
+                        "unknown feature '{other}'; expected adaptive_thinking, effort, eager_input_streaming, anthropic_text_editor, or prompt_caching"
                     ));
                 }
             };
