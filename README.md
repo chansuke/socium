@@ -27,6 +27,8 @@ library), and install Git, ripgrep, and bubblewrap 0.12 or newer yourself:
 cargo install --locked --git https://github.com/chansuke/socium socium-tui
 ```
 
+The installed command is `socium`.
+
 On Ubuntu 24.04 and later, bubblewrap also needs an AppArmor `userns` profile;
 see the [Linux sandbox guide](docs/linux-sandbox.md#installation-and-support).
 
@@ -35,7 +37,7 @@ see the [Linux sandbox guide](docs/linux-sandbox.md#installation-and-support).
 ```bash
 export ANTHROPIC_API_KEY=...   # or register another provider; see Models below
 cd your-project
-socium-tui
+socium
 ```
 
 Ask for something in the composer and press Enter. Commands ask for your
@@ -79,7 +81,7 @@ defaults to 64000; a model's `max_output_tokens` in `models.toml` wins over it.
 compacted, and `ANTHROPIC_VERSION` sets the `anthropic-version` header
 (default `2023-06-01`). Model names must be available to your API account.
 
-`socium-tui -p "<prompt>"` runs one turn without the terminal UI and prints its
+`socium -p "<prompt>"` runs one turn without the terminal UI and prints its
 progress and result as JSON Lines on standard output (`-p -` reads the prompt
 from standard input). Each line has the schema version in `v` and a `type`:
 `started`, then one `activity` per Activity event, then `finished` with `ok`,

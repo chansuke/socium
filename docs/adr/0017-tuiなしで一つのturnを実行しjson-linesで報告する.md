@@ -28,7 +28,7 @@ socium を動かす経路は TUI だけで、プロンプトや tool の変更�
 
 Chosen option: 「`-p` で 1 turn を実行し、版付きの JSON Lines を出す」。評価と自動化に要るのは 1 つの依頼の結果と経過で、それは ADR 2 の event と同じ事実を流せば足りる。
 
-* `socium-tui -p PROMPT` は、TUI を起動せずに PROMPT を 1 turn として実行する。`-p -` は stdin からプロンプトを読む。`-c` と `-r <ID>` と組み合わせて保存した会話を続けられる。`-r` の選択画面とは組み合わせられない。
+* `socium -p PROMPT` は、TUI を起動せずに PROMPT を 1 turn として実行する。`-p -` は stdin からプロンプトを読む。`-c` と `-r <ID>` と組み合わせて保存した会話を続けられる。`-r` の選択画面とは組み合わせられない。
 * stdout の各行は JSON で、`v` にスキーマの版 (今は 1)、`type` に種類を持つ。
   * `started`: セッション ID とモデルの alias と ID。
   * `activity`: `event` に Activity の event。セッションの activity log と同じ形。

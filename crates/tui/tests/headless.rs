@@ -1,4 +1,4 @@
-//! `socium-tui -p` end to end: the real binary against a local server that
+//! `socium -p` end to end: the real binary against a local server that
 //! speaks the Anthropic streaming format. The environment is cleared, so no
 //! provider key or user configuration is read, and nothing leaves the host.
 use serde_json::{Value, json};
@@ -111,7 +111,7 @@ fn fixture(port: u16) -> Fixture {
 }
 
 fn command(fixture: &Fixture, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_socium-tui"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_socium"));
     command
         .args(args)
         .current_dir(&fixture.workspace)

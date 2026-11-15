@@ -115,7 +115,7 @@
               ];
 
               postFixup = ''
-                wrapProgram "$out/bin/socium-tui" \
+                wrapProgram "$out/bin/socium" \
                   --prefix PATH : "${
                     lib.makeBinPath (
                       [
@@ -138,7 +138,7 @@
       apps = forAllSystems (pkgs: {
         default = {
           type = "app";
-          program = "${self.packages.${pkgs.system}.default}/bin/socium-tui";
+          program = "${self.packages.${pkgs.system}.default}/bin/socium";
         };
       });
 

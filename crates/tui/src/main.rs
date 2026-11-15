@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     let program = args
         .next()
         .and_then(|arg| Some(Path::new(&arg).file_name()?.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "socium-tui".to_string());
+        .unwrap_or_else(|| "socium".to_string());
     let cli::Args { launch, print } = match cli::parse(args) {
         Ok(cli::Args {
             launch: Launch::Help,

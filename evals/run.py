@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runs each task in evals/tasks with `socium-tui -p` and checks the result.
+"""Runs each task in evals/tasks with `socium -p` and checks the result.
 
 Each task directory holds `task.toml` and a `repo/` that is copied into a
 fresh Git repository for the run. `task.toml` has:
@@ -15,7 +15,7 @@ Every run calls the model you configured, so it costs money. Socium's own
 environment applies (MODEL, keys, models.toml); SOCIUM_CONFIG_FILE defaults to
 evals/config.toml, which lets commands run without asking.
 
-usage: run.py [--binary socium-tui] [--only NAME ...] [--out results.jsonl]
+usage: run.py [--binary socium] [--only NAME ...] [--out results.jsonl]
 """
 import argparse
 import json
@@ -101,7 +101,7 @@ def run_task(name, task, binary, workdir):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--binary", default="socium-tui")
+    parser.add_argument("--binary", default="socium")
     parser.add_argument("--only", nargs="*")
     parser.add_argument("--out", default="results.jsonl")
     args = parser.parse_args()

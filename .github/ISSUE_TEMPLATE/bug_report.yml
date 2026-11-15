@@ -19,7 +19,7 @@ body:
     id: reproduce
     attributes:
       label: How to reproduce
-      description: The smallest steps or workspace that shows it. `socium-tui -p` output (JSON Lines) helps.
+      description: The smallest steps or workspace that shows it. `socium -p` output (JSON Lines) helps.
     validations:
       required: true
   - type: input

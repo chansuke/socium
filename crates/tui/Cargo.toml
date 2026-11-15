@@ -7,6 +7,10 @@ license = "MIT"
 repository = "https://github.com/chansuke/socium"
 description = "Terminal interface for the Socium coding agent"
 
+[[bin]]
+name = "socium"
+path = "src/main.rs"
+
 [dependencies]
 socium-core = { path = "../core" }
 ratatui = "0.30.0"

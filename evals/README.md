@@ -3,11 +3,11 @@
 Fixed tasks for measuring a change to prompts, tools, or limits against the
 same requests. Each task in `tasks/` has a `repo/` copied into a fresh Git
 repository, a `prompt`, and a `check` that passes only when the work is done.
-`run.py` runs Socium on each with `socium-tui -p` (ADR 17) and records the
+`run.py` runs Socium on each with `socium -p` (ADR 17) and records the
 result, rounds, tools, and tokens.
 
 ```sh
-nix develop -c python3 evals/run.py --binary target/debug/socium-tui --out results.jsonl
+nix develop -c python3 evals/run.py --binary target/debug/socium --out results.jsonl
 ```
 
 Every task calls the model you configured, so a run costs money. It uses
