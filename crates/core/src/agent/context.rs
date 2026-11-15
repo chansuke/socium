@@ -107,7 +107,11 @@ pub(crate) fn prepare_context_messages(
     model: &str,
     tools: &[ToolDefinition],
 ) -> io::Result<PreparedContext> {
-    let prepared = prepare_context_with_budget(raw_messages, summary_state, model, budget, tools);
+    let mut prepared =
+        prepare_context_with_budget(raw_messages, summary_state, model, budget, tools);
+    if prepared.metrics.estimated_input_tokens > budget.input_budget_tokens() {
+        prepared = shrink_to_budget(prepared, model, budget, tools);
+    }
     if prepared.metrics.estimated_input_tokens > budget.input_budget_tokens() {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -242,9 +246,19 @@ fn prepare_context_with_budget(
         best = candidate;
     }
 
-    // Still too large: a kept message holds huge tool output. Shrink the
-    // oldest results first. Thinking after a shrunk result was produced
-    // against the full text, so it is not sent.
+    best
+}
+
+/// When even the fewest kept messages are too large, a kept message holds
+/// huge tool output: the oldest results are shrunk first. Thinking after a
+/// shrunk result was produced against the full text, so it is not sent.
+/// Only a request does this; the metrics shown as the user types do not.
+fn shrink_to_budget(
+    mut best: PreparedContext,
+    model: &str,
+    budget: ContextBudget,
+    tools: &[ToolDefinition],
+) -> PreparedContext {
     let limit = budget.input_budget_tokens();
     let mut estimate = best.metrics.estimated_input_tokens;
     for index in 0..best.messages.len() {
@@ -761,6 +775,37 @@ mod tests {
         ));
         assert!(prepared.metrics.summary_active);
         assert!(prepared.metrics.summarized_messages > 0);
+    }
+
+    #[test]
+    fn only_a_request_shrinks_kept_tool_results() {
+        let budget = super::resolve_context_budget(Some(20_000), 1_000);
+        let messages = vec![
+            Message::user_text("read it".into()),
+            Message::assistant_blocks(vec![ContentBlock::ToolUse {
+                id: "t".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({"path": "big"}),
+            }]),
+            Message::user_blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "t".into(),
+                content: "x".repeat(200_000),
+                is_error: None,
+            }]),
+        ];
+        let state = ConversationSummaryState::default();
+        // Shown as the user types: the plain estimate, without the work of
+        // shrinking.
+        let metrics = context_metrics_for_input(&messages, "", &state, budget, "m", &[]).unwrap();
+        assert!(metrics.estimated_input_tokens > metrics.input_budget_tokens);
+        let prepared =
+            super::prepare_context_messages(&messages, &state, budget, "m", &[]).unwrap();
+        assert!(prepared.metrics.estimated_input_tokens <= budget.input_budget_tokens());
+        assert!(
+            serde_json::to_string(&prepared.messages)
+                .unwrap()
+                .contains("omitted to fit the context window")
+        );
     }
 
     #[test]
