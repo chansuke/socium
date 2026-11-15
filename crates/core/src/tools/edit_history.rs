@@ -33,6 +33,41 @@ struct EditHistoryState {
     #[serde(default)]
     records: Vec<EditRecord>,
 }
+/// Undo reaches back this many edits, and no further than this many bytes
+/// of saved file text, so the history never grows into the state limit.
+/// Unfinished records are kept whatever their age: recovery needs them.
+const MAX_EDIT_RECORDS: usize = 200;
+const MAX_EDIT_HISTORY_BYTES: usize = 16 * 1024 * 1024;
+
+impl EditRecord {
+    fn bytes(&self) -> usize {
+        self.changes
+            .iter()
+            .map(|change| {
+                change.path.len()
+                    + change.before.as_ref().map_or(0, String::len)
+                    + change.after.as_ref().map_or(0, String::len)
+            })
+            .sum()
+    }
+}
+
+/// Drops the oldest finished records beyond the limits.
+fn prune(records: &mut Vec<EditRecord>) {
+    let mut bytes: usize = records.iter().map(EditRecord::bytes).sum();
+    let mut count = records.len();
+    records.retain(|record| {
+        let over = count > MAX_EDIT_RECORDS || bytes > MAX_EDIT_HISTORY_BYTES;
+        if over && record.complete {
+            count -= 1;
+            bytes -= record.bytes();
+            false
+        } else {
+            true
+        }
+    });
+}
+
 fn history_path(root: &Path) -> Result<PathBuf, String> {
     crate::agent::state::workspace_state_path(root, "edit_history.json").map_err(|e| e.to_string())
 }
@@ -133,6 +168,7 @@ pub(crate) fn apply_changes(root: &Path, mut changes: Vec<Mutation>) -> Result<(
         changes: changes.clone(),
         complete: false,
     });
+    prune(&mut history.records);
     save_json_file(&path, &history).map_err(|e| e.to_string())?;
     let mut applied = Vec::new();
     for change in &changes {
@@ -152,30 +188,47 @@ pub(crate) fn apply_changes(root: &Path, mut changes: Vec<Mutation>) -> Result<(
 
 pub(crate) fn undo(root: &Path, requested: &str) -> Result<(), String> {
     let target = resolve_workspace_mutation_path(root, requested).map_err(|e| e.to_string())?;
-    let path = history_path(root)?;
-    let mut history: EditHistoryState = load_json_file(&path).map_err(|e| e.to_string())?;
-    if history.schema_version > 1 {
-        return Err("Unsupported edit history schema; original preserved".into());
-    }
-    history.schema_version = 1;
-    let index = history
-        .records
-        .iter()
-        .rposition(|r| {
-            r.changes.iter().any(|c| {
-                resolve_workspace_path_for_create(root, &c.path).is_ok_and(|p| p == target)
-            })
-        })
-        .ok_or_else(|| {
+    undo_where(root, |record| {
+        record
+            .changes
+            .iter()
+            .any(|c| resolve_workspace_path_for_create(root, &c.path).is_ok_and(|p| p == target))
+    })
+    .map_err(|err| {
+        err.unwrap_or_else(|| {
             format!(
                 "No edit history found for '{requested}' (legacy history cannot be safely undone)"
             )
-        })?;
+        })
+    })
+    .map(drop)
+}
+
+/// Undoes the most recent edit, whichever files it changed, and returns
+/// their paths.
+pub(crate) fn undo_last(root: &Path) -> Result<Vec<String>, String> {
+    undo_where(root, |_| true).map_err(|err| err.unwrap_or_else(|| "No edit to undo".to_string()))
+}
+
+/// Undoes the newest record `matches` accepts. `Err(None)` means none did.
+fn undo_where(
+    root: &Path,
+    matches: impl Fn(&EditRecord) -> bool,
+) -> Result<Vec<String>, Option<String>> {
+    let path = history_path(root)?;
+    let mut history: EditHistoryState = load_json_file(&path).map_err(|e| e.to_string())?;
+    if history.schema_version > 1 {
+        return Err(Some(
+            "Unsupported edit history schema; original preserved".into(),
+        ));
+    }
+    history.schema_version = 1;
+    let index = history.records.iter().rposition(matches).ok_or(None)?;
     let record = &history.records[index];
     if !record.complete {
-        return Err(
+        return Err(Some(
             "Incomplete edit or undo; inspect workspace and history before recovery".into(),
-        );
+        ));
     }
     for change in &record.changes {
         check(root, change, &change.after, change.after_mode)?;
@@ -188,20 +241,81 @@ pub(crate) fn undo(root: &Path, requested: &str) -> Result<(), String> {
         let result = check(root, change, &change.after, change.after_mode)
             .and_then(|(path, _)| write(&path, &change.before, change.before_mode));
         if let Err(e) = result {
-            return Err(format!(
+            return Err(Some(format!(
                 "{e}; restored: {restored:?}. Incomplete undo record retained"
-            ));
+            )));
         }
         restored.push(change.path.clone());
     }
     history.records.remove(index);
     save_json_file(&path, &history)
-        .map_err(|e| format!("Undo applied; could not save history: {e}"))
+        .map_err(|e| format!("Undo applied; could not save history: {e}"))?;
+    Ok(restored)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record(bytes: usize, complete: bool) -> EditRecord {
+        EditRecord {
+            changes: vec![Mutation {
+                path: "f".into(),
+                after: Some("x".repeat(bytes)),
+                ..Mutation::default()
+            }],
+            complete,
+        }
+    }
+
+    #[test]
+    fn old_finished_records_are_dropped_and_unfinished_ones_kept() {
+        // Review R2: the history grew until every edit failed at 64 MiB.
+        let mut records = vec![record(10, false)];
+        records.extend((0..300).map(|_| record(10, true)));
+        prune(&mut records);
+        assert_eq!(records.len(), MAX_EDIT_RECORDS);
+        assert!(!records[0].complete, "recovery still needs it");
+
+        let mut records = (0..100)
+            .map(|_| record(1024 * 1024, true))
+            .collect::<Vec<_>>();
+        prune(&mut records);
+        let bytes: usize = records.iter().map(EditRecord::bytes).sum();
+        assert!(bytes <= MAX_EDIT_HISTORY_BYTES, "{bytes}");
+        assert_eq!(records.len(), 15);
+    }
+
+    #[test]
+    fn undo_last_reverts_the_newest_edit_whatever_its_files() {
+        let workspace = crate::test_support::make_temp_dir("undo_last");
+        let root = workspace.path();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        for patch in [
+            "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+two\n*** End Patch",
+            "*** Begin Patch\n*** Add File: b.txt\n+new\n*** Update File: a.txt\n@@\n-two\n+three\n*** End Patch",
+        ] {
+            crate::tools::apply_patch::apply_patch_from_workspace(
+                root,
+                &serde_json::json!({ "patch": patch }),
+            )
+            .unwrap();
+        }
+        let mut restored = undo_last(root).unwrap();
+        restored.sort();
+        assert_eq!(restored, ["a.txt", "b.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "two\n"
+        );
+        assert!(!root.join("b.txt").exists());
+        undo_last(root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(undo_last(root).unwrap_err(), "No edit to undo");
+    }
 
     #[cfg(unix)]
     mod modes {

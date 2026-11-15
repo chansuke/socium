@@ -10,6 +10,7 @@ pub(crate) enum SlashAction {
     Resume,
     Rename,
     Agents,
+    Undo,
     Exit,
 }
 
@@ -69,6 +70,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "agents",
         description: "List saved subagents; /agents <id> shows one's conversation",
         action: SlashAction::Agents,
+        takes_argument: true,
+    },
+    SlashCommand {
+        name: "undo",
+        description: "Revert Socium's last edit; /undo <path> reverts its last edit of that file",
+        action: SlashAction::Undo,
         takes_argument: true,
     },
     SlashCommand {

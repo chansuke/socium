@@ -823,6 +823,26 @@ impl AgentService {
         Ok(())
     }
 
+    /// Reverts Socium's most recent edit, or its most recent edit of
+    /// `path`, when the files still hold what Socium wrote. The model is
+    /// told in the conversation, so it does not build on the reverted text.
+    /// Returns the paths restored.
+    pub fn undo(&mut self, path: Option<&str>) -> Result<Vec<String>, AgentError> {
+        self.ensure_state_lock()?;
+        let restored = match path {
+            Some(path) => crate::tools::edit_history::undo(&self.workspace_root, path)
+                .map(|()| vec![path.to_string()]),
+            None => crate::tools::edit_history::undo_last(&self.workspace_root),
+        }
+        .map_err(std::io::Error::other)?;
+        self.messages.push(Message::user_text(format!(
+            "(The user undid your last edit of {}; those files are back to their content before it.)",
+            restored.join(", ")
+        )));
+        self.persist_state()?;
+        Ok(restored)
+    }
+
     /// Permanently removes another saved session, named by its full ID.
     pub fn delete_session(&mut self, id: &str) -> std::io::Result<()> {
         self.ensure_state_lock()?;

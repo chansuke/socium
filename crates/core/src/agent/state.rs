@@ -254,9 +254,10 @@ where
         ))
     })?;
     if serialized.len() > 64 * 1024 * 1024 {
-        return Err(Error::other(
-            "State exceeds 64 MiB limit; archive the session before continuing",
-        ));
+        return Err(Error::other(format!(
+            "'{}' would exceed the 64 MiB state limit; /clear starts a new conversation",
+            path.display()
+        )));
     }
     atomic_write_impl(
         path,

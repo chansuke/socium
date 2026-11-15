@@ -473,6 +473,15 @@ impl App {
                 );
                 self.status = Some("Subagents".to_string());
             }
+            SlashAction::Undo => {
+                let message = match self.agent_mut()?.undo(argument.as_deref()) {
+                    Ok(paths) => format!("Undid the last edit of {}", paths.join(", ")),
+                    Err(err) => format!("Cannot undo: {err}"),
+                };
+                self.push_message(Speaker::System, message);
+                self.status = Some("Undo".to_string());
+                self.refresh_context_metrics();
+            }
             SlashAction::Compact => {
                 self.push_message(Speaker::System, "Compacting conversation context…");
                 self.status = Some("Compacting".to_string());

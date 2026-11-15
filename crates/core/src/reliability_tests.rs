@@ -1380,3 +1380,23 @@ async fn the_first_request_survives_compaction_word_for_word() {
     assert!(sent.contains("keep the public API unchanged"), "{sent}");
     assert!(sent.contains("first request, word for word"));
 }
+
+#[test]
+fn undo_reverts_the_last_edit_and_tells_the_model() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+    let mut agent = open_session(root.path(), SessionStart::New).unwrap();
+    crate::tools::apply_patch::apply_patch_from_workspace(
+        root.path(),
+        &json!({"patch": "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+two\n*** End Patch"}),
+    )
+    .unwrap();
+    assert_eq!(agent.undo(None).unwrap(), ["a.txt"]);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
+        "one\n"
+    );
+    let note = serde_json::to_string(agent.messages.last().unwrap()).unwrap();
+    assert!(note.contains("undid your last edit of a.txt"), "{note}");
+    assert!(agent.undo(Some("a.txt")).is_err());
+}
