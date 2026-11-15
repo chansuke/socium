@@ -10,17 +10,22 @@ Git repositories, with no API keys or paid requests.
 - File tools accept relative workspace paths. Missing path components are
   normalized and existing symlinks are resolved before any directories are made.
   `.git` and `.socium` are protected from file mutations, including undo and aliases.
-- Commands run in a required **Linux OS sandbox**, after a human approves the
-  exact request and displayed policy in the TUI. Approval is single use, expires
-  after 120 seconds, and cannot be supplied by model arguments. Headless callers
-  without an approval handler deny commands. Children receive a fixed environment
-  allowlist, private HOME, and no network access. See the [sandbox guide](linux-sandbox.md).
+- Commands run in a required **Linux OS sandbox**. By default each waits for a
+  human to approve the exact request and displayed policy in the TUI, once or,
+  for its command prefix, for the rest of the session; `approval.commands =
+  "auto"` and `approval.allow` rules run commands unasked in a narrower sandbox
+  (see the [README](../README.md#sandbox-and-approval-settings)). An approval
+  wait has no time limit, and approval cannot be supplied by model arguments.
+  Headless callers without an approval handler (`-p`) refuse what needs
+  approval. Children receive a fixed environment allowlist, private HOME, and
+  no network access. See the [sandbox guide](linux-sandbox.md).
 - Esc or Ctrl+C cancels a running request, approval wait, search, or command. The
   TUI waits for cleanup before accepting another submission. Ctrl+C when idle exits.
   A worker panic returns an error; a closed result channel tells the user to restart.
 - Cancellation terminates the sandbox PID namespace, including detached descendants. Memory capture is
-  capped at 256 KiB per stream. `run_command` also saves up to 8 MiB per stream under
-  `.socium/outputs/`, reports truncation, and shows byte-count progress while running.
+  capped at 256 KiB per stream, keeping the first 32 KiB and the newest output. `run_command` also
+  saves up to 8 MiB per stream under `.socium/outputs/`, reports truncation, and shows byte-count
+  progress while running; the model sees at most 20,000 characters per stream, mostly from the end.
   Timeout cleanup drains for at most another 200 ms. OS-level uninterruptible I/O
   can still delay kernel cleanup. Unsupported platforms and unavailable sandbox
   backends are rejected; there is no host fallback.
@@ -28,24 +33,30 @@ Git repositories, with no API keys or paid requests.
   default hidden-file, and no-follow-symlink behavior. `-e` separates the pattern
   from options. Search fails explicitly if rg is absent, its regex is invalid, its
   5-second deadline expires, or a matched path/content cannot be decoded as UTF-8.
-  Capture limits are reported, not represented as a complete search. File listing
-  bounds traversal by time, entries, and depth; it does not apply Git ignore rules.
+  Capture limits are reported, not represented as a complete search. Matched lines
+  are cut at 500 characters. A recursive listing uses `rg --files`, so ignored
+  files and `.git` are left out; a plain listing shows one directory.
 
 ## Editing and Git
 
 Patch preview and apply use the same validated plan. Missing updates, conflicting
 adds/moves, overlapping paths and ambiguous hunks fail before any file changes.
 Insertion-only hunks remain explicitly unsupported; use `text_editor insert`.
-Preview shows complete before/after lines, including duplicate lines and missing
-final newlines. It does not claim to be a minimal unified diff.
+Preview and every edit result show a unified diff of the changed lines with three
+lines of context (cut after 80 lines in the result); applying the previewed diff
+to the original gives exactly the bytes written, line endings included. `Add File`
+ends every line with a newline, `*** End of File` anchors a hunk at the end, and
+an empty line in a hunk is a blank context line.
 
-Each file replacement is atomic and preserves existing permissions. Move targets
-and undo of deleted files currently restore content without restoring the original
-Unix executable bit; metadata preservation is tracked in SOC-040 / issue #93. A whole
-multi-file operation is not atomic. The full before/after record is durable before
+Each file replacement is atomic and preserves existing permissions; moves and
+undo keep the Unix permission bits (SOC-040). A whole multi-file operation is not
+atomic. The full before/after record is durable before
 changes begin. Failures list applied paths and retain an incomplete history record.
-Patch and text-editor changes share undo: undo restores the entire recorded edit
-only when current contents match the expected post-edit contents. An incomplete
+Patch and text-editor changes share undo (`/undo`, or `/undo <path>`): undo
+restores the entire recorded edit only when current contents match the expected
+post-edit contents, and tells the model it did. The history keeps the newest 200
+finished edits, up to 16 MiB of saved file text; unfinished records are never
+dropped. An incomplete
 edit or undo requires inspection; it is never silently rolled back over newer work.
 
 Git read-only tools reject configurations containing external content filters;
@@ -53,14 +64,18 @@ status/diff can otherwise launch those programs without command approval.
 External diff/text conversion, signature helpers and fsmonitor are disabled,
 submodule worktrees are ignored, and lazy object fetches are disabled. Use an
 explicitly approved sandboxed command for those features, within its declared
-filesystem and network scope. Global/system Git configuration is not loaded.
+filesystem and network scope. Global/system Git configuration is not loaded,
+except that `git_commit` takes your global `user.name` and `user.email` when the
+repository sets none.
 
 `git_commit` defaults to the existing staged changes. Optional `paths` commits only
-those tracked files and preserves unrelated index entries. Explicit paths with
-staged changes are rejected to protect partial staging; use staged-only mode after
-reviewing the index. New files must be staged explicitly. Socium never runs
-`git add -A` as part of `git_commit`. Approval displays the requested diff and
-existing index; changes during the approval wait invalidate the request. Failed or
+those files and preserves unrelated index entries. Explicit paths with staged
+changes are rejected to protect partial staging; use staged-only mode after
+reviewing the index. A new file named in `paths` is shown in full for approval and
+added with intent-to-add; if the commit fails, the mark is removed. Socium never
+runs `git add -A` as part of `git_commit`. Approval displays the author, the
+requested diff, and existing index; changes during the approval wait invalidate
+the request. Failed or
 cancelled Git commands require checking HEAD/index before retrying because hooks
 can modify workspace files within the sandbox. Networked hooks and external
 metadata are unsupported.
@@ -96,7 +111,8 @@ permanently; the open session cannot be deleted. Edit history, input history
 and command output artifacts belong to the workspace, not to a session. Writes
 use a same-directory temporary file, file sync, rename and (on Unix)
 parent-directory sync. State is bounded at 64 MiB; reaching
-the limit fails explicitly instead of silently dropping history.
+the limit fails explicitly instead of silently dropping history, and `/clear`
+starts a new conversation.
 
 The user request, assistant tool intent, authorized execution boundary and each
 result are saved independently of turn success. Events identify the turn by its
