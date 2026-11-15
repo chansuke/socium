@@ -426,7 +426,10 @@ impl App {
 
     fn begin_submit(&mut self) -> Result<SubmitAction> {
         if self.pending_task.is_some() {
-            self.status = Some("Request already in progress".to_string());
+            self.status = Some(
+                "Request in progress; send this message when it ends, or Esc to cancel it"
+                    .to_string(),
+            );
             return Ok(SubmitAction::None);
         }
         let user_input = self.input.trim().to_string();
@@ -699,9 +702,10 @@ impl App {
                         {
                             self.history_next();
                         }
+                        // The next message can be written while a request
+                        // runs; Enter sends it once the request is done.
                         KeyCode::Char(to_insert)
-                            if self.pending_task.is_none()
-                                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
                                 && !key.modifiers.contains(KeyModifiers::ALT) =>
                         {
                             if self.history_index.is_some() {
@@ -710,15 +714,15 @@ impl App {
                             }
                             self.enter_char(to_insert);
                         }
-                        KeyCode::Backspace if self.pending_task.is_none() => {
+                        KeyCode::Backspace => {
                             if self.history_index.is_some() {
                                 self.history_index = None;
                                 self.history_draft.clear();
                             }
                             self.delete_char();
                         }
-                        KeyCode::Left if self.pending_task.is_none() => self.move_cursor_left(),
-                        KeyCode::Right if self.pending_task.is_none() => self.move_cursor_right(),
+                        KeyCode::Left => self.move_cursor_left(),
+                        KeyCode::Right => self.move_cursor_right(),
                         KeyCode::Esc => {
                             self.input_mode = InputMode::Normal;
                             self.status = Some(if self.pending_task.is_some() {
@@ -726,13 +730,6 @@ impl App {
                             } else {
                                 "Press E to resume typing".to_string()
                             });
-                        }
-                        KeyCode::Char(_)
-                            if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                && !key.modifiers.contains(KeyModifiers::ALT)
-                                && self.pending_task.is_some() =>
-                        {
-                            self.status = Some("Request in progress".to_string());
                         }
                         _ => {}
                     },
