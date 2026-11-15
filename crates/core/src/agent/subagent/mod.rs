@@ -95,8 +95,9 @@ pub(crate) fn run_subagent<'a>(
             .filter(|tool| kind.tools.allows(tool.name()))
             .cloned()
             .collect::<Vec<_>>();
+        let system = format!("{}{}", kind.system_prompt, ctx.project_instructions);
         let child = TurnContext {
-            system: &kind.system_prompt,
+            system: &system,
             tools: &tools,
             ..child
         };

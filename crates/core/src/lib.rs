@@ -6,6 +6,7 @@ mod activity_log;
 mod approval;
 mod control;
 mod execution;
+mod instructions;
 mod models;
 mod process;
 mod session;
@@ -278,6 +279,11 @@ pub struct AgentService {
     estimate_scale: f32,
     /// Tokens used by this conversation since it was opened in this process.
     session_usage: Arc<std::sync::Mutex<SessionUsage>>,
+    /// Socium's instructions plus the sandbox settings and the project's
+    /// instruction file, read when the service is opened.
+    system_prompt: String,
+    /// The framed instruction file alone, which subagents also get.
+    project_instructions: Option<String>,
 }
 
 /// The client for model requests. There is no deadline for a whole
@@ -369,8 +375,11 @@ impl AgentService {
             last_measured_usage: None,
             estimate_scale: 1.0,
             session_usage: Default::default(),
+            system_prompt: String::new(),
+            project_instructions: None,
         };
         service.apply_model_limits();
+        service.refresh_system_prompt();
         service
     }
 
@@ -426,6 +435,24 @@ impl AgentService {
     pub(crate) fn install_settings(&mut self, settings: Settings) {
         self.settings = Arc::new(settings);
         self.apply_model_limits();
+        self.refresh_system_prompt();
+    }
+
+    /// Rebuilds the system prompt from the settings and the project's
+    /// instruction file. A file that cannot be used is reported, not fatal.
+    fn refresh_system_prompt(&mut self) {
+        self.project_instructions = match instructions::project_instructions(&self.workspace_root) {
+            Ok(found) => found,
+            Err(warning) => {
+                self.warnings.push(warning);
+                None
+            }
+        };
+        self.system_prompt = instructions::system_prompt(
+            DEFAULT_SYSTEM_PROMPT,
+            &self.settings,
+            self.project_instructions.as_deref(),
+        );
     }
 
     /// Opens the session `start` names and selects its model: the alias
@@ -1172,7 +1199,8 @@ impl AgentService {
             provider: self.provider.as_ref(),
             client: &self.client,
             model: &self.active_model.id,
-            system: DEFAULT_SYSTEM_PROMPT,
+            system: &self.system_prompt,
+            project_instructions: self.project_instructions.as_deref().unwrap_or(""),
             context_window: self.active_model.context_window,
             max_tokens: self.max_tokens,
             estimate_scale: self.estimate_scale,

@@ -24,6 +24,9 @@ pub(crate) struct TurnContext<'a> {
     pub(crate) client: &'a reqwest::Client,
     pub(crate) model: &'a str,
     pub(crate) system: &'a str,
+    /// The project's framed instruction file, appended to subagent
+    /// prompts; empty when there is none.
+    pub(crate) project_instructions: &'a str,
     pub(crate) context_window: Option<u32>,
     pub(crate) max_tokens: u32,
     /// See [`crate::agent::context::ContextBudget::estimate_scale`].
@@ -731,6 +734,7 @@ mod tests {
             client: &client,
             model: "m",
             system: "s",
+            project_instructions: "",
             context_window: None,
             max_tokens: 100,
             estimate_scale: 1.0,
