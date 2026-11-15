@@ -3,7 +3,10 @@
 SOC-003 / [#55](https://github.com/chansuke/socium/issues/55) separates application
 authority (`ExecutionPolicy`) from enforcement (`SandboxExecutor`). Executable
 names never grant permissions. The model cannot request additional paths,
-environment variables, network access, or an unconfined mode.
+environment variables, network access, or an unconfined mode. You can add
+read-only directories, PATH entries, variables, and a longer time limit in
+`~/.config/socium/config.toml` (see [User settings](#user-settings)); network
+access cannot be added.
 
 ## Installation and support
 
@@ -17,10 +20,16 @@ has not been exercised on hardware. macOS and Windows are unsupported.
 
 Run from a dedicated project directory. The project must not overlap the
 runtime mounts, `/proc`, `/dev`, or `/socium-home`, and cannot be `/tmp` itself.
-An ordinary root `.git` directory is supported. Gitfiles, linked worktrees,
-symlinked Git metadata and shared `commondir` layouts are refused. Granting their
-external metadata requires a separate design; copying a self-contained checkout
-is the supported alternative. Do not use your home directory as the workspace.
+An ordinary root `.git` directory is supported, and so is a linked worktree made
+by `git worktree add`. For a worktree, Socium checks every link Git creates: the
+gitfile names a directory under `<main>/.git/worktrees/`, that directory's
+`gitdir` points back to this gitfile, and its `commondir` names the main Git
+directory, which holds `objects` and `HEAD` and lies outside the worktree. Only
+then is the main Git directory mounted (read-only, or read/write during
+`git_commit`); the gitfile itself is always read-only and the main checkout's
+files stay invisible. Submodule gitfiles, symlinked Git metadata, and a
+`commondir` in an ordinary `.git` are refused. Do not use your home directory as
+the workspace.
 
 The backend must report version 0.12.0 or newer and must not be setuid/setgid.
 Older or unrecognized versions are rejected, even if a distribution claims a
@@ -35,13 +44,35 @@ permission. See [Ubuntu's namespace policy](https://documentation.ubuntu.com/rel
 CI installs a temporary profile for the pinned Nix store executable and unloads
 it after testing. It never disables AppArmor globally or skips enforcement tests.
 
+A profile for one exact store path stops working when a flake update changes
+the hash, until it is installed again. A glob keeps working across updates:
+
+```
+# /etc/apparmor.d/socium-nix-bwrap
+abi <abi/4.0>,
+include <tunables/global>
+
+profile socium-nix-bwrap /nix/store/*-bubblewrap-*/bin/bwrap flags=(unconfined) {
+  userns,
+}
+```
+
+Load it with `sudo apparmor_parser -r /etc/apparmor.d/socium-nix-bwrap`. The
+glob lets every bubblewrap in the Nix store create user namespaces, including
+versions Socium refuses to run; the exact path allows only the pinned one.
+
 ## Policy
 
 | Operation | Workspace | Existing root `.git` | Root `.socium` | Network |
 |---|---|---|---|---|
 | Search, symbol search, Git queries | Read-only | Read-only | Hidden | Denied |
 | Approved `run_command` | Read/write | Read-only | Hidden | Denied |
+| `run_command` nobody reviewed (`approval.commands = "auto"` or an `allow` rule) | Read/write, except protected paths (read-only) and sensitive files (read as empty) | Read-only | Hidden | Denied |
 | Approved `git_commit`, including hooks | Read/write | Read/write | Hidden | Denied |
+
+Directories in `sandbox.read_only` are read-only in every row. A command
+nobody reviewed gets the narrower view only when the protected and sensitive
+files can be listed in time (at most 256 paths); otherwise it asks.
 
 Every tool subprocess goes through this executor. The trusted backend version
 query runs outside the sandbox with an empty environment before setup. Human approval displays
@@ -63,14 +94,18 @@ identical to those of a system executable.
 The child environment is rebuilt with only:
 
 - `PATH`: canonical system runtime directories from the launcher's PATH, plus
-  available system bin directories; no arbitrary home or workspace PATH entries.
+  available system bin directories, then the `sandbox.path` entries that lie in
+  a mounted directory; no other home or workspace PATH entries. The backend
+  itself is found only in the system directories.
 - `HOME=/socium-home`, `TMPDIR=/tmp`, `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `TERM=dumb`.
 - `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`.
 
-There is no inherited credential denylist to become stale: unknown future secret
-variables are excluded as well. Configure Git identity with repository-local
-`git config user.name` and `git config user.email` outside Socium before use.
+Variables from `[sandbox.env]` come last; PATH, HOME, TMPDIR and `GIT_*` cannot
+be set there. There is no inherited credential denylist to become stale: unknown
+future secret variables are excluded as well. `git_commit` uses the repository's
+identity, or else your global `user.name` and `user.email`, which the host's Git
+reads outside any repository and passes in as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`.
 Global hooks, aliases, credential helpers and filters are not inherited.
 
 Bubblewrap creates user, mount, PID, IPC, UTS and network namespaces, drops all
@@ -79,9 +114,11 @@ parent. A seccomp filter rejects alternate syscall ABIs and denies socket
 creation for all address families, io_uring, keyring access, ptrace/process-memory
 access, pidfd descriptor theft, BPF and performance monitoring. Network namespaces
 alone would not block host pathname Unix sockets in a mounted workspace; the
-socket filter covers that path too, including `socketpair`, whose Unix datagrams
-could otherwise reach host pathname sockets. Programs requiring socketpair-based
-local IPC are also unsupported by this initial policy; pipes remain available.
+socket filter covers that path too. `socketpair` is allowed for `SOCK_STREAM` and
+`SOCK_SEQPACKET` (with or without `SOCK_CLOEXEC`/`SOCK_NONBLOCK`): such a pair is
+connected to its own peer and has no address, and Rust's process spawning,
+Python's `asyncio`, and Node's `child_process` need one. `SOCK_DGRAM` pairs stay
+denied, since `sendto` on one could reach a host pathname socket.
 Timeout/cancellation kills the sandbox, so `setsid` does not escape cleanup.
 
 ## Practical limits
@@ -89,10 +126,9 @@ Timeout/cancellation kills the sandbox, so `setsid` does not escape cleanup.
 Networked package installation, Git fetch/push, local TCP test servers and daemon
 sockets are intentionally unavailable. Perform those steps yourself outside the
 agent. A home-installed rustup/npm toolchain, user package caches and signing keys
-are not exposed automatically. Use system/Nix toolchains and project-local,
-prepopulated dependency caches for offline builds. There is no per-command grant
-UI yet. Commands also cannot stage files in an existing `.git`; stage new files
-outside Socium, or use `git_commit` for its supported tracked-file scope.
+are not exposed unless you list them in `sandbox.read_only`. Commands cannot
+stage files in an existing `.git`; `git_commit` adds new files named in `paths`
+with intent-to-add and removes that mark again if the commit fails.
 
 Workspace contents are still readable by the model through file tools and command
 output. `.gitignore` is not a confidentiality boundary. A command may damage any
@@ -104,6 +140,27 @@ Path-based setup and the parent's file tools are not a race-free boundary agains
 concurrent host filesystem modification. Cancellation does not undo completed
 writes; inspect unknown outcomes before retrying after a crash.
 
+## User settings
+
+`[sandbox]` in `~/.config/socium/config.toml` (see
+[`config.toml.example`](../config.toml.example)) widens what commands see:
+
+- `read_only`: host directories mounted read-only at their own paths, after the
+  fresh `/tmp` and before the workspace, so a listed ancestor of the workspace
+  can neither make it read-only nor reveal `.socium`. `/`, the home directory
+  and its ancestors, `/proc`, `/dev`, `/socium-home`, and `/tmp` itself are
+  refused; a directory that does not exist is skipped with a warning.
+  Executables inside these directories may run.
+- `path`: PATH entries, kept only when they lie in a `read_only` directory or a
+  system runtime.
+- `env`: extra variables, such as `CARGO_HOME`.
+- `command_timeout`: the longest a command may run, 1 to 86400 seconds
+  (default 120).
+
+With `~/.cargo/registry`, `~/.cargo/git`, and `~/.rustup` listed and
+`CARGO_HOME = "~/.cargo"`, `cargo build --offline` of a crates.io-dependent
+project works from the host's cache.
+
 ## Verification
 
 Run on a Linux host capable of starting the namespaces (not a container that
@@ -114,7 +171,10 @@ nix develop --command cargo test --locked --all-targets --all-features
 nix develop --command cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
-`crates/core/src/execution/tests.rs` checks allowed workspace writes alongside
+`crates/core/src/execution/tests.rs` builds and runs a Cargo project, Python
+`asyncio` subprocesses, and Node `child_process` inside the sandbox, and checks
+user mounts, PATH and variables, hidden and frozen paths, linked worktrees and
+forged gitfiles, and allowed workspace writes alongside
 denied outside reads/writes, `sed -i`, `env` wrappers, same-name workspace programs,
 symlink escapes, hidden state, protected Git metadata, redirected-layout refusal,
 fake credential exclusion, fresh HOME/tmp, TCP/UDP/Unix sockets, io_uring,
