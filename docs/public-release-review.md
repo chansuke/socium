@@ -49,3 +49,41 @@ PR #96時点ではOS sandboxは未実装（後続の#55で対応）。当時の�
 状態・出力は平文。実モデル通信、macOS、Windowsは今回検証していない。move/deleteのundoにおけるfile mode復元は#93で未完了。リポジトリを実際に公開する前には、GitHubの公開範囲・private vulnerability reporting・required checksも所有者の設定として確認する。
 
 GitHub設定の読取りではリポジトリはprivate、mainのbranch protectionは無効。private vulnerability reportingの照会は404で、利用可否は確認できなかった。公開準備のコード修正に伴って可視性や保護ルールは変更していない。公開時にrequired checksと非公開の報告窓口を設定する。
+
+## 2026-11-15 の再確認
+
+基準: PR #121 (`fix/review-2026-11-14`) と、その上の `docs/open-source-prep`。公開設定の変更、GitHub への書き込み、実モデル API への送信はしていない。
+
+| 項目 | 結果 |
+|---|---|
+| 秘密情報 (履歴) | Gitleaks 8.30.0 で全 ref の 349 コミットを検査し、検出 0。 |
+| 秘密情報 (Issue・PR) | 公開すると見えるようになる Issue 47 件 (コメント 1 件) と PR 74 件の本文・コメントを書き出して Gitleaks で検査し、検出 0。 |
+| 依存の脆弱性 | cargo-audit (RustSec 1,509 件) で脆弱性 0・警告 0。 |
+| 依存のライセンス | 345 crate はすべて MIT・Apache-2.0・BSD・ISC・Zlib・Unicode-3.0 など許容的なもので、MIT での公開と両立する。`r-efi` の LGPL-2.1-or-later は MIT・Apache-2.0 との選択式。バイナリを配布するときは各ライセンス表示を同梱する。 |
+| ローカルの情報 | 2026-11-11 のレビューと証拠に残っていた絶対パスを相対リンクと `<repo>` に置き換えた。追跡中のファイルに `/home/...` は無い。 |
+| ビルド | Nix の package build (全テスト込み) が成功。Nix の開発シェルを使わず、Cargo・rustc 1.92・gcc・CMake だけの環境でも release build が成功した。 |
+| crates.io の名前 | `socium`、`socium-core`、`socium-tui` はどれも未使用 (2026-11-15 に API で確認)。 |
+| CI | action は SHA で固定。PR には Cachix の書き込み token を渡さず、`pull_request_target` を使っていないので、fork からの PR でも秘密は渡らない。 |
+
+### 公開すると見えるようになるもの
+
+- コミットの作者・コミッターのメールアドレス (`[personal address]`、`[personal address]`)。隠すには履歴の書き換えが要る。
+- main の 46 コミットのメッセージと、PR 14 件 (#33、#100〜#105、#108〜#110、#112〜#114、#118) の本文にある Claude Code のセッション URL。開くにはログインが要るが、セッション ID は見える。消すには履歴の書き換えと PR 本文の編集が要る。
+- 未マージの PR #116 (`clear-activity`) と #120 (`fix-nix-fileset`) とそのブランチ。#120 はマージ済みの #119 と同じ目的に見える。
+- Issue 47 件、`docs/tickets/`、レビューの記録 (日本語)。
+
+### 公開した後でないと設定できないもの
+
+無料プランの private repository では、branch protection と private vulnerability reporting を有効にできない (API が 403 と 404 を返す)。公開した直後に次を設定する。
+
+- private vulnerability reporting を有効にする (`SECURITY.md` と issue form の窓口がこれを指す)。
+- main に ruleset を置き、PR を必須にし、CI の `Format, Lint and Test`、Security の `Secrets and dependencies`、`Validate PR title` を必須の check にし、force push と削除を禁止する。
+
+### 所有者が決めること
+
+- リポジトリの説明 (今は "A tiny coding agent for personal use") と topics。
+- バイナリ名を `socium-tui` のままにするか、`socium` にするか。
+- crates.io に公開するか。しないなら各 crate に `publish = false` を書く。
+- 最初のタグ (例: `v0.1.0`) とリリースノート、CHANGELOG を持つか。
+- メールアドレスとセッション URL のために履歴を書き換えるか。書き換えるなら公開の前に一度だけ行い、既存の clone と PR の参照が切れることを受け入れる。
+- Code of Conduct を置くか、Discussions を開くか。
