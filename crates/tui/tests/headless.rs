@@ -126,6 +126,13 @@ fn command(fixture: &Fixture, args: &[&str]) -> Command {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // The HTTP client needs CA certificates even for a loopback server; a
+    // build sandbox has them only through these variables.
+    for name in ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     command
 }
 
