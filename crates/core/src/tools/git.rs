@@ -356,6 +356,147 @@ fn commit_pathspec(canonical_root: &Path, requested: &str) -> Result<String, Too
     Ok(relative.to_string_lossy().into_owned())
 }
 
+/// The listed paths Git does not track yet: files the agent (or the user)
+/// created that a scoped commit adds.
+fn untracked_paths(root: &Path, paths: &[String]) -> Result<Vec<String>, ToolError> {
+    let mut args = vec![
+        "--literal-pathspecs".to_string(),
+        "ls-files".into(),
+        "-z".into(),
+        "--".into(),
+    ];
+    args.extend(paths.iter().cloned());
+    let tracked = run_git_capture(root, &args)?.stdout;
+    let tracked = tracked
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect::<Vec<_>>();
+    let mut untracked = Vec::new();
+    for path in paths {
+        if tracked.contains(path) {
+            continue;
+        }
+        if std::fs::symlink_metadata(root.join(path)).is_err() {
+            return Err(format!("'{path}' is neither tracked nor present").into());
+        }
+        untracked.push(path.clone());
+    }
+    Ok(untracked)
+}
+
+/// A new file as the reviewer sees it.
+fn new_file_review(root: &Path, path: &str) -> String {
+    const SHOWN: u64 = 64 * 1024;
+    let full = root.join(path);
+    match std::fs::symlink_metadata(&full) {
+        Ok(metadata) if metadata.file_type().is_symlink() => format!(
+            "New symlink: {path} -> {}\n",
+            std::fs::read_link(&full).map_or_else(|e| e.to_string(), |t| t.display().to_string())
+        ),
+        Ok(metadata) => {
+            let mut bytes = Vec::new();
+            let read = std::fs::File::open(&full).and_then(|file| {
+                std::io::Read::read_to_end(&mut std::io::Read::take(file, SHOWN), &mut bytes)
+            });
+            match (read, String::from_utf8(bytes)) {
+                (Ok(_), Ok(text)) => {
+                    let mut shown = format!("New file: {path} ({} bytes)\n", metadata.len());
+                    for line in text.lines() {
+                        shown.push('+');
+                        shown.push_str(line);
+                        shown.push('\n');
+                    }
+                    if metadata.len() > SHOWN {
+                        shown.push_str("(only the first 64 KiB shown)\n");
+                    }
+                    shown
+                }
+                _ => format!(
+                    "New file: {path} ({} bytes, not UTF-8 text)\n",
+                    metadata.len()
+                ),
+            }
+        }
+        Err(e) => format!("New file: {path} ({e})\n"),
+    }
+}
+
+/// Author and committer for the commit. The repository's own setting wins;
+/// otherwise the user's global Git identity is passed in, since the sandbox
+/// does not load global configuration.
+fn commit_identity(root: &Path) -> Result<Vec<(String, String)>, ToolError> {
+    let local = |key: &str| -> Result<String, ToolError> {
+        Ok(stdout_to_string(&run_git_capture(
+            root,
+            &["config", "--default", "", "--get", key],
+        )?)?
+        .trim()
+        .to_string())
+    };
+    let (name, email) = (local("user.name")?, local("user.email")?);
+    if !name.is_empty() && !email.is_empty() {
+        return Ok(Vec::new());
+    }
+    let name = if name.is_empty() {
+        host_git_identity("user.name")
+    } else {
+        Some(name)
+    };
+    let email = if email.is_empty() {
+        host_git_identity("user.email")
+    } else {
+        Some(email)
+    };
+    match (name, email) {
+        (Some(name), Some(email)) => Ok(["AUTHOR", "COMMITTER"]
+            .iter()
+            .flat_map(|role| {
+                [
+                    (format!("GIT_{role}_NAME"), name.clone()),
+                    (format!("GIT_{role}_EMAIL"), email.clone()),
+                ]
+            })
+            .collect()),
+        _ => Err("No Git identity: set user.name and user.email with `git config` (globally or in this repository) before committing".into()),
+    }
+}
+
+/// A value from the user's global Git configuration, read by the host's Git
+/// outside any repository, so nothing from the workspace is loaded and no
+/// helper runs.
+fn host_git_identity(key: &str) -> Option<String> {
+    host_git_config(
+        key,
+        &std::env::var_os("HOME")?,
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+    )
+}
+
+fn host_git_config(
+    key: &str,
+    home: &std::ffi::OsStr,
+    config_home: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    let git = std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_absolute() && path.is_file())?;
+    let mut command = std::process::Command::new(git);
+    command
+        .args(["config", "--global", "--includes", "--get", key])
+        .env_clear()
+        .env("HOME", home)
+        .current_dir("/")
+        .stdin(std::process::Stdio::null());
+    if let Some(config_home) = config_home {
+        command.env("XDG_CONFIG_HOME", config_home);
+    }
+    let output = command.output().ok()?;
+    let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (output.status.success() && !value.is_empty() && !value.chars().any(char::is_control))
+        .then_some(value)
+}
+
 pub(crate) fn commit_review(root: &Path, input: &Value) -> Result<String, ToolError> {
     let paths = commit_paths(root, input)?;
     let mut diff_args = vec![
@@ -365,16 +506,33 @@ pub(crate) fn commit_review(root: &Path, input: &Value) -> Result<String, ToolEr
         "--no-textconv".into(),
         "--binary".into(),
     ];
+    let mut new_files = String::new();
     if let Some(paths) = paths {
+        let untracked = untracked_paths(root, &paths)?;
+        for path in &untracked {
+            new_files.push_str(&new_file_review(root, path));
+        }
         diff_args.push("--".into());
-        diff_args.extend(paths);
+        diff_args.extend(paths.into_iter().filter(|path| !untracked.contains(path)));
     } else {
         diff_args.push("--cached".into());
     }
-    let diff = stdout_to_string(&run_git_capture(root, &diff_args)?)?;
+    let mut diff = if diff_args.last().is_some_and(|last| last == "--") {
+        String::new()
+    } else {
+        stdout_to_string(&run_git_capture(root, &diff_args)?)?
+    };
+    diff.push_str(&new_files);
     if diff.trim().is_empty() {
-        return Err("No changes in requested commit scope; stage new files explicitly before a staged-only commit".into());
+        return Err("No changes in requested commit scope; name the files in paths, or stage them before a staged-only commit".into());
     }
+    let identity = match commit_identity(root)? {
+        env if env.is_empty() => "repository configuration".to_string(),
+        env => format!(
+            "{} <{}> from your global Git configuration",
+            env[0].1, env[1].1
+        ),
+    };
     let index = stdout_to_string(&run_git_capture(
         root,
         &[
@@ -390,7 +548,7 @@ pub(crate) fn commit_review(root: &Path, input: &Value) -> Result<String, ToolEr
         &["status", "--porcelain=v2", "--branch"],
     )?)?;
     Ok(format!(
-        "Repository state:\n{head}\nRequested diff:\n{diff}\nExisting staged diff:\n{index}"
+        "Author: {identity}\nRepository state:\n{head}\nRequested diff:\n{diff}\nExisting staged diff:\n{index}"
     ))
 }
 
@@ -409,6 +567,7 @@ where
         return Err("Empty commit message".into());
     }
     let paths = commit_paths(workspace_root, input)?;
+    let mut untracked = Vec::new();
     let mut args = vec![
         "git".into(),
         "--literal-pathspecs".into(),
@@ -431,27 +590,53 @@ where
         {
             return Err("Selected paths already have staged changes; use staged-only mode or resolve partial staging first".into());
         }
+        untracked = untracked_paths(workspace_root, &paths)?;
         args.extend(["--only".into(), "--".into()]);
         args.extend(paths);
     }
     // --only preserves unrelated index entries and excludes unselected files.
-    // New untracked files require explicit intent-to-add before commit --only;
-    // do not mutate the user's index implicitly to make this work.
-    let policy = crate::execution::ExecutionPolicy::new(
+    // A new file the user named in the approved request is marked with
+    // intent-to-add so that --only can take it; if the commit fails, the
+    // mark is removed and the file is untracked again.
+    let mut policy = crate::execution::ExecutionPolicy::new(
         workspace_root,
         crate::execution::WorkspaceAccess::GitCommit,
     )
     .map_err(|e| e.to_string())?;
-    let output = crate::process::run_observed(
-        &args,
-        workspace_root,
-        std::time::Duration::from_secs(60),
-        control,
-        &mut |_, _| Ok(()),
-        &policy,
-    )
-    .map_err(|e| e.to_string())?;
+    policy.env = commit_identity(workspace_root)?;
+    let run = |args: &[String]| {
+        crate::process::run_observed(
+            args,
+            workspace_root,
+            std::time::Duration::from_secs(60),
+            control,
+            &mut |_, _| Ok(()),
+            &policy,
+        )
+        .map_err(|e| e.to_string())
+    };
+    let git = |rest: &[&str], paths: &[String]| {
+        let mut args = vec!["git".to_string(), "--literal-pathspecs".into()];
+        args.extend(rest.iter().map(|s| s.to_string()));
+        args.push("--".into());
+        args.extend(paths.iter().cloned());
+        args
+    };
+    if !untracked.is_empty() {
+        let added = run(&git(&["add", "--intent-to-add"], &untracked))?;
+        if !added.status.success() {
+            return Err(format!(
+                "Could not add the new files: {}",
+                String::from_utf8_lossy(&added.stderr)
+            )
+            .into());
+        }
+    }
+    let output = run(&args)?;
     if output.cancelled || output.timed_out || !output.status.success() {
+        if !untracked.is_empty() && !output.cancelled {
+            let _ = run(&git(&["reset", "-q"], &untracked));
+        }
         return Err(format!("Git commit incomplete (cancelled={}, timed_out={}): {}. Inspect HEAD and index before retrying.",output.cancelled,output.timed_out,String::from_utf8_lossy(&output.stderr)).into());
     }
     let head = run_git_capture(workspace_root, &["rev-parse", "--short", "HEAD"])?;
@@ -754,6 +939,56 @@ mod tests {
         let result = approved_commit(root, &["target.txt"]);
         assert!(succeeded(&result), "{result:?}");
         assert_eq!(committed(root).trim(), "M\ttarget.txt");
+    }
+
+    #[test]
+    fn a_named_new_file_is_committed_and_a_failed_commit_leaves_it_untracked() {
+        let workspace = make_temp_dir("commit-new");
+        let root = workspace.path();
+        init_git_repo(root);
+        fs::write(root.join("new.rs"), "fn f() {}\n").unwrap();
+        fs::write(root.join("unrelated.txt"), "human work\n").unwrap();
+        let review = commit_review(root, &json!({"paths": ["new.rs"]})).unwrap();
+        assert!(review.contains("New file: new.rs"), "{review}");
+        assert!(review.contains("+fn f() {}"), "{review}");
+        let requested = review.split("Requested diff:").nth(1).unwrap();
+        assert!(!requested.contains("unrelated"), "{review}");
+
+        let result = approved_commit(root, &["new.rs"]);
+        assert!(succeeded(&result), "{result:?}");
+        assert_eq!(committed(root).trim(), "A\tnew.rs");
+        assert!(git_stdout(root, &["status", "--porcelain"]).contains("?? unrelated.txt"));
+
+        // A hook that fails: the new file must not stay half-added.
+        fs::write(root.join("second.rs"), "fn g() {}\n").unwrap();
+        let hook = root.join(".git/hooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(!succeeded(&approved_commit(root, &["second.rs"])));
+        assert!(git_stdout(root, &["ls-files", "second.rs"]).is_empty());
+        assert!(git_stdout(root, &["status", "--porcelain"]).contains("?? second.rs"));
+    }
+
+    #[test]
+    fn the_global_identity_is_read_outside_any_repository() {
+        let home = make_temp_dir("git-home");
+        fs::write(
+            home.path().join(".gitconfig"),
+            "[user]\n\tname = Global Person\n\temail = global@example.com\n",
+        )
+        .unwrap();
+        assert_eq!(
+            host_git_config("user.name", home.path().as_os_str(), None).as_deref(),
+            Some("Global Person")
+        );
+        let empty = make_temp_dir("git-home-empty");
+        assert_eq!(
+            host_git_config("user.name", empty.path().as_os_str(), None),
+            None
+        );
     }
 
     #[cfg(unix)]
