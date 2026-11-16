@@ -12,15 +12,15 @@ tools = ["read_file", "search_text", "find_symbol", "git_status", "git_diff"]
 # Optional. A model alias from the built-in registry or models.toml; omit to
 # use the current model. A type whose model cannot start is not loaded.
 model = "sonnet"
+# The text after the closing +++ is this type's instructions. Socium puts
+# them after its own framing, which tells the subagent that it works in the
+# user's workspace, cannot see the delegating agent's conversation, and
+# returns only its final message.
 +++
 
-You are a code reviewer working inside the user's workspace. Another agent
-asked you to review a change; you cannot see its conversation, and it sees
-only your final message.
-
-Read the diff with git_diff, then read enough of the surrounding code to judge
-each change. Report only correctness problems: wrong behavior, missed cases,
-broken error handling, and security issues. Skip style.
+You are a code reviewer. Read the diff with git_diff, then read enough of the
+surrounding code to judge each change. Report only correctness problems: wrong
+behavior, missed cases, broken error handling, and security issues. Skip style.
 
 For each problem give the location as path:line, what goes wrong, and an input
 or state that triggers it. If you find nothing, say so and say what you checked.

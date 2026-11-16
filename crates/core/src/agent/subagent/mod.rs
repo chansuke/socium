@@ -19,7 +19,9 @@ use crate::agent::subagent::record::{SubagentRecord, SubagentStatus};
 use crate::agent::turn::repair_incomplete_tools;
 use crate::agent::turn::{TurnContext, extract_text, run_agent_turn};
 use crate::agent::types::{Message, Role};
-use crate::constants::{AGENT_TOOL_NAME, MAX_SUBAGENT_REPORT_CHARACTERS, MAX_TOOL_ROUNDS};
+use crate::constants::{
+    AGENT_TOOL_NAME, MAX_SUBAGENT_REPORT_CHARACTERS, MAX_TOOL_ROUNDS, SUBAGENT_FRAMING,
+};
 use crate::error::AgentError;
 use crate::providers::TokenUsage;
 use crate::tools::error::ToolError;
@@ -116,7 +118,10 @@ pub(crate) fn run_subagent<'a>(
             .filter(|tool| kind.tools.allows(tool.name()))
             .cloned()
             .collect::<Vec<_>>();
-        let system = format!("{}{}", kind.system_prompt, ctx.project_instructions);
+        let system = format!(
+            "{SUBAGENT_FRAMING}\n\n{}{}",
+            kind.instructions, ctx.project_instructions
+        );
         let child = TurnContext {
             system: &system,
             tools: &tools,
@@ -461,8 +466,8 @@ fn bounded_report(mut report: String) -> String {
 mod tests {
     use crate::agent::types::{AgentMessageResponse, ContentBlock};
     use crate::constants::{
-        DEFAULT_COMPACTION_MODEL, DEFAULT_SYSTEM_PROMPT, SUBAGENT_EXPLORER_SYSTEM_PROMPT,
-        SUBAGENT_WORKER_SYSTEM_PROMPT,
+        DEFAULT_COMPACTION_MODEL, DEFAULT_SYSTEM_PROMPT, SUBAGENT_EXPLORER_INSTRUCTIONS,
+        SUBAGENT_FRAMING, SUBAGENT_WORKER_INSTRUCTIONS,
     };
     use crate::providers::error::ProviderError;
     use crate::providers::{ProviderResponse, TokenUsage};
@@ -572,7 +577,10 @@ mod tests {
         assert!(tool_names(&requests[0]).contains(&"agent".to_string()));
         assert_eq!(requests[0]["system"], DEFAULT_SYSTEM_PROMPT);
         let child = &requests[1];
-        assert_eq!(child["system"], SUBAGENT_EXPLORER_SYSTEM_PROMPT);
+        assert_eq!(
+            child["system"],
+            format!("{SUBAGENT_FRAMING}\n\n{SUBAGENT_EXPLORER_INSTRUCTIONS}")
+        );
         assert_eq!(
             child["messages"],
             json!([{"role": "user", "content": "Where does a.txt say hello?"}])
@@ -723,7 +731,10 @@ mod tests {
         let requests = requests.lock().unwrap().clone();
         let mut expected = tool_names(&requests[0]);
         expected.retain(|name| name != "agent");
-        assert_eq!(requests[1]["system"], SUBAGENT_WORKER_SYSTEM_PROMPT);
+        assert_eq!(
+            requests[1]["system"],
+            format!("{SUBAGENT_FRAMING}\n\n{SUBAGENT_WORKER_INSTRUCTIONS}")
+        );
         assert_eq!(tool_names(&requests[1]), expected);
     }
 
@@ -1033,7 +1044,7 @@ mod tests {
             vec![SubagentType {
                 name: "reviewer".into(),
                 description: "Reviews a diff".into(),
-                system_prompt: "You review.".into(),
+                instructions: "You review.".into(),
                 tools: ToolSet::Only(vec!["git_diff".into(), "read_file".into()]),
                 model: Some("haiku".into()),
             }],
@@ -1066,7 +1077,17 @@ mod tests {
         let child = model_requests.lock().unwrap()[0].clone();
         assert_eq!(child["model"], "claude-haiku-5-5");
         assert_eq!(child["max_tokens"], 321);
-        assert_eq!(child["system"], "You review.");
+        // The user writes only the role; the framing every subagent needs
+        // comes first.
+        let system = child["system"].as_str().unwrap();
+        assert!(
+            system.starts_with("You are a subagent of Socium")
+                && system.contains(
+                    "you cannot see its conversation, and it sees only your final message."
+                ),
+            "{system}"
+        );
+        assert!(system.ends_with("\n\nYou review."), "{system}");
         assert_eq!(tool_names(&child), ["read_file", "git_diff"]);
         let report = last_results(&main_requests[1])[0]["content"]
             .as_str()
@@ -1119,7 +1140,10 @@ mod tests {
 
         let child = haiku_requests.lock().unwrap()[0].clone();
         assert_eq!(child["model"], "claude-haiku-5-5");
-        assert_eq!(child["system"], SUBAGENT_EXPLORER_SYSTEM_PROMPT);
+        assert_eq!(
+            child["system"],
+            format!("{SUBAGENT_FRAMING}\n\n{SUBAGENT_EXPLORER_INSTRUCTIONS}")
+        );
         let main_requests = main_requests.lock().unwrap().clone();
         assert_eq!(main_requests.len(), 2);
         let results = last_results(&main_requests[1]);
@@ -1573,7 +1597,10 @@ mod tests {
             crate::constants::COMPACTION_SYSTEM_PROMPT
         );
         let child = &requests[2];
-        assert_eq!(child["system"], SUBAGENT_EXPLORER_SYSTEM_PROMPT);
+        assert_eq!(
+            child["system"],
+            format!("{SUBAGENT_FRAMING}\n\n{SUBAGENT_EXPLORER_INSTRUCTIONS}")
+        );
         let messages = child["messages"].as_array().unwrap();
         assert!(
             messages[0]["content"]
