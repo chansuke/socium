@@ -39,6 +39,8 @@ Chosen option: 「同期の `agent` tool」。親の tool loop の中で子の t
 
 親のモデルには `agent` tool を渡す。入力は `description`（利用者に見せる短い名前）、`prompt`（子への指示のすべて）、`agent_type` の三つで、すべて必須。
 
+`description` か `prompt` が空白だけなら、子を動かさずに誤りを返す。任意の入力に `null` が来たら、渡されなかったものとして扱う。モデルは使わない任意の入力に `null` を書くことが多いため。スキーマに無い入力は、ほかの tool と同じく無視する。
+
 * `explorer`: `read_file`、`list_files`、`search_text`、`find_symbol`、`git_branch`、`git_status`、`git_diff`、`git_log` だけを持つ。ファイルを変えず、コマンドも実行しない。
 * `worker`: `agent` 以外のすべての tool を持つ。`run_command` と `git_commit` は、親と同じく利用者の承認を一回ずつ要する。
 
