@@ -31,6 +31,13 @@ pub(crate) struct TurnContext<'a> {
     pub(crate) max_tokens: u32,
     /// See [`crate::agent::context::ContextBudget::estimate_scale`].
     pub(crate) estimate_scale: f32,
+    /// The provider and model ID that summarize a subagent's history when
+    /// it no longer fits.
+    pub(crate) compaction: (&'a dyn Provider, &'a str),
+    /// Rounds an earlier call already made for the same run, as when a
+    /// subagent goes on after its history was summarized: numbering
+    /// continues from them and `MAX_TOOL_ROUNDS` counts them.
+    pub(crate) rounds_done: usize,
     /// The tools offered to the model; a call to any other is refused.
     pub(crate) tools: &'a [ToolDefinition],
     /// The types the `agent` tool can start.
@@ -76,7 +83,7 @@ where
     let mut estimate_scale = None;
     let max_rounds = if supports_tools { MAX_TOOL_ROUNDS } else { 1 };
     let clock = ctx.clock;
-    for round in 0..max_rounds {
+    for round in ctx.rounds_done..max_rounds {
         let round_number = round + 1;
         let emit = |on_progress: &mut F, kind: ActivityKind| {
             on_progress(AgentProgress::Activity(clock.event(round_number, kind)));
@@ -778,6 +785,8 @@ mod tests {
             context_window: None,
             max_tokens: 100,
             estimate_scale: 1.0,
+            compaction: (&provider, "m"),
+            rounds_done: 0,
             tools: &tools,
             subagents: &subagents,
             control: &control,

@@ -6,7 +6,9 @@
 //! checkpoint of its loop, so a side effect it starts is on disk first, as
 //! for the main conversation.
 
-use crate::agent::state::{load_json_file, save_json_file, workspace_state_path};
+use crate::agent::state::{
+    ConversationSummaryState, load_json_file, save_json_file, workspace_state_path,
+};
 use crate::agent::types::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -54,11 +56,16 @@ pub(crate) struct SubagentRecord {
     /// Prompts it was given: the first task and each resume.
     pub(crate) runs: usize,
     pub(crate) updated_at_ms: u64,
+    /// Every message, kept whole after compaction as in the main
+    /// conversation.
     pub(crate) messages: Vec<Message>,
     /// The `tool_started` checkpoint of each call that ran, saying how it
     /// was authorized, so the transcript can mark the approved ones.
     #[serde(default)]
     pub(crate) tool_events: Vec<Value>,
+    /// What replaces the older `messages` when they are sent.
+    #[serde(default)]
+    pub(crate) summary_state: ConversationSummaryState,
 }
 
 /// What `/agents` lists about a saved subagent.
@@ -87,6 +94,7 @@ impl SubagentRecord {
             updated_at_ms: now_ms(),
             messages: Vec::new(),
             tool_events: Vec::new(),
+            summary_state: ConversationSummaryState::default(),
         }
     }
 
