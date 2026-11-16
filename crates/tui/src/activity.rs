@@ -397,7 +397,7 @@ impl ActivityModel {
                 name,
                 input_summary,
             } => {
-                if let Some(tool) = self.find_tool(turn_id, &call_id) {
+                if let Some(tool) = self.find_tool(turn_id, agent.as_deref(), &call_id) {
                     tool.state = ToolState::Running;
                     if !input_summary.is_empty() {
                         tool.input_summary = input_summary;
@@ -422,7 +422,7 @@ impl ActivityModel {
                 }
             }
             ActivityKind::ApprovalWaiting { call_id, .. } => {
-                if let Some(tool) = self.find_tool(turn_id, &call_id) {
+                if let Some(tool) = self.find_tool(turn_id, agent.as_deref(), &call_id) {
                     tool.approval = Some(ApprovalState::Waiting);
                 }
             }
@@ -431,7 +431,7 @@ impl ActivityModel {
                 approved,
                 waited_ms,
             } => {
-                if let Some(tool) = self.find_tool(turn_id, &call_id) {
+                if let Some(tool) = self.find_tool(turn_id, agent.as_deref(), &call_id) {
                     tool.approval = Some(ApprovalState::Resolved {
                         approved,
                         waited_ms,
@@ -443,7 +443,7 @@ impl ActivityModel {
                 stdout_bytes,
                 stderr_bytes,
             } => {
-                if let Some(tool) = self.find_tool(turn_id, &call_id) {
+                if let Some(tool) = self.find_tool(turn_id, agent.as_deref(), &call_id) {
                     tool.output_bytes = Some((stdout_bytes, stderr_bytes));
                 }
             }
@@ -454,7 +454,7 @@ impl ActivityModel {
                 summary,
                 ..
             } => {
-                if let Some(tool) = self.find_tool(turn_id, &call_id) {
+                if let Some(tool) = self.find_tool(turn_id, agent.as_deref(), &call_id) {
                     tool.state = ToolState::Finished {
                         is_error,
                         elapsed_ms,
@@ -504,7 +504,7 @@ impl ActivityModel {
         }
     }
 
-    /// Attaches a finished command's output preview to the newest
+    /// Attaches a finished command's output preview to the running
     /// `run_command` call, shown when that item is expanded.
     pub(crate) fn attach_command_output(&mut self, output: CommandOutputState) {
         if let Some(tool) = self
@@ -512,7 +512,11 @@ impl ActivityModel {
             .iter_mut()
             .rev()
             .find_map(|item| match &mut item.kind {
-                ItemKind::Tool(tool) if tool.name == "run_command" => Some(tool),
+                ItemKind::Tool(tool)
+                    if tool.name == "run_command" && tool.state == ToolState::Running =>
+                {
+                    Some(tool)
+                }
                 _ => None,
             })
         {
@@ -564,18 +568,47 @@ impl ActivityModel {
     }
 
     fn push(&mut self, turn_id: usize, round: usize, agent: Option<String>, kind: ItemKind) {
-        self.items.push(Item {
-            turn_id,
-            round,
-            agent,
-            kind,
-            expanded: false,
-        });
+        let index = self.insertion_index(turn_id, agent.as_deref());
+        if let Some(selected) = &mut self.selected
+            && *selected >= index
+        {
+            *selected += 1;
+        }
+        self.items.insert(
+            index,
+            Item {
+                turn_id,
+                round,
+                agent,
+                kind,
+                expanded: false,
+            },
+        );
         if self.items.len() > MAX_ITEMS {
             let excess = self.items.len() - MAX_ITEMS;
             self.items.drain(..excess);
             self.selected = self.selected.and_then(|s| s.checked_sub(excess));
         }
+    }
+
+    /// A subagent's items follow its `agent` call and its earlier items, so
+    /// subagents running at the same time each read as one block.
+    fn insertion_index(&self, turn_id: usize, agent: Option<&str>) -> usize {
+        let parent = agent.and_then(|agent| {
+            self.items.iter().rposition(|item| {
+                item.turn_id == turn_id
+                    && item.agent.is_none()
+                    && matches!(&item.kind, ItemKind::Tool(tool) if tool.call_id == agent)
+            })
+        });
+        let Some(parent) = parent else {
+            return self.items.len();
+        };
+        let children = self.items[parent + 1..]
+            .iter()
+            .take_while(|item| item.agent.as_deref() == agent)
+            .count();
+        parent + 1 + children
     }
 
     fn find_thought(
@@ -615,11 +648,17 @@ impl ActivityModel {
             })
     }
 
-    fn find_tool(&mut self, turn_id: usize, call_id: &str) -> Option<&mut ToolItem> {
+    fn find_tool(
+        &mut self,
+        turn_id: usize,
+        agent: Option<&str>,
+        call_id: &str,
+    ) -> Option<&mut ToolItem> {
         self.items
             .iter_mut()
             .rev()
             .take_while(|item| item.turn_id == turn_id)
+            .filter(|item| item.agent.as_deref() == agent)
             .find_map(|item| match &mut item.kind {
                 ItemKind::Tool(tool) if tool.call_id == call_id => Some(tool.as_mut()),
                 _ => None,
@@ -1153,6 +1192,152 @@ pub(crate) mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(rounds, [(None, false), (Some("agent-1"), true)]);
+    }
+
+    fn started(call_id: &str, name: &str, input_summary: &str) -> ActivityKind {
+        ActivityKind::ToolStarted {
+            call_id: call_id.into(),
+            name: name.into(),
+            input_summary: input_summary.into(),
+        }
+    }
+
+    fn finished(call_id: &str, name: &str, summary: &str) -> ActivityKind {
+        ActivityKind::ToolFinished {
+            call_id: call_id.into(),
+            name: name.into(),
+            is_error: false,
+            elapsed_ms: 5,
+            summary: summary.into(),
+        }
+    }
+
+    /// Two explorers of one batch whose events arrive interleaved, each
+    /// using the call ID `call_0` for its own read.
+    pub(crate) fn turn_with_concurrent_subagents() -> Vec<ActivityEvent> {
+        let sub = |agent: &str, kind| ActivityEvent {
+            agent: Some(agent.into()),
+            ..event(2, 1, kind)
+        };
+        vec![
+            event(2, 0, ActivityKind::TurnStarted),
+            event(2, 1, ActivityKind::RoundStarted { model: "m".into() }),
+            event(2, 1, started("agent-a", "agent", "Scan src")),
+            event(2, 1, started("agent-b", "agent", "Scan docs")),
+            sub("agent-a", ActivityKind::RoundStarted { model: "m".into() }),
+            sub("agent-b", ActivityKind::RoundStarted { model: "m".into() }),
+            sub("agent-a", started("call_0", "read_file", "src/lib.rs")),
+            sub("agent-b", started("call_0", "read_file", "docs/guide.md")),
+            sub("agent-b", finished("call_0", "read_file", "guide read")),
+            sub("agent-a", finished("call_0", "read_file", "lib read")),
+            event(2, 1, finished("agent-b", "agent", "docs done")),
+            event(2, 1, finished("agent-a", "agent", "src done")),
+        ]
+    }
+
+    #[test]
+    fn subagents_sharing_a_call_id_keep_their_own_tool_items() {
+        let model = model_with(turn_with_concurrent_subagents());
+
+        let reads = model
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::Tool(tool) if tool.name == "read_file" => Some((
+                    item.agent.as_deref(),
+                    tool.input_summary.as_str(),
+                    tool.state.clone(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let done = |summary: &str| ToolState::Finished {
+            is_error: false,
+            elapsed_ms: 5,
+            summary: summary.into(),
+        };
+        assert_eq!(
+            reads,
+            [
+                (Some("agent-a"), "src/lib.rs", done("lib read")),
+                (Some("agent-b"), "docs/guide.md", done("guide read")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_subagent_item_inserted_above_the_selection_keeps_it_selected() {
+        let mut events = turn_with_concurrent_subagents();
+        let late = events.split_off(7);
+        let mut model = model_with(events);
+        model.focused = true;
+        let scan_docs = model
+            .items
+            .iter()
+            .position(
+                |item| matches!(&item.kind, ItemKind::Tool(tool) if tool.call_id == "agent-b"),
+            )
+            .unwrap();
+        model.selected = Some(scan_docs);
+
+        for event in late {
+            model.apply(event);
+        }
+        model.apply(ActivityEvent {
+            agent: Some("agent-a".into()),
+            ..event(2, 1, started("call_1", "search_text", "fn main"))
+        });
+
+        let selected = &model.items[model.selected_index().unwrap()];
+        assert!(
+            matches!(&selected.kind, ItemKind::Tool(tool) if tool.call_id == "agent-b"),
+            "selection moved off the agent-b call"
+        );
+    }
+
+    #[test]
+    fn command_output_goes_to_the_running_command_not_the_newest_row() {
+        let intent = |block, call_id: &str, name: &str| {
+            event(
+                2,
+                1,
+                ActivityKind::ToolIntentStarted {
+                    block,
+                    call_id: call_id.into(),
+                    name: name.into(),
+                },
+            )
+        };
+        let mut model = model_with(vec![
+            event(2, 0, ActivityKind::TurnStarted),
+            intent(0, "agent-1", "agent"),
+            intent(1, "main-test", "run_command"),
+            event(2, 1, started("agent-1", "agent", "Fix the bug")),
+            ActivityEvent {
+                agent: Some("agent-1".into()),
+                ..event(2, 1, started("call_0", "run_command", "cargo build"))
+            },
+        ]);
+
+        model.attach_command_output(CommandOutputState {
+            command: "cargo build".into(),
+            exit_code: Some(0),
+            timed_out: false,
+            stdout_preview: "built".into(),
+            stderr_preview: String::new(),
+        });
+
+        let outputs = model
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::Tool(tool) if tool.name == "run_command" => {
+                    Some((tool.call_id.as_str(), tool.command_output.is_some()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(outputs, [("call_0", true), ("main-test", false)]);
     }
 
     #[test]
