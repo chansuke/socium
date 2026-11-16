@@ -301,7 +301,7 @@ impl App {
             return;
         };
         match agent.rewind(turn_id, mode) {
-            Ok(rewound) => self.show_rewound(rewound, mode),
+            Ok(rewound) => self.show_rewound(turn_id, rewound, mode),
             Err(err) => {
                 self.push_message(Speaker::System, format!("Cannot rewind: {err}"));
                 self.status = Some("Rewind failed".into());
@@ -311,8 +311,11 @@ impl App {
 
     /// Shows the conversation as the rewind left it and, when it went
     /// back, puts the prompt back in the input.
-    pub(crate) fn show_rewound(&mut self, rewound: Rewound, mode: RewindMode) {
-        self.show_agent_conversation();
+    pub(crate) fn show_rewound(&mut self, turn_id: usize, rewound: Rewound, mode: RewindMode) {
+        self.show_agent_transcript();
+        if mode != RewindMode::Files {
+            self.activity.drop_turns_from(turn_id);
+        }
         let restored = rewound.restored_files.join(", ");
         if mode == RewindMode::Files {
             self.push_message(
@@ -455,6 +458,7 @@ mod tests {
     fn the_rewound_prompt_is_put_back_in_the_input_to_edit() {
         let mut app = App::for_test();
         app.show_rewound(
+            0,
             Rewound {
                 prompt: "fix the bug\nin parser.rs".into(),
                 warning: None,
@@ -541,6 +545,7 @@ mod tests {
         let mut app = App::for_test();
         app.input = "draft".into();
         app.show_rewound(
+            0,
             Rewound {
                 prompt: "edit things".into(),
                 warning: None,
@@ -553,6 +558,7 @@ mod tests {
         assert!(note.contains("Restored a.txt, src/b.rs"), "{note}");
 
         app.show_rewound(
+            0,
             Rewound {
                 prompt: "edit things".into(),
                 warning: None,
