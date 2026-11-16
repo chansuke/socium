@@ -577,6 +577,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_workers_edits_belong_to_the_turn_that_started_it() {
+        let workspace = make_temp_dir("subagent_edit_origin");
+        std::fs::write(workspace.path().join("a.txt"), "hello\n").unwrap();
+        let (mut service, _) = scripted(
+            workspace.path(),
+            vec![
+                delegate("worker"),
+                calls(&[(
+                    "patch-1",
+                    "apply_patch",
+                    json!({"patch": "*** Begin Patch\n*** Update File: a.txt\n@@\n-hello\n+bye\n*** End Patch"}),
+                )]),
+                text("Edited."),
+                text("Done."),
+            ],
+        );
+
+        service.submit("Change the greeting".into()).await.unwrap();
+
+        assert_eq!(service.rewind_points()[0].changed_files, ["a.txt"]);
+        let rewound = service.rewind(0, crate::RewindMode::Files).unwrap();
+        assert_eq!(rewound.restored_files, ["a.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+            "hello\n"
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_subagent_is_an_error_result_and_the_main_agent_continues() {
         let workspace = make_temp_dir("subagent_failed");
         let (mut service, requests) = scripted(

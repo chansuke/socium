@@ -49,7 +49,7 @@ impl Tool for ApplyPatchTool {
         input: &Value,
         _on_progress: &mut dyn FnMut(AgentProgress),
     ) -> Result<String, ToolError> {
-        apply_patch_from_workspace(ctx.workspace_root, input)
+        apply_patch_from_workspace(ctx.workspace_root, input, ctx.edit_origin)
     }
 }
 
@@ -112,6 +112,7 @@ impl<'a> ApplyPatchInput<'a> {
 pub(crate) fn apply_patch_from_workspace(
     workspace_root: &Path,
     input: &Value,
+    edit_origin: Option<&crate::tools::edit_history::EditOrigin>,
 ) -> Result<String, ToolError> {
     let ApplyPatchInput { patch, dry_run } = ApplyPatchInput::parse(input)?;
     let actions = parse_patch_actions(patch)?;
@@ -134,7 +135,7 @@ pub(crate) fn apply_patch_from_workspace(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    crate::tools::edit_history::apply_changes(workspace_root, plan)?;
+    crate::tools::edit_history::apply_changes(workspace_root, plan, edit_origin)?;
     Ok(maybe_prepend_dirty_worktree_warning(
         workspace_root,
         format!("{report}\n{diff}"),
@@ -561,7 +562,8 @@ mod tests {
             assert!(
                 apply_patch_from_workspace(
                     workspace.path(),
-                    &json!({"patch":patch,"dry_run":dry_run})
+                    &json!({"patch":patch,"dry_run":dry_run}),
+                    None
                 )
                 .is_err()
             );
@@ -584,6 +586,7 @@ mod tests {
                 let err = apply_patch_from_workspace(
                     workspace.path(),
                     &json!({"patch": patch, "dry_run": dry_run}),
+                    None,
                 )
                 .unwrap_err();
                 assert!(err.to_string().contains("Not a regular file"), "{err}");
@@ -602,10 +605,11 @@ mod tests {
         let file = workspace.path().join("f.txt");
         fs::write(&file, before).unwrap();
         let input = |dry_run| json!({"patch": patch, "dry_run": dry_run});
-        let preview = apply_patch_from_workspace(workspace.path(), &input(true))
+        let preview = apply_patch_from_workspace(workspace.path(), &input(true), None)
             .map_err(|e| e.to_string())?;
         assert_eq!(fs::read_to_string(&file).unwrap(), before, "dry run wrote");
-        apply_patch_from_workspace(workspace.path(), &input(false)).map_err(|e| e.to_string())?;
+        apply_patch_from_workspace(workspace.path(), &input(false), None)
+            .map_err(|e| e.to_string())?;
         let after = fs::read_to_string(&file).unwrap();
         assert_eq!(
             apply_unified(before, &preview),
@@ -693,6 +697,7 @@ mod tests {
                 let err = apply_patch_from_workspace(
                     workspace.path(),
                     &json!({"patch": patch, "dry_run": dry_run}),
+                    None,
                 )
                 .unwrap_err();
                 assert!(err.to_string().contains("carriage return"), "{err}");
@@ -706,9 +711,9 @@ mod tests {
     fn ambiguous_hunks_are_refused_and_move_undo_is_grouped() {
         let workspace = make_temp_dir("patch-move");
         fs::write(workspace.path().join("f"), "same\nsame\n").unwrap();
-        assert!(apply_patch_from_workspace(workspace.path(),&json!({"patch":"*** Begin Patch\n*** Update File: f\n@@\n-same\n+new\n*** End Patch"})).is_err());
+        assert!(apply_patch_from_workspace(workspace.path(),&json!({"patch":"*** Begin Patch\n*** Update File: f\n@@\n-same\n+new\n*** End Patch"}), None).is_err());
         fs::write(workspace.path().join("f"), "old\r\n").unwrap();
-        apply_patch_from_workspace(workspace.path(),&json!({"patch":"*** Begin Patch\n*** Update File: f\n*** Move to: g\n@@\n-old\n+new\n*** End Patch"})).unwrap();
+        apply_patch_from_workspace(workspace.path(),&json!({"patch":"*** Begin Patch\n*** Update File: f\n*** Move to: g\n@@\n-old\n+new\n*** End Patch"}), None).unwrap();
         assert_eq!(
             fs::read_to_string(workspace.path().join("g")).unwrap(),
             "new\r\n"
@@ -787,12 +792,12 @@ mod tests {
         let file = workspace.path().join("f.txt");
         fs::write(&file, "a\n\nb\nend\nend\n").unwrap();
         let patch = "*** Begin Patch\n*** Update File: f.txt\n@@\n a\n\n-b\n+B\n@@\n end\n-end\n+last\n*** End of File\n*** End Patch";
-        apply_patch_from_workspace(workspace.path(), &json!({ "patch": patch })).unwrap();
+        apply_patch_from_workspace(workspace.path(), &json!({ "patch": patch }), None).unwrap();
         assert_eq!(fs::read_to_string(&file).unwrap(), "a\n\nB\nend\nlast\n");
 
         let wrong =
             "*** Begin Patch\n*** Update File: f.txt\n@@\n-a\n+A\n*** End of File\n*** End Patch";
-        let err = apply_patch_from_workspace(workspace.path(), &json!({ "patch": wrong }))
+        let err = apply_patch_from_workspace(workspace.path(), &json!({ "patch": wrong }), None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("at the end of 'f.txt'"), "{err}");
@@ -810,6 +815,7 @@ mod tests {
         let preview = apply_patch_from_workspace(
             workspace.path(),
             &json!({ "patch": patch, "dry_run": true }),
+            None,
         )
         .unwrap();
         assert!(preview.len() < 400, "{}", preview.len());

@@ -1,6 +1,7 @@
 use crate::agent::state::{atomic_write_with_mode, load_json_file, save_json_file};
 use crate::tools::workspace::{resolve_workspace_mutation_path, resolve_workspace_path_for_create};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -19,10 +20,22 @@ pub(crate) struct Mutation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_mode: Option<u32>,
 }
+/// The turn whose tool call made an edit, so `/rewind` can revert the
+/// edits of the turns it drops. A subagent's edits belong to the turn that
+/// started it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EditOrigin {
+    pub session_id: String,
+    pub turn_id: usize,
+}
 #[derive(Debug, Serialize, Deserialize)]
 struct EditRecord {
     changes: Vec<Mutation>,
     complete: bool,
+    /// `None` for edits made outside a turn and in history written before
+    /// origins were kept: `/undo` reverts them, `/rewind` never does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<EditOrigin>,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct EditHistoryState {
@@ -68,8 +81,26 @@ fn prune(records: &mut Vec<EditRecord>) {
     });
 }
 
+impl EditRecord {
+    fn made_since(&self, session_id: &str, turn_id: usize) -> bool {
+        self.origin
+            .as_ref()
+            .is_some_and(|origin| origin.session_id == session_id && origin.turn_id >= turn_id)
+    }
+}
+
 fn history_path(root: &Path) -> Result<PathBuf, String> {
     crate::agent::state::workspace_state_path(root, "edit_history.json").map_err(|e| e.to_string())
+}
+
+fn load_history(root: &Path) -> Result<(PathBuf, EditHistoryState), String> {
+    let path = history_path(root)?;
+    let mut history: EditHistoryState = load_json_file(&path).map_err(|e| e.to_string())?;
+    if history.schema_version > 1 {
+        return Err("Unsupported edit history schema; original preserved".into());
+    }
+    history.schema_version = 1;
+    Ok((path, history))
 }
 /// The file's content and permission bits, or `None` when it is missing.
 fn current(path: &Path) -> Result<Option<(String, Option<u32>)>, String> {
@@ -164,7 +195,11 @@ pub(crate) fn describe(changes: &[Mutation]) -> String {
     text
 }
 
-pub(crate) fn apply_changes(root: &Path, mut changes: Vec<Mutation>) -> Result<(), String> {
+pub(crate) fn apply_changes(
+    root: &Path,
+    mut changes: Vec<Mutation>,
+    origin: Option<&EditOrigin>,
+) -> Result<(), String> {
     let canonical = root.canonicalize().map_err(|e| e.to_string())?;
     let mut seen: Vec<PathBuf> = Vec::new();
     for change in &mut changes {
@@ -196,15 +231,11 @@ pub(crate) fn apply_changes(root: &Path, mut changes: Vec<Mutation>) -> Result<(
         seen.push(resolved);
     }
     changes.sort_by_key(|change| change.after.is_none());
-    let path = history_path(root)?;
-    let mut history: EditHistoryState = load_json_file(&path).map_err(|e| e.to_string())?;
-    if history.schema_version > 1 {
-        return Err("Unsupported edit history schema; original preserved".into());
-    }
-    history.schema_version = 1;
+    let (path, mut history) = load_history(root)?;
     history.records.push(EditRecord {
         changes: changes.clone(),
         complete: false,
+        origin: origin.cloned(),
     });
     prune(&mut history.records);
     save_json_file(&path, &history).map_err(|e| e.to_string())?;
@@ -253,42 +284,134 @@ fn undo_where(
     root: &Path,
     matches: impl Fn(&EditRecord) -> bool,
 ) -> Result<Vec<String>, Option<String>> {
-    let path = history_path(root)?;
-    let mut history: EditHistoryState = load_json_file(&path).map_err(|e| e.to_string())?;
-    if history.schema_version > 1 {
-        return Err(Some(
-            "Unsupported edit history schema; original preserved".into(),
-        ));
-    }
-    history.schema_version = 1;
+    let (path, mut history) = load_history(root)?;
     let index = history.records.iter().rposition(matches).ok_or(None)?;
-    let record = &history.records[index];
-    if !record.complete {
-        return Err(Some(
+    Ok(revert(root, &path, &mut history, &[index])?)
+}
+
+/// The files that edits made by `session_id`, per turn, changed, as
+/// `(turn_id, path)` pairs.
+pub(crate) fn session_edits(root: &Path, session_id: &str) -> Result<Vec<(usize, String)>, String> {
+    let (_, history) = load_history(root)?;
+    Ok(history
+        .records
+        .iter()
+        .filter_map(|record| {
+            let origin = record.origin.as_ref()?;
+            (origin.session_id == session_id).then_some((origin.turn_id, &record.changes))
+        })
+        .flat_map(|(turn_id, changes)| {
+            changes
+                .iter()
+                .map(move |change| (turn_id, change.path.clone()))
+        })
+        .collect())
+}
+
+/// Reverts every edit the turns of `session_id` from `turn_id` on made,
+/// when the files still hold what those edits wrote, and returns the paths
+/// restored. Edits by anyone else after them on the same files refuse it.
+pub(crate) fn revert_since(
+    root: &Path,
+    session_id: &str,
+    turn_id: usize,
+) -> Result<Vec<String>, String> {
+    let (path, mut history) = load_history(root)?;
+    let indices = (0..history.records.len())
+        .filter(|&index| history.records[index].made_since(session_id, turn_id))
+        .collect::<Vec<_>>();
+    if indices.is_empty() {
+        return Ok(Vec::new());
+    }
+    revert(root, &path, &mut history, &indices)
+}
+
+/// Keeps the edits of the turns of `session_id` from `turn_id` on out of
+/// later rewinds: those turns are gone and their ids will be reused.
+/// `/undo` still reverts them.
+pub(crate) fn forget_since(root: &Path, session_id: &str, turn_id: usize) -> Result<(), String> {
+    let (path, mut history) = load_history(root)?;
+    let mut changed = false;
+    for record in &mut history.records {
+        if record.made_since(session_id, turn_id) {
+            record.origin = None;
+            changed = true;
+        }
+    }
+    if changed {
+        save_json_file(&path, &history).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Reverts the records at `indices`, in history order, newest change
+/// first. Every file is checked against what the records wrote before the
+/// first write, following the files through the records, and the records
+/// are marked incomplete while files change.
+fn revert(
+    root: &Path,
+    path: &Path,
+    history: &mut EditHistoryState,
+    indices: &[usize],
+) -> Result<Vec<String>, String> {
+    if indices
+        .iter()
+        .any(|&index| !history.records[index].complete)
+    {
+        return Err(
             "Incomplete edit or undo; inspect workspace and history before recovery".into(),
-        ));
+        );
     }
-    for change in &record.changes {
-        check(root, change, &change.after, change.after_mode)?;
+    let changes = indices
+        .iter()
+        .rev()
+        .flat_map(|&index| history.records[index].changes.iter().rev())
+        .cloned()
+        .collect::<Vec<_>>();
+    // What each file holds once the newer changes are reverted; `None` as
+    // the mode when it is not known.
+    let mut expected: HashMap<&str, (Option<String>, Option<u32>)> = HashMap::new();
+    for change in &changes {
+        match expected.get(change.path.as_str()) {
+            None => {
+                check(root, change, &change.after, change.after_mode)?;
+            }
+            Some((content, mode)) => {
+                let mode_differs = content.is_some()
+                    && change.after_mode.is_some()
+                    && mode.is_some()
+                    && *mode != change.after_mode;
+                if *content != change.after || mode_differs {
+                    return Err(format!(
+                        "File changed outside these turns: '{}'; operation refused",
+                        change.path
+                    ));
+                }
+            }
+        }
+        expected.insert(&change.path, (change.before.clone(), change.before_mode));
     }
-    let changes = record.changes.clone();
-    history.records[index].complete = false;
-    save_json_file(&path, &history).map_err(|e| e.to_string())?;
-    let mut restored = Vec::new();
-    for change in changes.iter().rev() {
+    for &index in indices {
+        history.records[index].complete = false;
+    }
+    save_json_file(path, history).map_err(|e| e.to_string())?;
+    let mut restored = BTreeSet::new();
+    for change in &changes {
         let result = check(root, change, &change.after, change.after_mode)
             .and_then(|(path, _)| write(&path, &change.before, change.before_mode));
         if let Err(e) = result {
-            return Err(Some(format!(
+            return Err(format!(
                 "{e}; restored: {restored:?}. Incomplete undo record retained"
-            )));
+            ));
         }
-        restored.push(change.path.clone());
+        restored.insert(change.path.clone());
     }
-    history.records.remove(index);
-    save_json_file(&path, &history)
+    for &index in indices.iter().rev() {
+        history.records.remove(index);
+    }
+    save_json_file(path, history)
         .map_err(|e| format!("Undo applied; could not save history: {e}"))?;
-    Ok(restored)
+    Ok(restored.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -303,6 +426,7 @@ mod tests {
                 ..Mutation::default()
             }],
             complete,
+            origin: None,
         }
     }
 
@@ -336,6 +460,7 @@ mod tests {
             crate::tools::apply_patch::apply_patch_from_workspace(
                 root,
                 &serde_json::json!({ "patch": patch }),
+                None,
             )
             .unwrap();
         }
@@ -372,7 +497,7 @@ mod tests {
         }
 
         fn patch(root: &Path, patch: &str) {
-            apply_patch_from_workspace(root, &json!({ "patch": patch })).unwrap();
+            apply_patch_from_workspace(root, &json!({ "patch": patch }), None).unwrap();
         }
 
         fn executable(root: &Path) {
@@ -482,6 +607,75 @@ mod tests {
             assert!(again.contains("Incomplete edit or undo"), "{again}");
         }
     }
+    fn edit(root: &Path, path: &str, from: &str, to: &str, origin: Option<(&str, usize)>) {
+        let origin = origin.map(|(session_id, turn_id)| EditOrigin {
+            session_id: session_id.into(),
+            turn_id,
+        });
+        apply_changes(
+            root,
+            vec![Mutation {
+                path: path.into(),
+                before: Some(from.into()),
+                after: Some(to.into()),
+                ..Mutation::default()
+            }],
+            origin.as_ref(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rewind_leaves_edits_without_an_origin_to_undo() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a"), "one").unwrap();
+        std::fs::write(root.path().join("b"), "one").unwrap();
+        edit(root.path(), "a", "one", "two", None);
+        edit(root.path(), "b", "one", "two", Some(("s", 0)));
+        let saved = std::fs::read_to_string(history_path(root.path()).unwrap()).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved["schema_version"], 1);
+        assert!(saved["records"][0].get("origin").is_none(), "{saved}");
+
+        assert_eq!(
+            session_edits(root.path(), "s").unwrap(),
+            [(0, "b".to_string())]
+        );
+        assert!(session_edits(root.path(), "other").unwrap().is_empty());
+        assert_eq!(revert_since(root.path(), "s", 0).unwrap(), ["b"]);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("b")).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("a")).unwrap(),
+            "two"
+        );
+        assert!(revert_since(root.path(), "s", 0).unwrap().is_empty());
+        assert_eq!(undo_last(root.path()).unwrap(), ["a"]);
+    }
+
+    #[test]
+    fn rewind_refuses_a_file_another_edit_changed_between_the_turns() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("f"), "one").unwrap();
+        edit(root.path(), "f", "one", "two", Some(("s", 0)));
+        edit(root.path(), "f", "two", "three", None);
+        edit(root.path(), "f", "three", "four", Some(("s", 1)));
+
+        let err = revert_since(root.path(), "s", 0).unwrap_err();
+        assert!(err.contains("'f'; operation refused"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("f")).unwrap(),
+            "four"
+        );
+        assert_eq!(revert_since(root.path(), "s", 1).unwrap(), ["f"]);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("f")).unwrap(),
+            "three"
+        );
+    }
+
     #[test]
     fn external_edits_prevent_undo_without_consuming_history() {
         let root = tempfile::tempdir().unwrap();
@@ -494,6 +688,7 @@ mod tests {
                 after: Some("after".into()),
                 ..Mutation::default()
             }],
+            None,
         )
         .unwrap();
         std::fs::write(root.path().join("f"), "human").unwrap();

@@ -315,7 +315,8 @@ fn metadata_paths_and_aliases_are_rejected_before_editing() {
             assert!(
                 crate::tools::apply_patch::apply_patch_from_workspace(
                     root.path(),
-                    &json!({"patch":patch,"dry_run":dry_run})
+                    &json!({"patch":patch,"dry_run":dry_run}),
+                    None
                 )
                 .is_err()
             );
@@ -491,6 +492,7 @@ fn failed_execution_intent_after_approval_has_no_side_effects() {
         &json!({"command":["touch","must-not-exist"]}),
         &control,
         &crate::settings::Settings::default(),
+        None,
         &mut |e| {
             if let AgentProgress::ApprovalRequested { request_id, .. } = e {
                 control.answer_approval(request_id, true);
@@ -1002,6 +1004,7 @@ fn run_with_settings(
         &input,
         control,
         settings,
+        None,
         &mut |event| on_progress(event),
         &mut |_| Ok(()),
     ) {
@@ -1408,9 +1411,12 @@ async fn rewind_goes_back_to_a_prompt_and_drops_the_turns_from_it() {
         ["first", "second", "third"]
     );
 
-    let rewound = agent.rewind(points[1].turn_id).unwrap();
+    let rewound = agent
+        .rewind(points[1].turn_id, RewindMode::Conversation)
+        .unwrap();
     assert_eq!(rewound.prompt, "second");
     assert_eq!(rewound.warning, None);
+    assert!(rewound.restored_files.is_empty());
     assert_eq!(prompts(&agent), ["first", "answer one"]);
     assert_eq!(agent.rewind_points().len(), 1);
 
@@ -1448,13 +1454,17 @@ async fn rewind_refuses_a_message_that_is_not_a_prompt() {
     crate::tools::apply_patch::apply_patch_from_workspace(
         root.path(),
         &json!({"patch": "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+two\n*** End Patch"}),
+        None,
     )
     .unwrap();
     agent.undo(None).unwrap();
     let before = prompts(&agent);
 
     for turn_id in [1, 2, 9] {
-        let err = agent.rewind(turn_id).err().unwrap();
+        let err = agent
+            .rewind(turn_id, RewindMode::ConversationAndFiles)
+            .err()
+            .unwrap();
         assert!(err.to_string().contains("No prompt"), "{err}");
     }
     assert_eq!(prompts(&agent), before);
@@ -1480,14 +1490,152 @@ async fn rewinding_into_the_summarized_history_drops_the_summary() {
     let covered = agent.compact().await.unwrap().covered_messages;
     assert!(covered > 2);
 
-    agent.rewind(16).unwrap();
+    agent.rewind(16, RewindMode::Conversation).unwrap();
     let summary = agent.summary_state.summary.as_ref().unwrap();
     assert_eq!(summary.covered_messages, covered);
     assert_eq!(summary.thinking_valid_from, Some(16));
 
-    agent.rewind(2).unwrap();
+    agent.rewind(2, RewindMode::Conversation).unwrap();
     assert!(agent.summary_state.summary.is_none());
     assert_eq!(agent.messages.len(), 2);
+}
+
+fn patch_call(path: &str, from: &str, to: &str) -> ProviderResponse {
+    response(&[(
+        "apply_patch",
+        json!({"patch": format!("*** Begin Patch\n*** Update File: {path}\n@@\n-{from}\n+{to}\n*** End Patch")}),
+    )])
+}
+
+fn read(root: &std::path::Path, path: &str) -> String {
+    std::fs::read_to_string(root.join(path)).unwrap()
+}
+
+#[tokio::test]
+async fn rewind_restores_only_the_files_the_dropped_turns_edited() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+    std::fs::write(root.path().join("b.txt"), "one\n").unwrap();
+    let mut agent = service(
+        root.path(),
+        vec![
+            Ok(patch_call("a.txt", "one", "two")),
+            Ok(text_provider_response("edited a", None)),
+            Ok(patch_call("b.txt", "one", "two")),
+            Ok(patch_call("b.txt", "two", "three")),
+            Ok(text_provider_response("edited b twice", None)),
+        ],
+    );
+    submit_turns(&mut agent, &["edit a", "edit b"]).await;
+    assert_eq!(read(root.path(), "b.txt"), "three\n");
+    let points = agent.rewind_points();
+    assert_eq!(points[0].changed_files, ["a.txt", "b.txt"]);
+    assert_eq!(points[1].changed_files, ["b.txt"]);
+
+    let rewound = agent
+        .rewind(points[1].turn_id, RewindMode::ConversationAndFiles)
+        .unwrap();
+    assert_eq!(rewound.prompt, "edit b");
+    assert_eq!(rewound.restored_files, ["b.txt"]);
+    assert_eq!(read(root.path(), "a.txt"), "two\n");
+    assert_eq!(read(root.path(), "b.txt"), "one\n");
+    assert_eq!(agent.messages.len(), points[1].turn_id);
+    let points = agent.rewind_points();
+    assert_eq!(points.len(), 1);
+    assert_eq!(points[0].changed_files, ["a.txt"]);
+}
+
+#[tokio::test]
+async fn rewind_with_files_refuses_a_file_changed_by_hand_and_changes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+    let mut agent = service(
+        root.path(),
+        vec![
+            Ok(patch_call("a.txt", "one", "two")),
+            Ok(text_provider_response("edited a", None)),
+        ],
+    );
+    submit_turns(&mut agent, &["edit a"]).await;
+    std::fs::write(root.path().join("a.txt"), "human\n").unwrap();
+    let before = prompts(&agent);
+
+    for mode in [RewindMode::ConversationAndFiles, RewindMode::Files] {
+        let err = agent.rewind(0, mode).err().unwrap();
+        assert!(
+            err.to_string().contains("changed externally: 'a.txt'"),
+            "{err}"
+        );
+    }
+    assert_eq!(read(root.path(), "a.txt"), "human\n");
+    assert_eq!(prompts(&agent), before);
+    assert_eq!(agent.rewind_points()[0].changed_files, ["a.txt"]);
+}
+
+#[tokio::test]
+async fn a_conversation_only_rewind_keeps_the_dropped_edits_out_of_later_rewinds() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+    std::fs::write(root.path().join("b.txt"), "one\n").unwrap();
+    let mut agent = service(
+        root.path(),
+        vec![
+            Ok(patch_call("a.txt", "one", "two")),
+            Ok(text_provider_response("edited a", None)),
+            Ok(patch_call("b.txt", "one", "two")),
+            Ok(text_provider_response("edited b", None)),
+        ],
+    );
+    submit_turns(&mut agent, &["edit a"]).await;
+    let rewound = agent.rewind(0, RewindMode::Conversation).unwrap();
+    assert_eq!(rewound.warning, None);
+    assert!(rewound.restored_files.is_empty());
+    assert_eq!(read(root.path(), "a.txt"), "two\n");
+
+    // The new turn starts at the same message as the dropped one.
+    submit_turns(&mut agent, &["edit b"]).await;
+    let points = agent.rewind_points();
+    assert_eq!(points[0].turn_id, 0);
+    assert_eq!(points[0].changed_files, ["b.txt"]);
+    let rewound = agent.rewind(0, RewindMode::ConversationAndFiles).unwrap();
+    assert_eq!(rewound.restored_files, ["b.txt"]);
+    assert_eq!(read(root.path(), "b.txt"), "one\n");
+    assert_eq!(read(root.path(), "a.txt"), "two\n");
+
+    assert_eq!(agent.undo(None).unwrap(), ["a.txt"]);
+    assert_eq!(read(root.path(), "a.txt"), "one\n");
+}
+
+#[tokio::test]
+async fn a_files_only_rewind_keeps_the_conversation_and_tells_the_model() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+    let mut agent = service(
+        root.path(),
+        vec![
+            Ok(patch_call("a.txt", "one", "two")),
+            Ok(text_provider_response("edited a", None)),
+        ],
+    );
+    submit_turns(&mut agent, &["edit a"]).await;
+    let kept = agent.messages.len();
+
+    let rewound = agent.rewind(0, RewindMode::Files).unwrap();
+    assert_eq!(rewound.restored_files, ["a.txt"]);
+    assert_eq!(read(root.path(), "a.txt"), "one\n");
+    assert_eq!(agent.messages.len(), kept + 1);
+    let note = serde_json::to_string(agent.messages.last().unwrap()).unwrap();
+    assert!(
+        note.contains(r#"reverted the files you changed since their prompt \"edit a\": a.txt"#),
+        "{note}"
+    );
+    let points = agent.rewind_points();
+    assert_eq!(points.len(), 1);
+    assert!(points[0].changed_files.is_empty());
+
+    let err = agent.rewind(0, RewindMode::Files).err().unwrap();
+    assert!(err.to_string().contains("changed no files"), "{err}");
+    assert_eq!(agent.messages.len(), kept + 1);
 }
 
 #[test]
@@ -1498,6 +1646,7 @@ fn undo_reverts_the_last_edit_and_tells_the_model() {
     crate::tools::apply_patch::apply_patch_from_workspace(
         root.path(),
         &json!({"patch": "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+two\n*** End Patch"}),
+        None,
     )
     .unwrap();
     assert_eq!(agent.undo(None).unwrap(), ["a.txt"]);
