@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <rect width="1280" height="640" fill="#111317"/>
+  <g transform="translate(80 150) scale(2.571)">
+    <rect x="1.5" y="1.5" width="25" height="25" rx="7" fill="none" stroke="#e0a43c" stroke-width="2"/>
+    <path d="M8.5 10.5 L13 14 L8.5 17.5" fill="none" stroke="#e0a43c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M15 18 H20" stroke="#e6e6e3" stroke-width="2.2" stroke-linecap="round"/>
+  </g>
+  <text x="172" y="208" font-family="JetBrains Mono" font-weight="800" font-size="72" letter-spacing="-2" fill="#e6e6e3">socium</text>
+  <text font-family="Inter Variable, Inter, sans-serif" font-weight="600" font-size="34" fill="#e6e6e3">
+    <tspan x="80" y="300">A coding agent for the terminal</tspan>
+    <tspan x="80" y="344">that runs every command in a sandbox.</tspan>
+  </text>
+  <text x="80" y="420" font-family="Inter Variable, Inter, sans-serif" font-size="22" fill="#9097a3">Rust · Linux · bubblewrap · no network, no home directory</text>
+  <rect x="760.5" y="160.5" width="439" height="296" rx="14" fill="none" stroke="#2c3038"/>
+  <g font-family="JetBrains Mono" font-size="17" fill="#9097a3" xml:space="preserve">
+    <text x="784" y="206"><tspan fill="#e0a43c">$</tspan><tspan fill="#e6e6e3"> socium</tspan></text>
+    <text x="784" y="240"><tspan fill="#e0a43c">›</tspan><tspan fill="#e6e6e3"> fix the failing test</tspan></text>
+    <text x="784" y="274">  read_file   tests/headless.rs <tspan fill="#58c48a">✓</tspan></text>
+    <text x="784" y="308">  run_command cargo test <tspan fill="#ef7a6e">✗</tspan></text>
+    <text x="784" y="342">  edit_file   tests/headless.rs <tspan fill="#58c48a">✓</tspan></text>
+    <text x="784" y="376">  run_command cargo test <tspan fill="#58c48a">✓</tspan></text>
+    <text x="784" y="420"><tspan fill="#e0a43c">●</tspan><tspan fill="#e6e6e3"> Fixed. 3 tests pass.</tspan></text>
+  </g>
+</svg>
