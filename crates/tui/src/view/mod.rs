@@ -821,6 +821,7 @@ mod tests {
             socium_core::RewindPoint {
                 turn_id: 0,
                 prompt: "fix the README".into(),
+                changed_files: Vec::new(),
             },
         ]));
         let rows = render(&app);

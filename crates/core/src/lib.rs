@@ -97,6 +97,16 @@ pub struct RewindPoint {
     /// dropped.
     pub turn_id: usize,
     pub prompt: String,
+    /// The files Socium's edits changed from this prompt on, sorted.
+    pub changed_files: Vec<String>,
+}
+
+/// What a rewind takes back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewindMode {
+    ConversationAndFiles,
+    Conversation,
+    Files,
 }
 
 /// Result of a rewind.
@@ -104,9 +114,12 @@ pub struct RewindPoint {
 pub struct Rewound {
     /// The prompt that was taken back, to edit and send again.
     pub prompt: String,
-    /// Why the Activity of the dropped turns could not be removed. The
-    /// conversation is rewound either way.
+    /// Why the Activity of the dropped turns could not be removed, or
+    /// their edits kept out of later rewinds. The rewind is done either
+    /// way.
     pub warning: Option<String>,
+    /// The files put back to their content before the prompt, sorted.
+    pub restored_files: Vec<String>,
 }
 
 /// Everything that changes together when the model changes.
@@ -924,6 +937,10 @@ impl AgentService {
     /// The prompts this conversation can go back to, oldest first. Notes
     /// added by `/undo` are not prompts.
     pub fn rewind_points(&self) -> Vec<RewindPoint> {
+        // Unreadable history lists no files; reverting them reports why.
+        let edits =
+            crate::tools::edit_history::session_edits(&self.workspace_root, &self.session_id)
+                .unwrap_or_default();
         self.events
             .iter()
             .filter(|event| event["type"] == "turn_started")
@@ -937,6 +954,13 @@ impl AgentService {
                     } => Some(RewindPoint {
                         turn_id,
                         prompt: prompt.clone(),
+                        changed_files: edits
+                            .iter()
+                            .filter(|(edit_turn, _)| *edit_turn >= turn_id)
+                            .map(|(_, path)| path.clone())
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .collect(),
                     }),
                     _ => None,
                 }
@@ -944,10 +968,11 @@ impl AgentService {
             .collect()
     }
 
-    /// Goes back to just before the prompt at `turn_id`, between turns,
-    /// and returns that prompt. Files are not restored; `/undo` reverts
-    /// Socium's edits.
-    pub fn rewind(&mut self, turn_id: usize) -> Result<Rewound, AgentError> {
+    /// Goes back to just before the prompt at `turn_id`, between turns:
+    /// puts the files Socium's edits changed from it on back, drops the
+    /// conversation from it, or both, as `mode` says. Files are reverted
+    /// first, and only when every one still holds what Socium wrote.
+    pub fn rewind(&mut self, turn_id: usize, mode: RewindMode) -> Result<Rewound, AgentError> {
         self.ensure_state_lock()?;
         let Some(point) = self
             .rewind_points()
@@ -960,6 +985,57 @@ impl AgentService {
             )
             .into());
         };
+        let restored_files = match mode {
+            RewindMode::Conversation => Vec::new(),
+            RewindMode::ConversationAndFiles | RewindMode::Files => {
+                crate::tools::edit_history::revert_since(
+                    &self.workspace_root,
+                    &self.session_id,
+                    turn_id,
+                )
+                .map_err(Error::other)?
+            }
+        };
+        if mode == RewindMode::Files {
+            return self.note_reverted_files(point.prompt, restored_files);
+        }
+        let mut warnings = Vec::new();
+        if let Err(err) = self.drop_turns_from(turn_id) {
+            if restored_files.is_empty() {
+                return Err(err.into());
+            }
+            return Err(Error::other(format!(
+                "The files were restored ({}), but the conversation could not be rewound: {err}",
+                restored_files.join(", ")
+            ))
+            .into());
+        }
+        if let Err(err) = crate::activity_log::drop_turns_from(&self.activity_log_path(), turn_id) {
+            warnings.push(format!(
+                "The Activity of the dropped turns is still saved: {err}"
+            ));
+        }
+        if mode == RewindMode::Conversation
+            && let Err(err) = crate::tools::edit_history::forget_since(
+                &self.workspace_root,
+                &self.session_id,
+                turn_id,
+            )
+        {
+            warnings.push(format!(
+                "A later /rewind may revert the edits of the dropped turns: {err}"
+            ));
+        }
+        Ok(Rewound {
+            prompt: point.prompt,
+            warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+            restored_files,
+        })
+    }
+
+    /// Drops the messages and events of the turns from `turn_id` on and
+    /// saves the conversation, or changes nothing.
+    fn drop_turns_from(&mut self, turn_id: usize) -> std::io::Result<()> {
         let previous_summary = self.summary_state.clone();
         let previous_usage = self.last_measured_usage.take();
         let mut dropped_messages = self.messages.split_off(turn_id);
@@ -989,14 +1065,46 @@ impl AgentService {
             self.events.append(&mut dropped_events);
             self.summary_state = previous_summary;
             self.last_measured_usage = previous_usage;
-            return Err(err.into());
+            return Err(err);
         }
-        let warning = crate::activity_log::drop_turns_from(&self.activity_log_path(), turn_id)
-            .err()
-            .map(|err| format!("The Activity of the dropped turns is still saved: {err}"));
+        Ok(())
+    }
+
+    /// Tells the model, in the kept conversation, that the files its turns
+    /// from `prompt` on changed are back as they were.
+    fn note_reverted_files(
+        &mut self,
+        prompt: String,
+        restored_files: Vec<String>,
+    ) -> Result<Rewound, AgentError> {
+        if restored_files.is_empty() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Socium changed no files from this prompt on",
+            )
+            .into());
+        }
+        let excerpt = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        let excerpt = match excerpt.char_indices().nth(80) {
+            Some((end, _)) => format!("{}…", &excerpt[..end]),
+            None => excerpt,
+        };
+        self.messages.push(Message::user_text(format!(
+            "(The user reverted the files you changed since their prompt \"{excerpt}\": {}; those files are back to their content before it.)",
+            restored_files.join(", ")
+        )));
+        if let Err(err) = self.persist_state() {
+            self.messages.pop();
+            return Err(Error::other(format!(
+                "The files were restored ({}), but the conversation could not be saved: {err}",
+                restored_files.join(", ")
+            ))
+            .into());
+        }
         Ok(Rewound {
-            prompt: point.prompt,
-            warning,
+            prompt,
+            warning: None,
+            restored_files,
         })
     }
 
@@ -1325,6 +1433,10 @@ impl AgentService {
         )?;
         let initial_len = prepared_context.messages.len();
         let mut context_messages = prepared_context.messages;
+        let edit_origin = crate::tools::edit_history::EditOrigin {
+            session_id: self.session_id.clone(),
+            turn_id,
+        };
         let turn_context = TurnContext {
             provider: self.provider.as_ref(),
             client: &self.client,
@@ -1337,6 +1449,7 @@ impl AgentService {
             tools: &self.tools,
             subagents: &self.subagents,
             workspace_root: &self.workspace_root,
+            edit_origin: Some(&edit_origin),
             control: &self.control,
             settings: &self.settings,
             clock,
