@@ -122,15 +122,17 @@ pub(crate) fn run_subagent<'a>(
             tools: &tools,
             ..child
         };
-        let root = ctx.workspace_root;
+        let (root, session) = (ctx.workspace_root, ctx.session_id);
         let state_error =
             |err: std::io::Error| ToolError::Message(format!("Subagent record: {err}"));
         let mut record = match optional_string_field(fields, "resume", AGENT_TOOL_NAME)? {
             Some(id) => {
-                let mut record = record::load(root, id)
+                let mut record = record::load(root, session, id)
                     .map_err(state_error)?
                     .ok_or_else(|| {
-                        ToolError::Message(format!("No saved subagent '{id}' to resume"))
+                        ToolError::Message(format!(
+                            "No saved subagent '{id}' in this session; only subagents started in this session can be resumed"
+                        ))
                     })?;
                 if record.agent_type != kind.name {
                     return Err(ToolError::Message(format!(
@@ -145,7 +147,7 @@ pub(crate) fn run_subagent<'a>(
                 record
             }
             None => {
-                let id = record::new_id(root, call_id).map_err(state_error)?;
+                let id = record::new_id(root, session, call_id).map_err(state_error)?;
                 SubagentRecord::new(id, &kind.name, description, child.model)
             }
         };
@@ -154,14 +156,14 @@ pub(crate) fn run_subagent<'a>(
         record.model = child.model.to_string();
         record.runs += 1;
         record.status = SubagentStatus::Running;
-        record.save(root).map_err(|err| {
+        record.save(root, session).map_err(|err| {
             ToolError::Message(format!(
                 "Could not save the subagent record; it was not started: {err}"
             ))
         })?;
         if record.runs == 1 {
             // Pruning only removes other, older records.
-            let _ = record::prune(root, &record.id);
+            let _ = record::prune(root, session, &record.id);
         }
         let agent = Some(call_id.to_string());
         let requested_by = format!(
@@ -228,7 +230,7 @@ pub(crate) fn run_subagent<'a>(
             Err(AgentError::Cancelled) => SubagentStatus::Cancelled,
             Err(_) => SubagentStatus::Failed,
         };
-        let saved = record.save(root);
+        let saved = record.save(root, session);
 
         let notes = last_assistant_text(&record.messages[resumed_from..]);
         let side_effects = if kind.tools.may_change_workspace() {
@@ -312,7 +314,7 @@ async fn run_in_window(
             if started {
                 record.tool_events.push(event);
             }
-            let saved = record.save(ctx.workspace_root);
+            let saved = record.save(ctx.workspace_root, ctx.session_id);
             if saved.is_err() && started {
                 record.tool_events.pop();
             }
@@ -1134,8 +1136,16 @@ mod tests {
         );
     }
 
-    fn record(root: &std::path::Path, id: &str) -> Value {
-        let path = root.join(".socium/agents").join(format!("{id}.json"));
+    fn record_path(service: &AgentService, id: &str) -> std::path::PathBuf {
+        crate::session::session_file(
+            &service.workspace_root,
+            service.session_id(),
+            &format!("agents/{id}.json"),
+        )
+    }
+
+    fn record(service: &AgentService, id: &str) -> Value {
+        let path = record_path(service, id);
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
@@ -1165,7 +1175,7 @@ mod tests {
         );
 
         service.submit("Find the greeting".into()).await.unwrap();
-        let saved = record(workspace.path(), "agent-1");
+        let saved = record(&service, "agent-1");
         assert_eq!(saved["status"], "finished");
         assert_eq!(saved["runs"], 1);
         assert_eq!(saved["agent_type"], "explorer");
@@ -1190,7 +1200,7 @@ mod tests {
             report.starts_with("a.txt:2 says world\n\n(subagent agent-1: 1 round, "),
             "{report}"
         );
-        let saved = record(workspace.path(), "agent-1");
+        let saved = record(&service, "agent-1");
         assert_eq!(saved["runs"], 2);
         assert_eq!(saved["messages"].as_array().unwrap().len(), 6);
 
@@ -1260,10 +1270,63 @@ mod tests {
         assert_eq!(
             contents,
             [
-                "No saved subagent 'missing' to resume",
+                "No saved subagent 'missing' in this session; only subagents started in this session can be resumed",
                 "Subagent record: '../agent-1' is not a subagent ID",
                 "Subagent 'agent-1' has agent_type 'explorer'; resume it with that type",
             ]
+        );
+    }
+
+    /// Paths of the files under `dir` that contain `needle`.
+    fn files_containing(dir: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.extend(files_containing(&path, needle));
+            } else if std::fs::read_to_string(&path).is_ok_and(|text| text.contains(needle)) {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    #[tokio::test]
+    async fn subagents_belong_to_their_session_and_go_with_it() {
+        let workspace = make_temp_dir("subagent_sessions");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                delegate("explorer"),
+                text("a.txt:1 says hello"),
+                text("Found it."),
+                resume("agent-1", "explorer", "And line 2?"),
+                text("I cannot resume it here."),
+            ],
+        );
+        service.submit("Find the greeting".into()).await.unwrap();
+        let first = service.session_id().to_string();
+        assert_eq!(service.subagent_runs().unwrap().len(), 1);
+
+        service.clear().unwrap();
+
+        // A new session lists none of the old one's subagents and cannot
+        // resume them.
+        assert!(service.subagent_runs().unwrap().is_empty());
+        assert!(service.subagent_transcript("agent-1").is_err());
+        service.submit("Ask it again".into()).await.unwrap();
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 5, "no subagent ran for the refused resume");
+        assert_eq!(
+            last_results(&requests[4])[0]["content"],
+            "No saved subagent 'agent-1' in this session; only subagents started in this session can be resumed"
+        );
+
+        // Deleting the session deletes what its subagents were told.
+        service.delete_session(&first).unwrap();
+        assert_eq!(
+            files_containing(workspace.path(), "Where does a.txt say hello?"),
+            Vec::<std::path::PathBuf>::new()
         );
     }
 
@@ -1283,16 +1346,16 @@ mod tests {
 
         service.submit("Find it".into()).await.unwrap();
 
-        let saved = record(workspace.path(), "agent-1");
+        let saved = record(&service, "agent-1");
         assert_eq!(saved["status"], "failed");
         let messages = saved["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[2]["content"][0]["tool_use_id"], "read-1");
         assert_eq!(requests.lock().unwrap().len(), 4);
+        let path = record_path(&service, "agent-1");
         drop(service);
 
         // A crash between the call and its result leaves the call alone.
-        let path = workspace.path().join(".socium/agents/agent-1.json");
         let mut cut = saved.clone();
         cut["messages"].as_array_mut().unwrap().truncate(2);
         cut["status"] = json!("running");
@@ -1305,6 +1368,7 @@ mod tests {
                 text("Done."),
             ],
         );
+        service.restore_state().unwrap();
 
         service.submit("Again".into()).await.unwrap();
 
@@ -1486,7 +1550,6 @@ mod tests {
         ];
         saved.status = SubagentStatus::Finished;
         saved.runs = 1;
-        saved.save(workspace.path()).unwrap();
         let (mut service, requests) = scripted(
             workspace.path(),
             vec![
@@ -1496,6 +1559,7 @@ mod tests {
                 text("Done."),
             ],
         );
+        saved.save(workspace.path(), service.session_id()).unwrap();
 
         service.submit("How long?".into()).await.unwrap();
 
@@ -1527,7 +1591,7 @@ mod tests {
             report.starts_with("About a million characters.\n\n"),
             "{report}"
         );
-        assert_eq!(record(workspace.path(), "agent-1")["status"], "finished");
+        assert_eq!(record(&service, "agent-1")["status"], "finished");
     }
 
     #[tokio::test]
@@ -1548,11 +1612,11 @@ mod tests {
             ],
         );
         service.submit("First".into()).await.unwrap();
-        let before = record(workspace.path(), "agent-1");
+        let before = record(&service, "agent-1");
 
         service.submit("Again".into()).await.unwrap();
 
-        let failed = record(workspace.path(), "agent-1");
+        let failed = record(&service, "agent-1");
         assert_eq!(failed["status"], "failed");
         assert_eq!(failed["messages"], before["messages"]);
         assert_eq!(failed["runs"], 1);
@@ -1568,7 +1632,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(sent.len(), 3);
         assert_eq!(sent[2], "Second follow-up");
-        assert_eq!(record(workspace.path(), "agent-1")["runs"], 2);
+        assert_eq!(record(&service, "agent-1")["runs"], 2);
     }
 
     /// Answers the main agent from a script. Each subagent request waits
@@ -1679,8 +1743,8 @@ mod tests {
                 .1
                 .starts_with("report on docs\n\n(subagent agent-b: ")
         );
-        assert_eq!(record(workspace.path(), "agent-a")["status"], "finished");
-        assert_eq!(record(workspace.path(), "agent-b")["status"], "finished");
+        assert_eq!(record(&service, "agent-a")["status"], "finished");
+        assert_eq!(record(&service, "agent-b")["status"], "finished");
     }
 
     /// The tool entries a turn shows live, then the ones a restarted
