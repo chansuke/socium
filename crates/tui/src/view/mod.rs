@@ -429,7 +429,7 @@ impl App {
             ))
         } else if self.activity.is_empty() {
             Text::from(vec![Line::from(Span::styled(
-                "Thoughts, tool calls, and token use appear here",
+                "  Thoughts, tool calls, and token use appear here",
                 Style::default().fg(MUTED),
             ))])
         } else {
