@@ -173,9 +173,12 @@ pub(crate) fn list(root: &Path) -> io::Result<Vec<SubagentRecord>> {
     Ok(records)
 }
 
-/// Removes the least recently updated records beyond `MAX_RECORDS`.
-pub(crate) fn prune(root: &Path) -> io::Result<()> {
-    for record in list(root)?.into_iter().skip(MAX_RECORDS) {
+/// Removes the least recently updated records beyond `MAX_RECORDS`, never
+/// `keep`, the one just created: a clock that went back can date it older
+/// than the rest.
+pub(crate) fn prune(root: &Path, keep: &str) -> io::Result<()> {
+    let others = list(root)?.into_iter().filter(|record| record.id != keep);
+    for record in others.skip(MAX_RECORDS - 1) {
         fs::remove_file(record_path(root, &record.id)?)?;
     }
     Ok(())
@@ -226,12 +229,31 @@ mod tests {
             save_json_file(&record_path(root.path(), &record.id).unwrap(), &record).unwrap();
         }
 
-        prune(root.path()).unwrap();
+        prune(root.path(), &format!("r{MAX_RECORDS:03}")).unwrap();
 
         let kept = list(root.path()).unwrap();
         assert_eq!(kept.len(), MAX_RECORDS);
         assert_eq!(kept[0].id, format!("r{MAX_RECORDS:03}"));
         assert!(load(root.path(), "r000").unwrap().is_none());
         assert!(load(root.path(), "r001").unwrap().is_some());
+    }
+
+    #[test]
+    fn pruning_never_removes_the_new_record_even_when_the_clock_went_back() {
+        let root = make_temp_dir("record_prune_skew");
+        for index in 0..MAX_RECORDS {
+            let mut record = SubagentRecord::new(format!("r{index:03}"), "explorer", "d", "m");
+            record.updated_at_ms = u64::MAX - index as u64;
+            save_json_file(&record_path(root.path(), &record.id).unwrap(), &record).unwrap();
+        }
+        let mut new = SubagentRecord::new("new".into(), "explorer", "d", "m");
+        new.save(root.path()).unwrap();
+
+        prune(root.path(), "new").unwrap();
+
+        assert_eq!(list(root.path()).unwrap().len(), MAX_RECORDS);
+        assert!(load(root.path(), "new").unwrap().is_some());
+        let oldest = format!("r{:03}", MAX_RECORDS - 1);
+        assert!(load(root.path(), &oldest).unwrap().is_none());
     }
 }
