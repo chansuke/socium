@@ -13,8 +13,9 @@ access cannot be added.
 Use Linux x86_64 or aarch64 with bubblewrap 0.12+ and enabled unprivileged user
 namespaces. `nix develop` and the Linux Nix application supply bubblewrap. Native
 installations also need Git and ripgrep. The TUI executes a harmless sandboxed
-probe at startup; missing tools, disabled namespaces and invalid mounts stop
-startup. There is no automatic or opt-in host-execution fallback in this version.
+probe at startup while the interface opens, and no turn starts before it passes;
+missing tools, disabled namespaces and invalid mounts stop startup. There is no
+automatic or opt-in host-execution fallback in this version.
 Linux x86_64 is exercised locally and in CI; aarch64 has an implementation but
 has not been exercised on hardware. macOS and Windows are unsupported.
 
