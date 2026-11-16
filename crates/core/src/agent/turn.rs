@@ -124,7 +124,7 @@ where
         }
         if estimate > limit {
             return Err(AgentError::ContextFull(format!(
-                "The context window filled during the tool loop (about {estimate} of {limit} tokens)."
+                "The context window filled during the tool loop (about {estimate} of {limit} tokens)"
             )));
         }
         let estimated_input = crate::agent::context::estimate_request_tokens(
