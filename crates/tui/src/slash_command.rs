@@ -75,7 +75,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "agents",
-        description: "List saved subagents; /agents <id> shows one's conversation",
+        description: "List this session's subagents; /agents <id> shows one's conversation",
         action: SlashAction::Agents,
         takes_argument: true,
     },
