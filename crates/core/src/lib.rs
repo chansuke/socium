@@ -1422,6 +1422,13 @@ impl AgentService {
     pub fn startup_warnings(&self) -> Vec<String> {
         let mut warnings = self.warnings.clone();
         warnings.extend(self.provider.startup_warnings());
+        // The current model is also a subagent model; its warnings name
+        // its alias, so a repeat is the same text.
+        for warning in self.subagents.startup_warnings() {
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
         warnings
     }
 
@@ -2669,6 +2676,60 @@ max_output_tokens = 4000
             service.switch_model("opus").unwrap();
             let back = service.switch_model("ds-flash").unwrap();
             assert_eq!(back.warnings.len(), 1, "{:?}", back.warnings);
+        }
+
+        #[test]
+        fn settings_a_subagent_model_ignores_are_warned_about_once() {
+            let root = make_temp_dir("subagent_model_warnings");
+            let registry = ModelRegistry::from_toml(
+                r#"
+default = "main"
+[providers.p]
+wire = "anthropic"
+base_url = "https://p.example"
+api_key_env = "P_KEY"
+
+[[models]]
+alias = "main"
+provider = "p"
+id = "main-id"
+features = ["effort"]
+
+[[models]]
+alias = "plain"
+provider = "p"
+id = "plain-id"
+
+[[models]]
+alias = "plain-too"
+provider = "p"
+id = "plain-id"
+"#,
+            )
+            .unwrap();
+            let service = AgentService::open(
+                root.path().to_path_buf(),
+                SessionStart::New,
+                registry,
+                lookup(&[("P_KEY", "k"), ("EFFORT", "high"), ("MODEL", "plain")]),
+                None,
+                reqwest::Client::new(),
+            )
+            .unwrap();
+
+            let warnings = service.startup_warnings();
+            let effort = warnings
+                .iter()
+                .filter(|warning| warning.contains("EFFORT is ignored"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                effort,
+                [
+                    "EFFORT is ignored for plain: it does not list the effort feature",
+                    "EFFORT is ignored for plain-too: it does not list the effort feature",
+                ],
+                "{warnings:?}"
+            );
         }
 
         #[test]

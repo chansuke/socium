@@ -118,6 +118,15 @@ impl SubagentCatalog {
         self.models.iter().find(|model| model.config.alias == alias)
     }
 
+    /// What the models' providers ignore, such as `EFFORT` on a model
+    /// without the feature.
+    pub(crate) fn startup_warnings(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .flat_map(|model| model.provider.startup_warnings())
+            .collect()
+    }
+
     pub(crate) fn model_aliases(&self) -> Vec<&str> {
         self.models
             .iter()
