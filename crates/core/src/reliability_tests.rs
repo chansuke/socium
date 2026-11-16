@@ -708,6 +708,66 @@ fn continue_opens_the_most_recently_saved_session() {
 }
 
 #[test]
+fn continuing_the_newest_session_leaves_its_file_alone() {
+    let root = tempfile::tempdir().unwrap();
+    let id = saved_session(root.path(), "only");
+    let path = root
+        .path()
+        .join(".socium/sessions")
+        .join(&id)
+        .join("conversation.json");
+    let saved_at = std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(saved_at)
+        .unwrap();
+
+    drop(open_session(root.path(), SessionStart::Continue).unwrap());
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        saved_at
+    );
+}
+
+#[test]
+fn a_resumed_older_session_is_the_one_continue_opens_next() {
+    let root = tempfile::tempdir().unwrap();
+    let older = saved_session(root.path(), "older");
+    std::thread::sleep(Duration::from_millis(20));
+    saved_session(root.path(), "newer");
+
+    drop(open_session(root.path(), SessionStart::Resume(older.clone())).unwrap());
+    let agent = open_session(root.path(), SessionStart::Continue).unwrap();
+    assert_eq!(agent.session_id(), older);
+}
+
+#[test]
+fn continuing_saves_the_repair_of_an_interrupted_tool_call() {
+    let root = tempfile::tempdir().unwrap();
+    let mut agent = open_session(root.path(), SessionStart::New).unwrap();
+    agent.messages = vec![
+        Message::user_text("list the files".into()),
+        Message::assistant_blocks(vec![ContentBlock::ToolUse {
+            id: "call-1".into(),
+            name: "list_files".into(),
+            input: json!({"path": "."}),
+        }]),
+    ];
+    agent.persist_state().unwrap();
+    let path = agent.conversation_path();
+    drop(agent);
+
+    drop(open_session(root.path(), SessionStart::Continue).unwrap());
+    let saved = std::fs::read_to_string(path).unwrap();
+    assert!(
+        saved.contains("Interrupted before result was saved"),
+        "{saved}"
+    );
+}
+
+#[test]
 fn continue_refuses_an_unreadable_latest_session_instead_of_skipping_it() {
     let root = tempfile::tempdir().unwrap();
     saved_session(root.path(), "older");
