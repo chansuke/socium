@@ -199,12 +199,20 @@ pub(crate) fn run_subagent<'a>(
             | AgentProgress::CompactionStarted
             | AgentProgress::CompactionFinished { .. }) => on_progress(other),
         };
-        // Saved before each side effect, like the main conversation.
-        let mut checkpoint = |context: &[Message], _event: Value| -> std::io::Result<()> {
+        // Saved before each side effect, like the main conversation. A
+        // call runs once its intent is saved; one refused or denied before
+        // that is not counted.
+        let mut tool_calls = 0;
+        let mut checkpoint = |context: &[Message], event: Value| -> std::io::Result<()> {
             record.messages = context.to_vec();
-            record.save(root)
+            record.save(root)?;
+            if event["type"] == "tool_started" {
+                tool_calls += 1;
+            }
+            Ok(())
         };
         let result = run_agent_turn(&child, &mut messages, &mut forward, &mut checkpoint).await;
+        stats.tool_calls = tool_calls;
         record.messages = messages;
         record.status = match &result {
             Ok(_) => SubagentStatus::Finished,
@@ -243,8 +251,8 @@ pub(crate) fn run_subagent<'a>(
     })
 }
 
-/// What one subagent run cost, counted from its activity so that failed
-/// and cancelled runs are measured too.
+/// What one subagent run cost: the model requests it made and the tool
+/// calls it ran, measured also for failed and cancelled runs.
 struct RunStats {
     started: Instant,
     rounds: usize,
@@ -263,23 +271,22 @@ impl RunStats {
     }
 
     fn observe(&mut self, kind: &ActivityKind) {
-        match kind {
-            ActivityKind::RoundStarted { .. } => self.rounds += 1,
-            ActivityKind::ToolStarted { .. } => self.tool_calls += 1,
-            ActivityKind::RoundFinished {
-                usage: Some(usage), ..
-            } => {
-                let total = self.usage.get_or_insert_with(TokenUsage::default);
-                total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
-                total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
-                total.cache_creation_input_tokens = total
-                    .cache_creation_input_tokens
-                    .saturating_add(usage.cache_creation_input_tokens);
-                total.cache_read_input_tokens = total
-                    .cache_read_input_tokens
-                    .saturating_add(usage.cache_read_input_tokens);
-            }
-            _ => {}
+        // A round ends only after its request, so one that failed before
+        // sending is left out.
+        let ActivityKind::RoundFinished { usage, .. } = kind else {
+            return;
+        };
+        self.rounds += 1;
+        if let Some(usage) = usage {
+            let total = self.usage.get_or_insert_with(TokenUsage::default);
+            total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+            total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+            total.cache_creation_input_tokens = total
+                .cache_creation_input_tokens
+                .saturating_add(usage.cache_creation_input_tokens);
+            total.cache_read_input_tokens = total
+                .cache_read_input_tokens
+                .saturating_add(usage.cache_read_input_tokens);
         }
     }
 
@@ -573,6 +580,15 @@ mod tests {
             assert_eq!(result["is_error"], true);
             assert_eq!(result["content"], format!("Unsupported tool: {tool}"));
         }
+        // Refused calls never ran, so the report counts none.
+        let report = &last_results(&requests[3])[0]["content"];
+        assert!(
+            report
+                .as_str()
+                .unwrap()
+                .contains("(subagent agent-1: 2 rounds, 0 tool calls, "),
+            "{report}"
+        );
     }
 
     #[tokio::test]
@@ -702,7 +718,7 @@ mod tests {
             "{content}"
         );
         assert!(
-            content.contains(" tokens).\n\n(subagent agent-1: "),
+            content.contains(" tokens).\n\n(subagent agent-1: 0 rounds, 0 tool calls, "),
             "{content}"
         );
     }
@@ -839,6 +855,14 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("Denied by the user")
+        );
+        let report = &last_results(&requests.lock().unwrap()[3])[0]["content"];
+        assert!(
+            report
+                .as_str()
+                .unwrap()
+                .contains("(subagent agent-1: 2 rounds, 0 tool calls, "),
+            "{report}"
         );
     }
 
