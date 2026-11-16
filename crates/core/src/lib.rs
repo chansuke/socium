@@ -742,14 +742,21 @@ impl AgentService {
         let (user_types, subagent_models, mut agent_warnings) = service.load_subagents();
         service.warnings.append(&mut agent_warnings);
         service.install_subagents(SubagentCatalog::new(user_types, subagent_models));
-        service.apply_state(state)?;
-        if let Some(alias) = saved
-            && alias == service.active_model.alias
+        let repaired = service.apply_state(state)?;
+        if let Some(alias) = &saved
+            && *alias == service.active_model.alias
         {
-            service.selected_model = Some(alias);
+            service.selected_model = Some(alias.clone());
         }
-        // A new session is written once it has something to save.
-        if resumed.is_some() {
+        // A new session is written once it has something to save. A resumed
+        // one is written when loading repaired it or dropped its model, or to
+        // make it the newest so that `-c` continues it. Rewriting an unchanged
+        // newest session would cost a full write and sync on every launch.
+        if let Some(session) = resumed
+            && (repaired
+                || service.selected_model != saved
+                || sessions.first().map(|newest| &newest.id) != Some(&session.id))
+        {
             service.persist_state()?;
         }
         Ok(service)
@@ -1225,7 +1232,8 @@ impl AgentService {
         )
     }
 
-    fn apply_state(&mut self, state: ConversationState) -> std::io::Result<()> {
+    /// Loads `state` and reports whether loading had to repair it.
+    fn apply_state(&mut self, state: ConversationState) -> std::io::Result<bool> {
         if state.schema_version > 1 {
             return Err(std::io::Error::other(format!(
                 "Unsupported conversation schema {}; original file preserved",
@@ -1238,7 +1246,7 @@ impl AgentService {
         self.messages = state.messages;
         self.events = state.events;
         self.session_name = state.name;
-        crate::agent::turn::repair_incomplete_tools(&mut self.messages);
+        let mut repaired = crate::agent::turn::repair_incomplete_tools(&mut self.messages);
         if self
             .summary_state
             .summary
@@ -1255,9 +1263,10 @@ impl AgentService {
             && summary.thinking_valid_from.is_none()
         {
             summary.thinking_valid_from = Some(self.messages.len());
+            repaired = true;
         }
         *self.session_usage.lock().unwrap_or_else(|e| e.into_inner()) = SessionUsage::default();
-        Ok(())
+        Ok(repaired)
     }
 
     /// Starts a new session with the current model. The previous one stays
@@ -1329,7 +1338,7 @@ impl AgentService {
         let previous_usage = self.last_measured_usage.take();
         let mut previous_model = None;
         let mut warnings = Vec::new();
-        let result = self.apply_state(state).and_then(|()| {
+        let result = self.apply_state(state).and_then(|_| {
             match saved {
                 Some(alias) if alias == self.active_model.alias => {
                     self.selected_model = Some(alias);
