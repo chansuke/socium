@@ -91,16 +91,22 @@
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           };
+          # Only the shipped binary needs the release profile's LTO. With it,
+          # linking the test binaries took most of the package build.
+          testProfile = "--config profile.release.lto=false --config profile.release.codegen-units=16";
           # Dependencies alone, built from Cargo.toml and Cargo.lock. Its
           # output stays the same until they change, so the Cachix cache
           # serves it to later builds.
-          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          cargoArtifacts = craneLib.buildDepsOnly (
+            commonArgs // { cargoTestExtraArgs = "--no-run ${testProfile}"; }
+          );
         in
         {
           default = craneLib.buildPackage (
             commonArgs
             // {
               inherit cargoArtifacts;
+              cargoTestExtraArgs = testProfile;
               nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
               nativeCheckInputs = [
                 pkgs.git
