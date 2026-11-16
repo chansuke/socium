@@ -1556,6 +1556,13 @@ impl AgentService {
             context_window: self.context_window(),
             max_tokens: self.max_tokens,
             estimate_scale: self.estimate_scale,
+            compaction: (
+                self.compaction_provider
+                    .as_deref()
+                    .unwrap_or(self.provider.as_ref()),
+                &self.compaction_model,
+            ),
+            rounds_done: 0,
             tools: &self.tools,
             subagents: &self.subagents,
             workspace_root: &self.workspace_root,
