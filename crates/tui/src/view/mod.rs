@@ -251,6 +251,8 @@ impl App {
             // The request under review replaces the transcript and Activity
             // so that a long diff gets the whole body of the screen.
             draw_approval_details(frame, areas.transcript.union(areas.activity), prompt);
+        } else if let Some(picker) = &self.rewind_picker {
+            picker.draw(frame, areas.transcript.union(areas.activity));
         } else if let Some(picker) = &self.session_picker {
             picker.draw(
                 frame,
@@ -866,6 +868,25 @@ mod tests {
             .position(|row| row.starts_with("╭ Resume · 20261114-000000-0000 "))
             .unwrap();
         assert!(rows[top + 3].contains("❯ just now     4 msgs  readme · fix the README"));
+        assert!(!rows.iter().any(|row| row.contains("hidden while choosing")));
+    }
+
+    #[test]
+    fn the_rewind_picker_replaces_the_conversation() {
+        let mut app = App::for_test();
+        app.push_message(crate::transcript::Speaker::User, "hidden while choosing");
+        app.rewind_picker = Some(crate::rewind_picker::RewindPicker::new(vec![
+            socium_core::RewindPoint {
+                turn_id: 0,
+                prompt: "fix the README".into(),
+            },
+        ]));
+        let rows = render(&app);
+        let top = rows
+            .iter()
+            .position(|row| row.starts_with("┌ Rewind "))
+            .unwrap();
+        assert!(rows[top + 3].starts_with("│ ❯ fix the README"));
         assert!(!rows.iter().any(|row| row.contains("hidden while choosing")));
     }
 

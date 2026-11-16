@@ -326,6 +326,9 @@ what it adds.
   whether it was approved, and failed requests; interrupted operations with no
   saved result are marked unknown, never replayed. Only one Socium runs in a
   workspace at a time.
+- `/rewind` lists your prompts in this conversation, newest first. Choosing one
+  drops it and everything after it and puts it back in the input to edit and
+  send again. Files are not restored; `/undo` reverts Socium's edits.
 - `/compact`, automatic compaction, and budget trimming replace older turns
   with a summary. Thinking in the turns kept verbatim was produced against the
   replaced history, so it is no longer sent back; thinking produced after the
