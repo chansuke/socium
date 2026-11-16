@@ -47,6 +47,9 @@ pub(crate) struct TurnContext<'a> {
     pub(crate) workspace_root: &'a Path,
     /// The main agent's turn, which a subagent's edits belong to as well.
     pub(crate) edit_origin: Option<&'a crate::tools::edit_history::EditOrigin>,
+    /// The session whose subagent records the `agent` tool saves and
+    /// resumes.
+    pub(crate) session_id: &'a str,
     pub(crate) clock: ActivityClock,
 }
 
@@ -793,6 +796,7 @@ mod tests {
             settings: &crate::settings::Settings::default(),
             workspace_root: workspace.path(),
             edit_origin: None,
+            session_id: "20261101-000000-0000",
             clock: ActivityClock::start(0),
         };
         let agent = |agent_type: &str| {

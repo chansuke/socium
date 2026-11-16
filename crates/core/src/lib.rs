@@ -612,7 +612,7 @@ impl AgentService {
         client: impl Into<HttpClient>,
     ) -> Result<Self, AgentError> {
         let state_lock = crate::agent::state::lock_workspace(&workspace_root)?;
-        session::migrate_legacy_conversation(&workspace_root)?;
+        session::migrate_legacy_state(&workspace_root)?;
         let sessions = session::scan_sessions(&workspace_root)?;
         let mut warnings = Vec::new();
         let resumed = match &start {
@@ -975,7 +975,7 @@ impl AgentService {
     #[cfg(test)]
     fn restore_state(&mut self) -> std::io::Result<()> {
         self.ensure_state_lock()?;
-        session::migrate_legacy_conversation(&self.workspace_root)?;
+        session::migrate_legacy_state(&self.workspace_root)?;
         if let Some(latest) = session::scan_sessions(&self.workspace_root)?.first() {
             self.session_id = latest.id.clone();
         }
@@ -1430,22 +1430,30 @@ impl AgentService {
         transcript::transcript_entries(&self.messages, &self.events)
     }
 
-    /// Saved subagents, most recently updated first.
+    /// Subagents started in this session, most recently updated first.
     pub fn subagent_runs(&self) -> std::io::Result<Vec<SubagentSummary>> {
-        Ok(crate::agent::subagent::record::list(&self.workspace_root)?
-            .iter()
-            .map(|record| record.summary())
-            .collect())
+        Ok(
+            crate::agent::subagent::record::list(&self.workspace_root, &self.session_id)?
+                .iter()
+                .map(|record| record.summary())
+                .collect(),
+        )
     }
 
-    /// A saved subagent and its conversation, prompts and tool results
-    /// included.
+    /// A subagent started in this session and its conversation, prompts
+    /// and tool results included.
     pub fn subagent_transcript(
         &self,
         id: &str,
     ) -> std::io::Result<(SubagentSummary, Vec<TranscriptEntry>)> {
-        let record = crate::agent::subagent::record::load(&self.workspace_root, id)?
-            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("No saved subagent '{id}'")))?;
+        let record =
+            crate::agent::subagent::record::load(&self.workspace_root, &self.session_id, id)?
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::NotFound,
+                        format!("No saved subagent '{id}' in this session"),
+                    )
+                })?;
         Ok((
             record.summary(),
             transcript::transcript_entries(&record.messages, &record.tool_events),
@@ -1567,6 +1575,7 @@ impl AgentService {
             subagents: &self.subagents,
             workspace_root: &self.workspace_root,
             edit_origin: Some(&edit_origin),
+            session_id: &self.session_id,
             control: &self.control,
             settings: &self.settings,
             clock,
