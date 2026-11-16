@@ -94,11 +94,37 @@ fn supported_backend_version(stdout: &[u8]) -> bool {
     parts.len() == 3 && (parts[0], parts[1], parts[2]) >= (0, 12, 0)
 }
 
+/// Which file a backend path named when its version was checked.
+#[derive(PartialEq)]
+struct BackendIdentity {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    modified: (i64, i64),
+}
+
 fn verify_backend(backend: &Path) -> io::Result<()> {
-    if fs::metadata(backend)?.permissions().mode() & 0o6000 != 0 {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::Mutex;
+    /// The binary whose version passed, so each command does not run
+    /// `--version` again. A replaced binary has another identity.
+    static VERIFIED: Mutex<Option<BackendIdentity>> = Mutex::new(None);
+
+    let metadata = fs::metadata(backend)?;
+    if metadata.permissions().mode() & 0o6000 != 0 {
         return Err(io::Error::other(
             "setuid/setgid bubblewrap is not supported",
         ));
+    }
+    let identity = BackendIdentity {
+        path: backend.to_path_buf(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+    };
+    let mut verified = VERIFIED.lock().unwrap_or_else(|e| e.into_inner());
+    if verified.as_ref() == Some(&identity) {
+        return Ok(());
     }
     // This is trusted backend bootstrap, not a tool command. No workspace
     // paths or inherited environment are passed to its version query.
@@ -112,6 +138,7 @@ fn verify_backend(backend: &Path) -> io::Result<()> {
             "bubblewrap >= 0.12.0 is required (CVE-2026-87766); use nix develop / nix run or upgrade the system backend; no host fallback",
         ));
     }
+    *verified = Some(identity);
     Ok(())
 }
 
