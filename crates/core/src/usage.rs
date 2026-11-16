@@ -85,6 +85,10 @@ impl SessionUsage {
     /// The cost at the user's prices, or `None` when a model that was used
     /// has no price.
     pub fn cost(&self, price_of: impl Fn(&str) -> Option<Price>) -> Option<f64> {
+        // An empty float sum is -0.0, which would show as "$-0.00".
+        if self.by_model.is_empty() {
+            return None;
+        }
         self.by_model
             .iter()
             .map(|(model, usage)| price_of(model).map(|price| price.cost(usage)))
@@ -145,5 +149,16 @@ mod tests {
         let cost = session.cost(|_| Some(price)).unwrap();
         let expected = (110.0 * 4.0 + 11.0 * 20.0 + 900.0 * 0.2) / 1_000_000.0;
         assert!((cost - expected).abs() < 1e-12, "{cost}");
+    }
+
+    #[test]
+    fn no_cost_before_any_model_is_called() {
+        let price = Price {
+            input: 4.0,
+            output: 20.0,
+            cache_read: None,
+            cache_write: None,
+        };
+        assert_eq!(SessionUsage::default().cost(|_| Some(price)), None);
     }
 }
