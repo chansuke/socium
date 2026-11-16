@@ -69,6 +69,8 @@ pub(crate) struct ToolContext<'a> {
     /// What a command nobody reviewed may not touch; `None` when a person
     /// approved this call or it needs no review.
     pub(crate) restrictions: Option<&'a crate::approval::Restrictions>,
+    /// The turn an edit is recorded under; `None` outside a turn.
+    pub(crate) edit_origin: Option<&'a crate::tools::edit_history::EditOrigin>,
 }
 
 /// A built-in tool: its wire schema and its execution, colocated so the
@@ -211,6 +213,7 @@ where
         input,
         control,
         &crate::settings::Settings::default(),
+        None,
         on_progress,
         &mut |_| Ok(()),
     )
@@ -229,6 +232,7 @@ pub(crate) fn run_tool_call_checkpointed<F>(
     input: &Value,
     control: &crate::TaskControl,
     settings: &crate::settings::Settings,
+    edit_origin: Option<&crate::tools::edit_history::EditOrigin>,
     on_progress: &mut F,
     before_execute: &mut dyn FnMut(&str) -> std::io::Result<()>,
 ) -> ContentBlock
@@ -309,6 +313,7 @@ where
                     control,
                     settings,
                     restrictions: restrictions.as_ref(),
+                    edit_origin,
                 },
                 input,
                 on_progress,

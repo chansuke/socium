@@ -1,6 +1,6 @@
 use crate::AgentProgress;
 use crate::constants::*;
-use crate::tools::edit_history::{Mutation, apply_changes, describe, undo};
+use crate::tools::edit_history::{EditOrigin, Mutation, apply_changes, describe, undo};
 use crate::tools::error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{require_i64_field, require_string_field};
@@ -70,13 +70,14 @@ impl Tool for TextEditorTool {
         input: &Value,
         _on_progress: &mut dyn FnMut(AgentProgress),
     ) -> Result<String, ToolError> {
-        text_editor_from_workspace(ctx.workspace_root, input)
+        text_editor_from_workspace(ctx.workspace_root, input, ctx.edit_origin)
     }
 }
 
 pub(crate) fn text_editor_from_workspace(
     workspace_root: &Path,
     input: &Value,
+    edit_origin: Option<&EditOrigin>,
 ) -> Result<String, ToolError> {
     let input_object = input
         .as_object()
@@ -85,9 +86,9 @@ pub(crate) fn text_editor_from_workspace(
 
     match command {
         "view" => text_editor_view(workspace_root, input_object),
-        "str_replace" => text_editor_str_replace(workspace_root, input_object),
-        "create" => text_editor_create(workspace_root, input_object),
-        "insert" => text_editor_insert(workspace_root, input_object),
+        "str_replace" => text_editor_str_replace(workspace_root, input_object, edit_origin),
+        "create" => text_editor_create(workspace_root, input_object, edit_origin),
+        "insert" => text_editor_insert(workspace_root, input_object, edit_origin),
         "undo_edit" => text_editor_undo_edit(workspace_root, input_object),
         other => Err(format!("Unsupported text editor command: {other}").into()),
     }
@@ -144,9 +145,10 @@ pub(crate) fn text_editor_view(
 pub(crate) fn text_editor_str_replace(
     workspace_root: &Path,
     input: &serde_json::Map<String, Value>,
+    edit_origin: Option<&EditOrigin>,
 ) -> Result<String, ToolError> {
     let plan = plan_str_replace(workspace_root, input)?;
-    apply_plan(workspace_root, plan)
+    apply_plan(workspace_root, plan, edit_origin)
 }
 
 fn plan_str_replace(
@@ -197,9 +199,10 @@ fn plan_str_replace(
 pub(crate) fn text_editor_create(
     workspace_root: &Path,
     input: &serde_json::Map<String, Value>,
+    edit_origin: Option<&EditOrigin>,
 ) -> Result<String, ToolError> {
     let plan = plan_create(workspace_root, input)?;
-    apply_plan(workspace_root, plan)
+    apply_plan(workspace_root, plan, edit_origin)
 }
 
 fn plan_create(
@@ -225,9 +228,10 @@ fn plan_create(
 pub(crate) fn text_editor_insert(
     workspace_root: &Path,
     input: &serde_json::Map<String, Value>,
+    edit_origin: Option<&EditOrigin>,
 ) -> Result<String, ToolError> {
     let plan = plan_insert(workspace_root, input)?;
-    apply_plan(workspace_root, plan)
+    apply_plan(workspace_root, plan, edit_origin)
 }
 
 fn plan_insert(
@@ -287,9 +291,10 @@ fn plan_insert(
 fn apply_plan(
     workspace_root: &Path,
     (changes, done): (Vec<Mutation>, String),
+    edit_origin: Option<&EditOrigin>,
 ) -> Result<String, ToolError> {
     let diff = describe(&changes);
-    apply_changes(workspace_root, changes)?;
+    apply_changes(workspace_root, changes, edit_origin)?;
     Ok(maybe_prepend_dirty_worktree_warning(
         workspace_root,
         format!("{done}\n{diff}"),

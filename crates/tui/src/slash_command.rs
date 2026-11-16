@@ -69,7 +69,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "rewind",
-        description: "Go back to an earlier prompt to edit it; files are not restored (use /undo)",
+        description: "Go back to an earlier prompt to edit it, and restore the files Socium changed since",
         action: SlashAction::Rewind,
         takes_argument: false,
     },

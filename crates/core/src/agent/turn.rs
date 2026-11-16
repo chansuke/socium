@@ -38,6 +38,8 @@ pub(crate) struct TurnContext<'a> {
     pub(crate) control: &'a crate::TaskControl,
     pub(crate) settings: &'a crate::settings::Settings,
     pub(crate) workspace_root: &'a Path,
+    /// The main agent's turn, which a subagent's edits belong to as well.
+    pub(crate) edit_origin: Option<&'a crate::tools::edit_history::EditOrigin>,
     pub(crate) clock: ActivityClock,
 }
 
@@ -487,6 +489,7 @@ where
                     &input,
                     ctx.control,
                     ctx.settings,
+                    ctx.edit_origin,
                     &mut tool_progress,
                     &mut |authorization| {
                         // The input is already in the message; the event
@@ -743,6 +746,7 @@ mod tests {
             control: &control,
             settings: &crate::settings::Settings::default(),
             workspace_root: workspace.path(),
+            edit_origin: None,
             clock: ActivityClock::start(0),
         };
         let agent = |agent_type: &str| {

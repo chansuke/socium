@@ -328,7 +328,10 @@ what it adds.
   workspace at a time.
 - `/rewind` lists your prompts in this conversation, newest first. Choosing one
   drops it and everything after it and puts it back in the input to edit and
-  send again. Files are not restored; `/undo` reverts Socium's edits.
+  send again. When Socium edited files from that prompt on, you choose whether
+  to restore the conversation, the files, or both. Files are restored only if
+  they still hold what Socium wrote; otherwise nothing changes. Edits whose
+  turns were dropped by a conversation-only rewind stay for `/undo`.
 - `/compact`, automatic compaction, and budget trimming replace older turns
   with a summary. Thinking in the turns kept verbatim was produced against the
   replaced history, so it is no longer sent back; thinking produced after the
