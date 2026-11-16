@@ -33,17 +33,13 @@ pub use crate::error::AgentError;
 
 use crate::activity::ActivityClock;
 use crate::activity_log::{ACTIVITY_LOG_FILE_NAME, ActivityRecorder};
-use crate::agent::compaction::{
-    CompactionRequest, compaction_threshold_tokens, retention_boundary_by_tokens,
-    summarize_with_llm,
-};
+use crate::agent::compaction::{compact_history, compaction_threshold_tokens};
 use crate::agent::context::{
-    context_metrics_for_input, extend_summary_text, history_input_tokens, prepare_context_messages,
-    resolve_context_budget, summarize_messages,
+    context_metrics_for_input, history_input_tokens, prepare_context_messages,
+    resolve_context_budget,
 };
 use crate::agent::state::{
-    ConversationState, ConversationStateRef, ConversationSummary, ConversationSummaryState,
-    load_json_file,
+    ConversationState, ConversationStateRef, ConversationSummaryState, load_json_file,
 };
 use crate::agent::subagent::catalog::{
     SubagentCatalog, SubagentModel, SubagentType, load_user_types,
@@ -147,9 +143,7 @@ impl ModelTarget {
         let provider = build_provider(provider_config, &model, lookup)?;
         let mut warnings = Vec::new();
         let compact = model
-            .compact_model
-            .as_deref()
-            .filter(|alias| *alias != model.alias)
+            .compaction_alias()
             .and_then(|alias| registry.find(alias));
         let (compaction_provider, compaction_model) = match compact {
             None => (None, model.id.clone()),
@@ -1685,76 +1679,21 @@ impl AgentService {
     }
 
     async fn run_compaction(&mut self) -> Result<CompactionReport, AgentError> {
-        let boundary = retention_boundary_by_tokens(
-            &self.messages,
-            &self.active_model.id,
-            COMPACTION_RETAIN_RECENT_MESSAGES,
-            COMPACTION_RETAIN_RECENT_TOKENS,
-        );
-        let covered = self
-            .summary_state
-            .summary
-            .as_ref()
-            .map(|summary| summary.covered_messages)
-            .unwrap_or(0);
-        if boundary <= covered {
-            return Err(AgentError::NothingToCompact);
-        }
-
-        let previous_summary = self
-            .summary_state
-            .summary
-            .as_ref()
-            .map(|summary| summary.text.clone());
-        let compaction_request = CompactionRequest {
-            previous_summary: previous_summary.as_deref(),
-            messages: &self.messages[covered..boundary],
-        };
-        let client = self.client.get()?;
-        let summary_result = tokio::select! {
-            biased;
-            _ = self.control.cancelled() => return Err(AgentError::Cancelled),
-            result = summarize_with_llm(
-                self.compaction_provider.as_deref().unwrap_or(self.provider.as_ref()),
+        let compaction = compact_history(
+            (
+                self.compaction_provider
+                    .as_deref()
+                    .unwrap_or(self.provider.as_ref()),
                 &self.compaction_model,
-                &client,
-                &compaction_request,
-            ) => result,
-        };
-        let (text, fallback_reason) = match summary_result {
-            Ok(text) => (text, None),
-            Err(err) => {
-                let text = match previous_summary.as_deref() {
-                    Some(previous) => {
-                        extend_summary_text(previous, &self.messages, covered, boundary)
-                    }
-                    None => summarize_messages(&self.messages[..boundary]),
-                };
-                (
-                    text,
-                    Some(format!(
-                        "The compaction model failed ({err}); kept a shorter line-by-line summary instead"
-                    )),
-                )
-            }
-        };
-        let first_request = self
-            .summary_state
-            .summary
-            .as_ref()
-            .and_then(|summary| summary.first_request.clone())
-            .or_else(|| ConversationSummary::first_request_of(&self.messages[..boundary]));
-
-        self.summary_state = ConversationSummaryState {
-            summary: Some(ConversationSummary {
-                covered_messages: boundary,
-                text,
-                // Everything after the cut so far was produced against the
-                // replaced history.
-                thinking_valid_from: Some(self.messages.len()),
-                first_request,
-            }),
-        };
+            ),
+            &self.client.get()?,
+            &self.control,
+            &self.active_model.id,
+            &self.messages,
+            &self.summary_state,
+        )
+        .await?;
+        self.summary_state = compaction.summary_state;
         self.persist_state()?;
 
         // The old measurement described the pre-compaction prompt; drop it
@@ -1762,10 +1701,10 @@ impl AgentService {
         self.last_measured_usage = None;
         let metrics = self.context_metrics("")?;
         Ok(CompactionReport {
-            covered_messages: boundary,
-            retained_messages: self.messages.len() - boundary,
-            used_llm: fallback_reason.is_none(),
-            fallback_reason,
+            covered_messages: compaction.covered_messages,
+            retained_messages: self.messages.len() - compaction.covered_messages,
+            used_llm: compaction.fallback_reason.is_none(),
+            fallback_reason: compaction.fallback_reason,
             metrics,
         })
     }

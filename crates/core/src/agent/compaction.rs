@@ -1,10 +1,14 @@
+use crate::agent::context::{extend_summary_text, summarize_messages};
+use crate::agent::state::{ConversationSummary, ConversationSummaryState};
 use crate::agent::turn::extract_text;
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
 use crate::constants::{
-    COMPACTION_MAX_OUTPUT_TOKENS, COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS,
+    COMPACTION_MAX_OUTPUT_TOKENS, COMPACTION_RETAIN_RECENT_MESSAGES,
+    COMPACTION_RETAIN_RECENT_TOKENS, COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS,
     COMPACTION_SYSTEM_PROMPT, COMPACTION_TRANSCRIPT_MAX_CHARACTERS, COMPACTION_TRIGGER_RATIO,
     COMPACTION_USER_MESSAGE_MAX_CHARACTERS, DEFAULT_COMPACT_AT_TOKENS,
 };
+use crate::error::AgentError;
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, ProviderEvent};
 
@@ -65,6 +69,83 @@ fn starts_with_tool_result(message: &Message) -> bool {
             MessageContent::Blocks(blocks)
                 if blocks.iter().any(|block| matches!(block, ContentBlock::ToolResult { .. }))
         )
+}
+
+/// The summary state after a compaction, for its owner to save.
+pub(crate) struct Compaction {
+    pub(crate) summary_state: ConversationSummaryState,
+    pub(crate) covered_messages: usize,
+    /// Why the compaction model was not used, when it failed.
+    pub(crate) fallback_reason: Option<String>,
+}
+
+/// Summarizes `messages` up to the newest ones kept verbatim, extending
+/// the summary in `summary_state`. A failed compaction model leaves a
+/// line-by-line summary instead. `NothingToCompact` when the summary
+/// already covers everything before the kept messages.
+pub(crate) async fn compact_history(
+    summarizer: (&dyn Provider, &str),
+    client: &reqwest::Client,
+    control: &crate::TaskControl,
+    model: &str,
+    messages: &[Message],
+    summary_state: &ConversationSummaryState,
+) -> Result<Compaction, AgentError> {
+    let boundary = retention_boundary_by_tokens(
+        messages,
+        model,
+        COMPACTION_RETAIN_RECENT_MESSAGES,
+        COMPACTION_RETAIN_RECENT_TOKENS,
+    );
+    let previous = summary_state.summary.as_ref();
+    let covered = previous.map_or(0, |summary| summary.covered_messages);
+    if boundary <= covered {
+        return Err(AgentError::NothingToCompact);
+    }
+
+    let previous_summary = previous.map(|summary| summary.text.as_str());
+    let request = CompactionRequest {
+        previous_summary,
+        messages: &messages[covered..boundary],
+    };
+    let (provider, summary_model) = summarizer;
+    let summary_result = tokio::select! {
+        biased;
+        _ = control.cancelled() => return Err(AgentError::Cancelled),
+        result = summarize_with_llm(provider, summary_model, client, &request) => result,
+    };
+    let (text, fallback_reason) = match summary_result {
+        Ok(text) => (text, None),
+        Err(err) => {
+            let text = match previous_summary {
+                Some(previous) => extend_summary_text(previous, messages, covered, boundary),
+                None => summarize_messages(&messages[..boundary]),
+            };
+            (
+                text,
+                Some(format!(
+                    "The compaction model failed ({err}); kept a shorter line-by-line summary instead"
+                )),
+            )
+        }
+    };
+    let first_request = previous
+        .and_then(|summary| summary.first_request.clone())
+        .or_else(|| ConversationSummary::first_request_of(&messages[..boundary]));
+    Ok(Compaction {
+        summary_state: ConversationSummaryState {
+            summary: Some(ConversationSummary {
+                covered_messages: boundary,
+                text,
+                // Everything after the cut so far was produced against the
+                // replaced history.
+                thinking_valid_from: Some(messages.len()),
+                first_request,
+            }),
+        },
+        covered_messages: boundary,
+        fallback_reason,
+    })
 }
 
 pub(crate) struct CompactionRequest<'a> {
