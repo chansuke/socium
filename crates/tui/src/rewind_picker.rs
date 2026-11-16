@@ -231,7 +231,7 @@ impl RewindPicker {
     pub(crate) fn draw(&self, frame: &mut Frame, area: Rect) {
         let block = Block::bordered()
             .title(" Rewind ")
-            .border_style(Style::default().fg(LILAC))
+            .border_style(Style::default().fg(FOCUS_BORDER))
             .style(Style::default().bg(BG));
         let rows = area.height.saturating_sub(2);
         frame.render_widget(Clear, area);
@@ -246,7 +246,7 @@ impl RewindPicker {
 fn option_line(text: &str, selected: bool, width: usize) -> Line<'static> {
     let marker = if selected { " ❯ " } else { "   " };
     let style = if selected {
-        Style::default().fg(LILAC).add_modifier(Modifier::BOLD)
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(TEXT)
     };
