@@ -151,7 +151,7 @@ pub(crate) fn run_subagent<'a>(
         })?;
         if record.runs == 1 {
             // Pruning only removes other, older records.
-            let _ = record::prune(root);
+            let _ = record::prune(root, &record.id);
         }
         let agent = Some(call_id.to_string());
         let requested_by = format!(
