@@ -20,7 +20,7 @@ use color_eyre::{Result, eyre::eyre};
 use socium_core::{AgentService, SessionStart};
 use std::{env, path::Path};
 
-#[tokio::main]
+#[tokio::main(worker_threads = 1)]
 async fn main() -> Result<()> {
     color_eyre::install()?;
     let mut args = env::args();
