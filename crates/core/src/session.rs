@@ -237,6 +237,24 @@ pub(crate) fn migrate_legacy_conversation(root: &Path) -> io::Result<Option<Stri
     Ok(Some(id))
 }
 
+/// Moves state saved before sessions, and before subagent records belonged
+/// to a session, into sessions: the conversation as
+/// `migrate_legacy_conversation` does, then the subagent records into the
+/// most recently saved session with messages, which is the one `-c`
+/// continues. Records stay in `.socium/agents/` while there is no such
+/// session. Call with the workspace lock held.
+pub(crate) fn migrate_legacy_state(root: &Path) -> io::Result<()> {
+    migrate_legacy_conversation(root)?;
+    let sessions = scan_sessions(root)?;
+    match sessions
+        .iter()
+        .find(|session| session.readable && session.message_count > 0)
+    {
+        Some(latest) => crate::agent::subagent::record::adopt_legacy_records(root, &latest.id),
+        None => Ok(()),
+    }
+}
+
 /// Saved sessions, most recently saved first. Sessions without a saved
 /// conversation are left out; an unreadable one is listed with the reason
 /// in its preview. Call with the workspace lock held.
@@ -414,7 +432,7 @@ pub(crate) fn delete_session_dir(root: &Path, id: &str) -> io::Result<()> {
 /// another Socium runs here.
 pub fn list_sessions(root: &Path) -> io::Result<Vec<SessionSummary>> {
     let _lock = lock_workspace(root)?;
-    migrate_legacy_conversation(root)?;
+    migrate_legacy_state(root)?;
     Ok(scan_sessions(root)?
         .into_iter()
         .filter(|session| session.message_count > 0 || !session.readable)
@@ -551,6 +569,55 @@ mod tests {
         let err = migrate_legacy_conversation(root.path()).unwrap_err();
         assert!(err.to_string().contains("already exists"), "{err}");
         assert!(state.exists());
+    }
+
+    #[test]
+    fn subagent_records_from_before_sessions_move_into_the_latest_session() {
+        use crate::agent::subagent::record;
+        let root = make_temp_dir("session-migrate-agents");
+        let legacy = |id: &str| {
+            let path = workspace_state_path(root.path(), &format!("agents/{id}.json")).unwrap();
+            save_json_file(
+                &path,
+                &record::SubagentRecord::new(id.into(), "explorer", "old work", "m"),
+            )
+            .unwrap();
+            path
+        };
+        let old = legacy("old");
+        // With no saved conversation to give them to, they stay.
+        migrate_legacy_state(root.path()).unwrap();
+        assert!(old.exists());
+
+        save_conversation(root.path(), "20261101-000000-0000", &["older"], 100);
+        save_conversation(root.path(), "20261102-000000-0000", &["latest"], 200);
+        save_conversation(root.path(), "20261103-000000-0000", &[], 300);
+        let mut taken = record::SubagentRecord::new("taken".into(), "worker", "newer", "m");
+        taken.save(root.path(), "20261102-000000-0000").unwrap();
+        let clash = legacy("taken");
+
+        migrate_legacy_state(root.path()).unwrap();
+
+        let ids = |session: &str| {
+            record::list(root.path(), session)
+                .unwrap()
+                .into_iter()
+                .map(|record| (record.id, record.description))
+                .collect::<Vec<_>>()
+        };
+        let mut adopted = ids("20261102-000000-0000");
+        adopted.sort();
+        assert_eq!(
+            adopted,
+            [
+                ("old".to_string(), "old work".to_string()),
+                ("taken".to_string(), "newer".to_string())
+            ]
+        );
+        assert!(ids("20261101-000000-0000").is_empty());
+        assert!(!old.exists());
+        // A record the session already has is not overwritten.
+        assert!(clash.exists());
     }
 
     #[test]

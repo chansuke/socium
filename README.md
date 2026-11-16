@@ -285,11 +285,13 @@ what it adds.
   in the same response, run at the same time, tool calls included; others
   run one at a time. Each subagent's steps appear in the Activity pane under
   its own `agent` call, marked with `│`, and its repeated calls and silent
-  rounds are counted apart from the other agents'. Each
-  subagent's conversation is saved in `.socium/agents/<id>.json` before each
-  of its tool calls; the model can continue a subagent with everything it
-  saw by passing its ID as `resume`, and `/agents` lists saved subagents and
-  `/agents <id>` shows one's conversation. The newest 100 are kept. When a
+  rounds are counted apart from the other agents'. Each subagent's
+  conversation is saved in the session that started it, as
+  `.socium/sessions/<session>/agents/<id>.json`, before each of its tool
+  calls; the model can continue a subagent of the same session with
+  everything it saw by passing its ID as `resume`, and `/agents` lists this
+  session's subagents and `/agents <id>` shows one's conversation. The newest
+  100 of each session are kept, and deleting a session deletes them. When a
   subagent's history no longer fits its model's window, it is summarized as
   the conversation is (by its model's `compact_model`), shown in the
   Activity pane, and the subagent goes on and still reports; a resumed
@@ -327,7 +329,8 @@ what it adds.
   ones, newest first, to choose from; `-r <ID>` opens one directly, by its full
   ID, its name, or any unique ID prefix. `/resume` opens the same list between
   turns (`/resume <ID>` switches at once); in the list, `d` then `y`
-  permanently deletes the selected conversation. `/rename <name>` names the
+  permanently deletes the selected conversation and its subagents' records.
+  `/rename <name>` names the
   open conversation. On exit Socium prints the command that resumes the
   conversation. `/clear` starts a new conversation and keeps the previous one
   resumable. Resuming loads the conversation and Activity, and the

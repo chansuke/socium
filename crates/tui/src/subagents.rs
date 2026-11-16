@@ -7,9 +7,10 @@ const MAX_ENTRY_CHARS: usize = 4_000;
 
 pub(crate) fn runs_text(runs: &[SubagentSummary], now_ms: u64) -> String {
     if runs.is_empty() {
-        return "No saved subagents in this workspace.".to_string();
+        return "No saved subagents in this session.".to_string();
     }
-    let mut lines = vec!["Saved subagents, newest first (/agents <id> shows one):".to_string()];
+    let mut lines =
+        vec!["Subagents of this session, newest first (/agents <id> shows one):".to_string()];
     for run in runs {
         lines.push(format!(
             "  {}  {} · {} · {} · {}",
@@ -101,9 +102,9 @@ mod tests {
 
         assert_eq!(
             text,
-            "Saved subagents, newest first (/agents <id> shows one):\n  toolu_b  explorer · finished · 2 runs · 5m ago\n    Find the greeting\n  toolu_a  explorer · finished · 1 run · 3d ago\n    Find the greeting"
+            "Subagents of this session, newest first (/agents <id> shows one):\n  toolu_b  explorer · finished · 2 runs · 5m ago\n    Find the greeting\n  toolu_a  explorer · finished · 1 run · 3d ago\n    Find the greeting"
         );
-        assert_eq!(runs_text(&[], now), "No saved subagents in this workspace.");
+        assert_eq!(runs_text(&[], now), "No saved subagents in this session.");
     }
 
     #[test]

@@ -107,7 +107,8 @@ it. Each save also writes `meta.json`, a cache of what the session list shows
 modification time. The list trusts it only while both match and otherwise
 reads the snapshot and rewrites it, so a missing, stale or broken cache costs
 time, not data. Deleting a session from the list removes its directory
-permanently; the open session cannot be deleted. Edit history, input history
+permanently, the records of its subagents included; the open session cannot be
+deleted. Edit history, input history
 and command output artifacts belong to the workspace, not to a session. Writes
 use a same-directory temporary file, file sync, rename and (on Unix)
 parent-directory sync. State is bounded at 64 MiB; reaching
@@ -139,14 +140,22 @@ same name is already in that session, startup stops and names both files rather
 than overwrite either; move one aside and start again. To go back to an older
 Socium, move the three files back to `.socium/`.
 
-Each subagent's conversation is saved to `.socium/agents/<id>.json` before its
-first request and at the same checkpoints as the main conversation, so its tool
-intents are on disk before they run. A record keeps every message; once a
-subagent's history no longer fits, a summary saved in the record replaces the
-older messages in what is sent, as for the main conversation. A record left
-`running` was cut off by a crash; resuming it marks its unfinished tool calls
-unknown, as on restart. Only the 100 most recently updated records are kept;
-older ones are removed when a new subagent starts.
+Each subagent's conversation is saved in the session that started it, as
+`.socium/sessions/<ID>/agents/<id>.json`, before its first request and at the
+same checkpoints as the main conversation, so its tool intents are on disk
+before they run. `/agents` lists and `resume` continues only the open session's
+subagents. A record keeps every message; once a subagent's history no longer
+fits, a summary saved in the record replaces the older messages in what is
+sent, as for the main conversation. A record left `running` was cut off by a
+crash; resuming it marks its unfinished tool calls unknown, as on restart. Only
+the 100 most recently updated records of a session are kept; older ones are
+removed when a new subagent starts in it.
+
+Records saved before they belonged to a session, in `.socium/agents/`, move on
+the next start (or `-r` listing) into the most recently saved session with
+messages, the one `-c` continues. A record whose ID that session already has
+stays in `.socium/agents/` rather than overwrite it; while no session has
+messages, all of them stay.
 
 Bubblewrap ties subprocess lifetime to Socium and isolates descendants in a PID
 namespace. A crash after intent but before a saved result still produces an **unknown outcome** on
