@@ -549,87 +549,68 @@ impl App {
         }
     }
 
+    /// What Socium is doing and how commands are approved at the left;
+    /// context, latency, and usage at the right.
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
-        let [left, center, right] = Layout::horizontal([
-            Constraint::Percentage(38),
-            Constraint::Percentage(22),
-            Constraint::Percentage(40),
-        ])
-        .areas(area);
+        let muted = |text: String| Span::styled(text, Style::default().fg(MUTED));
+        let approval = if self.commands_run_without_asking {
+            "commands run without asking"
+        } else {
+            "ask before commands"
+        };
+        let left = Line::from(vec![
+            Span::styled(
+                self.status.clone().unwrap_or_else(|| "idle".to_string()),
+                Style::default().fg(TEXT),
+            ),
+            muted(format!(" · {approval}")),
+        ]);
 
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(&self.workspace_label, Style::default().fg(MUTED)),
-                Span::styled(" ", Style::default().fg(MUTED)),
-                Span::styled(
-                    format!(
-                        "({})",
-                        self.status.clone().unwrap_or_else(|| "idle".to_string())
-                    ),
-                    Style::default().fg(MUTED),
-                ),
-            ]))
-            .style(Style::default().bg(BG)),
-            left,
-        );
-
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                "host (ask)",
-                Style::default().fg(MUTED),
-            )]))
-            .style(Style::default().bg(BG)),
-            center,
-        );
-
-        let latency_label = self
+        let latency = self
             .last_latency_ms
             .map(|latency| format!("{latency}ms"))
             .unwrap_or_else(|| "--".to_string());
+        // A trailing '*' marks a provider-measured token count; without it
+        // the value is a heuristic estimate.
+        let tokens = match self.context_metrics.measured_input_tokens {
+            Some(measured) => format!("{measured}*/{}", self.context_metrics.input_budget_tokens),
+            None => format!(
+                "{}/{}",
+                self.context_metrics.estimated_input_tokens,
+                self.context_metrics.input_budget_tokens
+            ),
+        };
+        let mut right = format!(
+            "{}% context left ({tokens}) · {latency} · {}",
+            self.context_metrics.context_left_percentage,
+            format_session_usage(&self.session_usage.0, self.session_usage.1)
+        );
+        if self.context_metrics.summary_active {
+            right.push_str(&format!(
+                " · summary {}",
+                self.context_metrics.summarized_messages
+            ));
+        }
+        let right = Line::from(muted(right));
+
+        // The right side keeps its full width; the status gives way.
+        let right_width = (right.width() as u16 + 1).min(area.width);
+        let [left_area, right_area] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(area);
+        let padded = Rect {
+            x: left_area.x + 1,
+            width: left_area.width.saturating_sub(2),
+            ..left_area
+        };
+        frame.render_widget(Paragraph::new(left).style(Style::default().bg(BG)), padded);
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(&self.model_label, Style::default().fg(MUTED)),
-                Span::styled(" ", Style::default().fg(MUTED)),
-                Span::styled(
-                    format!(
-                        "({}% context left, {latency_label})",
-                        self.context_metrics.context_left_percentage
-                    ),
-                    Style::default().fg(MUTED),
-                ),
-                Span::styled(" ", Style::default().fg(MUTED)),
-                Span::styled(
-                    // A trailing '*' marks a provider-measured token count;
-                    // without it the value is a heuristic estimate.
-                    match self.context_metrics.measured_input_tokens {
-                        Some(measured) => {
-                            format!("{measured}*/{}", self.context_metrics.input_budget_tokens)
-                        }
-                        None => format!(
-                            "{}/{}",
-                            self.context_metrics.estimated_input_tokens,
-                            self.context_metrics.input_budget_tokens
-                        ),
-                    },
-                    Style::default().fg(MUTED),
-                ),
-                Span::styled(" ", Style::default().fg(MUTED)),
-                Span::styled(
-                    format_session_usage(&self.session_usage.0, self.session_usage.1),
-                    Style::default().fg(MUTED),
-                ),
-                Span::styled(" ", Style::default().fg(MUTED)),
-                Span::styled(
-                    if self.context_metrics.summary_active {
-                        format!("summary {}", self.context_metrics.summarized_messages)
-                    } else {
-                        "summary off".to_string()
-                    },
-                    Style::default().fg(MUTED),
-                ),
-            ]))
-            .style(Style::default().bg(BG)),
-            right,
+            Paragraph::new(right)
+                .alignment(ratatui::layout::Alignment::Right)
+                .style(Style::default().bg(BG)),
+            Rect {
+                width: right_area.width.saturating_sub(1),
+                ..right_area
+            },
         );
     }
 
@@ -1014,6 +995,22 @@ mod tests {
     }
 
     #[test]
+    fn footer_shows_status_and_how_commands_are_approved() {
+        let mut app = App::for_test();
+        let footer = |app: &App| render_at(app, 120, 30).pop().unwrap();
+        assert!(
+            footer(&app).starts_with(" idle · ask before commands"),
+            "{:?}",
+            footer(&app)
+        );
+        assert!(footer(&app).trim_end().ends_with("in 0 out 0"));
+
+        app.commands_run_without_asking = true;
+        app.status = Some("running cargo test".into());
+        assert!(footer(&app).starts_with(" running cargo test · commands run without asking"));
+    }
+
+    #[test]
     fn focusing_activity_draws_its_frame_in_the_focus_color() {
         use crate::view::theme::{BORDER, FOCUS_BORDER};
 
@@ -1104,7 +1101,7 @@ mod tests {
     fn no_popup_for_ordinary_input() {
         let mut app = App::for_test();
         app.input = "hello".into();
-        assert!(!render(&app).iter().any(|row| row.contains(" commands ")));
+        assert!(!render(&app).iter().any(|row| row.contains(" commands · ")));
     }
 }
 
