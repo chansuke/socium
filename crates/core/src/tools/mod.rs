@@ -341,6 +341,69 @@ where
     }
 }
 
+/// [`run_tool_call_checkpointed`] on a blocking thread, so the runtime keeps
+/// polling everything else, such as the other subagents of a batch, while
+/// the tool works. `on_progress` and `before_execute` still run on the
+/// awaiting task, in the order the call makes them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_tool_call_on_blocking_thread(
+    workspace_root: &Path,
+    tool_use_id: &str,
+    name: &str,
+    input: &Value,
+    control: &crate::TaskControl,
+    settings: &crate::settings::Settings,
+    edit_origin: Option<&crate::tools::edit_history::EditOrigin>,
+    on_progress: &mut (dyn FnMut(AgentProgress) + Send),
+    before_execute: &mut (dyn FnMut(&str) -> std::io::Result<()> + Send),
+) -> ContentBlock {
+    enum Relayed {
+        Progress(AgentProgress),
+        BeforeExecute(String, tokio::sync::oneshot::Sender<std::io::Result<()>>),
+    }
+    let (relay, mut relayed) = tokio::sync::mpsc::unbounded_channel();
+    let (root, id, name, input) = (
+        workspace_root.to_path_buf(),
+        tool_use_id.to_string(),
+        name.to_string(),
+        input.clone(),
+    );
+    let (control, settings, edit_origin) =
+        (control.clone(), settings.clone(), edit_origin.cloned());
+    let call = tokio::task::spawn_blocking(move || {
+        let stopped = || std::io::Error::other("the turn stopped waiting for this call");
+        run_tool_call_checkpointed(
+            &root,
+            &id,
+            &name,
+            &input,
+            &control,
+            &settings,
+            edit_origin.as_ref(),
+            &mut |event| {
+                let _ = relay.send(Relayed::Progress(event));
+            },
+            &mut |authorization| {
+                let (reply, answer) = tokio::sync::oneshot::channel();
+                relay
+                    .send(Relayed::BeforeExecute(authorization.to_string(), reply))
+                    .map_err(|_| stopped())?;
+                answer.blocking_recv().map_err(|_| stopped())?
+            },
+        )
+    });
+    while let Some(relayed) = relayed.recv().await {
+        match relayed {
+            Relayed::Progress(event) => on_progress(event),
+            Relayed::BeforeExecute(authorization, reply) => {
+                let _ = reply.send(before_execute(&authorization));
+            }
+        }
+    }
+    call.await
+        .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
