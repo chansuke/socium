@@ -824,4 +824,33 @@ mod tests {
             "{lines:#?}"
         );
     }
+
+    #[test]
+    fn concurrent_subagents_hang_under_their_own_agent_calls() {
+        let events = crate::activity::tests::turn_with_concurrent_subagents();
+        let live = model_with(events.clone());
+        let mut replayed = ActivityModel::default();
+        for event in events {
+            replayed.apply_replayed(event);
+        }
+
+        let rows = plain(&activity_lines(&live, 80, 40));
+        assert_eq!(
+            rows[2..],
+            [
+                "  ⚙ agent  Scan src  ✓ 5ms",
+                "    ↳ src done",
+                "  │ ◆ round 1  m  streaming…",
+                "  │ ⚙ read_file  src/lib.rs  ✓ 5ms",
+                "  │   ↳ lib read",
+                "  ⚙ agent  Scan docs  ✓ 5ms",
+                "    ↳ docs done",
+                "  │ ◆ round 1  m  streaming…",
+                "  │ ⚙ read_file  docs/guide.md  ✓ 5ms",
+                "  │   ↳ guide read",
+            ],
+            "{rows:#?}"
+        );
+        assert_eq!(plain(&activity_lines(&replayed, 80, 40))[1..], rows[1..]);
+    }
 }
