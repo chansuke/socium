@@ -1381,6 +1381,115 @@ async fn the_first_request_survives_compaction_word_for_word() {
     assert!(sent.contains("first request, word for word"));
 }
 
+async fn submit_turns(agent: &mut AgentService, prompts: &[&str]) {
+    for prompt in prompts {
+        agent.submit((*prompt).into()).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn rewind_goes_back_to_a_prompt_and_drops_the_turns_from_it() {
+    let root = tempfile::tempdir().unwrap();
+    let mut agent = service(
+        root.path(),
+        vec![
+            Ok(text_provider_response("answer one", None)),
+            Ok(text_provider_response("answer two", None)),
+            Ok(text_provider_response("answer three", None)),
+        ],
+    );
+    submit_turns(&mut agent, &["first", "second", "third"]).await;
+    let points = agent.rewind_points();
+    assert_eq!(
+        points
+            .iter()
+            .map(|point| point.prompt.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+
+    let rewound = agent.rewind(points[1].turn_id).unwrap();
+    assert_eq!(rewound.prompt, "second");
+    assert_eq!(rewound.warning, None);
+    assert_eq!(prompts(&agent), ["first", "answer one"]);
+    assert_eq!(agent.rewind_points().len(), 1);
+
+    drop(agent);
+
+    let mut agent = service(
+        root.path(),
+        vec![Ok(text_provider_response("answer again", None))],
+    );
+    agent.restore_state().unwrap();
+    assert_eq!(prompts(&agent), ["first", "answer one"]);
+    agent.submit("second, edited".into()).await.unwrap();
+    assert_eq!(
+        prompts(&agent),
+        ["first", "answer one", "second, edited", "answer again"]
+    );
+    let turns = agent
+        .recent_activity()
+        .into_iter()
+        .filter(|event| matches!(event.kind, ActivityKind::TurnStarted))
+        .map(|event| event.turn_id)
+        .collect::<Vec<_>>();
+    assert_eq!(turns, [0, 2]);
+}
+
+#[tokio::test]
+async fn rewind_refuses_a_message_that_is_not_a_prompt() {
+    let root = tempfile::tempdir().unwrap();
+    let mut agent = service(
+        root.path(),
+        vec![Ok(text_provider_response("answer", None))],
+    );
+    submit_turns(&mut agent, &["only"]).await;
+    std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+    crate::tools::apply_patch::apply_patch_from_workspace(
+        root.path(),
+        &json!({"patch": "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+two\n*** End Patch"}),
+    )
+    .unwrap();
+    agent.undo(None).unwrap();
+    let before = prompts(&agent);
+
+    for turn_id in [1, 2, 9] {
+        let err = agent.rewind(turn_id).err().unwrap();
+        assert!(err.to_string().contains("No prompt"), "{err}");
+    }
+    assert_eq!(prompts(&agent), before);
+    assert_eq!(agent.rewind_points().len(), 1);
+}
+
+#[tokio::test]
+async fn rewinding_into_the_summarized_history_drops_the_summary() {
+    let root = tempfile::tempdir().unwrap();
+    let mut responses = (0..10)
+        .map(|turn| Ok(text_provider_response(&format!("answer {turn}"), None)))
+        .collect::<Vec<_>>();
+    responses.push(Err(ProviderError::Api("compaction model down".into())));
+    let mut agent = service(root.path(), responses);
+    let prompts = (0..10)
+        .map(|turn| format!("prompt {turn}"))
+        .collect::<Vec<_>>();
+    submit_turns(
+        &mut agent,
+        &prompts.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .await;
+    let covered = agent.compact().await.unwrap().covered_messages;
+    assert!(covered > 2);
+
+    agent.rewind(16).unwrap();
+    let summary = agent.summary_state.summary.as_ref().unwrap();
+    assert_eq!(summary.covered_messages, covered);
+    assert_eq!(summary.thinking_valid_from, Some(16));
+
+    agent.rewind(2).unwrap();
+    assert!(agent.summary_state.summary.is_none());
+    assert_eq!(agent.messages.len(), 2);
+}
+
 #[test]
 fn undo_reverts_the_last_edit_and_tells_the_model() {
     let root = tempfile::tempdir().unwrap();

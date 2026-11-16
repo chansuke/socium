@@ -2,7 +2,7 @@
 //! Activity pane survives a restart.
 
 use crate::activity::{ActivityEvent, ActivityKind};
-use crate::agent::state::{open_state_append, read_state_bytes};
+use crate::agent::state::{open_state_append, read_state_bytes, save_state_bytes};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -203,6 +203,27 @@ pub(crate) fn load_recent(path: &Path, max_turns: usize) -> Vec<ActivityEvent> {
     events.into_iter().skip(start).collect()
 }
 
+/// Removes the events of turn `turn_id` and later ones, which a rewind
+/// dropped from the conversation; the turns that replace them reuse their
+/// IDs. The previous generation is left alone, since replay does not read
+/// it. A missing log has nothing to remove.
+pub(crate) fn drop_turns_from(path: &Path, turn_id: usize) -> io::Result<()> {
+    #[derive(Deserialize)]
+    struct Turn {
+        turn_id: usize,
+    }
+    let Some(bytes) = read_state_bytes(path, MAX_READ_BYTES)? else {
+        return Ok(());
+    };
+    let mut kept = Vec::with_capacity(bytes.len());
+    for (index, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        if index == 0 || serde_json::from_slice::<Turn>(line).is_ok_and(|e| e.turn_id < turn_id) {
+            kept.extend_from_slice(line);
+        }
+    }
+    save_state_bytes(path, &kept)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +340,25 @@ mod tests {
 
         let loaded = load_recent(&path, REPLAY_TURNS);
         assert_eq!(loaded.len(), turn(1).len() - 1);
+    }
+
+    #[test]
+    fn dropping_turns_keeps_the_earlier_ones_and_the_header() {
+        let (_root, path) = state_dir();
+        for turn_id in [0, 2, 4] {
+            record(&path, &turn(turn_id));
+        }
+
+        drop_turns_from(&path, 2).unwrap();
+        let loaded = load_recent(&path, REPLAY_TURNS);
+        assert_eq!(loaded.len(), turn(0).len() - 1);
+        assert!(loaded.iter().all(|event| event.turn_id == 0));
+        record(&path, &turn(2));
+        assert_eq!(load_recent(&path, 1).first().unwrap().turn_id, 2);
+
+        let (_root, missing) = state_dir();
+        drop_turns_from(&missing, 0).unwrap();
+        assert!(!missing.exists());
     }
 
     #[test]

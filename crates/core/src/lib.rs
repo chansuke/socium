@@ -49,7 +49,7 @@ use crate::agent::subagent::catalog::{
     SubagentCatalog, SubagentModel, SubagentType, load_user_types,
 };
 use crate::agent::turn::{TurnContext, run_agent_turn};
-use crate::agent::types::Message;
+use crate::agent::types::{Message, MessageContent, Role};
 use crate::constants::*;
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::error::ProviderError;
@@ -88,6 +88,25 @@ pub struct ModelSwitch {
     /// The history reaches the new model's compaction threshold; compact
     /// before the next turn instead of trimming it.
     pub needs_compaction: bool,
+}
+
+/// A prompt of this conversation that `/rewind` can go back to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindPoint {
+    /// Where the prompt sits in the history; turns started from here are
+    /// dropped.
+    pub turn_id: usize,
+    pub prompt: String,
+}
+
+/// Result of a rewind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rewound {
+    /// The prompt that was taken back, to edit and send again.
+    pub prompt: String,
+    /// Why the Activity of the dropped turns could not be removed. The
+    /// conversation is rewound either way.
+    pub warning: Option<String>,
 }
 
 /// Everything that changes together when the model changes.
@@ -900,6 +919,85 @@ impl AgentService {
         )));
         self.persist_state()?;
         Ok(restored)
+    }
+
+    /// The prompts this conversation can go back to, oldest first. Notes
+    /// added by `/undo` are not prompts.
+    pub fn rewind_points(&self) -> Vec<RewindPoint> {
+        self.events
+            .iter()
+            .filter(|event| event["type"] == "turn_started")
+            .filter_map(|event| {
+                let turn_id = usize::try_from(event["turn_id"].as_u64()?).ok()?;
+                match self.messages.get(turn_id)? {
+                    Message {
+                        role: Role::User,
+                        content: MessageContent::Text(prompt),
+                        ..
+                    } => Some(RewindPoint {
+                        turn_id,
+                        prompt: prompt.clone(),
+                    }),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Goes back to just before the prompt at `turn_id`, between turns,
+    /// and returns that prompt. Files are not restored; `/undo` reverts
+    /// Socium's edits.
+    pub fn rewind(&mut self, turn_id: usize) -> Result<Rewound, AgentError> {
+        self.ensure_state_lock()?;
+        let Some(point) = self
+            .rewind_points()
+            .into_iter()
+            .find(|point| point.turn_id == turn_id)
+        else {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("No prompt of this conversation starts at message {turn_id}"),
+            )
+            .into());
+        };
+        let previous_summary = self.summary_state.clone();
+        let previous_usage = self.last_measured_usage.take();
+        let mut dropped_messages = self.messages.split_off(turn_id);
+        let cut = self
+            .events
+            .iter()
+            .position(|event| {
+                event["turn_id"]
+                    .as_u64()
+                    .is_some_and(|id| id >= turn_id as u64)
+            })
+            .unwrap_or(self.events.len());
+        let mut dropped_events = self.events.split_off(cut);
+        match &mut self.summary_state.summary {
+            Some(summary) if summary.covered_messages > turn_id => {
+                self.summary_state = ConversationSummaryState::default();
+            }
+            Some(summary) => {
+                if let Some(from) = &mut summary.thinking_valid_from {
+                    *from = (*from).min(turn_id);
+                }
+            }
+            None => {}
+        }
+        if let Err(err) = self.persist_state() {
+            self.messages.append(&mut dropped_messages);
+            self.events.append(&mut dropped_events);
+            self.summary_state = previous_summary;
+            self.last_measured_usage = previous_usage;
+            return Err(err.into());
+        }
+        let warning = crate::activity_log::drop_turns_from(&self.activity_log_path(), turn_id)
+            .err()
+            .map(|err| format!("The Activity of the dropped turns is still saved: {err}"));
+        Ok(Rewound {
+            prompt: point.prompt,
+            warning,
+        })
     }
 
     /// Permanently removes another saved session, named by its full ID.
