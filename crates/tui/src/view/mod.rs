@@ -21,7 +21,8 @@ use socium_core::providers::TokenUsage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const SLASH_POPUP_MAX_ROWS: usize = 8;
-const COMPOSER_ROWS: u16 = 2;
+/// The input line inside a rounded border.
+const COMPOSER_ROWS: u16 = 3;
 /// Lines of a multi-line message shown at once; the rest scroll.
 const COMPOSER_MAX_LINES: usize = 8;
 const APPROVAL_SUMMARY_MAX_ROWS: usize = 3;
@@ -471,6 +472,17 @@ impl App {
             );
             return;
         }
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(match self.input_mode {
+                InputMode::Editing => ACCENT,
+                InputMode::Normal => BORDER,
+            }))
+            .padding(ratatui::widgets::Padding::horizontal(1))
+            .style(Style::default().bg(BG));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let area = inner;
         let available_cells = area.width.saturating_sub(2) as usize;
         if self.input.contains('\n') {
             self.draw_multiline_composer(frame, area, available_cells);
@@ -481,7 +493,10 @@ impl App {
 
         let line = if self.input.is_empty() {
             Line::from(vec![
-                Span::styled("> ", Style::default().fg(MUTED)),
+                Span::styled(
+                    "› ",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     "Ask Socium to inspect files, explain code, or run tasks",
                     Style::default().fg(MUTED),
@@ -498,12 +513,15 @@ impl App {
                 .map_or(visible_input.len(), |(index, _)| index);
             let (command, rest) = visible_input.split_at(split);
             Line::from(vec![
-                Span::styled("> ", Style::default().fg(MUTED)),
+                Span::styled(
+                    "› ",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     command.to_string(),
                     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(rest.to_string(), Style::default().fg(MUTED)),
+                Span::styled(rest.to_string(), Style::default().fg(TEXT)),
             ])
         };
 
@@ -546,10 +564,13 @@ impl App {
             if index == cursor_row {
                 cursor_cell = cell;
             }
-            let prefix = if index == 0 { "> " } else { "  " };
+            let prefix = if index == 0 { "› " } else { "  " };
             rows.push(Line::from(vec![
-                Span::styled(prefix, Style::default().fg(MUTED)),
-                Span::styled(visible, Style::default().fg(MUTED)),
+                Span::styled(
+                    prefix,
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(visible, Style::default().fg(TEXT)),
             ]));
         }
         let hidden = lines.len() - rows.len();
@@ -709,9 +730,11 @@ mod tests {
         let mut app = App::for_test();
         app.insert_text("first line\nsecond line");
         let rows = render(&app);
-        let first = rows.iter().position(|row| row.starts_with("> first line"));
+        let first = rows
+            .iter()
+            .position(|row| row.starts_with("│ › first line"));
         let first = first.expect("first line shown");
-        assert!(rows[first + 1].starts_with("  second line"), "{rows:#?}");
+        assert!(rows[first + 1].starts_with("│   second line"), "{rows:#?}");
     }
 
     /// A commit review as the core sends it: status, then a long diff.
@@ -814,7 +837,7 @@ mod tests {
         assert!(rows[top + 6].contains("↑↓ select · Enter confirm · PgUp/PgDn/Home/End review"));
         assert!(rows[top + 7].starts_with('╰'));
         assert_eq!(top + 8, rows.len() - 1, "the footer stays on the last row");
-        assert!(!rows.iter().any(|row| row.starts_with("> ")));
+        assert!(!rows.iter().any(|row| row.starts_with("│ › ")));
 
         app.handle_approval_key(ratatui::crossterm::event::KeyCode::Down);
         let rows = render(&app);
@@ -883,7 +906,7 @@ mod tests {
 
     #[test]
     fn a_fully_typed_command_is_highlighted_in_the_composer() {
-        use crate::view::theme::{ACCENT, MUTED};
+        use crate::view::theme::{ACCENT, TEXT};
 
         let colors = |input: &str| {
             let mut app = App::for_test();
@@ -893,18 +916,18 @@ mod tests {
             terminal.draw(|frame| app.draw(frame)).unwrap();
             let buffer = terminal.backend().buffer();
             let y = (0..buffer.area.height)
-                .find(|&y| buffer[(0, y)].symbol() == ">" && buffer[(2, y)].symbol() == "/")
+                .find(|&y| buffer[(2, y)].symbol() == "›" && buffer[(4, y)].symbol() == "/")
                 .unwrap();
-            (2..2 + input.chars().count() as u16)
+            (4..4 + input.chars().count() as u16)
                 .map(|x| buffer[(x, y)].fg)
                 .collect::<Vec<_>>()
         };
 
         let typed = colors("/model glm");
         assert!(typed[..6].iter().all(|&fg| fg == ACCENT), "{typed:?}");
-        assert!(typed[6..].iter().all(|&fg| fg == MUTED), "{typed:?}");
-        assert!(colors("/mod").iter().all(|&fg| fg == MUTED));
-        assert!(colors("/clear now").iter().all(|&fg| fg == MUTED));
+        assert!(typed[6..].iter().all(|&fg| fg == TEXT), "{typed:?}");
+        assert!(colors("/mod").iter().all(|&fg| fg == TEXT));
+        assert!(colors("/clear now").iter().all(|&fg| fg == TEXT));
     }
 
     #[test]
@@ -914,7 +937,12 @@ mod tests {
         app.character_index = 2;
         app.slash_selection = 1;
         let rows = render(&app);
-        let composer = rows.iter().position(|row| row.starts_with("> /c")).unwrap();
+        // The popup covers the rows above the composer's frame.
+        let composer = rows
+            .iter()
+            .position(|row| row.starts_with("│ › /c"))
+            .unwrap()
+            - 1;
 
         assert!(rows[composer - 5].contains(" commands "));
         assert!(rows[composer - 4].contains("  /commands  List available slash commands"));
@@ -940,11 +968,12 @@ mod tests {
         app.input = "このプロジェクト".into();
         app.character_index = 8;
         let (x, row) = composer_cursor(&app);
-        assert!(row.replace(' ', "").starts_with(">このプロジェクト"));
-        assert_eq!(x, 2 + 16);
+        // Border, padding, and the "› " prompt come before the text.
+        assert!(row.replace(' ', "").starts_with("│›このプロジェクト"));
+        assert_eq!(x, 4 + 16);
 
         app.character_index = 2;
-        assert_eq!(composer_cursor(&app).0, 2 + 4);
+        assert_eq!(composer_cursor(&app).0, 4 + 4);
     }
 
     #[test]
@@ -953,9 +982,15 @@ mod tests {
         app.input = "あ".repeat(60);
         app.character_index = 60;
         let (x, row) = composer_cursor(&app);
-        // 78 cells wide; 38 wide chars (76 cells) plus the cursor cell fit.
-        assert_eq!(x, 2 + 76);
-        assert!(row.trim_end().ends_with('あ'));
+        // 74 cells inside the frame; 36 wide chars (72 cells) plus the
+        // cursor cell fit.
+        assert_eq!(x, 4 + 72);
+        assert!(
+            row.trim_end()
+                .trim_end_matches('│')
+                .trim_end()
+                .ends_with('あ')
+        );
     }
 
     fn app_with_activity() -> App {
@@ -971,16 +1006,17 @@ mod tests {
     fn small_terminal_keeps_input_transcript_and_activity_visible() {
         let rows = render_at(&app_with_activity(), 80, 24);
 
-        // Footer on the last row, the two-row composer above it.
-        assert!(rows[21].starts_with("> "), "composer row: {:?}", rows[21]);
+        // Footer on the last row, the framed composer above it.
+        assert!(rows[21].starts_with("│ › "), "composer row: {:?}", rows[21]);
+        assert!(rows[20].starts_with('╭') && rows[22].starts_with('╰'));
         assert!(rows.iter().any(|row| row.contains("> explain the view")));
         let top = rows
             .iter()
             .position(|row| row.contains(" activity "))
             .unwrap();
-        assert!(top < 21);
+        assert!(top < 20);
         assert!(
-            rows[top..21]
+            rows[top..20]
                 .iter()
                 .any(|row| row.contains("response · 312 chars"))
         );
