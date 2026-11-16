@@ -8,7 +8,8 @@ pub(crate) const BG: Color = Color::Reset;
 pub(crate) const TEXT: Color = Color::Reset;
 pub(crate) const MUTED: Color = Color::DarkGray;
 pub(crate) const BORDER: Color = Color::DarkGray;
-pub(crate) const ACCENT: Color = Color::Rgb(232, 162, 92);
+/// Amber that keeps 3:1 contrast on a white background and 5:1 on a near-black one.
+pub(crate) const ACCENT: Color = Color::Rgb(200, 130, 20);
 /// Failures: a failed tool call or turn, and destructive confirmations.
 pub(crate) const ERROR: Color = Color::Red;
 /// The frame of the focused pane or open dialog; others use `BORDER`.
