@@ -594,7 +594,7 @@ fn concurrent_batch_len(ctx: &TurnContext<'_>, calls: &[(String, String, Value)]
         .take_while(|(_, name, input)| {
             name == AGENT_TOOL_NAME
                 && ctx.tools.iter().any(|tool| tool.name() == name)
-                && input.get("resume").is_none()
+                && input.get("resume").is_none_or(Value::is_null)
                 && input
                     .get("agent_type")
                     .and_then(Value::as_str)
