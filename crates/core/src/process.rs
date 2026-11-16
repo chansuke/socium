@@ -129,9 +129,11 @@ pub(crate) fn run_observed(
     let mut truncated = false;
     let mut timed_out = false;
     let mut cancelled = false;
+    let mut out_done = false;
+    let mut err_done = false;
     loop {
-        let out_done = drain(&mut stdout, &mut out, &mut truncated, false, observer)?;
-        let err_done = drain(&mut stderr, &mut err, &mut truncated, true, observer)?;
+        out_done = out_done || drain(&mut stdout, &mut out, &mut truncated, false, observer)?;
+        err_done = err_done || drain(&mut stderr, &mut err, &mut truncated, true, observer)?;
         let status = child.0.try_wait()?;
         if let Some(status) = status
             && out_done
@@ -163,7 +165,27 @@ pub(crate) fn run_observed(
                 truncated: true,
             });
         }
-        std::thread::sleep(Duration::from_millis(2));
+        // Sleep until output, end of output, or the next cancellation and
+        // deadline check, instead of polling on a fixed beat.
+        let mut fds: Vec<libc::pollfd> = [
+            (out_done, stdout.as_raw_fd()),
+            (err_done, stderr.as_raw_fd()),
+        ]
+        .into_iter()
+        .filter(|(done, _)| !done)
+        .map(|(_, fd)| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+        if fds.is_empty() {
+            // Both pipes closed but the process has not exited yet.
+            std::thread::sleep(Duration::from_millis(1));
+        } else {
+            // SAFETY: `fds` holds live descriptors owned by the pipes above.
+            unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 10) };
+        }
     }
 }
 
