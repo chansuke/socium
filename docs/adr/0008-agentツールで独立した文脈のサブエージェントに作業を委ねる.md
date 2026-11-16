@@ -59,7 +59,7 @@ Chosen option: 「同期の `agent` tool」。親の tool loop の中で子の t
 * 子が承認を求めるとき、承認の要求に子の種類と `description` を付ける（`AgentProgress::ApprovalRequested.requested_by`）。TUI は承認の選択肢の上の要約と、要求の詳細の冒頭にそれを出す。表示のためだけの情報で、承認は従来どおり要求の ID で照合する。
 * 子の Activity event は、`ActivityEvent.agent` にそれを起動した `agent` 呼び出しの call ID を入れて親に渡す。親の event には付けない。JSONL の記録にも同じ形で残り、この項目の無い古い記録はそのまま読める。
 * TUI は `agent` の付いた項目を `│ ` の罫線で字下げして出す。子の round 番号は 1 から数え直すので、項目の照合には `turn_id` と `round` に `agent` を加える。
-* 子の本文の stream、thinking の stream、生の provider event、model request の開始は親に渡さない。会話欄に親の発言として混ざるため。子の round では、生の event 表示（`r`）を出さず、理由を示す。
+* 子の本文の stream、thinking の stream、生の provider event、model request の開始、会話欄に足す tool 呼び出しの項目は親に渡さない。会話欄に親の発言や呼び出しとして混ざり、再起動後の会話欄と食い違うため。会話欄には `agent` 呼び出しとその結果だけが出て、子の tool 呼び出しは Activity 欄に出る。子の round では、生の event 表示（`r`）を出さず、理由を示す。
 * 子の message は保存しない。親の会話には、`agent` 呼び出しの開始（`tool_started`）と結果だけが残る。子の実行中に止まった場合は、他の tool と同じく結果不明として扱い、再実行しない。子が呼んだ tool は、Activity の記録に残る。（ADR 10 で、子の message を保存し、再開できるようにした。）
 * 子の token 使用量は、turn の出力 token の合計に含める。親の自動 compaction の判断には使わない。
 
@@ -81,7 +81,7 @@ Chosen option: 「同期の `agent` tool」。親の tool loop の中で子の t
 
 ### Confirmation
 
-core の単体テストで、`explorer` が空の文脈と自分の system prompt で始まり読み取り用の tool だけを受け取ること、親には報告だけが返り子の tool 呼び出しが会話に残らないこと、子の Activity に call ID が付くこと、一覧の外の tool と入れ子の `agent` が拒否されファイルが変わらないこと、`worker` が `agent` 以外のすべての tool を受け取ること、子の失敗が `is_error` の結果になり親が続くこと、不正な入力がモデルの呼び出し前に拒否されることを、`ScriptedProvider` で確認する。TUI のテストで、子の event が親の同じ番号の round の項目に混ざらないこと、子の round で生の event 表示を断ること、罫線の字下げを確認する。
+core の単体テストで、`explorer` が空の文脈と自分の system prompt で始まり読み取り用の tool だけを受け取ること、親には報告だけが返り子の tool 呼び出しが会話に残らないこと、実行中の会話欄に出る tool の項目が再起動後に会話から組み直すものと一致すること、子の Activity に call ID が付くこと、一覧の外の tool と入れ子の `agent` が拒否されファイルが変わらないこと、`worker` が `agent` 以外のすべての tool を受け取ること、子の失敗が `is_error` の結果になり親が続くこと、不正な入力がモデルの呼び出し前に拒否されることを、`ScriptedProvider` で確認する。TUI のテストで、子の event が親の同じ番号の round の項目に混ざらないこと、子の round で生の event 表示を断ること、罫線の字下げを確認する。
 
 ## Pros and Cons of the Options
 

@@ -172,12 +172,23 @@ pub(crate) fn run_subagent<'a>(
                 requested_by: Some(requested_by.clone()),
                 session_option,
             }),
-            // These would read as the main agent's own stream.
+            // These would read as the main agent's own stream or calls; the
+            // child's calls are in the Activity pane.
             AgentProgress::AssistantText { .. }
             | AgentProgress::ThinkingText { .. }
             | AgentProgress::RawProviderEvent { .. }
-            | AgentProgress::ModelRequestStarted { .. } => {}
-            other => on_progress(other),
+            | AgentProgress::ModelRequestStarted { .. }
+            | AgentProgress::ToolCallRecorded(_) => {}
+            // Approvals, the status line and command output.
+            other @ (AgentProgress::ApprovalRequired { .. }
+            | AgentProgress::ApprovalResolved { .. }
+            | AgentProgress::ToolCallStarted { .. }
+            | AgentProgress::ToolCallFinished { .. }
+            | AgentProgress::CommandOutput { .. }
+            | AgentProgress::CommandStarted { .. }
+            | AgentProgress::CommandFinished { .. }
+            | AgentProgress::CompactionStarted
+            | AgentProgress::CompactionFinished { .. }) => on_progress(other),
         };
         // Saved before each side effect, like the main conversation.
         let mut checkpoint = |context: &[Message], _event: Value| -> std::io::Result<()> {
@@ -327,7 +338,7 @@ mod tests {
     use crate::providers::error::ProviderError;
     use crate::providers::{ProviderResponse, TokenUsage};
     use crate::test_support::{ScriptedProvider, make_temp_dir, text_provider_response};
-    use crate::{ActivityKind, AgentProgress, AgentService};
+    use crate::{ActivityKind, AgentProgress, AgentService, TranscriptEntry, TranscriptRole};
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
 
@@ -1139,6 +1150,83 @@ mod tests {
         );
         assert_eq!(record(workspace.path(), "agent-a")["status"], "finished");
         assert_eq!(record(workspace.path(), "agent-b")["status"], "finished");
+    }
+
+    /// The tool entries a turn shows live, then the ones a restarted
+    /// session rebuilds from the saved conversation.
+    async fn live_and_restored_tool_entries(
+        root: &std::path::Path,
+        responses: Vec<Result<ProviderResponse, ProviderError>>,
+    ) -> (Vec<TranscriptEntry>, Vec<TranscriptEntry>) {
+        let (mut service, _) = scripted(root, responses);
+        let mut live = Vec::new();
+        service
+            .submit_with_progress("Look around".into(), |event| {
+                if let AgentProgress::ToolCallRecorded(entry) = event {
+                    live.push(entry);
+                }
+            })
+            .await
+            .unwrap();
+        drop(service);
+        let (mut restarted, _) = scripted(root, Vec::new());
+        restarted.restore_state().unwrap();
+        let restored = restarted
+            .transcript_entries()
+            .into_iter()
+            .filter(|entry| matches!(entry.role, TranscriptRole::Tool { .. }))
+            .collect();
+        (live, restored)
+    }
+
+    #[tokio::test]
+    async fn the_live_conversation_shows_agent_calls_as_a_restart_does() {
+        let workspace = make_temp_dir("subagent_live_sequential");
+        std::fs::write(workspace.path().join("a.txt"), "hello\n").unwrap();
+        let (live, restored) = live_and_restored_tool_entries(
+            workspace.path(),
+            vec![
+                delegate("explorer"),
+                calls(&[("read-1", "read_file", json!({"path": "a.txt"}))]),
+                text("a.txt:1 says hello"),
+                text("It is in a.txt."),
+            ],
+        )
+        .await;
+        // The explorer's read belongs to the Activity pane.
+        assert_eq!(live, restored);
+        assert_eq!(restored.len(), 1, "{restored:?}");
+        assert!(
+            restored[0]
+                .text
+                .starts_with("agent Find the greeting\na.txt:1 says hello"),
+            "{restored:?}"
+        );
+
+        let workspace = make_temp_dir("subagent_live_batch");
+        let explore = |id, prompt| {
+            (
+                id,
+                "agent",
+                json!({"description": format!("Look at {prompt}"), "prompt": prompt, "agent_type": "explorer"}),
+            )
+        };
+        let (live, restored) = live_and_restored_tool_entries(
+            workspace.path(),
+            vec![
+                calls(&[explore("agent-a", "src"), explore("agent-b", "docs")]),
+                text("report one"),
+                text("report two"),
+                text("Both done."),
+            ],
+        )
+        .await;
+        assert_eq!(live, restored);
+        let firsts = restored
+            .iter()
+            .map(|entry| entry.text.lines().next().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(firsts, ["agent Look at src", "agent Look at docs"]);
     }
 
     #[test]
