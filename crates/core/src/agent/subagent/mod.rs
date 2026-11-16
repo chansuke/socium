@@ -1229,6 +1229,128 @@ mod tests {
         assert_eq!(firsts, ["agent Look at src", "agent Look at docs"]);
     }
 
+    fn explore(id: &str, prompt: &str) -> (String, Value) {
+        (
+            id.to_string(),
+            json!({"description": "Look", "prompt": prompt, "agent_type": "explorer"}),
+        )
+    }
+
+    fn delegate_all(batch: &[(String, Value)]) -> Result<ProviderResponse, ProviderError> {
+        calls(
+            &batch
+                .iter()
+                .map(|(id, input)| (id.as_str(), "agent", input.clone()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Answers the main agent from a script. A subagent asked for "slow"
+    /// waits until two others have reported, then copies the conversation
+    /// file to `crashed`, as the process dying at that moment would leave it.
+    struct CrashingProvider {
+        main: ScriptedProvider,
+        reported: tokio::sync::Semaphore,
+        conversation: Arc<std::sync::OnceLock<std::path::PathBuf>>,
+        crashed: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::providers::Provider for CrashingProvider {
+        fn kind(&self) -> crate::providers::ProviderKind {
+            crate::providers::ProviderKind::Anthropic
+        }
+
+        fn capabilities(&self) -> crate::providers::ProviderCapabilities {
+            crate::providers::ProviderCapabilities {
+                supports_tools: true,
+            }
+        }
+
+        async fn send_message(
+            &self,
+            client: &reqwest::Client,
+            request: &crate::agent::types::AgentMessageRequest<'_>,
+            on_delta: &mut (dyn FnMut(crate::providers::ProviderEvent) + Send),
+        ) -> Result<ProviderResponse, ProviderError> {
+            let value = serde_json::to_value(request)?;
+            if value["system"] == DEFAULT_SYSTEM_PROMPT {
+                return self.main.send_message(client, request, on_delta).await;
+            }
+            let prompt = value["messages"][0]["content"].as_str().unwrap_or_default();
+            if prompt == "slow" {
+                let _ = self.reported.acquire_many(2).await;
+                std::fs::copy(self.conversation.get().unwrap(), &self.crashed).unwrap();
+            } else {
+                self.reported.add_permits(1);
+            }
+            Ok(text_provider_response(&format!("report on {prompt}"), None))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restart_keeps_the_reports_of_batched_subagents_that_finished() {
+        let workspace = make_temp_dir("subagent_batch_restart");
+        let conversation = Arc::new(std::sync::OnceLock::new());
+        let crashed = workspace.path().join("crashed.json");
+        let provider = CrashingProvider {
+            main: ScriptedProvider::new(vec![
+                delegate_all(&[
+                    explore("agent-a", "src"),
+                    explore("agent-b", "slow"),
+                    explore("agent-c", "docs"),
+                ]),
+                text("All done."),
+            ]),
+            reported: tokio::sync::Semaphore::new(0),
+            conversation: conversation.clone(),
+            crashed: crashed.clone(),
+        };
+        let mut service = AgentService::with_provider(
+            workspace.path().into(),
+            Box::new(provider),
+            "test".into(),
+            1000,
+            reqwest::Client::new(),
+        );
+        conversation.set(service.conversation_path()).unwrap();
+        service.submit("Look around".into()).await.unwrap();
+        drop(service);
+        std::fs::copy(&crashed, conversation.get().unwrap()).unwrap();
+        let (mut restarted, requests) = scripted(workspace.path(), vec![text("Resumed.")]);
+        restarted.restore_state().unwrap();
+
+        restarted.submit("Go on".into()).await.unwrap();
+
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "no subagent ran again");
+        let messages = requests[0]["messages"].as_array().unwrap();
+        let results = messages[messages.len() - 2]["content"].as_array().unwrap();
+        let ids = results
+            .iter()
+            .map(|result| result["tool_use_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["agent-a", "agent-b", "agent-c"]);
+        let content = |index: usize| results[index]["content"].as_str().unwrap();
+        assert!(
+            content(0).starts_with("report on src\n\n(subagent agent-a: "),
+            "{}",
+            content(0)
+        );
+        assert_eq!(results[0].get("is_error"), None);
+        assert_eq!(results[1]["is_error"], true);
+        assert!(
+            content(1).starts_with("Interrupted before result was saved"),
+            "{}",
+            content(1)
+        );
+        assert!(
+            content(2).starts_with("report on docs\n\n(subagent agent-c: "),
+            "{}",
+            content(2)
+        );
+    }
+
     #[test]
     fn long_reports_are_cut_on_a_character_boundary() {
         let report = "é".repeat(super::MAX_SUBAGENT_REPORT_CHARACTERS + 5);
