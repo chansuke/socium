@@ -32,6 +32,8 @@ pub(crate) struct App {
     pub(crate) status: Option<String>,
     pub(crate) workspace_label: String,
     pub(crate) model_label: String,
+    /// `approval.commands = "auto"`: shown in the footer.
+    pub(crate) commands_run_without_asking: bool,
     pub(crate) context_metrics: ContextMetrics,
     /// Tokens this conversation used, and their cost when priced.
     pub(crate) session_usage: (TokenUsage, Option<f64>),
@@ -65,6 +67,7 @@ impl App {
         let model_label = model_label(&agent.active_model());
         let workspace_label = format_workspace_path(env::current_dir().ok());
         let warnings = agent.startup_warnings();
+        let commands_run_without_asking = agent.commands_run_without_asking();
         let history_path =
             socium_core::workspace_state_path(&env::current_dir()?, INPUT_HISTORY_FILE_NAME)?;
         let input_history = input_history::InputSession::load(history_path)?;
@@ -77,9 +80,10 @@ impl App {
             messages: Vec::new(),
             activity: ActivityModel::default(),
             transcript_scroll: 0,
-            status: Some(socium_core::SANDBOX_DESCRIPTION.to_string()),
+            status: None,
             workspace_label,
             model_label,
+            commands_run_without_asking,
             context_metrics: ContextMetrics::default(),
             session_usage: Default::default(),
             last_latency_ms: None,
@@ -137,6 +141,7 @@ impl App {
             status: None,
             workspace_label: "test".into(),
             model_label: "test".into(),
+            commands_run_without_asking: false,
             context_metrics: Default::default(),
             session_usage: Default::default(),
             last_latency_ms: None,

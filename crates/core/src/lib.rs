@@ -1105,6 +1105,12 @@ impl AgentService {
         )
     }
 
+    /// Whether sandboxed commands run without asking
+    /// (`approval.commands = "auto"`).
+    pub fn commands_run_without_asking(&self) -> bool {
+        self.settings.approval.commands == settings::CommandApproval::Auto
+    }
+
     /// Tolerated configuration problems to show once at startup.
     pub fn startup_warnings(&self) -> Vec<String> {
         let mut warnings = self.warnings.clone();
