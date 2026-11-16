@@ -37,7 +37,7 @@ Chosen option: 「同期の `agent` tool」。親の tool loop の中で子の t
 
 ### tool
 
-親のモデルには `agent` tool を渡す。入力は `description`（利用者に見せる短い名前）、`prompt`（子への指示のすべて）、`agent_type` の三つで、すべて必須。
+親のモデルには `agent` tool を渡す。入力は `description`（利用者に見せる短い名前）、`prompt`（子への指示のすべて）、`agent_type` の三つで、すべて必須。（ADR 10 で任意の `model` と `resume` を足した。後の変更を参照。）
 
 `description` か `prompt` が空白だけなら、子を動かさずに誤りを返す。任意の入力に `null` が来たら、渡されなかったものとして扱う。モデルは使わない任意の入力に `null` を書くことが多いため。スキーマに無い入力は、ほかの tool と同じく無視する。
 
@@ -48,7 +48,7 @@ Chosen option: 「同期の `agent` tool」。親の tool loop の中で子の t
 
 ### 実行
 
-* 子は親と同じモデル、provider、workspace、`TaskControl`（取り消しと承認）を使う。
+* 子は親と同じモデル、provider、workspace、`TaskControl`（取り消しと承認）を使う。（モデルと provider は ADR 9 と ADR 10 で選べるようになった。後の変更を参照。）
 * 子の文脈は、種類ごとの system prompt と、`prompt` を本文とする一つの user message だけから始まる。親の会話は見えない。
 * tool loop の上限は親と同じ 20 round。
 * tool loop は、モデルに渡した tool 以外の呼び出しを `Unsupported tool` として拒否する。子がモデルの判断で `apply_patch` や `agent` を名指ししても実行されないので、子の権限は渡した tool の一覧で決まる。子の一覧には `agent` が無いので、入れ子にならない。
@@ -110,3 +110,11 @@ core の単体テストで、`explorer` が空の文脈と自分の system promp
 ## More Information
 
 Claude Code の仕組みは公開文書（https://docs.anthropic.com/en/docs/claude-code/sub-agents ）、Codex CLI の仕組みは openai/codex の `codex-rs/core/src/tools/spec_plan.rs` と multi-agent の handler を、2026-11-14 に確認した。関連: ADR 2（Activity 欄の構造化 event）、ADR 4（Activity の記録）。
+
+### 後の変更
+
+2026-11-16 の時点で、次の点がこの ADR の決定から変わっている。
+
+* `agent` tool の入力は五つになった。必須の三つに加え、子のモデルを選ぶ任意の `model` と、保存した子を続ける任意の `resume` がある ([ADR 10](0010-サブエージェントのモデル選択と並行実行と記録と再開.md))。`model` は、子に使えるモデルが一つも無いときは出さない。
+* 子のモデルは、呼び出しの `model`、種類の `model` ([ADR 9](0009-利用者定義のサブエージェントを設定ディレクトリのmarkdownで定める.md))、親の現在のモデルの順に決める。親と同じモデルを使うのは、どちらも無いときだけ。provider、context window、最大出力も選んだモデルのものになる。
+* 子の system prompt は、すべての種類に共通の前置きの後に種類ごとの指示を置く ([ADR 9](0009-利用者定義のサブエージェントを設定ディレクトリのmarkdownで定める.md) の後の変更)。
