@@ -56,20 +56,12 @@ pub(crate) fn help_text() -> String {
     )
 }
 
-pub(crate) fn slice_chars(value: &str, start: usize, end: usize) -> String {
-    value
-        .chars()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .collect()
-}
-
 pub(crate) fn render_entry(entry: &ChatEntry, width: usize) -> Vec<Line<'static>> {
     match entry.speaker {
         Speaker::User => render_wrapped_text(&entry.body, width, "> ", "  ", MUTED, MUTED, None),
         Speaker::Socium => render_socium_entry(entry, width),
         Speaker::Thinking => render_thinking_indicator(),
-        Speaker::System => render_wrapped_text(&entry.body, width, "! ", "  ", PINK, TEXT, None),
+        Speaker::System => render_wrapped_text(&entry.body, width, "! ", "  ", ACCENT, TEXT, None),
         Speaker::Tool { failed } => render_tool_entry(&entry.body, width, failed),
     }
 }
@@ -77,8 +69,8 @@ pub(crate) fn render_entry(entry: &ChatEntry, width: usize) -> Vec<Line<'static>
 fn render_thinking_indicator() -> Vec<Line<'static>> {
     vec![
         Line::from(vec![
-            Span::styled("✦ ", Style::default().fg(LILAC)),
-            Span::styled("Socium is thinking", Style::default().fg(LILAC)),
+            Span::styled("✦ ", Style::default().fg(ACCENT)),
+            Span::styled("Socium is thinking", Style::default().fg(ACCENT)),
             Span::styled(
                 " · Ctrl+A to follow in activity · esc to cancel",
                 Style::default().fg(MUTED),
@@ -105,7 +97,7 @@ fn render_socium_entry(entry: &ChatEntry, width: usize) -> Vec<Line<'static>> {
                 if !wrote_text {
                     let first = wrapped.first().cloned().unwrap_or_default();
                     lines.push(Line::from(vec![
-                        Span::styled("✦ ", Style::default().fg(LILAC)),
+                        Span::styled("✦ ", Style::default().fg(ACCENT)),
                         Span::styled(first, Style::default().fg(TEXT)),
                     ]));
                     for line in wrapped.into_iter().skip(1) {
@@ -132,22 +124,22 @@ fn render_socium_entry(entry: &ChatEntry, width: usize) -> Vec<Line<'static>> {
     }
 
     if !wrote_text {
-        lines.push(Line::from(Span::styled("✦", Style::default().fg(LILAC))));
+        lines.push(Line::from(Span::styled("✦", Style::default().fg(ACCENT))));
     }
 
     lines.push(Line::from(""));
     lines
 }
 
-/// `⏺ name argument`, then `⎿ result` under it, the marker pink when the
+/// `⏺ name argument`, then `⎿ result` under it, the marker red when the
 /// call failed.
 fn render_tool_entry(body: &str, width: usize, failed: bool) -> Vec<Line<'static>> {
     let (call, result) = body.split_once('\n').unwrap_or((body, ""));
-    let marker = if failed { PINK } else { LILAC };
+    let marker = if failed { ERROR } else { ACCENT };
     let mut lines = render_wrapped_text(call, width, "⏺ ", "  ", marker, TEXT, None);
     if !result.is_empty() {
         lines.pop();
-        let color = if failed { PINK } else { MUTED };
+        let color = if failed { ERROR } else { MUTED };
         let (summary, diff) = result.split_once('\n').unwrap_or((result, ""));
         lines.extend(render_wrapped_text(
             summary, width, "  ⎿ ", "    ", MUTED, color, None,
@@ -156,7 +148,7 @@ fn render_tool_entry(body: &str, width: usize, failed: bool) -> Vec<Line<'static
         for line in diff.lines() {
             let color = match line.chars().next() {
                 Some('+') => DIFF_ADDED,
-                Some('-') => PINK,
+                Some('-') => DIFF_REMOVED,
                 _ => MUTED,
             };
             lines.pop();
@@ -190,7 +182,7 @@ fn render_wrapped_text(
             Span::styled(first.clone(), Style::default().fg(text_color)),
         ];
         if let Some(ts) = timestamp {
-            first_line.push(Span::styled(format!("  {ts}"), Style::default().fg(SOFT)));
+            first_line.push(Span::styled(format!("  {ts}"), Style::default().fg(MUTED)));
         }
         lines.push(Line::from(first_line));
     }
@@ -300,8 +292,8 @@ fn render_code_block(label: &str, code_lines: &[String], width: usize) -> Vec<Li
     let mut lines = vec![Line::from(vec![
         Span::styled("  ", Style::default().fg(MUTED)),
         Span::styled(
-            format!("┌{}{}┐", title_text, "─".repeat(fill)),
-            Style::default().fg(CODE_BORDER),
+            format!("╭{}{}╮", title_text, "─".repeat(fill)),
+            Style::default().fg(BORDER),
         ),
     ])];
 
@@ -315,11 +307,11 @@ fn render_code_block(label: &str, code_lines: &[String], width: usize) -> Vec<Li
         let padding = inner_width.saturating_sub(2 + cells(&visible));
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default().fg(MUTED)),
-            Span::styled("│ ", Style::default().fg(CODE_BORDER)),
-            Span::styled(visible, Style::default().fg(CODE_TEXT)),
+            Span::styled("│ ", Style::default().fg(BORDER)),
+            Span::styled(visible, Style::default().fg(TEXT)),
             Span::styled(
                 format!("{} │", " ".repeat(padding)),
-                Style::default().fg(CODE_BORDER),
+                Style::default().fg(BORDER),
             ),
         ]));
     }
@@ -327,8 +319,8 @@ fn render_code_block(label: &str, code_lines: &[String], width: usize) -> Vec<Li
     lines.push(Line::from(vec![
         Span::styled("  ", Style::default().fg(MUTED)),
         Span::styled(
-            format!("└{}┘", "─".repeat(inner_width)),
-            Style::default().fg(CODE_BORDER),
+            format!("╰{}╯", "─".repeat(inner_width)),
+            Style::default().fg(BORDER),
         ),
     ]));
     lines.push(Line::from(""));
@@ -463,7 +455,7 @@ mod tests {
             ]
         );
         let color = |row: usize| lines[row].spans[1].style.fg;
-        assert_eq!(color(4), Some(super::PINK));
+        assert_eq!(color(4), Some(super::DIFF_REMOVED));
         assert_eq!(color(5), Some(super::DIFF_ADDED));
     }
 

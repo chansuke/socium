@@ -14,7 +14,7 @@ use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Clear, Paragraph},
+    widgets::{Block, BorderType, Clear, Paragraph},
 };
 use socium_core::activity::Phase;
 use socium_core::providers::TokenUsage;
@@ -28,8 +28,11 @@ const APPROVAL_SUMMARY_MAX_ROWS: usize = 3;
 const MODEL_PICKER_MAX_ROWS: usize = 8;
 /// Terminal width from which the Activity pane becomes a right-hand column.
 const WIDE_LAYOUT_COLUMNS: u16 = 140;
-/// Terminal height from which the logo header is shown.
+/// Terminal height from which the header is shown.
 const HEADER_MIN_ROWS: u16 = 40;
+/// The header card: the name and version, a blank line, the model, and
+/// the directory, inside a rounded border.
+const HEADER_CARD_ROWS: u16 = 6;
 
 pub(crate) struct Areas {
     pub(crate) header: Rect,
@@ -44,7 +47,7 @@ pub(crate) struct Areas {
 /// Activity pane the transcript's space as well.
 pub(crate) fn layout(area: Rect, activity_fullscreen: bool, composer_rows: u16) -> Areas {
     let header_rows = if area.height >= HEADER_MIN_ROWS {
-        10
+        HEADER_CARD_ROWS + 1
     } else {
         0
     };
@@ -89,9 +92,12 @@ fn approval_lines(prompt: &ApprovalPrompt, width: u16) -> Vec<Line<'static>> {
     for (index, choice) in prompt.choices().into_iter().enumerate() {
         let selected = choice == prompt.choice;
         let (marker, style) = if selected {
-            ("❯", Style::default().fg(LILAC).add_modifier(Modifier::BOLD))
+            (
+                "❯",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )
         } else {
-            (" ", Style::default().fg(SOFT))
+            (" ", Style::default().fg(MUTED))
         };
         lines.push(Line::from(Span::styled(
             format!(" {marker} {}. {}", index + 1, prompt.label(choice)),
@@ -131,8 +137,9 @@ fn draw_approval_details(frame: &mut Frame, area: Rect, prompt: &ApprovalPrompt)
         lines.len()
     );
     let block = Block::bordered()
+        .border_type(BorderType::Rounded)
         .title(cells::truncate_cells(&title, width))
-        .border_style(Style::default().fg(LILAC))
+        .border_style(Style::default().fg(FOCUS_BORDER))
         .style(Style::default().bg(BG));
     let visible = lines
         .into_iter()
@@ -198,10 +205,10 @@ fn model_picker_lines(picker: &ModelPicker, width: u16) -> Vec<Line<'static>> {
                 };
                 let detail = truncate_text(&detail, inner.saturating_sub(head.width()));
                 let (head_style, detail_style) = if choice.unavailable.is_some() {
-                    (Style::default().fg(SOFT), Style::default().fg(SOFT))
+                    (Style::default().fg(MUTED), Style::default().fg(MUTED))
                 } else if selected {
                     (
-                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                         Style::default().fg(TEXT),
                     )
                 } else {
@@ -283,14 +290,14 @@ impl App {
                 let (marker, name_style, description_style) = if index == selected {
                     (
                         "› ",
-                        Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                         Style::default().fg(TEXT),
                     )
                 } else {
-                    ("  ", Style::default().fg(BLUE), Style::default().fg(MUTED))
+                    ("  ", Style::default().fg(TEXT), Style::default().fg(MUTED))
                 };
                 Line::from(vec![
-                    Span::styled(marker, Style::default().fg(LILAC)),
+                    Span::styled(marker, Style::default().fg(ACCENT)),
                     Span::styled(
                         format!("{:<name_width$}  ", format!("/{}", command.name)),
                         name_style,
@@ -307,34 +314,54 @@ impl App {
             height,
         );
         let block = Block::bordered()
+            .border_type(BorderType::Rounded)
             .title(" commands · ↑↓ select · Tab complete · Enter run · Esc close ")
-            .border_style(Style::default().fg(CODE_BORDER))
+            .border_style(Style::default().fg(BORDER))
             .style(Style::default().bg(BG));
         frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
     }
 
+    /// A rounded card with the name and version, then the model and the
+    /// directory, sized to its contents.
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let mut logo_lines = build_logo_rows(&LOGO_WORDMARK);
-        logo_lines.push(Line::from(vec![
-            Span::styled("model ", Style::default().fg(SOFT)),
-            Span::styled(&self.model_label, Style::default().fg(BLUE)),
-        ]));
-        logo_lines.push(Line::from(vec![
-            Span::styled("dir ", Style::default().fg(SOFT)),
-            Span::styled(&self.workspace_label, Style::default().fg(LILAC)),
-        ]));
-        logo_lines.push(Line::from(vec![
-            Span::styled("socium ", Style::default().fg(SOFT)),
-            Span::styled(
-                format!("v{}", env!("CARGO_PKG_VERSION")),
-                Style::default().fg(PINK),
-            ),
-        ]));
-        frame.render_widget(
-            Paragraph::new(Text::from(logo_lines)).style(Style::default().bg(BG)),
-            area,
-        );
+        let label = |name: &'static str| Span::styled(name, Style::default().fg(MUTED));
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("✦ ", Style::default().fg(ACCENT)),
+                Span::styled(
+                    "socium",
+                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  v{}", env!("CARGO_PKG_VERSION")),
+                    Style::default().fg(MUTED),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                label("  model  "),
+                Span::styled(&self.model_label, Style::default().fg(TEXT)),
+            ]),
+            Line::from(vec![
+                label("  dir    "),
+                Span::styled(&self.workspace_label, Style::default().fg(TEXT)),
+            ]),
+        ];
+        // One cell of padding on each side inside the border.
+        let content = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+        let card = Rect {
+            x: area.x + 1,
+            width: (content + 4).min(area.width.saturating_sub(1)),
+            height: HEADER_CARD_ROWS.min(area.height),
+            ..area
+        };
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(BORDER))
+            .padding(ratatui::widgets::Padding::horizontal(1))
+            .style(Style::default().bg(BG));
+        frame.render_widget(Paragraph::new(lines).block(block), card);
     }
 
     fn draw_transcript(&self, frame: &mut Frame, area: Rect) {
@@ -366,8 +393,9 @@ impl App {
             raw_title.as_str()
         };
         let block = Block::bordered()
+            .border_type(BorderType::Rounded)
             .title(title)
-            .border_style(Style::default().fg(if focused { LILAC } else { CODE_BORDER }))
+            .border_style(Style::default().fg(if focused { FOCUS_BORDER } else { BORDER }))
             .style(Style::default().bg(BG));
         let text = if let Some(view) = &self.activity.raw_view {
             Text::from(activity::raw_lines(
@@ -379,7 +407,7 @@ impl App {
         } else if self.activity.is_empty() {
             Text::from(vec![Line::from(Span::styled(
                 "Thoughts, tool calls, and token use appear here",
-                Style::default().fg(SOFT),
+                Style::default().fg(MUTED),
             ))])
         } else {
             Text::from(activity::activity_lines(
@@ -394,8 +422,9 @@ impl App {
     fn draw_composer(&self, frame: &mut Frame, area: Rect) {
         if let Some(prompt) = &self.approval {
             let block = Block::bordered()
+                .border_type(BorderType::Rounded)
                 .title(format!(" Approve {} ", prompt.tool))
-                .border_style(Style::default().fg(LILAC))
+                .border_style(Style::default().fg(FOCUS_BORDER))
                 .style(Style::default().bg(BG));
             frame.render_widget(
                 Paragraph::new(approval_lines(prompt, area.width)).block(block),
@@ -405,11 +434,14 @@ impl App {
         }
         if let Some(picker) = &self.model_picker {
             let block = Block::bordered()
+                .border_type(BorderType::Rounded)
                 .title(Span::styled(
                     " Select model ",
-                    Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(FOCUS_BORDER)
+                        .add_modifier(Modifier::BOLD),
                 ))
-                .border_style(Style::default().fg(LILAC))
+                .border_style(Style::default().fg(FOCUS_BORDER))
                 .style(Style::default().bg(BG));
             frame.render_widget(
                 Paragraph::new(model_picker_lines(picker, area.width)).block(block),
@@ -430,7 +462,7 @@ impl App {
                 Span::styled("> ", Style::default().fg(MUTED)),
                 Span::styled(
                     "Ask Socium to inspect files, explain code, or run tasks",
-                    Style::default().fg(SOFT),
+                    Style::default().fg(MUTED),
                 ),
             ])
         } else {
@@ -447,7 +479,7 @@ impl App {
                 Span::styled("> ", Style::default().fg(MUTED)),
                 Span::styled(
                     command.to_string(),
-                    Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(rest.to_string(), Style::default().fg(MUTED)),
             ])
@@ -502,7 +534,7 @@ impl App {
         if hidden > 0 {
             rows.push(Line::from(Span::styled(
                 format!("  ({hidden} more lines)"),
-                Style::default().fg(SOFT),
+                Style::default().fg(MUTED),
             )));
         }
         frame.render_widget(
@@ -527,7 +559,7 @@ impl App {
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(&self.workspace_label, Style::default().fg(BLUE)),
+                Span::styled(&self.workspace_label, Style::default().fg(MUTED)),
                 Span::styled(" ", Style::default().fg(MUTED)),
                 Span::styled(
                     format!(
@@ -544,7 +576,7 @@ impl App {
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 "host (ask)",
-                Style::default().fg(PINK),
+                Style::default().fg(MUTED),
             )]))
             .style(Style::default().bg(BG)),
             center,
@@ -556,7 +588,7 @@ impl App {
             .unwrap_or_else(|| "--".to_string());
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(&self.model_label, Style::default().fg(BLUE)),
+                Span::styled(&self.model_label, Style::default().fg(MUTED)),
                 Span::styled(" ", Style::default().fg(MUTED)),
                 Span::styled(
                     format!(
@@ -579,12 +611,12 @@ impl App {
                             self.context_metrics.input_budget_tokens
                         ),
                     },
-                    Style::default().fg(SOFT),
+                    Style::default().fg(MUTED),
                 ),
                 Span::styled(" ", Style::default().fg(MUTED)),
                 Span::styled(
                     format_session_usage(&self.session_usage.0, self.session_usage.1),
-                    Style::default().fg(SOFT),
+                    Style::default().fg(MUTED),
                 ),
                 Span::styled(" ", Style::default().fg(MUTED)),
                 Span::styled(
@@ -593,7 +625,7 @@ impl App {
                     } else {
                         "summary off".to_string()
                     },
-                    Style::default().fg(PINK),
+                    Style::default().fg(MUTED),
                 ),
             ]))
             .style(Style::default().bg(BG)),
@@ -624,7 +656,7 @@ impl App {
                 )),
                 Line::from(vec![
                     Span::styled("3. ", Style::default().fg(TEXT)),
-                    Span::styled("/help", Style::default().fg(LILAC)),
+                    Span::styled("/help", Style::default().fg(ACCENT)),
                     Span::styled(" for more information.", Style::default().fg(TEXT)),
                 ]),
             ]);
@@ -694,7 +726,7 @@ mod tests {
     fn details_rows(rows: &[String]) -> Vec<String> {
         let top = rows
             .iter()
-            .position(|row| row.starts_with("┌ Review git_commit"))
+            .position(|row| row.starts_with("╭ Review git_commit"))
             .unwrap();
         rows[top + 1..]
             .iter()
@@ -724,7 +756,7 @@ mod tests {
         assert_eq!(rows.len(), 24);
         assert!(
             rows.iter()
-                .any(|row| row.starts_with("┌ Approve git_commit "))
+                .any(|row| row.starts_with("╭ Approve git_commit "))
         );
         let first = details_rows(&rows);
         assert!(first.len() >= 10, "{rows:#?}");
@@ -770,14 +802,14 @@ mod tests {
         let rows = render(&app);
         let top = rows
             .iter()
-            .position(|row| row.starts_with("┌ Approve run_command "))
+            .position(|row| row.starts_with("╭ Approve run_command "))
             .unwrap();
 
         assert!(rows[top + 1].starts_with("│ cargo test "));
         assert!(rows[top + 3].starts_with("│ ❯ 1. Allow once"));
         assert!(rows[top + 4].starts_with("│   2. Deny"));
         assert!(rows[top + 6].contains("↑↓ select · Enter confirm · PgUp/PgDn/Home/End review"));
-        assert!(rows[top + 7].starts_with('└'));
+        assert!(rows[top + 7].starts_with('╰'));
         assert_eq!(top + 8, rows.len() - 1, "the footer stays on the last row");
         assert!(!rows.iter().any(|row| row.starts_with("> ")));
 
@@ -805,7 +837,7 @@ mod tests {
         let rows = render(&app);
         let top = rows
             .iter()
-            .position(|row| row.starts_with("┌ Resume · 20261114-000000-0000 "))
+            .position(|row| row.starts_with("╭ Resume · 20261114-000000-0000 "))
             .unwrap();
         assert!(rows[top + 3].contains("❯ just now     4 msgs  readme · fix the README"));
         assert!(!rows.iter().any(|row| row.contains("hidden while choosing")));
@@ -832,7 +864,7 @@ mod tests {
         let rows = render(&app);
         let top = rows
             .iter()
-            .position(|row| row.starts_with("┌ Select model "))
+            .position(|row| row.starts_with("╭ Select model "))
             .unwrap();
 
         assert!(rows[top + 1].starts_with("│ Switch the model for this conversation."));
@@ -842,13 +874,13 @@ mod tests {
         assert!(rows[top + 4].starts_with("│   2. ds-flash  deepseek/ds-flash-id"));
         assert!(rows[top + 5].starts_with("│   3. glm       ZAI_API_KEY is not set"));
         assert!(rows[top + 7].contains("Enter to confirm · 1-9 to choose · Esc to exit"));
-        assert!(rows[top + 8].starts_with('└'));
+        assert!(rows[top + 8].starts_with('╰'));
         assert_eq!(top + 9, rows.len() - 1, "the footer stays on the last row");
     }
 
     #[test]
     fn a_fully_typed_command_is_highlighted_in_the_composer() {
-        use crate::view::theme::{LILAC, MUTED};
+        use crate::view::theme::{ACCENT, MUTED};
 
         let colors = |input: &str| {
             let mut app = App::for_test();
@@ -866,7 +898,7 @@ mod tests {
         };
 
         let typed = colors("/model glm");
-        assert!(typed[..6].iter().all(|&fg| fg == LILAC), "{typed:?}");
+        assert!(typed[..6].iter().all(|&fg| fg == ACCENT), "{typed:?}");
         assert!(typed[6..].iter().all(|&fg| fg == MUTED), "{typed:?}");
         assert!(colors("/mod").iter().all(|&fg| fg == MUTED));
         assert!(colors("/clear now").iter().all(|&fg| fg == MUTED));
@@ -885,7 +917,7 @@ mod tests {
         assert!(rows[composer - 4].contains("  /commands  List available slash commands"));
         assert!(rows[composer - 3].contains("› /clear     Start a new conversation"));
         assert!(rows[composer - 2].contains("  /compact"));
-        assert!(rows[composer - 1].starts_with('└'));
+        assert!(rows[composer - 1].starts_with('╰'));
     }
 
     fn composer_cursor(app: &App) -> (u16, String) {
@@ -956,10 +988,49 @@ mod tests {
         let rows = render_at(&app_with_activity(), 160, 40);
 
         let header = rows.iter().find(|row| row.contains(" activity ")).unwrap();
-        let column = header.chars().position(|c| c == '┌').unwrap();
+        let column = header.chars().position(|c| c == '╭').unwrap();
         assert!(column >= 90, "activity starts at column {column}");
         assert!(rows.iter().any(|row| row.contains("⚙ read_file")));
         assert!(rows.iter().any(|row| row.contains("> explain the view")));
+    }
+
+    #[test]
+    fn tall_terminal_shows_name_model_and_directory_in_a_card() {
+        let mut app = App::for_test();
+        app.model_label = "claude-opus-5-5".into();
+        app.workspace_label = "~/code/socium".into();
+        let rows = render_at(&app, 80, 40);
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let card = |inner: &str| format!(" │ {inner:<24} │");
+
+        assert_eq!(rows[0].trim_end(), format!(" ╭{}╮", "─".repeat(26)));
+        assert_eq!(rows[1].trim_end(), card(&format!("✦ socium  {version}")));
+        assert_eq!(rows[2].trim_end(), card(""));
+        assert_eq!(rows[3].trim_end(), card("  model  claude-opus-5-5"));
+        assert_eq!(rows[4].trim_end(), card("  dir    ~/code/socium"));
+        assert_eq!(rows[5].trim_end(), format!(" ╰{}╯", "─".repeat(26)));
+        assert!(rows[6].trim().is_empty());
+        assert!(!render_at(&app, 80, 39)[0].contains("socium"));
+    }
+
+    #[test]
+    fn focusing_activity_draws_its_frame_in_the_focus_color() {
+        use crate::view::theme::{BORDER, FOCUS_BORDER};
+
+        let corner_color = |focused| {
+            let mut app = app_with_activity();
+            app.activity.focused = focused;
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let y = (0..buffer.area.height)
+                .find(|&y| buffer[(0, y)].symbol() == "╭")
+                .unwrap();
+            buffer[(0, y)].fg
+        };
+
+        assert_eq!(corner_color(true), FOCUS_BORDER);
+        assert_eq!(corner_color(false), BORDER);
     }
 
     #[test]
