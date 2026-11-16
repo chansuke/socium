@@ -673,8 +673,9 @@ fn validate_protocol(messages: &[Message]) -> Result<(), AgentError> {
 
 /// Repair a crash between intent and result persistence without guessing whether
 /// a side effect happened. This also completes partially recorded tool batches.
-pub(crate) fn repair_incomplete_tools(messages: &mut Vec<Message>) {
+pub(crate) fn repair_incomplete_tools(messages: &mut Vec<Message>) -> bool {
     use crate::agent::types::{MessageContent, Role};
+    let mut repaired = false;
     let mut i = 0;
     while i < messages.len() {
         let ids: Vec<String> = match &messages[i].content {
@@ -691,11 +692,13 @@ pub(crate) fn repair_incomplete_tools(messages: &mut Vec<Message>) {
             let has_results = messages.get(i+1).is_some_and(|m| matches!(&m.content,MessageContent::Blocks(b) if matches!(m.role,Role::User) && b.iter().all(|b| matches!(b,ContentBlock::ToolResult{..}))));
             if !has_results {
                 messages.insert(i + 1, Message::user_blocks(Vec::new()));
+                repaired = true;
             }
             if let MessageContent::Blocks(results) = &mut messages[i + 1].content {
                 for id in ids {
                     if !results.iter().any(|b| matches!(b,ContentBlock::ToolResult{tool_use_id,..} if *tool_use_id==id)) {
                         results.push(ContentBlock::ToolResult {tool_use_id:id, content:"Interrupted before result was saved. Outcome unknown; inspect workspace before retrying. Do not automatically repeat this operation.".into(), is_error:Some(true)});
+                        repaired = true;
                     }
                 }
             }
@@ -703,6 +706,7 @@ pub(crate) fn repair_incomplete_tools(messages: &mut Vec<Message>) {
         }
         i += 1;
     }
+    repaired
 }
 
 pub(crate) fn extract_text(blocks: &[ContentBlock]) -> String {
