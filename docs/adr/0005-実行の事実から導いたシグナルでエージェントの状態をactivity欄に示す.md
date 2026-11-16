@@ -36,6 +36,7 @@ Chosen option: 「core が決まった規則でシグナルを導く」。追加
 * 回復: tool が失敗した直後に、別の tool か別の入力で tool を始めたら知らせる。
 * 沈黙: progress update も応答本文も無いまま `tool_use` で終わった round が 5 回続いたら、turn ごとに一度だけ知らせる。
 * 消費: turn の見出しに、その turn の全 round の出力 token の合計を出す。
+* 堂々巡り・回復・沈黙は、親のエージェントと各サブエージェント（ADR 8）ごとに数える。同時に動く子（ADR 10）の呼び出しを合わせて数えると、一人の振る舞いを表さなくなるため。段階は turn に一つのまま。
 * シグナルは item として Activity 欄に挟み、どの item から導いたかが前後で分かるようにする。
 
 ### Consequences

@@ -99,6 +99,8 @@ pub enum SignalChange {
     Raised(Signal),
 }
 
+/// What one agent did so far this turn. The main agent and each subagent
+/// keep their own, so concurrent subagents do not add up to a signal.
 #[derive(Default)]
 struct TurnState {
     starts: HashMap<(String, String), usize>,
@@ -114,7 +116,7 @@ struct TurnState {
 #[derive(Default)]
 pub struct SignalTracker {
     phase: Phase,
-    turn: TurnState,
+    agents: HashMap<Option<String>, TurnState>,
 }
 
 impl SignalTracker {
@@ -124,30 +126,32 @@ impl SignalTracker {
 
     pub fn observe(&mut self, event: &ActivityEvent) -> Vec<SignalChange> {
         let mut changes = Vec::new();
+        if matches!(event.kind, ActivityKind::TurnStarted) {
+            self.agents.clear();
+        }
+        let Self { phase, agents } = self;
+        let turn = agents.entry(event.agent.clone()).or_default();
         match &event.kind {
-            ActivityKind::TurnStarted => self.turn = TurnState::default(),
             ActivityKind::RoundStarted { .. } => {
-                self.turn.round_spoke = false;
-                self.set_phase(Phase::Thinking, &mut changes);
+                turn.round_spoke = false;
+                set_phase(phase, Phase::Thinking, &mut changes);
             }
             ActivityKind::ThoughtFinished {
                 role: ThoughtRole::ProgressUpdate,
                 ..
             }
-            | ActivityKind::TextFinished { .. } => self.turn.round_spoke = true,
+            | ActivityKind::TextFinished { .. } => turn.round_spoke = true,
             ActivityKind::RoundFinished { stop_reason, .. } => {
-                if stop_reason.as_deref() == Some("tool_use") && !self.turn.round_spoke {
-                    self.turn.silent_rounds += 1;
-                    if self.turn.silent_rounds >= SILENT_ROUNDS_THRESHOLD
-                        && !self.turn.silent_reported
-                    {
-                        self.turn.silent_reported = true;
+                if stop_reason.as_deref() == Some("tool_use") && !turn.round_spoke {
+                    turn.silent_rounds += 1;
+                    if turn.silent_rounds >= SILENT_ROUNDS_THRESHOLD && !turn.silent_reported {
+                        turn.silent_reported = true;
                         changes.push(SignalChange::Raised(Signal::Silent {
-                            rounds: self.turn.silent_rounds,
+                            rounds: turn.silent_rounds,
                         }));
                     }
                 } else {
-                    self.turn.silent_rounds = 0;
+                    turn.silent_rounds = 0;
                 }
             }
             ActivityKind::ToolStarted {
@@ -155,9 +159,9 @@ impl SignalTracker {
                 input_summary,
                 ..
             } => {
-                self.set_phase(Phase::of_tool(name), &mut changes);
+                set_phase(phase, Phase::of_tool(name), &mut changes);
                 let key = (name.clone(), input_summary.clone());
-                if let Some((failed_tool, failed_input)) = self.turn.failed.take()
+                if let Some((failed_tool, failed_input)) = turn.failed.take()
                     && (failed_tool != *name || failed_input != *input_summary)
                 {
                     changes.push(SignalChange::Raised(Signal::Recovering {
@@ -165,8 +169,8 @@ impl SignalTracker {
                         next_tool: name.clone(),
                     }));
                 }
-                self.turn.last_started = Some(key.clone());
-                let count = self.turn.starts.entry(key).or_default();
+                turn.last_started = Some(key.clone());
+                let count = turn.starts.entry(key).or_default();
                 *count += 1;
                 if *count == REPEAT_THRESHOLD {
                     changes.push(SignalChange::Raised(Signal::Repeating {
@@ -177,23 +181,23 @@ impl SignalTracker {
                 }
             }
             ActivityKind::ToolFinished { is_error, .. } => {
-                self.turn.failed = if *is_error {
-                    self.turn.last_started.clone()
+                turn.failed = if *is_error {
+                    turn.last_started.clone()
                 } else {
                     None
                 };
             }
-            ActivityKind::TurnFinished { .. } => self.set_phase(Phase::Idle, &mut changes),
+            ActivityKind::TurnFinished { .. } => set_phase(phase, Phase::Idle, &mut changes),
             _ => {}
         }
         changes
     }
+}
 
-    fn set_phase(&mut self, phase: Phase, changes: &mut Vec<SignalChange>) {
-        if self.phase != phase {
-            self.phase = phase;
-            changes.push(SignalChange::Phase(phase));
-        }
+fn set_phase(current: &mut Phase, phase: Phase, changes: &mut Vec<SignalChange>) {
+    if *current != phase {
+        *current = phase;
+        changes.push(SignalChange::Phase(phase));
     }
 }
 
@@ -351,6 +355,40 @@ mod tests {
             spoken.push(finish);
         }
         assert!(raised(&mut tracker, &spoken).is_empty());
+    }
+
+    #[test]
+    fn each_agent_raises_signals_from_its_own_calls() {
+        let by = |agent: &str, event: ActivityEvent| ActivityEvent {
+            agent: Some(agent.into()),
+            ..event
+        };
+        let mut tracker = SignalTracker::default();
+        tracker.observe(&event(ActivityKind::TurnStarted));
+        let one_read_each =
+            ["a", "b", "c"].map(|agent| by(agent, started("read_file", "README.md")));
+        assert!(raised(&mut tracker, &one_read_each).is_empty());
+
+        let a_repeats = [
+            by("a", started("read_file", "README.md")),
+            started("read_file", "README.md"),
+            by("a", started("read_file", "README.md")),
+        ];
+        assert_eq!(
+            raised(&mut tracker, &a_repeats),
+            [Signal::Repeating {
+                tool: "read_file".into(),
+                input_summary: "README.md".into(),
+                count: 3
+            }]
+        );
+
+        let other_agent_after_failure = [
+            by("b", started("read_file", "a.rs")),
+            by("b", finished("read_file", true)),
+            by("c", started("search_text", "x")),
+        ];
+        assert!(raised(&mut tracker, &other_agent_after_failure).is_empty());
     }
 
     #[test]
