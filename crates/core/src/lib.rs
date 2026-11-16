@@ -569,12 +569,13 @@ impl AgentService {
         }
     }
 
-    /// The startup sandbox check's failure, once the check has finished.
-    pub fn sandbox_failure(&mut self) -> Option<String> {
+    /// The startup sandbox check's result, or `None` while it runs.
+    pub fn sandbox_status(&mut self) -> Option<Result<(), String>> {
         self.sandbox.settle(false);
         match &self.sandbox {
-            SandboxCheck::Failed(message) => Some(message.clone()),
-            _ => None,
+            SandboxCheck::Running(_) => None,
+            SandboxCheck::Passed => Some(Ok(())),
+            SandboxCheck::Failed(message) => Some(Err(message.clone())),
         }
     }
 
@@ -1871,8 +1872,8 @@ mod tests {
 
         assert!(error.to_string().contains("bwrap is missing"), "{error}");
         assert_eq!(
-            service.sandbox_failure().as_deref(),
-            Some("bwrap is missing")
+            service.sandbox_status(),
+            Some(Err("bwrap is missing".into()))
         );
         assert!(requests.lock().unwrap().is_empty());
         assert!(service.messages.is_empty());
