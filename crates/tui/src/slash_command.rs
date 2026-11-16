@@ -9,6 +9,7 @@ pub(crate) enum SlashAction {
     Model,
     Resume,
     Rename,
+    Rewind,
     Agents,
     Undo,
     Exit,
@@ -65,6 +66,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Name this conversation so -r <name> resumes it",
         action: SlashAction::Rename,
         takes_argument: true,
+    },
+    SlashCommand {
+        name: "rewind",
+        description: "Go back to an earlier prompt to edit it; files are not restored (use /undo)",
+        action: SlashAction::Rewind,
+        takes_argument: false,
     },
     SlashCommand {
         name: "agents",
@@ -182,6 +189,8 @@ mod tests {
     fn prefix_narrows_candidates() {
         assert_eq!(names("/c"), ["commands", "clear", "compact"]);
         assert_eq!(names("/m"), ["model"]);
+        assert_eq!(names("/re"), ["resume", "rename", "rewind"]);
+        assert_eq!(names("/rew"), ["rewind"]);
         assert_eq!(names("/co"), ["commands", "compact"]);
         assert_eq!(names("/cl"), ["clear"]);
         assert!(names("/zzz").is_empty());

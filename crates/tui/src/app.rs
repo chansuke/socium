@@ -3,6 +3,7 @@ use crate::agent_task::{PendingSubmission, PendingTask};
 use crate::approval::ApprovalPrompt;
 use crate::input_history;
 use crate::model_picker::{ModelPicker, model_label};
+use crate::rewind_picker::RewindPicker;
 use crate::session_picker::SessionPicker;
 use crate::slash_command::{self, SlashAction, SlashCommand};
 use crate::transcript::{ChatEntry, Speaker, transcript_entries_to_chat_entries};
@@ -40,6 +41,7 @@ pub(crate) struct App {
     pub(crate) approval: Option<ApprovalPrompt>,
     pub(crate) model_picker: Option<ModelPicker>,
     pub(crate) session_picker: Option<SessionPicker>,
+    pub(crate) rewind_picker: Option<RewindPicker>,
     pub(crate) input_history: input_history::InputSession,
     pub(crate) history_index: Option<usize>,
     pub(crate) history_draft: String,
@@ -87,6 +89,7 @@ impl App {
             approval: None,
             model_picker: None,
             session_picker: None,
+            rewind_picker: None,
             input_history,
             history_index: None,
             history_draft: String::new(),
@@ -103,16 +106,21 @@ impl App {
     /// Shows the agent's session: its conversation, a note when it was
     /// resumed, and its recent Activity.
     pub(crate) fn load_session_view(&mut self) {
+        self.show_agent_conversation();
+        if let Some(agent) = self.agent.as_ref()
+            && agent.has_saved_messages()
+        {
+            let note = format!("Resumed session {}", agent.session_id());
+            self.push_message(Speaker::System, note);
+        }
+    }
+
+    /// Shows the agent's conversation and its recent Activity.
+    pub(crate) fn show_agent_conversation(&mut self) {
         let Some(agent) = self.agent.as_ref() else {
             return;
         };
-        let mut messages = transcript_entries_to_chat_entries(agent.transcript_entries());
-        if agent.has_saved_messages() {
-            messages.push(ChatEntry {
-                speaker: Speaker::System,
-                body: format!("Resumed session {}", agent.session_id()),
-            });
-        }
+        let messages = transcript_entries_to_chat_entries(agent.transcript_entries());
         let mut activity = ActivityModel::default();
         for event in agent.recent_activity() {
             activity.apply_replayed(event);
@@ -144,6 +152,7 @@ impl App {
             approval: None,
             model_picker: None,
             session_picker: None,
+            rewind_picker: None,
             input_history: input_history::InputSession {
                 history_path: PathBuf::new(),
                 entries: Vec::new(),
@@ -529,6 +538,7 @@ impl App {
                 None => self.open_session_picker(),
             },
             SlashAction::Rename => self.rename_session(argument.as_deref()),
+            SlashAction::Rewind => self.open_rewind_picker(),
             SlashAction::Agents => {
                 let agent = self.agent_mut()?;
                 let text = match argument {
@@ -598,6 +608,7 @@ impl App {
                     && self.approval.is_none()
                     && self.model_picker.is_none()
                     && self.session_picker.is_none()
+                    && self.rewind_picker.is_none()
                 {
                     self.insert_text(text);
                 }
@@ -609,6 +620,10 @@ impl App {
                         terminal.draw(|frame| self.draw(frame))?;
                         self.start_compact_task()?;
                     }
+                    continue;
+                }
+                if key.kind == KeyEventKind::Press && self.rewind_picker.is_some() {
+                    self.handle_rewind_picker_key(key.code, key.modifiers);
                     continue;
                 }
                 if key.kind == KeyEventKind::Press && self.model_picker.is_some() {
