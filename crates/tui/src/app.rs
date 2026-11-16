@@ -607,13 +607,21 @@ impl App {
 
     async fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         loop {
-            if let Some(message) = self.agent.as_mut().and_then(AgentService::sandbox_failure) {
+            let sandbox = self.agent.as_mut().and_then(AgentService::sandbox_status);
+            if let Some(Err(message)) = sandbox {
                 return Err(eyre!(message));
             }
             self.poll_pending_task();
             terminal.draw(|frame| self.draw(frame))?;
 
-            if !event::poll(Duration::from_millis(50))? {
+            // Only a running task or check changes the screen without input.
+            // Idle, wake once a minute so the session picker's ages stay true.
+            let timeout = if self.pending_task.is_some() || sandbox.is_none() {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_secs(60)
+            };
+            if !event::poll(timeout)? {
                 continue;
             }
 
