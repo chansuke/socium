@@ -10,11 +10,15 @@ pub(crate) mod catalog;
 pub(crate) mod record;
 
 use crate::AgentProgress;
-use crate::activity::{ActivityKind, summarize_tool_input};
+use crate::activity::{ActivityEvent, ActivityKind, summarize_tool_input};
+use crate::agent::compaction::compact_history;
+use crate::agent::context::{
+    history_input_tokens, prepare_context_messages, resolve_context_budget,
+};
 use crate::agent::subagent::record::{SubagentRecord, SubagentStatus};
 use crate::agent::turn::repair_incomplete_tools;
 use crate::agent::turn::{TurnContext, extract_text, run_agent_turn};
-use crate::agent::types::Message;
+use crate::agent::types::{Message, Role};
 use crate::constants::{AGENT_TOOL_NAME, MAX_SUBAGENT_REPORT_CHARACTERS, MAX_TOOL_ROUNDS};
 use crate::error::AgentError;
 use crate::providers::TokenUsage;
@@ -87,12 +91,20 @@ pub(crate) fn run_subagent<'a>(
                     model.config.features.anthropic_text_editor,
                     ctx.settings,
                 );
+                // Its compaction model when that one can run, else itself,
+                // as for the main agent.
+                let summarizer = model
+                    .config
+                    .compaction_alias()
+                    .and_then(|alias| ctx.subagents.model(alias))
+                    .unwrap_or(model);
                 TurnContext {
                     provider: model.provider.as_ref(),
                     model: &model.config.id,
                     context_window: model.config.context_window,
                     max_tokens: model.max_tokens,
                     estimate_scale: 1.0,
+                    compaction: (summarizer.provider.as_ref(), &summarizer.config.id),
                     tools: &model_tools,
                     ..*ctx
                 }
@@ -138,9 +150,7 @@ pub(crate) fn run_subagent<'a>(
             }
         };
         let resumed_from = record.messages.len();
-        let mut messages = std::mem::take(&mut record.messages);
-        messages.push(Message::user_text(prompt.to_string()));
-        record.messages.clone_from(&messages);
+        record.messages.push(Message::user_text(prompt.to_string()));
         record.model = child.model.to_string();
         record.runs += 1;
         record.status = SubagentStatus::Running;
@@ -162,7 +172,7 @@ pub(crate) fn run_subagent<'a>(
         let mut stats = RunStats::start();
         let mut forward = |event: AgentProgress| match event {
             AgentProgress::Activity(mut activity) => {
-                stats.observe(&activity.kind);
+                stats.observe(&activity);
                 activity.agent.clone_from(&agent);
                 on_progress(AgentProgress::Activity(activity));
             }
@@ -199,25 +209,20 @@ pub(crate) fn run_subagent<'a>(
             | AgentProgress::CompactionStarted
             | AgentProgress::CompactionFinished { .. }) => on_progress(other),
         };
-        // Saved before each side effect, like the main conversation. A
-        // call runs once its intent is saved, so the saved intents are the
-        // calls that ran; one refused or denied before that has none.
+        // A call runs once its intent is saved, so the saved intents are
+        // the calls that ran; one refused or denied before that has none.
         let intents_before = record.tool_events.len();
-        let mut checkpoint = |context: &[Message], event: Value| -> std::io::Result<()> {
-            record.messages = context.to_vec();
-            let started = event["type"] == "tool_started";
-            if started {
-                record.tool_events.push(event);
-            }
-            let saved = record.save(root);
-            if saved.is_err() && started {
-                record.tool_events.pop();
-            }
-            saved
-        };
-        let result = run_agent_turn(&child, &mut messages, &mut forward, &mut checkpoint).await;
+        let result = run_in_window(&child, &mut record, resumed_from, &mut forward).await;
         stats.tool_calls = record.tool_events.len() - intents_before;
-        record.messages = messages;
+        let answered = record.messages[resumed_from..]
+            .iter()
+            .any(|message| matches!(message.role, Role::Assistant));
+        if resumed_from > 0 && result.is_err() && !answered {
+            // A follow-up the model never answered is not kept, so trying
+            // it again does not stack prompts.
+            record.messages.truncate(resumed_from);
+            record.runs -= 1;
+        }
         record.status = match &result {
             Ok(_) => SubagentStatus::Finished,
             Err(AgentError::Cancelled) => SubagentStatus::Cancelled,
@@ -255,6 +260,107 @@ pub(crate) fn run_subagent<'a>(
     })
 }
 
+/// Runs the subagent's tool loop on what of `record` fits its window,
+/// saving the record at every checkpoint. A history that does not fit is
+/// summarized first, and a loop whose window fills goes on from the
+/// summary, as the main agent does when the user asks it to continue.
+async fn run_in_window(
+    ctx: &TurnContext<'_>,
+    record: &mut SubagentRecord,
+    run_from: usize,
+    on_progress: &mut (impl FnMut(AgentProgress) + Send),
+) -> Result<(), AgentError> {
+    let budget =
+        resolve_context_budget(ctx.context_window, ctx.max_tokens).with_scale(ctx.estimate_scale);
+    let rounds = |record: &SubagentRecord| {
+        record.messages[run_from..]
+            .iter()
+            .filter(|message| matches!(message.role, Role::Assistant))
+            .count()
+    };
+    loop {
+        let history = history_input_tokens(
+            &record.messages,
+            &record.summary_state,
+            ctx.model,
+            budget,
+            ctx.tools,
+        );
+        if history > budget.input_budget_tokens() {
+            compact_record(ctx, record, on_progress).await?;
+        }
+        let prepared = prepare_context_messages(
+            &record.messages,
+            &record.summary_state,
+            budget,
+            ctx.model,
+            ctx.tools,
+        )?;
+        record.summary_state = prepared.summary_state;
+        let mut context = prepared.messages;
+        let (raw_len, initial_len) = (record.messages.len(), context.len());
+        let rounds_done = rounds(record);
+        let segment = TurnContext {
+            rounds_done,
+            ..*ctx
+        };
+        // Saved before each side effect, like the main conversation.
+        let mut checkpoint = |context: &[Message], event: Value| -> std::io::Result<()> {
+            record.messages.truncate(raw_len);
+            record.messages.extend_from_slice(&context[initial_len..]);
+            let started = event["type"] == "tool_started";
+            if started {
+                record.tool_events.push(event);
+            }
+            let saved = record.save(ctx.workspace_root);
+            if saved.is_err() && started {
+                record.tool_events.pop();
+            }
+            saved
+        };
+        match run_agent_turn(&segment, &mut context, on_progress, &mut checkpoint).await {
+            // A loop that got no answer would fill the window again.
+            Err(AgentError::ContextFull(_)) if rounds(record) > rounds_done => {}
+            result => return result.map(drop),
+        }
+    }
+}
+
+/// Summarizes the older part of the record, reporting it as the
+/// subagent's activity. With nothing to summarize, preparing the context
+/// still trims what is sent.
+async fn compact_record(
+    ctx: &TurnContext<'_>,
+    record: &mut SubagentRecord,
+    on_progress: &mut (impl FnMut(AgentProgress) + Send),
+) -> Result<(), AgentError> {
+    let mut emit =
+        |kind: ActivityKind| on_progress(AgentProgress::Activity(ctx.clock.event(0, kind)));
+    emit(ActivityKind::CompactionStarted);
+    let compaction = match compact_history(
+        ctx.compaction,
+        ctx.client,
+        ctx.control,
+        ctx.model,
+        &record.messages,
+        &record.summary_state,
+    )
+    .await
+    {
+        Err(AgentError::NothingToCompact) => return Ok(()),
+        compaction => compaction?,
+    };
+    if let Some(message) = compaction.fallback_reason.clone() {
+        emit(ActivityKind::Warning { message });
+    }
+    emit(ActivityKind::CompactionFinished {
+        covered_messages: compaction.covered_messages,
+        used_llm: compaction.fallback_reason.is_none(),
+    });
+    record.summary_state = compaction.summary_state;
+    Ok(())
+}
+
 /// What one subagent run cost: the model requests it made and the tool
 /// calls it ran, measured also for failed and cancelled runs.
 struct RunStats {
@@ -274,10 +380,10 @@ impl RunStats {
         }
     }
 
-    fn observe(&mut self, kind: &ActivityKind) {
+    fn observe(&mut self, event: &ActivityEvent) {
         // A round ends only after its request, so one that failed before
         // sending is left out.
-        let ActivityKind::RoundFinished { usage, .. } = kind else {
+        let ActivityKind::RoundFinished { usage, .. } = &event.kind else {
             return;
         };
         self.rounds += 1;
@@ -353,7 +459,8 @@ fn bounded_report(mut report: String) -> String {
 mod tests {
     use crate::agent::types::{AgentMessageResponse, ContentBlock};
     use crate::constants::{
-        DEFAULT_SYSTEM_PROMPT, SUBAGENT_EXPLORER_SYSTEM_PROMPT, SUBAGENT_WORKER_SYSTEM_PROMPT,
+        DEFAULT_COMPACTION_MODEL, DEFAULT_SYSTEM_PROMPT, SUBAGENT_EXPLORER_SYSTEM_PROMPT,
+        SUBAGENT_WORKER_SYSTEM_PROMPT,
     };
     use crate::providers::error::ProviderError;
     use crate::providers::{ProviderResponse, TokenUsage};
@@ -392,10 +499,12 @@ mod tests {
         )])
     }
 
+    type Requests = Arc<Mutex<Vec<Value>>>;
+
     fn scripted(
         root: &std::path::Path,
         responses: Vec<Result<ProviderResponse, ProviderError>>,
-    ) -> (AgentService, Arc<Mutex<Vec<Value>>>) {
+    ) -> (AgentService, Requests) {
         let provider = ScriptedProvider::new(responses);
         let requests = provider.recorded_requests.clone();
         let service = AgentService::with_provider(
@@ -716,15 +825,14 @@ mod tests {
         assert_eq!(result["is_error"], true);
         let content = result["content"].as_str().unwrap();
         assert!(
-            content.starts_with(
-                "The subagent failed: The context window filled during the tool loop (about "
-            ),
+            content.starts_with("The subagent failed: The latest message alone is about "),
             "{content}"
         );
         assert!(
-            content.contains(" tokens).\n\n(subagent agent-1: 0 rounds, 0 tool calls, "),
+            content.contains("message.\n\n(subagent agent-1: 0 rounds, 0 tool calls, "),
             "{content}"
         );
+        assert!(!content.contains(".."), "{content}");
     }
 
     #[tokio::test]
@@ -1213,6 +1321,254 @@ mod tests {
                 .starts_with("Interrupted before result was saved")
         );
         assert_eq!(messages[3]["content"], "Try again");
+    }
+
+    /// The `sonnet` registry entry with a small window, so a few reads
+    /// fill it; it summarizes with `haiku` as `sonnet` does.
+    fn small_window_models(
+        child: Vec<Result<ProviderResponse, ProviderError>>,
+        summarizer: Vec<Result<ProviderResponse, ProviderError>>,
+    ) -> (super::catalog::SubagentCatalog, Requests, Requests) {
+        use super::catalog::{SubagentCatalog, SubagentModel};
+        let registry = crate::models::ModelRegistry::builtin();
+        let mut small = registry.find("sonnet").unwrap().clone();
+        small.alias = "small".into();
+        small.context_window = Some(36_000);
+        let child = ScriptedProvider::new(child);
+        let child_requests = child.recorded_requests.clone();
+        let summarizer = ScriptedProvider::new(summarizer);
+        let summary_requests = summarizer.recorded_requests.clone();
+        let catalog = SubagentCatalog::new(
+            Vec::new(),
+            vec![
+                SubagentModel {
+                    config: small,
+                    provider: Box::new(child),
+                    max_tokens: 1000,
+                },
+                SubagentModel {
+                    config: registry.find("haiku").unwrap().clone(),
+                    provider: Box::new(summarizer),
+                    max_tokens: 1000,
+                },
+            ],
+        );
+        (catalog, child_requests, summary_requests)
+    }
+
+    /// Characters per token the estimate uses for Claude model IDs.
+    fn estimated_tokens(request: &Value) -> usize {
+        (request.to_string().chars().count() as f32 / 3.5) as usize
+    }
+
+    #[tokio::test]
+    async fn a_subagent_whose_window_fills_summarizes_its_history_and_still_reports() {
+        let workspace = make_temp_dir("subagent_window_fills");
+        std::fs::write(
+            workspace.path().join("big.txt"),
+            format!("{}\n", "w".repeat(99)).repeat(1_000),
+        )
+        .unwrap();
+        let read = |id: &str| (id.to_string(), json!({"path": "big.txt"}));
+        let reads = |ids: &[&str]| {
+            let batch = ids.iter().map(|id| read(id)).collect::<Vec<_>>();
+            calls(
+                &batch
+                    .iter()
+                    .map(|(id, input)| (id.as_str(), "read_file", input.clone()))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        // The first two reads fit once the newest is cut; the third round's
+        // results cannot be cut far enough, so the window fills.
+        let (catalog, child_requests, summary_requests) = small_window_models(
+            vec![
+                reads(&["read-1"]),
+                reads(&["read-2"]),
+                reads(&["read-3", "read-4", "read-5"]),
+                text("big.txt is 1000 lines of w"),
+            ],
+            vec![text("1. User request: read big.txt")],
+        );
+        let (mut service, main_requests) = scripted(
+            workspace.path(),
+            vec![
+                calls(&[(
+                    "agent-1",
+                    "agent",
+                    json!({"description": "Read it", "prompt": "Read big.txt and describe it", "agent_type": "explorer", "model": "small"}),
+                )]),
+                text("Done."),
+            ],
+        );
+        service.install_subagents(catalog);
+        let mut activity = Vec::new();
+
+        service
+            .submit_with_progress("Describe big.txt".into(), |event| {
+                if let AgentProgress::Activity(event) = event {
+                    activity.push(event);
+                }
+            })
+            .await
+            .unwrap();
+
+        let result = &last_results(&main_requests.lock().unwrap()[1])[0];
+        assert_eq!(result.get("is_error"), None, "{result}");
+        let report = result["content"].as_str().unwrap();
+        assert!(
+            report.starts_with(
+                "big.txt is 1000 lines of w\n\n(subagent agent-1: 4 rounds, 5 tool calls, "
+            ),
+            "{report}"
+        );
+        // The small model's own compaction model wrote the summary.
+        let summaries = summary_requests.lock().unwrap().clone();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0]["model"], "claude-haiku-5-5");
+        assert_eq!(
+            summaries[0]["system"],
+            crate::constants::COMPACTION_SYSTEM_PROMPT
+        );
+        assert!(
+            summaries[0]["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Read big.txt and describe it")
+        );
+        // Every request fit the window, and the one after the cut starts
+        // from the summary with the open calls and their results.
+        let child_requests = child_requests.lock().unwrap().clone();
+        assert_eq!(child_requests.len(), 4);
+        for request in &child_requests {
+            assert!(
+                estimated_tokens(request) < 36_000,
+                "{}",
+                estimated_tokens(request)
+            );
+        }
+        let resumed = child_requests[3]["messages"].as_array().unwrap();
+        assert_eq!(resumed.len(), 3);
+        assert!(
+            resumed[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("1. User request: read big.txt")
+        );
+        assert_eq!(resumed[1]["content"][0]["id"], "read-3");
+        assert_eq!(resumed[2]["content"][2]["tool_use_id"], "read-5");
+        assert!(
+            activity
+                .iter()
+                .any(|event| event.agent.as_deref() == Some("agent-1")
+                    && event.kind
+                        == ActivityKind::CompactionFinished {
+                            covered_messages: 5,
+                            used_llm: true
+                        })
+        );
+        // `/agents` still shows the whole conversation.
+        let (_, transcript) = service.subagent_transcript("agent-1").unwrap();
+        assert_eq!(transcript[0].text, "Read big.txt and describe it");
+    }
+
+    #[tokio::test]
+    async fn resuming_a_subagent_whose_history_no_longer_fits_summarizes_it_first() {
+        use super::record::{SubagentRecord, SubagentStatus};
+        use crate::agent::types::Message;
+        let workspace = make_temp_dir("subagent_resume_full");
+        let mut saved = SubagentRecord::new("agent-1".into(), "explorer", "d", "test");
+        saved.messages = vec![
+            Message::user_text(format!("Look at this: {}", "x".repeat(1_000_000))),
+            Message::assistant_blocks(vec![ContentBlock::Text {
+                text: "It is all x.".into(),
+            }]),
+        ];
+        saved.status = SubagentStatus::Finished;
+        saved.runs = 1;
+        saved.save(workspace.path()).unwrap();
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                resume("agent-1", "explorer", "How long is it?"),
+                text("1. User request: look at a long run of x"),
+                text("About a million characters."),
+                text("Done."),
+            ],
+        );
+
+        service.submit("How long?".into()).await.unwrap();
+
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 4);
+        // Without its own model, the subagent summarizes as the main agent
+        // does.
+        assert_eq!(requests[1]["model"], DEFAULT_COMPACTION_MODEL);
+        assert_eq!(
+            requests[1]["system"],
+            crate::constants::COMPACTION_SYSTEM_PROMPT
+        );
+        let child = &requests[2];
+        assert_eq!(child["system"], SUBAGENT_EXPLORER_SYSTEM_PROMPT);
+        let messages = child["messages"].as_array().unwrap();
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("1. User request: look at a long run of x")
+        );
+        assert_eq!(messages.last().unwrap()["content"], "How long is it?");
+        assert!(estimated_tokens(child) < 200_000);
+        let report = last_results(&requests[3])[0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            report.starts_with("About a million characters.\n\n"),
+            "{report}"
+        );
+        assert_eq!(record(workspace.path(), "agent-1")["status"], "finished");
+    }
+
+    #[tokio::test]
+    async fn a_resume_that_fails_before_any_answer_leaves_the_record_as_it_was() {
+        let workspace = make_temp_dir("subagent_resume_unanswered");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                delegate("explorer"),
+                text("Report."),
+                text("Done."),
+                resume("agent-1", "explorer", "First follow-up"),
+                Err(ProviderError::Api("invalid request".into())),
+                text("It failed."),
+                resume("agent-1", "explorer", "Second follow-up"),
+                text("Second report."),
+                text("Done."),
+            ],
+        );
+        service.submit("First".into()).await.unwrap();
+        let before = record(workspace.path(), "agent-1");
+
+        service.submit("Again".into()).await.unwrap();
+
+        let failed = record(workspace.path(), "agent-1");
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["messages"], before["messages"]);
+        assert_eq!(failed["runs"], 1);
+
+        service.submit("Once more".into()).await.unwrap();
+
+        let child = requests.lock().unwrap()[7].clone();
+        let sent = child["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["content"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[2], "Second follow-up");
+        assert_eq!(record(workspace.path(), "agent-1")["runs"], 2);
     }
 
     /// Answers the main agent from a script. Each subagent request waits

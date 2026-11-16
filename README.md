@@ -289,9 +289,15 @@ what it adds.
   subagent's conversation is saved in `.socium/agents/<id>.json` before each
   of its tool calls; the model can continue a subagent with everything it
   saw by passing its ID as `resume`, and `/agents` lists saved subagents and
-  `/agents <id>` shows one's conversation. The newest 100 are kept. A restart
-  during a subagent still marks the `agent` call's outcome unknown; the
-  reports of subagents running with it that had already finished are kept. See
+  `/agents <id>` shows one's conversation. The newest 100 are kept. When a
+  subagent's history no longer fits its model's window, it is summarized as
+  the conversation is (by its model's `compact_model`), shown in the
+  Activity pane, and the subagent goes on and still reports; a resumed
+  subagent is summarized first when it needs to be. A follow-up the
+  subagent fails without answering is not kept, so it can be sent again. A
+  restart during a subagent still marks the `agent` call's outcome unknown;
+  the reports of subagents running with it that had already finished are
+  kept. See
   [ADR 8](docs/adr/0008-agentツールで独立した文脈のサブエージェントに作業を委ねる.md).
 - Define your own subagent types in `~/.config/socium/agents/*.md` (or
   `$XDG_CONFIG_HOME/socium/agents/`, or the directory named by
