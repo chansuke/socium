@@ -200,19 +200,23 @@ pub(crate) fn run_subagent<'a>(
             | AgentProgress::CompactionFinished { .. }) => on_progress(other),
         };
         // Saved before each side effect, like the main conversation. A
-        // call runs once its intent is saved; one refused or denied before
-        // that is not counted.
-        let mut tool_calls = 0;
+        // call runs once its intent is saved, so the saved intents are the
+        // calls that ran; one refused or denied before that has none.
+        let intents_before = record.tool_events.len();
         let mut checkpoint = |context: &[Message], event: Value| -> std::io::Result<()> {
             record.messages = context.to_vec();
-            record.save(root)?;
-            if event["type"] == "tool_started" {
-                tool_calls += 1;
+            let started = event["type"] == "tool_started";
+            if started {
+                record.tool_events.push(event);
             }
-            Ok(())
+            let saved = record.save(root);
+            if saved.is_err() && started {
+                record.tool_events.pop();
+            }
+            saved
         };
         let result = run_agent_turn(&child, &mut messages, &mut forward, &mut checkpoint).await;
-        stats.tool_calls = tool_calls;
+        stats.tool_calls = record.tool_events.len() - intents_before;
         record.messages = messages;
         record.status = match &result {
             Ok(_) => SubagentStatus::Finished,
@@ -864,6 +868,43 @@ mod tests {
                 .contains("(subagent agent-1: 2 rounds, 0 tool calls, "),
             "{report}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_subagent_transcript_marks_calls_the_user_approved() {
+        let workspace = make_temp_dir("subagent_approved_transcript");
+        let (mut service, _) = scripted(
+            workspace.path(),
+            vec![
+                delegate("worker"),
+                calls(&[
+                    ("cmd-1", "run_command", json!({"command": ["echo", "hi"]})),
+                    ("read-1", "read_file", json!({"path": "a.txt"})),
+                ]),
+                text("Ran it."),
+                text("Done."),
+            ],
+        );
+        std::fs::write(workspace.path().join("a.txt"), "hello\n").unwrap();
+        let control = service.task_control();
+        control.enable_interactive_approval();
+
+        service
+            .submit_with_progress("Run it".into(), |event| {
+                if let AgentProgress::ApprovalRequested { request_id, .. } = event {
+                    control.answer_approval(request_id, true);
+                }
+            })
+            .await
+            .unwrap();
+
+        let (_, transcript) = service.subagent_transcript("agent-1").unwrap();
+        let tools = transcript
+            .iter()
+            .filter(|entry| matches!(entry.role, crate::TranscriptRole::Tool { .. }))
+            .map(|entry| entry.text.lines().next().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(tools, ["run_command echo hi (approved)", "read_file a.txt"]);
     }
 
     #[tokio::test]

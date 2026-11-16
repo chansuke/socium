@@ -9,6 +9,7 @@
 use crate::agent::state::{load_json_file, save_json_file, workspace_state_path};
 use crate::agent::types::Message;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::Path;
@@ -54,6 +55,10 @@ pub(crate) struct SubagentRecord {
     pub(crate) runs: usize,
     pub(crate) updated_at_ms: u64,
     pub(crate) messages: Vec<Message>,
+    /// The `tool_started` checkpoint of each call that ran, saying how it
+    /// was authorized, so the transcript can mark the approved ones.
+    #[serde(default)]
+    pub(crate) tool_events: Vec<Value>,
 }
 
 /// What `/agents` lists about a saved subagent.
@@ -81,6 +86,7 @@ impl SubagentRecord {
             runs: 0,
             updated_at_ms: now_ms(),
             messages: Vec::new(),
+            tool_events: Vec::new(),
         }
     }
 
@@ -236,6 +242,22 @@ mod tests {
         assert_eq!(kept[0].id, format!("r{MAX_RECORDS:03}"));
         assert!(load(root.path(), "r000").unwrap().is_none());
         assert!(load(root.path(), "r001").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_record_saved_before_tool_events_were_kept_still_loads() {
+        let root = make_temp_dir("record_v1");
+        let path = record_path(root.path(), "old").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"id":"old","agent_type":"explorer","description":"d","model":"m","status":"finished","runs":1,"updated_at_ms":5,"messages":[]}"#,
+        )
+        .unwrap();
+
+        let record = load(root.path(), "old").unwrap().unwrap();
+        assert_eq!(record.id, "old");
+        assert!(record.tool_events.is_empty());
     }
 
     #[test]
