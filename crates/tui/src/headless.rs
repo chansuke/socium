@@ -33,7 +33,9 @@ pub(crate) async fn main(start: SessionStart, prompt: &str) -> i32 {
         eprintln!("socium: the prompt is empty");
         return 2;
     }
-    let mut agent = match AgentService::from_current_dir(start) {
+    let mut agent = match AgentService::from_current_dir(start)
+        .and_then(|mut agent| agent.wait_for_sandbox().map(|()| agent))
+    {
         Ok(agent) => agent,
         Err(err) => {
             eprintln!("socium: {err}");

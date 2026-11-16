@@ -320,6 +320,56 @@ pub struct AgentService {
     system_prompt: String,
     /// The framed instruction file alone, which subagents also get.
     project_instructions: Option<String>,
+    sandbox: SandboxCheck,
+}
+
+/// Whether the OS sandbox enforces isolation. The check takes most of the
+/// startup time, so it runs on a thread while the interface opens, and no
+/// turn starts until it has passed.
+enum SandboxCheck {
+    Running(std::thread::JoinHandle<Result<(), String>>),
+    Passed,
+    Failed(String),
+}
+
+impl SandboxCheck {
+    fn start(workspace_root: PathBuf) -> Self {
+        Self::Running(std::thread::spawn(move || probe_sandbox(&workspace_root)))
+    }
+
+    /// Records the result of a finished check, waiting for it when `wait`.
+    fn settle(&mut self, wait: bool) {
+        if let Self::Running(handle) = self
+            && (wait || handle.is_finished())
+            && let Self::Running(handle) = std::mem::replace(self, Self::Passed)
+        {
+            let result = handle.join().unwrap_or_else(|_| {
+                Err("OS sandbox initialization failed: the check panicked".into())
+            });
+            if let Err(message) = result {
+                *self = Self::Failed(message);
+            }
+        }
+    }
+}
+
+/// Runs `true` in the sandbox. A missing backend or disabled namespaces is
+/// an error, never a downgrade.
+fn probe_sandbox(workspace_root: &std::path::Path) -> Result<(), String> {
+    let probe = crate::process::run(
+        &["true".into()],
+        workspace_root,
+        Duration::from_secs(5),
+        &TaskControl::default(),
+    )
+    .map_err(|e| format!("OS sandbox initialization failed: {e}"))?;
+    if !probe.status.success() || probe.timed_out {
+        return Err(format!(
+            "OS sandbox initialization failed; no host fallback: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        ));
+    }
+    Ok(())
 }
 
 /// The client for model requests. There is no deadline for a whole
@@ -415,6 +465,7 @@ impl AgentService {
             session_usage: Default::default(),
             system_prompt: String::new(),
             project_instructions: None,
+            sandbox: SandboxCheck::Passed,
         };
         service.context_window_override = service.limit_override("CONTEXT_WINDOW_TOKENS");
         service.compaction_threshold_override =
@@ -440,6 +491,7 @@ impl AgentService {
     }
 
     pub fn from_env(workspace_root: PathBuf, start: SessionStart) -> Result<Self, AgentError> {
+        let sandbox = SandboxCheck::start(workspace_root.clone());
         let lookup: EnvLookup = Arc::new(|key| env::var(key).ok());
         let registry = ModelRegistry::load(lookup.as_ref())?;
         let max_tokens_override = lookup("MAX_TOKENS")
@@ -456,23 +508,6 @@ impl AgentService {
         settings::ensure_config_outside(&workspace_root, lookup.as_ref())?;
         let (settings, settings_warnings) = Settings::load(lookup.as_ref())?;
 
-        // Check actual enforcement before advertising a usable agent. A missing
-        // backend or disabled namespaces is a startup error, never a downgrade.
-        let probe = crate::process::run(
-            &["true".into()],
-            &workspace_root,
-            Duration::from_secs(5),
-            &TaskControl::default(),
-        )
-        .map_err(|e| Error::other(format!("OS sandbox initialization failed: {e}")))?;
-        if !probe.status.success() || probe.timed_out {
-            return Err(Error::other(format!(
-                "OS sandbox initialization failed; no host fallback: {}",
-                String::from_utf8_lossy(&probe.stderr)
-            ))
-            .into());
-        }
-
         let mut service = Self::open(
             workspace_root,
             start,
@@ -484,7 +519,26 @@ impl AgentService {
         service.warnings.extend(settings_warnings);
         service.warnings.extend(settings.summary());
         service.install_settings(settings);
+        service.sandbox = sandbox;
         Ok(service)
+    }
+
+    /// Waits for the startup sandbox check. After a failure no turn can run.
+    pub fn wait_for_sandbox(&mut self) -> Result<(), AgentError> {
+        self.sandbox.settle(true);
+        match &self.sandbox {
+            SandboxCheck::Failed(message) => Err(Error::other(message.clone()).into()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The startup sandbox check's failure, once the check has finished.
+    pub fn sandbox_failure(&mut self) -> Option<String> {
+        self.sandbox.settle(false);
+        match &self.sandbox {
+            SandboxCheck::Failed(message) => Some(message.clone()),
+            _ => None,
+        }
     }
 
     /// Makes `settings` the ones tools and commands follow.
@@ -1363,6 +1417,7 @@ impl AgentService {
     where
         F: FnMut(AgentProgress) + Send,
     {
+        self.wait_for_sandbox()?;
         self.ensure_state_lock()?;
         crate::agent::turn::repair_incomplete_tools(&mut self.messages);
         let turn_id = self.messages.len();
@@ -1757,6 +1812,31 @@ mod tests {
         service.messages = messages;
         service.last_measured_usage = last_measured_usage;
         service
+    }
+
+    #[tokio::test]
+    async fn no_turn_starts_after_the_sandbox_check_fails() {
+        let workspace = make_temp_dir("sandbox_check");
+        let provider = ScriptedProvider::new(vec![Ok(text_provider_response("hi", None))]);
+        let requests = provider.recorded_requests.clone();
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.sandbox =
+            super::SandboxCheck::Running(std::thread::spawn(
+                || Err("bwrap is missing".to_string()),
+            ));
+
+        let Err(error) = service.submit("hello".into()).await else {
+            panic!("a turn ran without a sandbox");
+        };
+
+        assert!(error.to_string().contains("bwrap is missing"), "{error}");
+        assert_eq!(
+            service.sandbox_failure().as_deref(),
+            Some("bwrap is missing")
+        );
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(service.messages.is_empty());
     }
 
     fn plain_user_messages(count: usize) -> Vec<Message> {
