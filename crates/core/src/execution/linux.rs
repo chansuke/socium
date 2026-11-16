@@ -216,7 +216,19 @@ pub(super) fn command(
         "ALL",
     ]);
     for runtime in RUNTIMES {
-        if Path::new(runtime).exists() {
+        let path = Path::new(runtime);
+        // On a merged-/usr system /bin, /lib and the rest link into /usr.
+        // The same link costs no mount, and each mount adds about a
+        // millisecond to every command.
+        if let Ok(target) = fs::read_link(path)
+            && let Ok(resolved) = path.canonicalize()
+            && RUNTIMES.iter().any(|other| {
+                resolved.starts_with(other)
+                    && fs::symlink_metadata(other).is_ok_and(|meta| meta.is_dir())
+            })
+        {
+            cmd.arg("--symlink").arg(target).arg(runtime);
+        } else if path.exists() {
             cmd.arg("--ro-bind").arg(runtime).arg(runtime);
         }
     }
