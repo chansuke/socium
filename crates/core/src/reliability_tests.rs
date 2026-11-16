@@ -1394,7 +1394,7 @@ async fn a_window_that_fills_mid_turn_is_compacted_at_once() {
         .unwrap()
         .to_string();
     assert!(err.contains("filled during the tool loop"), "{err}");
-    assert!(err.contains("The history was compacted"), "{err}");
+    assert!(err.contains(" tokens). The history was compacted"), "{err}");
     assert!(agent.summary_state.summary.is_some());
     assert_eq!(requests.lock().unwrap().len(), 2);
     let reply = agent.submit("continue".into()).await.unwrap();
