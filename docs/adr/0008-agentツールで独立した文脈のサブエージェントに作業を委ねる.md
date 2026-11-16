@@ -53,7 +53,7 @@ Chosen option: 「同期の `agent` tool」。親の tool loop の中で子の t
 * tool loop の上限は親と同じ 20 round。
 * tool loop は、モデルに渡した tool 以外の呼び出しを `Unsupported tool` として拒否する。子がモデルの判断で `apply_patch` や `agent` を名指ししても実行されないので、子の権限は渡した tool の一覧で決まる。子の一覧には `agent` が無いので、入れ子にならない。
 * 成功したら、子の最後の assistant message の本文を tool 結果にする。20,000 文字を超えた分は切り、切ったことを書き添える。
-* tool 結果の末尾に、子の round 数、tool 呼び出しの数、token 使用量（入力は cache を含む）、所要時間を一行で付ける。失敗した場合も付ける。親のモデルと利用者が、委任にかかった費用を知れるようにするため。数は子の Activity event から数えるので、途中で止まった実行も測れる。
+* tool 結果の末尾に、子の round 数、tool 呼び出しの数、token 使用量（入力は cache を含む）、所要時間を一行で付ける。失敗した場合も付ける。親のモデルと利用者が、委任にかかった費用を知れるようにするため。round は request を送ったものだけを子の Activity event から、tool 呼び出しは意図（`tool_started`）を保存して実行したものだけを子の checkpoint から数えるので、途中で止まった実行も測れる。渡していない tool の呼び出しや、利用者が退けた呼び出しは実行していないので数えない。
 * 失敗（provider のエラー、round の上限、取り消し）は `is_error` の tool 結果にする。`worker` の失敗には、それまでの変更が残っていることを書き添える。親は続けて動ける。取り消しは、子の結果を返したあと親の tool loop も止める。
 
 ### 表示と記録
