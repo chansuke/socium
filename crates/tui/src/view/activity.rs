@@ -16,8 +16,7 @@ const GUTTER: usize = 2;
 const SUBAGENT_GUIDE: &str = "│ ";
 const COLLAPSED_THOUGHT_LINES: usize = 2;
 const EXPANDED_INPUT_LINES: usize = 40;
-const ERROR: Color = Color::Rgb(240, 110, 110);
-const OK: Color = Color::Rgb(120, 200, 150);
+const OK: Color = Color::Green;
 
 /// Visible lines for a pane of `width` × `height` cells.
 pub(crate) fn activity_lines(
@@ -67,9 +66,9 @@ pub(crate) fn activity_lines(
             } else {
                 "  "
             };
-            let mut spans = vec![Span::styled(marker, Style::default().fg(LILAC))];
+            let mut spans = vec![Span::styled(marker, Style::default().fg(ACCENT))];
             if !guide.is_empty() {
-                spans.push(Span::styled(guide, Style::default().fg(SOFT)));
+                spans.push(Span::styled(guide, Style::default().fg(MUTED)));
             }
             spans.extend(line.spans);
             lines.push(Line::from(spans));
@@ -103,7 +102,7 @@ pub(crate) fn raw_lines(
     let Some(raw) = model.raw_round(view.turn_id, view.round) else {
         return vec![Line::from(Span::styled(
             "The raw stream of this round is no longer kept",
-            Style::default().fg(SOFT),
+            Style::default().fg(MUTED),
         ))];
     };
     let inner = width.max(16);
@@ -116,14 +115,14 @@ pub(crate) fn raw_lines(
             let lead = if row == 0 { "" } else { "  " };
             lines.push(Line::from(Span::styled(
                 format!("{lead}{line}"),
-                Style::default().fg(CODE_TEXT),
+                Style::default().fg(TEXT),
             )));
         }
     }
     if raw.truncated {
         lines.push(Line::from(Span::styled(
             "… later events exceeded the display limit",
-            Style::default().fg(SOFT),
+            Style::default().fg(MUTED),
         )));
     }
     let end = lines.len().saturating_sub(view.scroll.min(lines.len()));
@@ -149,12 +148,12 @@ fn item_lines(
         } => {
             let mut spans = vec![Span::styled(
                 format!("━ turn {number}"),
-                Style::default().fg(PINK).add_modifier(Modifier::BOLD),
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
             )];
             if *replayed {
                 spans.push(Span::styled(
                     "  (earlier session)",
-                    Style::default().fg(SOFT),
+                    Style::default().fg(MUTED),
                 ));
             }
             match outcome {
@@ -185,8 +184,11 @@ fn item_lines(
         }
         ItemKind::Round { model, stats } => {
             let mut spans = vec![
-                Span::styled(format!("◆ round {}", item.round), Style::default().fg(BLUE)),
-                Span::styled(format!("  {model}"), Style::default().fg(SOFT)),
+                Span::styled(
+                    format!("◆ round {}", item.round),
+                    Style::default().fg(MUTED),
+                ),
+                Span::styled(format!("  {model}"), Style::default().fg(MUTED)),
             ];
             match stats {
                 Some(stats) => {
@@ -216,9 +218,9 @@ fn item_lines(
             ..
         } => {
             let (icon, color, label) = match role {
-                Some(ThoughtRole::Reasoning) => ("✦ ", LILAC, "thinking"),
-                Some(ThoughtRole::ProgressUpdate) => ("→ ", BLUE, "update"),
-                None => ("· ", LILAC, "thinking"),
+                Some(ThoughtRole::Reasoning) => ("✦ ", ACCENT, "thinking"),
+                Some(ThoughtRole::ProgressUpdate) => ("→ ", MUTED, "update"),
+                None => ("· ", ACCENT, "thinking"),
             };
             let body = sanitize(text);
             let inner = width.saturating_sub(2);
@@ -255,7 +257,7 @@ fn item_lines(
             if !notes.is_empty() {
                 lines.push(Line::from(Span::styled(
                     format!("  {}", notes.join(" · ")),
-                    Style::default().fg(SOFT),
+                    Style::default().fg(MUTED),
                 )));
             }
             lines
@@ -270,7 +272,7 @@ fn item_lines(
             &sanitize(text),
             width,
             "◇ ",
-            Style::default().fg(LILAC).add_modifier(Modifier::ITALIC),
+            Style::default().fg(ACCENT).add_modifier(Modifier::ITALIC),
         ),
     }
 }
@@ -280,7 +282,7 @@ fn tool_lines(tool: &ToolItem, expanded: bool, width: usize) -> Vec<Line<'static
     let (status, status_color) = match &tool.state {
         ToolState::Composing => ("writing input…".to_string(), MUTED),
         ToolState::Ready | ToolState::Running if awaiting_approval => {
-            ("awaiting approval".to_string(), LILAC)
+            ("awaiting approval".to_string(), ACCENT)
         }
         ToolState::Ready => ("queued".to_string(), MUTED),
         ToolState::Running => match tool.output_bytes {
@@ -308,8 +310,8 @@ fn tool_lines(tool: &ToolItem, expanded: bool, width: usize) -> Vec<Line<'static
         ),
     };
     let mut spans = vec![
-        Span::styled("⚙ ", Style::default().fg(PINK)),
-        Span::styled(tool.name.clone(), Style::default().fg(PINK)),
+        Span::styled("⚙ ", Style::default().fg(MUTED)),
+        Span::styled(tool.name.clone(), Style::default().fg(TEXT)),
     ];
     if !tool.input_summary.is_empty() {
         spans.push(Span::styled(
@@ -318,7 +320,7 @@ fn tool_lines(tool: &ToolItem, expanded: bool, width: usize) -> Vec<Line<'static
         ));
     }
     if tool.state == ToolState::Composing {
-        spans.push(Span::styled("▍", Style::default().fg(LILAC)));
+        spans.push(Span::styled("▍", Style::default().fg(ACCENT)));
     }
     spans.push(Span::styled(
         format!("  {status}"),
@@ -329,7 +331,7 @@ fn tool_lines(tool: &ToolItem, expanded: bool, width: usize) -> Vec<Line<'static
     match &tool.approval {
         Some(ApprovalState::Waiting) => lines.push(Line::from(Span::styled(
             "  ⏸ waiting for your approval (y / n)",
-            Style::default().fg(LILAC),
+            Style::default().fg(ACCENT),
         ))),
         Some(ApprovalState::Resolved {
             approved,
@@ -366,7 +368,7 @@ fn tool_lines(tool: &ToolItem, expanded: bool, width: usize) -> Vec<Line<'static
         if !tool.partial_json.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  input:",
-                Style::default().fg(SOFT),
+                Style::default().fg(MUTED),
             )));
             let text = serde_json::from_str::<serde_json::Value>(&tool.partial_json)
                 .map_or_else(|_| tool.partial_json.clone(), |value| input_text(&value));
@@ -376,7 +378,7 @@ fn tool_lines(tool: &ToolItem, expanded: bool, width: usize) -> Vec<Line<'static
             {
                 lines.push(Line::from(Span::styled(
                     format!("    {line}"),
-                    Style::default().fg(CODE_TEXT),
+                    Style::default().fg(TEXT),
                 )));
             }
         }
@@ -384,7 +386,7 @@ fn tool_lines(tool: &ToolItem, expanded: bool, width: usize) -> Vec<Line<'static
             for line in command_output_preview_lines(output, inner, EXPANDED_INPUT_LINES) {
                 lines.push(Line::from(Span::styled(
                     format!("    {}", sanitize(&line)),
-                    Style::default().fg(CODE_TEXT),
+                    Style::default().fg(TEXT),
                 )));
             }
         }

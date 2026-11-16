@@ -12,7 +12,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, Paragraph},
+    widgets::{Block, BorderType, Clear, Paragraph},
 };
 use socium_core::SessionSummary;
 use std::time::SystemTime;
@@ -149,10 +149,10 @@ impl SessionPicker {
                     let preview =
                         truncate_text(&preview, inner.saturating_sub(head.width() + name.width()));
                     let (head_style, preview_style) = if !session.readable {
-                        (Style::default().fg(SOFT), Style::default().fg(SOFT))
+                        (Style::default().fg(MUTED), Style::default().fg(MUTED))
                     } else if selected {
                         (
-                            Style::default().fg(LILAC).add_modifier(Modifier::BOLD),
+                            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                             Style::default().fg(TEXT),
                         )
                     } else {
@@ -175,7 +175,7 @@ impl SessionPicker {
                     ),
                     inner,
                 ),
-                Style::default().fg(PINK).add_modifier(Modifier::BOLD),
+                Style::default().fg(ERROR).add_modifier(Modifier::BOLD),
             )),
             _ => Line::from(Span::styled(
                 truncate_text(" ↑↓ select · Enter resume · d delete · Esc close", inner),
@@ -193,8 +193,9 @@ impl SessionPicker {
             .map(|session| format!(" Resume · {} ", session.id))
             .unwrap_or_else(|| " Resume ".to_string());
         let block = Block::bordered()
+            .border_type(BorderType::Rounded)
             .title(title)
-            .border_style(Style::default().fg(LILAC))
+            .border_style(Style::default().fg(FOCUS_BORDER))
             .style(Style::default().bg(BG));
         let rows = area.height.saturating_sub(2);
         frame.render_widget(Clear, area);

@@ -189,7 +189,7 @@ ActivityModel
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- 記号と色で種類を区別する（思考 = LILAC、progress update = BLUE、tool = PINK、失敗 = 赤系、メタ情報 = MUTED）。既存 `theme.rs` のトークンを使う。
+- 記号と色で種類を区別する（思考 = ACCENT、progress update と tool = グレーの濃淡、失敗 = 赤系、メタ情報 = MUTED）。既存 `theme.rs` のトークンを使う。
 - tool 行は引数の要点だけを出す（`path`、`command`、`pattern` など tool ごとに決めた主キー）。完成前は部分 JSON から主キーを寛容に抜き出して表示する。
 - 完了した reasoning は既定で 2 行に畳み、streaming 中の block と選択中の block だけ全文を出す。
 - round 末尾に stop reason と token 内訳。usage が未報告なら 0 ではなく `usage n/a` と出す（SOC-020 の方針）。
