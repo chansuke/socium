@@ -303,7 +303,7 @@ pub struct AgentService {
     subagents: SubagentCatalog,
     /// The user's sandbox and approval settings from `config.toml`.
     settings: Arc<Settings>,
-    client: reqwest::Client,
+    client: HttpClient,
     /// Configuration problems found while choosing the startup model.
     warnings: Vec<String>,
     /// Usage measured on the most recent model call. Volatile: not
@@ -382,6 +382,43 @@ fn provider_http_client() -> Result<reqwest::Client, ProviderError> {
     )
 }
 
+/// Loading the system's CA certificates takes a few milliseconds, so startup
+/// builds the client on a thread and the first request waits for it.
+pub(crate) enum HttpClient {
+    Building(std::thread::JoinHandle<Result<reqwest::Client, ProviderError>>),
+    Ready(reqwest::Client),
+    Failed(String),
+}
+
+impl From<reqwest::Client> for HttpClient {
+    fn from(client: reqwest::Client) -> Self {
+        Self::Ready(client)
+    }
+}
+
+impl HttpClient {
+    fn start() -> Self {
+        Self::Building(std::thread::spawn(provider_http_client))
+    }
+
+    fn get(&mut self) -> Result<reqwest::Client, ProviderError> {
+        if matches!(self, Self::Building(_))
+            && let Self::Building(handle) = std::mem::replace(self, Self::Failed(String::new()))
+        {
+            *self = match handle.join() {
+                Ok(Ok(client)) => Self::Ready(client),
+                Ok(Err(err)) => Self::Failed(err.to_string()),
+                Err(_) => Self::Failed("the HTTP client could not be built".into()),
+            };
+        }
+        match self {
+            Self::Ready(client) => Ok(client.clone()),
+            Self::Failed(message) => Err(ProviderError::Env(Error::other(message.clone()))),
+            Self::Building(_) => unreachable!("settled above"),
+        }
+    }
+}
+
 fn http_client(connect: Duration, idle: Duration) -> Result<reqwest::Client, ProviderError> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -422,7 +459,7 @@ impl AgentService {
             target,
             Arc::new(|_| None),
             Some(max_tokens),
-            client,
+            client.into(),
         )
     }
 
@@ -433,7 +470,7 @@ impl AgentService {
         target: ModelTarget,
         env: EnvLookup,
         max_tokens_override: Option<u32>,
-        client: reqwest::Client,
+        client: HttpClient,
     ) -> Self {
         let mut service = Self {
             control: TaskControl::default(),
@@ -492,6 +529,7 @@ impl AgentService {
 
     pub fn from_env(workspace_root: PathBuf, start: SessionStart) -> Result<Self, AgentError> {
         let sandbox = SandboxCheck::start(workspace_root.clone());
+        let client = HttpClient::start();
         let lookup: EnvLookup = Arc::new(|key| env::var(key).ok());
         let registry = ModelRegistry::load(lookup.as_ref())?;
         let max_tokens_override = lookup("MAX_TOKENS")
@@ -504,7 +542,6 @@ impl AgentService {
                 })
             })
             .transpose()?;
-        let client = provider_http_client()?;
         settings::ensure_config_outside(&workspace_root, lookup.as_ref())?;
         let (settings, settings_warnings) = Settings::load(lookup.as_ref())?;
 
@@ -577,7 +614,7 @@ impl AgentService {
         registry: ModelRegistry,
         lookup: EnvLookup,
         max_tokens_override: Option<u32>,
-        client: reqwest::Client,
+        client: impl Into<HttpClient>,
     ) -> Result<Self, AgentError> {
         let state_lock = crate::agent::state::lock_workspace(&workspace_root)?;
         session::migrate_legacy_conversation(&workspace_root)?;
@@ -698,7 +735,7 @@ impl AgentService {
             target,
             lookup,
             max_tokens_override,
-            client,
+            client.into(),
         );
         service.state_lock = Some(state_lock);
         let (user_types, subagent_models, mut agent_warnings) = service.load_subagents();
@@ -1498,9 +1535,10 @@ impl AgentService {
             session_id: self.session_id.clone(),
             turn_id,
         };
+        let client = self.client.get()?;
         let turn_context = TurnContext {
             provider: self.provider.as_ref(),
-            client: &self.client,
+            client: &client,
             model: &self.active_model.id,
             system: &self.system_prompt,
             project_instructions: self.project_instructions.as_deref().unwrap_or(""),
@@ -1655,13 +1693,14 @@ impl AgentService {
             previous_summary: previous_summary.as_deref(),
             messages: &self.messages[covered..boundary],
         };
+        let client = self.client.get()?;
         let summary_result = tokio::select! {
             biased;
             _ = self.control.cancelled() => return Err(AgentError::Cancelled),
             result = summarize_with_llm(
                 self.compaction_provider.as_deref().unwrap_or(self.provider.as_ref()),
                 &self.compaction_model,
-                &self.client,
+                &client,
                 &compaction_request,
             ) => result,
         };
