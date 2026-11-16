@@ -1,14 +1,30 @@
-# socium
+<p align="center">
+  <img src="docs/assets/logo.svg" width="72" height="72" alt="">
+</p>
 
-A Rust coding agent for the terminal that runs every command in a Linux
-sandbox with no network and no access to your home directory.
+<h1 align="center">socium</h1>
 
-Our goal is a Rust coding agent that is easy to install and customize, works with
-your preferred model, preserves your existing changes, and lets you stop and
-resume work.
+<p align="center">
+  A Rust coding agent for the terminal that runs every command in a Linux
+  sandbox with no network and no access to your home directory.
+</p>
 
-Socium is pre-release software developed by one person. It runs on Linux only,
-expects breaking changes, and has no tagged releases yet.
+<p align="center">
+  <a href="https://github.com/chansuke/socium/actions/workflows/ci.yaml"><img src="https://github.com/chansuke/socium/actions/workflows/ci.yaml/badge.svg?branch=main" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/platform-Linux-lightgrey" alt="Platform: Linux">
+</p>
+
+- **Sandboxed by default.** Every command runs under bubblewrap and seccomp.
+  Socium refuses to start if isolation fails; there is no unsandboxed fallback.
+- **You approve what runs.** Commands and edits ask first, with the full diff
+  to review. Allow once, allow for the session, or tell Socium what to do
+  instead.
+- **Your model, your session.** Claude by default, or any provider you add in
+  `models.toml`. Stop at any time and resume with `-c` or `-r`.
+
+Socium is pre-release software developed by one person. It runs on Linux only
+and expects breaking changes. The first tag is `v0.1.0`.
 
 ## Install
 
