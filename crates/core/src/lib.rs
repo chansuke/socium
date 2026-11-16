@@ -1447,7 +1447,7 @@ impl AgentService {
             .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("No saved subagent '{id}'")))?;
         Ok((
             record.summary(),
-            transcript::transcript_entries(&record.messages, &[]),
+            transcript::transcript_entries(&record.messages, &record.tool_events),
         ))
     }
 
