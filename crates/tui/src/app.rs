@@ -120,13 +120,20 @@ impl App {
         let Some(agent) = self.agent.as_ref() else {
             return;
         };
-        let messages = transcript_entries_to_chat_entries(agent.transcript_entries());
         let mut activity = ActivityModel::default();
         for event in agent.recent_activity() {
             activity.apply_replayed(event);
         }
-        self.messages = messages;
         self.activity = activity;
+        self.show_agent_transcript();
+    }
+
+    /// Shows the agent's conversation, leaving the Activity as it is.
+    pub(crate) fn show_agent_transcript(&mut self) {
+        let Some(agent) = self.agent.as_ref() else {
+            return;
+        };
+        self.messages = transcript_entries_to_chat_entries(agent.transcript_entries());
         self.transcript_scroll = 0;
         self.last_latency_ms = None;
         self.refresh_context_metrics();

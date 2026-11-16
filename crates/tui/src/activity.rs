@@ -141,6 +141,25 @@ impl ActivityModel {
         };
     }
 
+    /// Removes turn `turn_id` and the later ones, which a rewind dropped.
+    pub(crate) fn drop_turns_from(&mut self, turn_id: usize) {
+        self.items.retain(|item| item.turn_id < turn_id);
+        self.raw.retain(|raw| raw.turn_id < turn_id);
+        if self
+            .raw_view
+            .as_ref()
+            .is_some_and(|view| view.turn_id >= turn_id)
+        {
+            self.raw_view = None;
+        }
+        self.selected = self.selected.filter(|&index| index < self.items.len());
+        self.turns_seen = self
+            .items
+            .iter()
+            .filter(|item| matches!(item.kind, ItemKind::Turn { .. }))
+            .count();
+    }
+
     /// A free-standing line, such as a request failure the core reported
     /// outside a turn.
     pub(crate) fn push_note(&mut self, text: impl Into<String>) {
@@ -962,6 +981,28 @@ pub(crate) mod tests {
             .map(|item| matches!(item.kind, ItemKind::Turn { replayed: true, .. }))
             .collect::<Vec<_>>();
         assert_eq!(replayed, [true, false]);
+    }
+
+    #[test]
+    fn dropped_turns_leave_the_earlier_ones_as_they_were() {
+        let mut model = ActivityModel::default();
+        model.apply(event(0, 0, ActivityKind::TurnStarted));
+        model.apply(event(2, 0, ActivityKind::TurnStarted));
+        model.apply(event(4, 0, ActivityKind::TurnStarted));
+
+        model.drop_turns_from(2);
+        model.apply(event(2, 0, ActivityKind::TurnStarted));
+        let turns = model
+            .items
+            .iter()
+            .filter_map(|item| match item.kind {
+                ItemKind::Turn {
+                    number, replayed, ..
+                } => Some((item.turn_id, number, replayed)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(turns, [(0, 1, false), (2, 2, false)]);
     }
 
     #[test]
