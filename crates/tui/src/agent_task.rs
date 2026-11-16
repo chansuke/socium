@@ -158,8 +158,10 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn poll_pending_task(&mut self) {
+    /// Applies what the running task sent, and says whether anything came.
+    pub(crate) fn poll_pending_task(&mut self) -> bool {
         let mut progress_events = Vec::new();
+        let mut disconnected = false;
         let mut streamed_assistant_text = None;
         let mut completed = None;
 
@@ -179,17 +181,19 @@ impl App {
                         Some("Worker disconnected; restart to recover saved history".into());
                     self.pending_task = None;
                     self.approval = None;
+                    disconnected = true;
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {}
             }
         }
 
+        let progressed = !progress_events.is_empty();
         for event in progress_events {
             self.apply_progress(event);
         }
 
         let Some(outcome) = completed else {
-            return;
+            return progressed || disconnected;
         };
         let streamed_assistant_text = streamed_assistant_text.unwrap_or(false);
         self.pending_task = None;
@@ -252,6 +256,7 @@ impl App {
                 self.status = Some("Compaction failed".to_string());
             }
         }
+        true
     }
 }
 
