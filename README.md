@@ -288,7 +288,8 @@ what it adds.
   of its tool calls; the model can continue a subagent with everything it
   saw by passing its ID as `resume`, and `/agents` lists saved subagents and
   `/agents <id>` shows one's conversation. The newest 100 are kept. A restart
-  during a subagent still marks the `agent` call's outcome unknown. See
+  during a subagent still marks the `agent` call's outcome unknown; the
+  reports of subagents running with it that had already finished are kept. See
   [ADR 8](docs/adr/0008-agentツールで独立した文脈のサブエージェントに作業を委ねる.md).
 - Define your own subagent types in `~/.config/socium/agents/*.md` (or
   `$XDG_CONFIG_HOME/socium/agents/`, or the directory named by
