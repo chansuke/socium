@@ -267,6 +267,12 @@ where
     )
 }
 
+/// Atomically replaces a private state file with `bytes`.
+pub(crate) fn save_state_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    prepare_state_path(path, true)?;
+    atomic_write_impl(path, bytes, ReplacementMode::Private, &mut |_| Ok(()))
+}
+
 /// Write a same-directory temporary file, sync it, then atomically replace the
 /// destination. Failed serialization/writes never truncate the previous state.
 /// The file gets `mode` before it replaces the destination, so a recreated
