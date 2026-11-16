@@ -688,10 +688,20 @@ impl App {
             ]);
         }
 
-        let mut lines = Vec::new();
-        for entry in &self.messages {
-            lines.extend(render_entry(entry, width.max(24)));
+        // Lay out only the newest entries that reach the window, so a key
+        // press in a long conversation does not rewrap all of it.
+        let wanted = height.max(1).saturating_add(self.transcript_scroll);
+        let mut blocks = Vec::new();
+        let mut count = 0;
+        for entry in self.messages.iter().rev() {
+            if count >= wanted {
+                break;
+            }
+            let block = render_entry(entry, width.max(24));
+            count += block.len();
+            blocks.push(block);
         }
+        let lines: Vec<_> = blocks.into_iter().rev().flatten().collect();
 
         let start = transcript_window_start(lines.len(), height.max(1), self.transcript_scroll);
         Text::from(lines.into_iter().skip(start).collect::<Vec<_>>())
@@ -725,6 +735,33 @@ mod tests {
                 row
             })
             .collect()
+    }
+
+    #[test]
+    fn scrolling_a_long_conversation_moves_the_view_one_line_at_a_time() {
+        use crate::transcript::Speaker;
+        let mut app = App::for_test();
+        for turn in 0..60 {
+            app.push_message(Speaker::User, format!("question {turn}"));
+            app.push_message(
+                Speaker::Socium,
+                format!("answer {turn}\nmore of answer {turn}"),
+            );
+        }
+        let shown = |app: &App, text: &str| render(app).iter().position(|row| row.contains(text));
+
+        let newest = shown(&app, "question 59").expect("newest turn on screen");
+        assert_eq!(shown(&app, "question 0"), None);
+
+        app.transcript_scroll = 1;
+        assert_eq!(shown(&app, "question 59"), Some(newest + 1));
+
+        app.transcript_scroll = 10_000;
+        assert_eq!(
+            shown(&app, "question 0"),
+            Some(0),
+            "the top stops at the first message"
+        );
     }
 
     #[test]
