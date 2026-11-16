@@ -607,6 +607,9 @@ impl App {
 
     async fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         loop {
+            if let Some(message) = self.agent.as_mut().and_then(AgentService::sandbox_failure) {
+                return Err(eyre!(message));
+            }
             self.poll_pending_task();
             terminal.draw(|frame| self.draw(frame))?;
 
