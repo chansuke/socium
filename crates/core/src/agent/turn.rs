@@ -307,7 +307,7 @@ where
                     on_progress(AgentProgress::ToolCallStarted { name: name.clone() });
                 }
                 // Every intent is saved before any of them starts.
-                let mut outcomes = batch_calls
+                let outcomes = batch_calls
                     .iter()
                     .map(|(id, name, _)| {
                         checkpoint(
@@ -324,7 +324,7 @@ where
                     .collect::<Vec<_>>();
                 let shared = std::sync::Mutex::new(&mut *on_progress);
                 let shared = &shared;
-                let runs = batch_calls
+                let mut runs = batch_calls
                     .iter()
                     .zip(&outcomes)
                     .enumerate()
@@ -363,11 +363,24 @@ where
                         run
                     })
                     .collect::<Vec<_>>();
-                for (index, report) in join_all(runs).await {
-                    outcomes[index] = Some(report);
-                }
-                for ((id, name, input), outcome) in batch_calls.iter().zip(outcomes) {
-                    let result = match outcome.expect("every call in the batch has an outcome") {
+                // Each result is saved as its call ends, so a crash keeps the
+                // reports already in. It goes where call order puts it; a
+                // restart fills the gaps of calls still running.
+                let first = results.len();
+                let mut placed = Vec::new();
+                let mut saved = Ok(());
+                let mut not_started = outcomes
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, outcome)| Some((index, outcome?)));
+                loop {
+                    let (index, outcome) = match not_started.next() {
+                        Some(call) => call,
+                        None if runs.is_empty() => break,
+                        None => next_finished(&mut runs).await,
+                    };
+                    let (id, name, _) = &batch_calls[index];
+                    let result = match outcome {
                         Ok(content) => ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content,
@@ -382,20 +395,33 @@ where
                             ..
                         }
                     );
-                    if let ContentBlock::ToolResult { content, .. } = &result {
+                    let slot = placed.partition_point(|&earlier| earlier < index);
+                    placed.insert(slot, index);
+                    results.insert(first + slot, bounded(result));
+                    *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
+                    // The other children still run to the end before a
+                    // failed save ends the turn.
+                    saved = saved.and(checkpoint(messages,serde_json::json!({"type":"tool_finished","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"is_error":failed,"result_index":first+index})));
+                }
+                drop(runs);
+                // The conversation lists the calls in call order, as a
+                // restart rebuilds it.
+                for ((_, name, input), result) in batch_calls.iter().zip(&results[first..]) {
+                    if let ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } = result
+                    {
                         on_progress(AgentProgress::ToolCallRecorded(
                             crate::transcript::tool_entry(
                                 name,
                                 input,
-                                Some((content, failed)),
+                                Some((content, *is_error == Some(true))),
                                 false,
                             ),
                         ));
                     }
-                    results.push(bounded(result));
-                    *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
-                    checkpoint(messages,serde_json::json!({"type":"tool_finished","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"is_error":failed,"result_index":results.len()-1})).map_err(|e|std::io::Error::other(format!("Tool finished but its result could not be saved; outcome may be unknown after restart: {e}")))?;
                 }
+                saved.map_err(|e|std::io::Error::other(format!("Tool finished but its result could not be saved; outcome may be unknown after restart: {e}")))?;
                 continue;
             }
             let (id, name, input) = calls[next].clone();
@@ -577,31 +603,21 @@ fn concurrent_batch_len(ctx: &TurnContext<'_>, calls: &[(String, String, Value)]
         .count()
 }
 
-/// Polls `futures` together on the current task and returns their outputs
-/// in order.
-async fn join_all<'a, T>(mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + 'a>>>) -> Vec<T> {
-    let mut outputs = futures.iter().map(|_| None).collect::<Vec<Option<T>>>();
+/// Polls `futures` together on the current task until one finishes, then
+/// removes it and returns its output.
+async fn next_finished<'a, T>(
+    futures: &mut Vec<Pin<Box<dyn Future<Output = T> + Send + 'a>>>,
+) -> T {
     std::future::poll_fn(|cx| {
-        let mut pending = false;
-        for (future, output) in futures.iter_mut().zip(outputs.iter_mut()) {
-            if output.is_none() {
-                match future.as_mut().poll(cx) {
-                    Poll::Ready(value) => *output = Some(value),
-                    Poll::Pending => pending = true,
-                }
+        for index in 0..futures.len() {
+            if let Poll::Ready(output) = futures[index].as_mut().poll(cx) {
+                drop(futures.swap_remove(index));
+                return Poll::Ready(output);
             }
         }
-        if pending {
-            Poll::Pending
-        } else {
-            Poll::Ready(())
-        }
+        Poll::Pending
     })
-    .await;
-    outputs
-        .into_iter()
-        .map(|output| output.expect("every future finished"))
-        .collect()
+    .await
 }
 
 /// One result keeps at most `MAX_TOOL_RESULT_CHARACTERS`, its head and
@@ -704,12 +720,18 @@ pub(crate) fn repair_incomplete_tools(messages: &mut Vec<Message>) -> bool {
                 messages.insert(i + 1, Message::user_blocks(Vec::new()));
                 repaired = true;
             }
+            // Results go in call order; a concurrent batch saves them as its
+            // calls end, leaving gaps for the calls still running.
             if let MessageContent::Blocks(results) = &mut messages[i + 1].content {
-                for id in ids {
-                    if !results.iter().any(|b| matches!(b,ContentBlock::ToolResult{tool_use_id,..} if *tool_use_id==id)) {
-                        results.push(ContentBlock::ToolResult {tool_use_id:id, content:"Interrupted before result was saved. Outcome unknown; inspect workspace before retrying. Do not automatically repeat this operation.".into(), is_error:Some(true)});
-                        repaired = true;
-                    }
+                for (index, id) in ids.into_iter().enumerate() {
+                    let saved = results[index..].iter().position(|b| matches!(b,ContentBlock::ToolResult{tool_use_id,..} if *tool_use_id==id));
+                    let result = match saved {
+                        Some(0) => continue,
+                        Some(offset) => results.remove(index + offset),
+                        None => ContentBlock::ToolResult {tool_use_id:id, content:"Interrupted before result was saved. Outcome unknown; inspect workspace before retrying. Do not automatically repeat this operation.".into(), is_error:Some(true)},
+                    };
+                    results.insert(index, result);
+                    repaired = true;
                 }
             }
             i += 1;
