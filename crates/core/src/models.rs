@@ -143,6 +143,14 @@ impl ModelConfig {
             price: None,
         }
     }
+
+    /// Alias of another model that summarizes this one's history; `None`
+    /// means this model does.
+    pub(crate) fn compaction_alias(&self) -> Option<&str> {
+        self.compact_model
+            .as_deref()
+            .filter(|alias| *alias != self.alias)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
