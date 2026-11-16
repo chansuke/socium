@@ -654,6 +654,59 @@ mod tests {
         );
     }
 
+    /// A subagent model with a window too small for a long prompt.
+    fn tiny_window_model() -> (super::catalog::SubagentModel, Arc<Mutex<Vec<Value>>>) {
+        let provider = ScriptedProvider::new(Vec::new());
+        let requests = provider.recorded_requests.clone();
+        let mut config = crate::models::ModelRegistry::builtin()
+            .find("haiku")
+            .unwrap()
+            .clone();
+        config.alias = "tiny".into();
+        config.context_window = Some(4_000);
+        let model = super::catalog::SubagentModel {
+            config,
+            provider: Box::new(provider),
+            max_tokens: 1000,
+        };
+        (model, requests)
+    }
+
+    #[tokio::test]
+    async fn a_subagent_whose_window_fills_reports_it_in_one_sentence() {
+        let workspace = make_temp_dir("subagent_context_full");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                calls(&[(
+                    "agent-1",
+                    "agent",
+                    json!({"description": "d", "prompt": "word ".repeat(20_000), "agent_type": "explorer", "model": "tiny"}),
+                )]),
+                text("Done."),
+            ],
+        );
+        let (tiny, tiny_requests) = tiny_window_model();
+        service.install_subagents(super::catalog::SubagentCatalog::new(Vec::new(), vec![tiny]));
+
+        service.submit("Delegate".into()).await.unwrap();
+
+        assert!(tiny_requests.lock().unwrap().is_empty());
+        let result = &last_results(&requests.lock().unwrap()[1])[0];
+        assert_eq!(result["is_error"], true);
+        let content = result["content"].as_str().unwrap();
+        assert!(
+            content.starts_with(
+                "The subagent failed: The context window filled during the tool loop (about "
+            ),
+            "{content}"
+        );
+        assert!(
+            content.contains(" tokens).\n\n(subagent agent-1: "),
+            "{content}"
+        );
+    }
+
     #[tokio::test]
     async fn invalid_input_is_refused_before_any_model_call() {
         let workspace = make_temp_dir("subagent_invalid");
