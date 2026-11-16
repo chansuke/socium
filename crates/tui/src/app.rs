@@ -606,26 +606,33 @@ impl App {
     }
 
     async fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        let mut redraw = true;
         loop {
             let sandbox = self.agent.as_mut().and_then(AgentService::sandbox_status);
             if let Some(Err(message)) = sandbox {
                 return Err(eyre!(message));
             }
-            self.poll_pending_task();
-            terminal.draw(|frame| self.draw(frame))?;
+            redraw |= self.poll_pending_task();
+            if redraw {
+                terminal.draw(|frame| self.draw(frame))?;
+            }
 
-            // Only a running task or check changes the screen without input.
-            // Idle, wake once a minute so the session picker's ages stay true.
-            let timeout = if self.pending_task.is_some() || sandbox.is_none() {
-                Duration::from_millis(50)
+            // A running task is checked about 60 times a second so its output
+            // shows at once. Idle, wake once a minute so the session picker's
+            // ages stay true.
+            let busy = self.pending_task.is_some() || sandbox.is_none();
+            let timeout = if busy {
+                Duration::from_millis(16)
             } else {
                 Duration::from_secs(60)
             };
             if !event::poll(timeout)? {
+                redraw = !busy;
                 continue;
             }
 
             let event = event::read()?;
+            redraw = true;
             if let Event::Paste(text) = &event {
                 if matches!(self.input_mode, InputMode::Editing)
                     && self.approval.is_none()
