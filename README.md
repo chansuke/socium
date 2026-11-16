@@ -276,8 +276,8 @@ what it adds.
   report, so a broad search stays out of the conversation. An `explorer` can
   only read, list, and search files and inspect Git; a `worker` can also edit
   and run commands, which still need your approval; the approval names the
-  subagent that asked. The report ends with the subagent's rounds, tool
-  calls, token use, time, and its ID. A subagent runs on the current model unless
+  subagent that asked. The report ends with the subagent's model
+  requests, the tool calls it ran, token use, time, and its ID. A subagent runs on the current model unless
   its type or the call names another registered model whose API key is set,
   so a simple search can go to a smaller model. Subagents cannot start
   subagents, and the main agent waits for them. New subagents of types that
