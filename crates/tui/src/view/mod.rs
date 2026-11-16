@@ -29,10 +29,12 @@ const MODEL_PICKER_MAX_ROWS: usize = 8;
 /// Terminal width from which the Activity pane becomes a right-hand column.
 const WIDE_LAYOUT_COLUMNS: u16 = 140;
 /// Terminal height from which the header is shown.
-const HEADER_MIN_ROWS: u16 = 40;
-/// The header card: the name and version, a blank line, the model, and
-/// the directory, inside a rounded border.
-const HEADER_CARD_ROWS: u16 = 6;
+const HEADER_MIN_ROWS: u16 = 32;
+/// The header card: the name and version, then the model and the
+/// directory, inside a rounded border.
+const HEADER_CARD_ROWS: u16 = 4;
+/// What the sandbox always enforces, shown at the header's right.
+const SANDBOX_FACTS: [(&str, &str); 2] = [("sandbox", "workspace only"), ("network", "off")];
 
 pub(crate) struct Areas {
     pub(crate) header: Rect,
@@ -323,29 +325,28 @@ impl App {
     }
 
     /// A rounded card with the name and version, then the model and the
-    /// directory, sized to its contents.
+    /// directory, sized to its contents; what the sandbox enforces sits at
+    /// the right when it fits.
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let label = |name: &'static str| Span::styled(name, Style::default().fg(MUTED));
         let lines = vec![
             Line::from(vec![
-                Span::styled("✦ ", Style::default().fg(ACCENT)),
+                Span::styled(
+                    "›_ ",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     "socium",
                     Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("  v{}", env!("CARGO_PKG_VERSION")),
+                    format!(" {}", env!("CARGO_PKG_VERSION")),
                     Style::default().fg(MUTED),
                 ),
             ]),
-            Line::from(""),
             Line::from(vec![
-                label("  model  "),
                 Span::styled(&self.model_label, Style::default().fg(TEXT)),
-            ]),
-            Line::from(vec![
-                label("  dir    "),
-                Span::styled(&self.workspace_label, Style::default().fg(TEXT)),
+                Span::styled(" · ", Style::default().fg(MUTED)),
+                Span::styled(&self.workspace_label, Style::default().fg(MUTED)),
             ]),
         ];
         // One cell of padding on each side inside the border.
@@ -362,6 +363,27 @@ impl App {
             .padding(ratatui::widgets::Padding::horizontal(1))
             .style(Style::default().bg(BG));
         frame.render_widget(Paragraph::new(lines).block(block), card);
+
+        let facts = SANDBOX_FACTS
+            .iter()
+            .map(|(name, value)| {
+                Line::from(vec![
+                    Span::styled(format!("{name} "), Style::default().fg(MUTED)),
+                    Span::styled(*value, Style::default().fg(TEXT)),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let facts_width = facts.iter().map(Line::width).max().unwrap_or(0) as u16;
+        let right = area.right().saturating_sub(facts_width + 2);
+        if right > card.right() + 2 && card.height >= HEADER_CARD_ROWS {
+            let facts_area = Rect::new(right, card.y + 1, facts_width, card.height - 2);
+            frame.render_widget(
+                Paragraph::new(facts)
+                    .alignment(ratatui::layout::Alignment::Right)
+                    .style(Style::default().bg(BG)),
+                facts_area,
+            );
+        }
     }
 
     fn draw_transcript(&self, frame: &mut Frame, area: Rect) {
@@ -976,22 +998,27 @@ mod tests {
     }
 
     #[test]
-    fn tall_terminal_shows_name_model_and_directory_in_a_card() {
+    fn tall_terminal_shows_name_model_directory_and_sandbox_in_the_header() {
         let mut app = App::for_test();
         app.model_label = "claude-opus-5-5".into();
         app.workspace_label = "~/code/socium".into();
         let rows = render_at(&app, 80, 40);
-        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
-        let card = |inner: &str| format!(" │ {inner:<24} │");
+        let version = env!("CARGO_PKG_VERSION");
+        let card = |inner: &str| format!(" │ {inner:<31} │");
 
-        assert_eq!(rows[0].trim_end(), format!(" ╭{}╮", "─".repeat(26)));
-        assert_eq!(rows[1].trim_end(), card(&format!("✦ socium  {version}")));
-        assert_eq!(rows[2].trim_end(), card(""));
-        assert_eq!(rows[3].trim_end(), card("  model  claude-opus-5-5"));
-        assert_eq!(rows[4].trim_end(), card("  dir    ~/code/socium"));
-        assert_eq!(rows[5].trim_end(), format!(" ╰{}╯", "─".repeat(26)));
-        assert!(rows[6].trim().is_empty());
-        assert!(!render_at(&app, 80, 39)[0].contains("socium"));
+        assert_eq!(rows[0].trim_end(), format!(" ╭{}╮", "─".repeat(33)));
+        assert!(rows[1].starts_with(&card(&format!("›_ socium {version}"))));
+        assert!(rows[2].starts_with(&card("claude-opus-5-5 · ~/code/socium")));
+        assert_eq!(rows[3].trim_end(), format!(" ╰{}╯", "─".repeat(33)));
+        assert!(rows[4].trim().is_empty());
+        // The sandbox's fixed limits, right-aligned beside the card.
+        assert!(
+            rows[1].trim_end().ends_with("sandbox workspace only"),
+            "{:?}",
+            rows[1]
+        );
+        assert!(rows[2].trim_end().ends_with("network off"), "{:?}", rows[2]);
+        assert!(!render_at(&app, 80, 31)[0].contains("socium"));
     }
 
     #[test]
@@ -1049,7 +1076,9 @@ mod tests {
         let mut app = app_with_activity();
         app.activity.focused = true;
         app.activity.selected = Some(3);
-        for row in render_at(&app, 110, 30) {
+        let width = std::env::var("FRAME_WIDTH").map_or(110, |w| w.parse().unwrap());
+        let height = std::env::var("FRAME_HEIGHT").map_or(30, |h| h.parse().unwrap());
+        for row in render_at(&app, width, height) {
             println!("{row}");
         }
     }
