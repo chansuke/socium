@@ -561,6 +561,55 @@ mod tests {
     }
 
     #[test]
+    fn null_optional_fields_take_their_defaults() {
+        let workspace = make_temp_dir("workspace");
+        std::fs::write(workspace.path().join("a.txt"), "hello\n").unwrap();
+        let blocks = [
+            (
+                "list_files",
+                json!({"path": null, "recursive": null, "glob": null}),
+            ),
+            (
+                "search_text",
+                json!({"pattern": "hello", "path": null, "glob": null, "max_results": null}),
+            ),
+            ("git_log", json!({"path": null, "max_count": null})),
+        ]
+        .into_iter()
+        .map(|(name, input)| ContentBlock::ToolUse {
+            id: name.to_string(),
+            name: name.to_string(),
+            input,
+        })
+        .collect::<Vec<_>>();
+
+        let results = run_tool_calls(workspace.path(), &blocks);
+
+        for result in &results {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = result
+            else {
+                panic!("expected tool_result");
+            };
+            assert!(
+                !content.contains("requires"),
+                "{tool_use_id}: {content} ({is_error:?})"
+            );
+        }
+        assert!(matches!(
+            &results[0],
+            ContentBlock::ToolResult { content, is_error: None, .. } if content.contains("a.txt")
+        ));
+        assert!(matches!(
+            &results[1],
+            ContentBlock::ToolResult { content, is_error: None, .. } if content.contains("a.txt")
+        ));
+    }
+
+    #[test]
     fn run_tool_calls_returns_error_for_non_object_list_files_input() {
         let workspace = make_temp_dir("workspace");
         let blocks = vec![ContentBlock::ToolUse {
