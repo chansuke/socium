@@ -2,7 +2,8 @@
 //! `worker`, and types the user defines in Markdown files.
 //!
 //! A definition file is a TOML front matter between `+++` lines, followed by
-//! the subagent's system prompt:
+//! the subagent's instructions, which follow `SUBAGENT_FRAMING` in its
+//! system prompt:
 //!
 //! ```text
 //! +++
@@ -15,7 +16,7 @@
 //! ```
 
 use crate::constants::{
-    AGENT_TOOL_NAME, SUBAGENT_EXPLORER_SYSTEM_PROMPT, SUBAGENT_WORKER_SYSTEM_PROMPT,
+    AGENT_TOOL_NAME, SUBAGENT_EXPLORER_INSTRUCTIONS, SUBAGENT_WORKER_INSTRUCTIONS,
 };
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::Provider;
@@ -86,7 +87,9 @@ pub(crate) struct SubagentType {
     pub(crate) name: String,
     /// One line telling the delegating model when to choose this type.
     pub(crate) description: String,
-    pub(crate) system_prompt: String,
+    /// What this type does, put after `SUBAGENT_FRAMING` in its system
+    /// prompt.
+    pub(crate) instructions: String,
     pub(crate) tools: ToolSet,
     /// Alias of the model the type runs on; `None` runs on the main
     /// agent's current model.
@@ -212,14 +215,14 @@ fn builtin_types() -> Vec<SubagentType> {
         SubagentType {
             name: "explorer".into(),
             description: "read-only investigation; reads, lists, and searches files and inspects Git, never changes anything.".into(),
-            system_prompt: SUBAGENT_EXPLORER_SYSTEM_PROMPT.into(),
+            instructions: SUBAGENT_EXPLORER_INSTRUCTIONS.into(),
             tools: ToolSet::ReadOnly,
             model: None,
         },
         SubagentType {
             name: "worker".into(),
             description: "tasks that need edits or commands; has every tool but agent.".into(),
-            system_prompt: SUBAGENT_WORKER_SYSTEM_PROMPT.into(),
+            instructions: SUBAGENT_WORKER_INSTRUCTIONS.into(),
             tools: ToolSet::AllButAgent,
             model: None,
         },
@@ -240,7 +243,7 @@ struct FrontMatter {
 pub(crate) struct Definition {
     pub(crate) name: String,
     pub(crate) description: String,
-    pub(crate) system_prompt: String,
+    pub(crate) instructions: String,
     pub(crate) tools: ToolSet,
     pub(crate) model: Option<String>,
 }
@@ -300,14 +303,14 @@ pub(crate) fn parse_definition(text: &str) -> Result<Definition, String> {
         }
     };
 
-    let system_prompt = body.trim().to_string();
-    if system_prompt.is_empty() {
-        return Err("the system prompt after the front matter is empty".into());
+    let instructions = body.trim().to_string();
+    if instructions.is_empty() {
+        return Err("the instructions after the front matter are empty".into());
     }
     Ok(Definition {
         name,
         description,
-        system_prompt,
+        instructions,
         tools,
         model: front.model,
     })
@@ -414,7 +417,7 @@ pub(crate) fn load_user_types(
         types.push(SubagentType {
             name: definition.name,
             description: definition.description,
-            system_prompt: definition.system_prompt,
+            instructions: definition.instructions,
             tools: definition.tools,
             model,
         });
@@ -468,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn a_definition_is_front_matter_then_the_system_prompt() {
+    fn a_definition_is_front_matter_then_the_instructions() {
         let definition = parse_definition(REVIEWER).unwrap();
 
         assert_eq!(
@@ -476,7 +479,7 @@ mod tests {
             Definition {
                 name: "reviewer".into(),
                 description: "Reviews a diff for correctness bugs".into(),
-                system_prompt: "You review changes.".into(),
+                instructions: "You review changes.".into(),
                 tools: ToolSet::Only(vec!["read_file".into(), "git_diff".into()]),
                 model: Some("haiku".into()),
             }
@@ -537,7 +540,7 @@ mod tests {
             ),
             (
                 with(&format!("name = \"a\"\n{base}"), "  \n"),
-                "system prompt",
+                "instructions after the front matter",
             ),
         ];
         for (text, expected) in cases {
@@ -637,7 +640,7 @@ mod tests {
             vec![SubagentType {
                 name: user.name,
                 description: user.description,
-                system_prompt: user.system_prompt,
+                instructions: user.instructions,
                 tools: user.tools,
                 model: user.model,
             }],
