@@ -306,7 +306,9 @@ what it adds.
   `SOCIUM_AGENTS_DIR`): a TOML front matter between `+++` lines with `name`,
   `description`, and optionally `tools` (read-only tools when omitted) and
   `model` (a registry alias; the current model when omitted), followed by the
-  subagent's system prompt. Start from
+  type's instructions. Socium puts them after the framing every subagent gets
+  (it works in your workspace, cannot see the main conversation, and returns
+  only its final message), so write only what the role does. Start from
   [`agent.md.example`](agent.md.example). Definitions are read at startup;
   a file with a mistake, or whose model cannot start, is skipped with a
   warning. Definitions in the project directory are not read. See

@@ -54,7 +54,7 @@ You are a code reviewer ...
 * `description`（必須）: 300 文字以内の一行。`agent` tool の説明に種類の一覧として載り、親のモデルが種類を選ぶ手がかりになる。
 * `tools`（任意）: 組み込みの tool の名前の一覧。省くと `explorer` と同じ読み取り専用の tool になる。最小の権限を既定にするため。`agent` と、存在しない名前は誤り。
 * `model`（任意）: registry の alias。省くと、呼び出した時点の親のモデルを使う。
-* 本文: 前後の空白を除いて、子の system prompt にする。空なら誤り。
+* 本文: 前後の空白を除いて、子の system prompt にする（後の変更を参照）。空なら誤り。
 * 知らない項目は誤りとする。綴りの誤りで設定が黙って無視されないようにするため。
 
 ### 検証と誤り
@@ -112,3 +112,7 @@ core の単体テストで、front matter と本文の解析、`tools` の既定
 ## More Information
 
 Claude Code の定義の形式は公開文書（https://docs.anthropic.com/en/docs/claude-code/sub-agents ）による。関連: ADR 6（モデルの registry）、ADR 8（`agent` tool）、SOC-022（プロジェクト単位の指示）。
+
+### 後の変更
+
+2026-11-16: 本文は子の system prompt のすべてではなく、組み込みの種類と共通の前置きの後に置く指示になった。前置きは、子が利用者の workspace で動くこと、委ねた側の会話が見えないこと、最後の message だけが返ることを伝える。本文がそのまま system prompt になると、利用者が書き忘れた種類の子は、自分が委任を受けた子であることも、報告が最後の message だけであることも知らずに動いていた。組み込みの `explorer` と `worker` も、同じ前置きの後に種類ごとの指示を置く形に分けた。本文が空なら誤りとするのは変わらない。
