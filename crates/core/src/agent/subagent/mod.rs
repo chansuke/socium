@@ -51,10 +51,12 @@ pub(crate) fn run_subagent<'a>(
                 ctx.subagents.names().join(", ")
             ))
         })?;
-        if prompt.trim().is_empty() {
-            return Err(ToolError::Message(
-                "agent requires a non-empty prompt".into(),
-            ));
+        for (field, value) in [("prompt", prompt), ("description", description)] {
+            if value.trim().is_empty() {
+                return Err(ToolError::Message(format!(
+                    "agent requires a non-empty {field}"
+                )));
+            }
         }
         // The call's model, else the type's, else the current one.
         let alias =
@@ -62,10 +64,17 @@ pub(crate) fn run_subagent<'a>(
         let model = match alias {
             None => None,
             Some(alias) => Some(ctx.subagents.model(alias).ok_or_else(|| {
-                ToolError::Message(format!(
-                    "Model '{alias}' is not available to subagents; use one of: {}",
-                    ctx.subagents.model_aliases().join(", ")
-                ))
+                let aliases = ctx.subagents.model_aliases();
+                ToolError::Message(if aliases.is_empty() {
+                    format!(
+                        "Model '{alias}' is not available to subagents, and no other model is; leave model out to run on the current one"
+                    )
+                } else {
+                    format!(
+                        "Model '{alias}' is not available to subagents; use one of: {}",
+                        aliases.join(", ")
+                    )
+                })
             })?),
         };
 
@@ -662,6 +671,16 @@ mod tests {
                         "agent",
                         json!({"description": "d", "prompt": "  ", "agent_type": "explorer"}),
                     ),
+                    (
+                        "no-description",
+                        "agent",
+                        json!({"description": " ", "prompt": "p", "agent_type": "explorer"}),
+                    ),
+                    (
+                        "no-models",
+                        "agent",
+                        json!({"description": "d", "prompt": "p", "agent_type": "explorer", "model": "haiku"}),
+                    ),
                 ]),
                 text("Done."),
             ],
@@ -677,6 +696,44 @@ mod tests {
             "Unknown agent_type 'admin'; use one of: explorer, worker"
         );
         assert_eq!(results[1]["content"], "agent requires a non-empty prompt");
+        assert_eq!(
+            results[2]["content"],
+            "agent requires a non-empty description"
+        );
+        assert_eq!(
+            results[3]["content"],
+            "Model 'haiku' is not available to subagents, and no other model is; leave model out to run on the current one"
+        );
+    }
+
+    #[tokio::test]
+    async fn null_optional_fields_mean_not_given() {
+        let workspace = make_temp_dir("subagent_null_fields");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                calls(&[(
+                    "agent-1",
+                    "agent",
+                    json!({"description": "d", "prompt": "p", "agent_type": "explorer", "model": null, "resume": null}),
+                )]),
+                text("Nothing here."),
+                text("Done."),
+            ],
+        );
+
+        service.submit("Delegate".into()).await.unwrap();
+
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3, "the subagent ran on the current model");
+        let result = &last_results(&requests[2])[0];
+        assert_eq!(result.get("is_error"), None, "{result}");
+        assert!(
+            result["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("Nothing here.\n\n(subagent agent-1: 1 round")
+        );
     }
 
     #[tokio::test]

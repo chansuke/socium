@@ -31,7 +31,7 @@ pub(crate) fn optional_string_field<'a>(
     context: &str,
 ) -> Result<Option<&'a str>, ToolError> {
     match input.get(field) {
-        None => Ok(None),
+        None | Some(Value::Null) => Ok(None),
         Some(value) => value
             .as_str()
             .map(Some)
@@ -48,7 +48,7 @@ pub(crate) fn optional_bool_field(
     context: &str,
 ) -> Result<Option<bool>, ToolError> {
     match input.get(field) {
-        None => Ok(None),
+        None | Some(Value::Null) => Ok(None),
         Some(value) => value
             .as_bool()
             .map(Some)
@@ -66,7 +66,7 @@ pub(crate) fn optional_bounded_usize_field(
     default: usize,
     max: usize,
 ) -> Result<usize, ToolError> {
-    let Some(value) = input.get(field) else {
+    let Some(value) = input.get(field).filter(|value| !value.is_null()) else {
         return Ok(default);
     };
     let raw = value
@@ -141,7 +141,7 @@ pub(crate) fn optional_timeout_ms(
     input: &serde_json::Map<String, Value>,
     max_ms: u64,
 ) -> Result<u64, ToolError> {
-    let Some(timeout_ms) = input.get("timeout_ms") else {
+    let Some(timeout_ms) = input.get("timeout_ms").filter(|value| !value.is_null()) else {
         return Ok(DEFAULT_COMMAND_TIMEOUT_MS.min(max_ms));
     };
     let timeout_ms = timeout_ms

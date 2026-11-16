@@ -64,7 +64,7 @@ impl<'a> ListFilesInput<'a> {
             .as_object()
             .ok_or("list_files requires an object input")?;
         let raw_path = match input_object.get("path") {
-            None => ".",
+            None | Some(Value::Null) => ".",
             Some(value) => value
                 .as_str()
                 .ok_or("list_files requires an optional string field: path")?,
