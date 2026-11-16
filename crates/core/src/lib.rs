@@ -1628,7 +1628,7 @@ impl AgentService {
                 }
             };
             if let Err(AgentError::ContextFull(message)) = result {
-                return Err(AgentError::ContextFull(format!("{message} {compacted}")));
+                return Err(AgentError::ContextFull(format!("{message}. {compacted}")));
             }
         }
         let outcome = result?;
