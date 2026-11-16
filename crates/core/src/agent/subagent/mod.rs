@@ -1351,6 +1351,120 @@ mod tests {
         );
     }
 
+    /// Answers the main agent from a script. A subagent searches the path
+    /// its prompt names for "needle", then reports what the search returned.
+    struct SearchingProvider {
+        main: ScriptedProvider,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::providers::Provider for SearchingProvider {
+        fn kind(&self) -> crate::providers::ProviderKind {
+            crate::providers::ProviderKind::Anthropic
+        }
+
+        fn capabilities(&self) -> crate::providers::ProviderCapabilities {
+            crate::providers::ProviderCapabilities {
+                supports_tools: true,
+            }
+        }
+
+        async fn send_message(
+            &self,
+            client: &reqwest::Client,
+            request: &crate::agent::types::AgentMessageRequest<'_>,
+            on_delta: &mut (dyn FnMut(crate::providers::ProviderEvent) + Send),
+        ) -> Result<ProviderResponse, ProviderError> {
+            let value = serde_json::to_value(request)?;
+            if value["system"] == DEFAULT_SYSTEM_PROMPT {
+                return self.main.send_message(client, request, on_delta).await;
+            }
+            let messages = value["messages"].as_array().unwrap();
+            if messages.len() == 1 {
+                return calls(&[(
+                    "search",
+                    "search_text",
+                    json!({"pattern": "needle", "path": messages[0]["content"]}),
+                )]);
+            }
+            let found = last_results(&value)[0]["content"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            Ok(text_provider_response(&found, None))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_tools_of_batched_subagents_run_at_the_same_time() {
+        use std::io::Write;
+        let workspace = make_temp_dir("subagent_concurrent_tools");
+        let pipes = ["a.pipe", "b.pipe"].map(|name| workspace.path().join(name));
+        for pipe in &pipes {
+            let made = std::process::Command::new("mkfifo").arg(pipe).status();
+            assert!(made.unwrap().success());
+        }
+        // Each subagent searches its own pipe. Opening a pipe to write waits
+        // for its reader, so the match is written only once both searches
+        // are running.
+        let writer = std::thread::spawn(move || {
+            let opened =
+                pipes.map(|pipe| std::fs::OpenOptions::new().write(true).open(pipe).unwrap());
+            for mut pipe in opened {
+                let _ = pipe.write_all(b"needle\n");
+            }
+        });
+        let provider = SearchingProvider {
+            main: ScriptedProvider::new(vec![
+                delegate_all(&[explore("agent-a", "a.pipe"), explore("agent-b", "b.pipe")]),
+                text("Both searched."),
+            ]),
+        };
+        let requests = provider.main.recorded_requests.clone();
+        let mut service = AgentService::with_provider(
+            workspace.path().into(),
+            Box::new(provider),
+            "test".into(),
+            1000,
+            reqwest::Client::new(),
+        );
+        let mut seen = Vec::new();
+
+        service
+            .submit_with_progress("Search both".into(), |event| {
+                if let AgentProgress::Activity(activity) = event
+                    && let Some(agent) = activity.agent
+                    && let ActivityKind::ToolStarted { .. } | ActivityKind::ToolFinished { .. } =
+                        activity.kind
+                {
+                    seen.push((agent, std::time::Instant::now()));
+                }
+            })
+            .await
+            .unwrap();
+
+        let results = last_results(&requests.lock().unwrap()[1]);
+        for (result, pipe) in results.iter().zip(["a.pipe", "b.pipe"]) {
+            let report = result["content"].as_str().unwrap();
+            assert!(report.contains(&format!("{pipe}:1:needle")), "{report}");
+        }
+        let span = |agent: &str| {
+            let times = seen
+                .iter()
+                .filter(|(id, _)| id == agent)
+                .map(|(_, at)| *at)
+                .collect::<Vec<_>>();
+            assert_eq!(times.len(), 2, "one search by {agent}");
+            (times[0], times[1])
+        };
+        let (a, b) = (span("agent-a"), span("agent-b"));
+        assert!(
+            a.0 < b.1 && b.0 < a.1,
+            "the searches ran one after the other"
+        );
+        writer.join().unwrap();
+    }
+
     #[test]
     fn long_reports_are_cut_on_a_character_boundary() {
         let report = "é".repeat(super::MAX_SUBAGENT_REPORT_CHARACTERS + 5);

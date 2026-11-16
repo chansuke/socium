@@ -10,7 +10,7 @@ use crate::error::AgentError;
 use crate::providers::{Provider, ProviderEvent, TokenUsage};
 use crate::tools::ToolDefinition;
 use crate::tools::error::ToolError;
-use crate::tools::run_tool_call_checkpointed;
+use crate::tools::run_tool_call_on_blocking_thread;
 use serde_json::Value;
 use std::future::Future;
 use std::path::Path;
@@ -518,7 +518,7 @@ where
                     Err(err) => tool_error(id, err),
                 }
             } else {
-                run_tool_call_checkpointed(
+                run_tool_call_on_blocking_thread(
                     ctx.workspace_root,
                     &id,
                     &name,
@@ -536,6 +536,7 @@ where
                         )
                     },
                 )
+                .await
             };
             let failed = matches!(
                 result,

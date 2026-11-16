@@ -282,7 +282,8 @@ what it adds.
   so a simple search can go to a smaller model. Subagents cannot start
   subagents, and the main agent waits for them. New subagents of types that
   cannot change the workspace (such as `explorer`), called one after another
-  in the same response, run at the same time; others run one at a time. Their steps
+  in the same response, run at the same time, tool calls included; others
+  run one at a time. Their steps
   appear in the Activity pane under the `agent` call, marked with `│`. Each
   subagent's conversation is saved in `.socium/agents/<id>.json` before each
   of its tool calls; the model can continue a subagent with everything it
