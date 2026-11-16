@@ -366,7 +366,7 @@ where
                 for (index, report) in join_all(runs).await {
                     outcomes[index] = Some(report);
                 }
-                for ((id, name, _), outcome) in batch_calls.iter().zip(outcomes) {
+                for ((id, name, input), outcome) in batch_calls.iter().zip(outcomes) {
                     let result = match outcome.expect("every call in the batch has an outcome") {
                         Ok(content) => ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
@@ -382,6 +382,16 @@ where
                             ..
                         }
                     );
+                    if let ContentBlock::ToolResult { content, .. } = &result {
+                        on_progress(AgentProgress::ToolCallRecorded(
+                            crate::transcript::tool_entry(
+                                name,
+                                input,
+                                Some((content, failed)),
+                                false,
+                            ),
+                        ));
+                    }
                     results.push(bounded(result));
                     *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
                     checkpoint(messages,serde_json::json!({"type":"tool_finished","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"is_error":failed,"result_index":results.len()-1})).map_err(|e|std::io::Error::other(format!("Tool finished but its result could not be saved; outcome may be unknown after restart: {e}")))?;
