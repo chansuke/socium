@@ -263,6 +263,9 @@ pub enum AgentProgress {
         command: String,
         exit_code: Option<i32>,
         timed_out: bool,
+        /// Whether either stream was cut in the result; the saved
+        /// artifacts hold what was left out.
+        truncated: bool,
         stdout_preview: String,
         stderr_preview: String,
     },

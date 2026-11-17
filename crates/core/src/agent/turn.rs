@@ -372,6 +372,7 @@ where
                                         is_error,
                                         elapsed_ms: elapsed_ms(started),
                                         summary: summarize_tool_result(&content),
+                                        truncated: exceeds_result_limit(&content),
                                     },
                                 )));
                                 (index, report)
@@ -455,6 +456,7 @@ where
             );
             let mut approval_started = None;
             let mut approved = false;
+            let mut streams_cut = false;
             let mut tool_progress = |event: AgentProgress| {
                 let kind = match &event {
                     AgentProgress::ApprovalRequested { tool, .. } => {
@@ -473,6 +475,10 @@ where
                             approved: *allowed,
                             waited_ms: approval_started.take().map_or(0, elapsed_ms),
                         })
+                    }
+                    AgentProgress::CommandFinished { truncated, .. } => {
+                        streams_cut |= *truncated;
+                        None
                     }
                     AgentProgress::CommandOutput {
                         stdout_bytes,
@@ -603,6 +609,7 @@ where
                         is_error: failed,
                         elapsed_ms: elapsed_ms(tool_started),
                         summary: summarize_tool_result(content),
+                        truncated: streams_cut || exceeds_result_limit(content),
                     },
                 );
             }
@@ -689,6 +696,11 @@ async fn next_finished<'a, T>(
         Poll::Pending
     })
     .await
+}
+
+/// Whether `bounded` will cut `content`.
+fn exceeds_result_limit(content: &str) -> bool {
+    content.chars().count() > crate::constants::MAX_TOOL_RESULT_CHARACTERS
 }
 
 /// One result keeps at most `MAX_TOOL_RESULT_CHARACTERS`, its head and
