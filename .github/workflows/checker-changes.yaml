@@ -1,0 +1,39 @@
+# A pull request runs the workflows it contains, so it can change the checks
+# that judge it. This job runs from the base branch (pull_request_target),
+# never checks out the pull request, and fails when the pull request edits
+# a check, so that a maintainer reviews that edit on purpose.
+name: Checker changes
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+permissions:
+  pull-requests: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  check:
+    name: Changes to checks need review
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: List edited checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          changed=$(gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" --jq '.[].filename')
+          checks=$(grep -E '^(\.github/|\.pre-commit-config\.yaml$|adrs\.toml$|flake\.nix$)' <<<"$changed" || true)
+          if [[ -n $checks ]]; then
+            echo "This pull request changes files that define its own checks:"
+            echo "$checks"
+            echo "::error::Review the changes to the checks above before merging."
+            exit 1
+          fi
