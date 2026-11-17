@@ -487,6 +487,17 @@ impl ActivityModel {
             ActivityKind::Warning { message } => {
                 self.push(turn_id, round, agent, ItemKind::Note(message));
             }
+            // The Timeline shows the plan; the `update_plan` call is a
+            // tool item already.
+            ActivityKind::PlanUpdated { .. } => {}
+            ActivityKind::PlanNudged { rounds } => self.push(
+                turn_id,
+                round,
+                agent,
+                ItemKind::Signal(format!(
+                    "Plan not updated for {rounds} rounds; the agent was reminded"
+                )),
+            ),
             ActivityKind::TurnFinished { ok, error } => {
                 if let Some(Item {
                     kind: ItemKind::Turn { outcome, .. },

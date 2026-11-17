@@ -283,7 +283,7 @@ features = ["effort"]
             Message::user_text("read it".into()),
             Message::assistant_blocks(vec![
                 ContentBlock::Thinking {
-                    thinking: "plan".into(),
+                    thinking: "private reasoning".into(),
                     signature: "sig".into(),
                 },
                 ContentBlock::Text {
@@ -357,7 +357,7 @@ features = ["effort"]
             sent[3],
             json!({"role": "tool", "tool_call_id": "toolu_1", "content": "Error: missing"})
         );
-        assert!(!body.to_string().contains("plan"));
+        assert!(!body.to_string().contains("private reasoning"));
         assert!(body.get("tools").is_none());
         assert!(body.get("reasoning_effort").is_none());
     }
