@@ -43,6 +43,8 @@ pub(crate) struct App {
     pub(crate) context_metrics: ContextMetrics,
     /// Tokens this conversation used, and their cost when priced.
     pub(crate) session_usage: (TokenUsage, Option<f64>),
+    /// Calls that reported no usage, so the totals are at least what shows.
+    pub(crate) unreported_calls: usize,
     pub(crate) last_latency_ms: Option<u128>,
     pub(crate) pending_task: Option<PendingTask>,
     pub(crate) approval: Option<ApprovalPrompt>,
@@ -95,6 +97,7 @@ impl App {
             commands_run_without_asking,
             context_metrics: ContextMetrics::default(),
             session_usage: Default::default(),
+            unreported_calls: 0,
             last_latency_ms: None,
             pending_task: None,
             approval: None,
@@ -169,6 +172,7 @@ impl App {
             commands_run_without_asking: false,
             context_metrics: Default::default(),
             session_usage: Default::default(),
+            unreported_calls: 0,
             last_latency_ms: None,
             pending_task: None,
             approval: None,
@@ -866,6 +870,7 @@ impl App {
         }
         if let Some(agent) = self.agent.as_ref() {
             self.session_usage = agent.session_usage();
+            self.unreported_calls = agent.unreported_model_calls();
         }
     }
 }

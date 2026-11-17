@@ -88,6 +88,7 @@ pub(crate) async fn run(
         })
         .await;
     let (usage, cost) = agent.session_usage();
+    let unreported_calls = agent.unreported_model_calls();
     let (fields, status) = match &result {
         Ok(reply) => (
             json!({"ok": true, "text": reply.text, "notices": reply.notices}),
@@ -106,6 +107,8 @@ pub(crate) async fn run(
     finished["session"] = json!(agent.session_id());
     finished["usage"] = json!(usage);
     finished["cost_usd"] = json!(cost);
+    // Calls that reported no usage: `usage` and `cost_usd` are then lower bounds.
+    finished["unreported_calls"] = json!(unreported_calls);
     // The plan the session's `update_plan` calls left; null without one.
     finished["plan"] = json!(agent.plan());
     emit(finished);
