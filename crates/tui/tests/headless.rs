@@ -280,3 +280,42 @@ fn a_plan_the_model_records_reaches_the_activity_lines_and_the_result() {
     let finished = records.last().unwrap();
     assert_eq!(finished["plan"], updated["event"]["plan"]);
 }
+
+/// The directory of `program` on the test's PATH, resolved to the store
+/// path the sandbox accepts.
+fn program_on_path(program: &str) -> std::path::PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join(program))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("{program} is not on PATH"))
+        .canonicalize()
+        .unwrap()
+}
+
+#[test]
+fn a_missing_ripgrep_is_named_at_startup() {
+    let (port, _) = serve(vec![text_reply("hi")]);
+    let fixture = fixture(port);
+    let bin = fixture.root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // Only bwrap and git, linked from their store directories; no rg.
+    let dirs =
+        ["bwrap", "git"].map(|program| program_on_path(program).parent().unwrap().to_path_buf());
+    let output = command(&fixture, &["-p", "hi"])
+        .env("PATH", std::env::join_paths(dirs).unwrap())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    // The sandbox also looks in /usr/bin and /bin, whatever PATH says, so
+    // a host that installed rg there still finds it.
+    let in_system = ["/usr/bin/rg", "/bin/rg"]
+        .iter()
+        .any(|path| std::path::Path::new(path).exists());
+    assert_eq!(
+        stderr.contains("ripgrep (rg) is not installed"),
+        !in_system,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("git is not installed"), "{stderr}");
+}
