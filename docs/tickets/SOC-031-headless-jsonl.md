@@ -55,7 +55,11 @@
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 完了として整理。
+
+- `socium -p` が TUI なしで一つの turn を実行し、stdout には版付きの JSON Lines だけを出し、診断は stderr に出す（ADR 17）。
+- 承認が要る呼び出しは拒否し、モデルに理由を返す。SIGINT で中断しても `finished` を出して 130 で終わる。
+- activity の記録は TUI と同じ `ActivityEvent`。試験は `crates/tui/tests/headless.rs`。
 
 [一覧へ戻る](README.md)
 
