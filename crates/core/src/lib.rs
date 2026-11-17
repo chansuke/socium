@@ -838,10 +838,7 @@ impl AgentService {
     fn model_choice(&self, model: &ModelConfig) -> ModelChoice {
         let unavailable = match self.registry.provider(&model.provider) {
             None => Some(format!("unknown provider '{}'", model.provider)),
-            Some(provider) => (self.env)(&provider.api_key_env)
-                .filter(|key| !key.is_empty())
-                .is_none()
-                .then(|| format!("{} is not set", provider.api_key_env)),
+            Some(provider) => provider.api_key(&*self.env).err(),
         };
         ModelChoice {
             alias: model.alias.clone(),

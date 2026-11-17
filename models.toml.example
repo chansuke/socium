@@ -100,19 +100,18 @@ max_output_tokens = 32000
 #     no prices, so without this field no cost is shown.
 #
 # A local server (http is allowed only on localhost), such as Ollama's
-# OpenAI-compatible API, which ignores the key:
+# OpenAI-compatible API. One that takes no key needs no api_key_env, and
+# its requests carry no key header; add api_key_env when it asks for one:
 #
 # [providers.local]
 # wire = "openai-chat"
 # base_url = "http://localhost:11434/v1"
-# api_key_env = "LOCAL_API_KEY"
 #
 # or one speaking the Anthropic Messages format:
 #
 # [providers.local]
 # wire = "anthropic"
 # base_url = "http://localhost:11434"
-# api_key_env = "LOCAL_API_KEY"
 
 # GPT-6 Astra, OpenAI's flagship for coding as of 2026-11-13 (the GPT-5
 # family is no longer listed). "effort" marks it as a reasoning model.
