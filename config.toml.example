@@ -59,3 +59,9 @@ deny = [
 # Paths whose reads always ask, because what a tool reads is sent to the
 # model provider. Setting this replaces the built-in list.
 # sensitive = [".env", ".env.*", "!.env.example", "*.pem", "*.key"]
+
+[web_search]
+# The web_search tool sends the model's queries to DeepSeek's paid Search
+# API with the key in DEEPSEEK_API_KEY; each search with results is billed.
+# Off unless set to true.
+enabled = false

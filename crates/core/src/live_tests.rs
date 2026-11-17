@@ -306,3 +306,23 @@ async fn live_main_agent_delegates_to_an_explorer() {
     assert_eq!(runs[0].status, crate::SubagentStatus::Finished);
     println!("subagent tools: {subagent_tools:?}\nreply: {}", reply.text);
 }
+
+/// One real search, billed to `DEEPSEEK_API_KEY`.
+#[tokio::test]
+#[ignore = "sends a paid request to DeepSeek's Search API"]
+async fn live_web_search() {
+    let lookup = |key: &str| env::var(key).ok();
+    let settings = crate::settings::WebSearchSettings {
+        base_url: crate::settings::DEEPSEEK_SEARCH_BASE_URL.into(),
+    };
+    let search = crate::tools::web_search::WebSearch::new(&settings, &lookup).unwrap();
+    let text = search
+        .run(
+            &crate::provider_http_client().unwrap(),
+            &crate::TaskControl::default(),
+            &serde_json::json!({"query": "Rust programming language site:rust-lang.org", "count": 3}),
+        )
+        .await
+        .unwrap();
+    assert!(text.contains("https://"), "{text}");
+}

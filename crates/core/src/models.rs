@@ -472,7 +472,7 @@ fn check_key_variable(variable: &str) -> Result<(), String> {
 
 /// The normalized URL and whether it is on this machine. Keys travel to
 /// this URL, so plain HTTP is allowed only on loopback.
-fn parse_base_url(raw: &str) -> Result<(String, bool), String> {
+pub(crate) fn parse_base_url(raw: &str) -> Result<(String, bool), String> {
     let url = reqwest::Url::parse(raw).map_err(|err| format!("invalid base_url '{raw}': {err}"))?;
     let loopback = url.host_str().is_some_and(|host| {
         host == "localhost"
