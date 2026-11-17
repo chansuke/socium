@@ -33,20 +33,43 @@ pub(crate) fn command_output_preview_lines(
         },
     ];
 
-    lines.push("stdout:".to_string());
-    lines.extend(wrap_multiline(
-        &output.stdout_preview,
-        wrap_width,
-        wrap_width,
-    ));
-    lines.push("stderr:".to_string());
-    lines.extend(wrap_multiline(
-        &output.stderr_preview,
-        wrap_width,
-        wrap_width,
-    ));
-
+    // A failure leads with stderr, where the reason usually is. Each stream
+    // gets half the room it can use and keeps its end, so a long stdout can
+    // no longer push stderr out of view.
+    let failed = output.timed_out || output.exit_code != Some(0);
+    let stdout = wrap_multiline(&output.stdout_preview, wrap_width, wrap_width);
+    let stderr = wrap_multiline(&output.stderr_preview, wrap_width, wrap_width);
+    let mut streams = [("stdout:", stdout), ("stderr:", stderr)];
+    if failed {
+        streams.reverse();
+    }
+    let room = max_lines.saturating_sub(lines.len());
+    // A label line per stream, then the bodies share what is left.
+    let body_room = room.saturating_sub(streams.len());
+    let wanted = streams.each_ref().map(|(_, body)| body.len());
+    let half = body_room / 2;
+    let first = wanted[0].min(body_room.saturating_sub(wanted[1].min(half)));
+    let second = wanted[1].min(body_room - first);
+    for ((label, body), keep) in streams.into_iter().zip([first, second]) {
+        lines.push(label.to_string());
+        lines.extend(tail_lines(body, keep));
+    }
     lines.into_iter().take(max_lines).collect()
+}
+
+/// The last `keep` lines of `body`; when lines are left out, the first
+/// kept line says how many.
+fn tail_lines(body: Vec<String>, keep: usize) -> Vec<String> {
+    if body.len() <= keep {
+        return body;
+    }
+    if keep == 0 {
+        return Vec::new();
+    }
+    let hidden = body.len() - keep + 1;
+    let mut kept = vec![format!("… {hidden} lines above")];
+    kept.extend(body.into_iter().skip(hidden));
+    kept
 }
 
 pub(crate) fn help_text() -> String {
@@ -346,6 +369,43 @@ mod tests {
         assert!(help.contains("/clear"));
         assert!(help.contains("/exit"));
         assert!(help.contains("/commands"));
+    }
+
+    #[test]
+    fn a_failure_shows_stderr_and_the_end_of_a_long_stdout() {
+        let output = CommandOutputState {
+            command: "cargo test".to_string(),
+            exit_code: Some(101),
+            timed_out: false,
+            stdout_preview: (1..=60)
+                .map(|n| format!("test case_{n} ... ok"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            stderr_preview: "error: test failed, to rerun pass `--lib`".to_string(),
+        };
+
+        let lines = command_output_preview_lines(&output, 60, 12);
+
+        assert!(lines.len() <= 12);
+        assert!(
+            lines.iter().any(|line| line.contains("error: test failed")),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("case_60")),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("lines above")),
+            "{lines:#?}"
+        );
+        // A failure leads with what went wrong.
+        let stderr = lines.iter().position(|line| line == "stderr:").unwrap();
+        let stdout = lines
+            .iter()
+            .position(|line| line.starts_with("stdout"))
+            .unwrap();
+        assert!(stderr < stdout, "{lines:#?}");
     }
 
     #[test]

@@ -56,7 +56,10 @@
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 一部（branch `fix/command-output-stderr`）。
+
+- Activity で展開したコマンド出力が stdout を全部並べた後に stderr を置き、行数で切っていたため、長い stdout の後の stderr が見えなかった。失敗時は stderr を先に出し、二つの stream が行数を分け合い、それぞれ末尾を残して「… N lines above」と示すようにした。試験 `a_failure_shows_stderr_and_the_end_of_a_long_stdout`（修正前に失敗を確認）。
+- 残り: 80×24 での header・Activity の高さ調整の再評価、表示 model と状態が core のイベントと一致することの確認。
 
 [一覧へ戻る](README.md)
 
