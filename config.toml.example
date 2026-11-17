@@ -53,6 +53,7 @@ deny = [
 # Paths whose edits always ask, because a host tool runs or loads them on
 # its own (direnv, rust-analyzer, CI, editors). Setting this replaces the
 # built-in list; patterns follow .gitignore rules and the last match wins.
+# A leading `/` or `./` anchors a pattern at the workspace root.
 # protected = ["build.rs", ".envrc", ".github/workflows/**", "!docs/**"]
 
 # Paths whose reads always ask, because what a tool reads is sent to the
