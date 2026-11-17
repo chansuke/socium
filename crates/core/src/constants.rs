@@ -82,6 +82,11 @@ Sandbox: commands run in a Linux sandbox without network access and without the 
 
 Approval: commands may wait for the user's approval, and commits, edits to files the host runs (build scripts, CI, editor and environment settings), and reads of secret files always do. If the user denies a call, do not retry it; ask, or take another approach.";
 
+/// Heads what the user typed while a turn ran, added after a round's tool
+/// results; the transcript shows only the words after it.
+pub const USER_STEERING_PREFIX: &str =
+    "The user added this while you were working; take it into account from here:\n";
+
 // The plan the main agent keeps with `update_plan` (see `crate::plan`).
 pub const PLAN_TOOL_NAME: &str = "update_plan";
 /// Tool rounds without a plan update before the main agent is reminded,

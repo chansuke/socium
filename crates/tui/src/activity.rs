@@ -503,6 +503,12 @@ impl ActivityModel {
             // The Timeline shows the plan; the `update_plan` call is a
             // tool item already.
             ActivityKind::PlanUpdated { .. } => {}
+            ActivityKind::UserSteered { text } => self.push(
+                turn_id,
+                round,
+                agent,
+                ItemKind::Note(format!("You added: {text}")),
+            ),
             ActivityKind::PlanNudged { rounds } => self.push(
                 turn_id,
                 round,

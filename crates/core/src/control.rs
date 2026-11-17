@@ -22,6 +22,9 @@ struct ControlState {
     approval: Mutex<Option<(u64, Option<ApprovalAnswer>)>>,
     /// What the user allowed for the session; kept across turns.
     grants: Mutex<Vec<Grant>>,
+    /// What the user typed while a turn ran, oldest first, until the turn
+    /// takes it at its next step.
+    steering: Mutex<Vec<String>>,
 }
 
 /// Per-task cancellation and human approval. Model arguments never grant
@@ -35,6 +38,20 @@ impl TaskControl {
     }
     pub fn is_cancelled(&self) -> bool {
         self.0.cancelled.load(Ordering::Acquire)
+    }
+    /// Hands the running turn something the user added. The main agent
+    /// reads it after its current tools finish, before its next request;
+    /// what is left when the turn ends stays here for `take_steering`.
+    pub fn steer(&self, text: String) {
+        self.0
+            .steering
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(text);
+    }
+    /// Everything added and not yet taken, oldest first, emptying the queue.
+    pub fn take_steering(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.steering.lock().unwrap_or_else(|e| e.into_inner()))
     }
     pub fn enable_interactive_approval(&self) {
         self.0.interactive.store(true, Ordering::Release);
