@@ -340,7 +340,11 @@ fn restrictions(
         if let Some(dir) = pattern.strip_suffix("/**")
             && !pattern.starts_with('!')
         {
-            let dir = dir.strip_prefix("**/").unwrap_or(dir);
+            // A rooted `/dir/**` names a workspace directory, not a host one.
+            let dir = dir
+                .strip_prefix("**/")
+                .unwrap_or(dir)
+                .trim_start_matches('/');
             if !dir.contains('*')
                 && root.join(dir).is_dir()
                 && !frozen_dirs.iter().any(|known| known == dir)
@@ -646,5 +650,48 @@ mod tests {
         let mut frozen = names(&restrictions.frozen);
         frozen.sort();
         assert_eq!(frozen, [".github/workflows", ".vscode", "build.rs"]);
+    }
+
+    #[test]
+    fn patterns_written_from_the_root_with_dot_slash_still_protect() {
+        let root = tempfile::tempdir().unwrap();
+        for file in ["scripts/deploy.sh", "sub/scripts/deploy.sh", "tools/run"] {
+            let path = root.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        // An empty directory is frozen from the pattern alone.
+        std::fs::create_dir(root.path().join("hooks")).unwrap();
+        let (settings, _) = Settings::from_toml(
+            "[approval]\nprotected = [\"./scripts/deploy.sh\", \"./tools/**\", \"./hooks/**\"]",
+            None,
+        )
+        .unwrap();
+        let edit = |path: &str| {
+            decide(
+                root.path(),
+                &settings,
+                crate::constants::TEXT_EDITOR_TOOL_NAME,
+                json!({"command": "create", "path": path, "file_text": "y"}),
+            )
+        };
+        assert!(matches!(edit("scripts/deploy.sh"), Gate::Ask(_)));
+        assert!(matches!(edit("tools/new"), Gate::Ask(_)));
+        assert!(matches!(edit("sub/scripts/deploy.sh"), Gate::Run(None)));
+        let restrictions = restrictions(root.path(), &settings.approval).unwrap();
+        let mut frozen = restrictions
+            .frozen
+            .iter()
+            .map(|path| path.strip_prefix(root.path()).unwrap().to_path_buf())
+            .collect::<Vec<_>>();
+        frozen.sort();
+        assert_eq!(
+            frozen,
+            [
+                PathBuf::from("hooks"),
+                PathBuf::from("scripts/deploy.sh"),
+                PathBuf::from("tools")
+            ]
+        );
     }
 }
