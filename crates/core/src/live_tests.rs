@@ -31,7 +31,7 @@ fn live_target() -> (ModelConfig, Box<dyn Provider>) {
 async fn ask(prompt: &str) -> (ModelConfig, ProviderResponse) {
     let (model, provider) = live_target();
     let messages = [Message::user_text(prompt.to_string())];
-    let tools = tools_for_model(model.features.anthropic_text_editor);
+    let tools = tools_for_model();
     let max_tokens = model
         .max_output_tokens
         .unwrap_or(LIVE_MAX_TOKENS)
@@ -102,7 +102,7 @@ async fn live_tool_result_round_trip_completes_the_turn() {
     // A prompt that needs reasoning before the call, so reasoning models
     // produce reasoning that the second request must carry back.
     let (model, provider) = live_target();
-    let tools = tools_for_model(model.features.anthropic_text_editor);
+    let tools = tools_for_model();
     let mut messages = vec![Message::user_text(
         "Let n be the number of primes between 1000 and 1100. Work it out carefully, then \
          call read_file with the path \"notes/n<n>.md\" (for example notes/n3.md). Call the \
@@ -169,7 +169,7 @@ async fn live_tool_result_round_trip_completes_the_turn() {
 async fn live_request_after_a_summary_is_accepted() {
     use crate::agent::state::{ConversationSummary, ConversationSummaryState};
     let (model, provider) = live_target();
-    let tools = tools_for_model(model.features.anthropic_text_editor);
+    let tools = tools_for_model();
     let client = crate::provider_http_client().unwrap();
     let mut ignore = |_| {};
     let mut messages = vec![Message::user_text(

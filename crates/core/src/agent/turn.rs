@@ -848,7 +848,7 @@ mod tests {
         let workspace = make_temp_dir("batch");
         let provider = ScriptedProvider::new(Vec::new());
         let client = reqwest::Client::new();
-        let tools = crate::tools::tools_for_model(true);
+        let tools = crate::tools::tools_for_model();
         let subagents = SubagentCatalog::builtin();
         let control = crate::TaskControl::default();
         let ctx = TurnContext {

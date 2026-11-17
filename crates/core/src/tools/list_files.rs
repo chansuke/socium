@@ -4,7 +4,7 @@ use crate::tools::error::ToolError;
 use crate::tools::input::{optional_bool_field, optional_string_field};
 use crate::tools::ripgrep::glob_matches;
 use crate::tools::workspace::resolve_workspace_path;
-use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
@@ -17,7 +17,7 @@ impl Tool for ListFilesTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::Custom(CustomToolDefinition {
+        ToolDefinition {
             name: "list_files".to_string(),
             description: "List files and directories at a given path. With recursive, lists the files beneath it as ripgrep sees them: ignored files (.gitignore, .ignore) and .git are left out. Supports file glob filtering for repo navigation."
                 .to_string(),
@@ -39,7 +39,7 @@ impl Tool for ListFilesTool {
                 },
                 "additionalProperties": false
             }),
-        })
+        }
     }
 
     fn run(

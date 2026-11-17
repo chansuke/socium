@@ -4,7 +4,7 @@ use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_object_input, require_string_field,
 };
 use crate::tools::workspace::resolve_workspace_path;
-use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -16,7 +16,7 @@ impl Tool for GitBranchTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::Custom(CustomToolDefinition {
+        ToolDefinition {
             name: "git_branch".to_string(),
             description: "Show the current Git branch for the workspace repository.".to_string(),
             input_schema: json!({
@@ -24,7 +24,7 @@ impl Tool for GitBranchTool {
                 "properties": {},
                 "additionalProperties": false
             }),
-        })
+        }
     }
 
     fn run(
@@ -45,7 +45,7 @@ impl Tool for GitStatusTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::Custom(CustomToolDefinition {
+        ToolDefinition {
             name: "git_status".to_string(),
             description:
                 "Show Git status for the workspace repository, including branch and dirty files."
@@ -60,7 +60,7 @@ impl Tool for GitStatusTool {
                 },
                 "additionalProperties": false
             }),
-        })
+        }
     }
 
     fn run(
@@ -81,7 +81,7 @@ impl Tool for GitDiffTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::Custom(CustomToolDefinition {
+        ToolDefinition {
             name: "git_diff".to_string(),
             description:
                 "Show the current Git diff for the workspace repository or an optional relative path."
@@ -96,7 +96,7 @@ impl Tool for GitDiffTool {
                 },
                 "additionalProperties": false
             }),
-        })
+        }
     }
 
     fn run(
@@ -117,7 +117,7 @@ impl Tool for GitLogTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::Custom(CustomToolDefinition {
+        ToolDefinition {
             name: "git_log".to_string(),
             description: "Show recent Git commit history for the workspace repository.".to_string(),
             input_schema: json!({
@@ -130,7 +130,7 @@ impl Tool for GitLogTool {
                 },
                 "additionalProperties": false
             }),
-        })
+        }
     }
 
     fn run(
@@ -151,7 +151,7 @@ impl Tool for GitCommitTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::Custom(CustomToolDefinition {
+        ToolDefinition {
             name: "git_commit".to_string(),
             description: "Commit staged changes by default, or only explicitly listed tracked files, after human approval. Unrelated staged, unstaged and untracked changes are preserved. Files already staged are rejected to protect partial staging."
                 .to_string(),
@@ -167,7 +167,7 @@ impl Tool for GitCommitTool {
                 "required": ["message"],
                 "additionalProperties": false
             }),
-        })
+        }
     }
 
     fn run(

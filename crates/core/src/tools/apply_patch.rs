@@ -7,7 +7,7 @@ use crate::tools::text_file::{read_utf8_file_and_mode, read_utf8_file_with_limit
 use crate::tools::workspace::{
     resolve_workspace_mutation_path, resolve_workspace_path, resolve_workspace_path_for_create,
 };
-use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
 #[cfg(test)]
 use std::fs;
@@ -21,7 +21,7 @@ impl Tool for ApplyPatchTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::Custom(CustomToolDefinition {
+        ToolDefinition {
             name: "apply_patch".to_string(),
             description: "Apply a structured patch with add, delete, or multi-hunk update operations inside the workspace. The result shows the unified diff of what changed."
                 .to_string(),
@@ -40,7 +40,7 @@ impl Tool for ApplyPatchTool {
                 "required": ["patch"],
                 "additionalProperties": false
             }),
-        })
+        }
     }
 
     fn run(

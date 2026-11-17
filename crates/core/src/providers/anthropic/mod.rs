@@ -85,6 +85,9 @@ impl AnthropicProvider {
     ) -> Result<reqwest::RequestBuilder, ProviderError> {
         let mut body = serde_json::to_value(request)?;
         body["stream"] = Value::Bool(true);
+        if self.features.anthropic_text_editor {
+            native_text_editor(&mut body);
+        }
         self.options.apply(&mut body, self.features);
         let mut http_request = client
             .post(&self.messages_url)
@@ -185,6 +188,23 @@ impl Provider for AnthropicProvider {
     }
 }
 
+/// Swaps the text editor's schema form for Anthropic's built-in tool of
+/// the same name and input, which models with the feature are trained on.
+fn native_text_editor(body: &mut Value) {
+    let Some(tools) = body["tools"].as_array_mut() else {
+        return;
+    };
+    for tool in tools {
+        if tool["name"] == crate::constants::TEXT_EDITOR_TOOL_NAME {
+            *tool = serde_json::json!({
+                "type": "text_editor_20250728",
+                "name": crate::constants::TEXT_EDITOR_TOOL_NAME,
+                "max_characters": crate::constants::MAX_TEXT_EDITOR_VIEW_CHARACTERS,
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,7 +221,7 @@ mod tests {
         )
         .unwrap();
         let messages = [Message::user_text("hi".into())];
-        let tools = tools_for_model(model.features.anthropic_text_editor);
+        let tools = tools_for_model();
         let request = AgentMessageRequest::new(&model.id, 100, &messages, &tools);
         provider
             .build_request(&reqwest::Client::new(), &request)

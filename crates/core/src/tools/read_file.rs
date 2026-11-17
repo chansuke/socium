@@ -3,7 +3,7 @@ use crate::constants::*;
 use crate::tools::error::ToolError;
 use crate::tools::text_file::read_utf8_file_with_limit;
 use crate::tools::workspace::resolve_workspace_path;
-use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
@@ -16,7 +16,7 @@ impl Tool for ReadFileTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::Custom(CustomToolDefinition {
+        ToolDefinition {
             name: "read_file".to_string(),
             description: format!(
                 "Read a UTF-8 text file from the current workspace by relative path. Lines come numbered like `cat -n` (line number, tab, text); cite them as path:line. Returns up to {READ_FILE_DEFAULT_LINES} lines from offset; a longer file says where to continue."
@@ -42,7 +42,7 @@ impl Tool for ReadFileTool {
                 "required": ["path"],
                 "additionalProperties": false
             }),
-        })
+        }
     }
 
     fn run(
