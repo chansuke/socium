@@ -558,4 +558,129 @@ mod tests {
         let loaded = load_json_file::<InputHistoryState>(&path).unwrap();
         assert_eq!(loaded.entries, state.entries);
     }
+
+    mod properties {
+        use super::super::*;
+        use crate::agent::types::{ContentBlock, Message, MessageContent, Origin, Role};
+        use crate::test_support::make_temp_dir;
+        use proptest::prelude::*;
+        use serde_json::Value;
+
+        fn text() -> impl Strategy<Value = String> {
+            "\\PC{0,12}"
+        }
+
+        /// Tool input as a model sends it. Floats are left out: serde_json
+        /// may parse one back a unit in the last place off, which no tool
+        /// depends on.
+        fn tool_input() -> impl Strategy<Value = Value> {
+            let leaf = prop_oneof![
+                Just(Value::Null),
+                any::<bool>().prop_map(Value::from),
+                any::<i64>().prop_map(Value::from),
+                any::<u64>().prop_map(Value::from),
+                text().prop_map(Value::from),
+            ];
+            leaf.prop_recursive(3, 16, 4, |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..4).prop_map(Value::from),
+                    prop::collection::btree_map(text(), inner, 0..4)
+                        .prop_map(|map| Value::Object(map.into_iter().collect())),
+                ]
+            })
+        }
+
+        fn block() -> impl Strategy<Value = ContentBlock> {
+            prop_oneof![
+                text().prop_map(|text| ContentBlock::Text { text }),
+                (text(), text()).prop_map(|(thinking, signature)| ContentBlock::Thinking {
+                    thinking,
+                    signature
+                }),
+                text().prop_map(|data| ContentBlock::RedactedThinking { data }),
+                (text(), text(), tool_input())
+                    .prop_map(|(id, name, input)| ContentBlock::ToolUse { id, name, input }),
+                (text(), text(), prop::option::of(any::<bool>())).prop_map(
+                    |(tool_use_id, content, is_error)| {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        }
+                    }
+                ),
+            ]
+        }
+
+        fn message() -> impl Strategy<Value = Message> {
+            let role = prop_oneof![Just(Role::User), Just(Role::Assistant)];
+            let content = prop_oneof![
+                text().prop_map(MessageContent::Text),
+                prop::collection::vec(block(), 0..4).prop_map(MessageContent::Blocks),
+            ];
+            let origin = prop::option::of(
+                (text(), text()).prop_map(|(provider, model)| Origin { provider, model }),
+            );
+            (role, content, origin).prop_map(|(role, content, origin)| Message {
+                role,
+                content,
+                origin,
+            })
+        }
+
+        fn summary() -> impl Strategy<Value = ConversationSummaryState> {
+            prop::option::of(
+                (
+                    any::<usize>(),
+                    text(),
+                    prop::option::of(any::<usize>()),
+                    prop::option::of(text()),
+                )
+                    .prop_map(
+                        |(covered_messages, text, thinking_valid_from, first_request)| {
+                            ConversationSummary {
+                                covered_messages,
+                                text,
+                                thinking_valid_from,
+                                first_request,
+                            }
+                        },
+                    ),
+            )
+            .prop_map(|summary| ConversationSummaryState { summary })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// What a save writes, a resume reads back unchanged: the saving and loading types must not drift apart.
+            #[test]
+            fn a_saved_conversation_loads_back_unchanged(
+                messages in prop::collection::vec(message(), 0..5),
+                events in prop::collection::vec(tool_input(), 0..3),
+                summary_state in summary(),
+                active_model in prop::option::of(text()),
+                name in prop::option::of(text()),
+            ) {
+                let temp = make_temp_dir("round-trip");
+                let path = temp.path().join("conversation.json");
+                let saved = ConversationStateRef {
+                    schema_version: 1,
+                    messages: &messages,
+                    events: &events,
+                    summary_state: &summary_state,
+                    active_model: active_model.as_deref(),
+                    name: name.as_deref(),
+                };
+                save_json_file(&path, &saved).unwrap();
+                let loaded = load_json_file::<ConversationState>(&path).unwrap();
+                prop_assert_eq!(loaded.schema_version, 1);
+                prop_assert_eq!(&loaded.messages, &messages);
+                prop_assert_eq!(&loaded.events, &events);
+                prop_assert_eq!(loaded.summary_state.as_ref(), Some(&summary_state));
+                prop_assert_eq!(&loaded.active_model, &active_model);
+                prop_assert_eq!(&loaded.name, &name);
+            }
+        }
+    }
 }
