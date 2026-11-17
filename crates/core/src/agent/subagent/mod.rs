@@ -357,10 +357,7 @@ async fn compact_record(
     if let Some(message) = compaction.fallback_reason.clone() {
         emit(ActivityKind::Warning { message });
     }
-    emit(ActivityKind::CompactionFinished {
-        covered_messages: compaction.covered_messages,
-        used_llm: compaction.fallback_reason.is_none(),
-    });
+    emit(compaction.finished_event());
     record.summary_state = compaction.summary_state;
     Ok(())
 }
@@ -1547,11 +1544,14 @@ mod tests {
             activity
                 .iter()
                 .any(|event| event.agent.as_deref() == Some("agent-1")
-                    && event.kind
-                        == ActivityKind::CompactionFinished {
+                    && matches!(
+                        event.kind,
+                        ActivityKind::CompactionFinished {
                             covered_messages: 5,
-                            used_llm: true
-                        })
+                            used_llm: true,
+                            ..
+                        }
+                    ))
         );
         // `/agents` still shows the whole conversation.
         let (_, transcript) = service.subagent_transcript("agent-1").unwrap();

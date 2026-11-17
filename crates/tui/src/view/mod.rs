@@ -695,7 +695,11 @@ impl App {
         let mut right = format!(
             "{}% context left ({tokens}) · {latency} · {}",
             self.context_metrics.context_left_percentage,
-            format_session_usage(&self.session_usage.0, self.session_usage.1)
+            format_session_usage(
+                &self.session_usage.0,
+                self.session_usage.1,
+                self.unreported_calls
+            )
         );
         if self.context_metrics.summary_active {
             right.push_str(&format!(
@@ -1401,15 +1405,25 @@ mod tests {
 }
 
 /// Tokens sent and received so far, the share of input read from the
-/// cache, and the cost when every model used has a price.
-pub(crate) fn format_session_usage(usage: &TokenUsage, cost: Option<f64>) -> String {
+/// cache, and the cost when every model used has a price. When some calls
+/// reported no usage, the figures are lower bounds and start with "≥".
+pub(crate) fn format_session_usage(
+    usage: &TokenUsage,
+    cost: Option<f64>,
+    unreported_calls: usize,
+) -> String {
     let compact = |tokens: u32| match tokens {
         0..=999 => tokens.to_string(),
         1_000..=999_999 => format!("{:.1}k", tokens as f64 / 1_000.0),
         _ => format!("{:.1}M", tokens as f64 / 1_000_000.0),
     };
     let input = usage.total_input_tokens();
-    let mut text = format!("in {} out {}", compact(input), compact(usage.output_tokens));
+    let at_least = if unreported_calls > 0 { "≥" } else { "" };
+    let mut text = format!(
+        "in {at_least}{} out {at_least}{}",
+        compact(input),
+        compact(usage.output_tokens)
+    );
     if input > 0 && usage.cache_read_input_tokens > 0 {
         text.push_str(&format!(
             " ({}% cached)",
@@ -1417,7 +1431,7 @@ pub(crate) fn format_session_usage(usage: &TokenUsage, cost: Option<f64>) -> Str
         ));
     }
     if let Some(cost) = cost {
-        text.push_str(&format!(" ${cost:.2}"));
+        text.push_str(&format!(" {at_least}${cost:.2}"));
     }
     text
 }
@@ -1435,12 +1449,17 @@ mod usage_tests {
             ..TokenUsage::default()
         };
         assert_eq!(
-            format_session_usage(&usage, Some(0.4167)),
+            format_session_usage(&usage, Some(0.4167), 0),
             "in 10.0k out 1.2k (80% cached) $0.42"
         );
         assert_eq!(
-            format_session_usage(&TokenUsage::default(), None),
+            format_session_usage(&TokenUsage::default(), None, 0),
             "in 0 out 0"
+        );
+        // A call without usage makes the figures lower bounds, never zeros.
+        assert_eq!(
+            format_session_usage(&usage, Some(0.4167), 1),
+            "in ≥10.0k out ≥1.2k (80% cached) ≥$0.42"
         );
     }
 }

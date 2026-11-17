@@ -469,19 +469,34 @@ impl ActivityModel {
             ActivityKind::CompactionFinished {
                 covered_messages,
                 used_llm,
-            } => self.push(
-                turn_id,
-                round,
-                agent.clone(),
-                ItemKind::Note(format!(
-                    "Compacted: {covered_messages} messages summarized ({})",
-                    if used_llm {
-                        "model summary"
-                    } else {
-                        "deterministic fallback"
-                    }
-                )),
-            ),
+                model,
+                usage,
+            } => {
+                // The summary call is charged even when its text was not
+                // used; say what it cost, or that it reported nothing.
+                let call = match (model.is_empty(), usage) {
+                    (true, _) => String::new(),
+                    (false, Some(usage)) => format!(
+                        " · {model} in {} out {}",
+                        usage.total_input_tokens(),
+                        usage.output_tokens
+                    ),
+                    (false, None) => format!(" · {model} usage n/a"),
+                };
+                self.push(
+                    turn_id,
+                    round,
+                    agent.clone(),
+                    ItemKind::Note(format!(
+                        "Compacted: {covered_messages} messages summarized ({}){call}",
+                        if used_llm {
+                            "model summary"
+                        } else {
+                            "deterministic fallback"
+                        }
+                    )),
+                )
+            }
             ActivityKind::Warning { message } => {
                 self.push(turn_id, round, agent, ItemKind::Note(message));
             }

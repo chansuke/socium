@@ -38,6 +38,9 @@ impl Price {
 pub struct SessionUsage {
     /// Totals keyed by model ID.
     pub by_model: BTreeMap<String, TokenUsage>,
+    /// Model calls whose provider reported no usage: the totals and the
+    /// cost are then at least what they show.
+    unreported: usize,
     /// Which model each open round runs, keyed by agent and round.
     open_rounds: BTreeMap<(Option<String>, usize), String>,
 }
@@ -51,20 +54,36 @@ impl SessionUsage {
             }
             ActivityKind::RoundFinished { usage, .. } => {
                 let model = self.open_rounds.remove(&key).unwrap_or_default();
-                if let Some(usage) = usage {
-                    let total = self.by_model.entry(model).or_default();
-                    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
-                    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
-                    total.cache_read_input_tokens = total
-                        .cache_read_input_tokens
-                        .saturating_add(usage.cache_read_input_tokens);
-                    total.cache_creation_input_tokens = total
-                        .cache_creation_input_tokens
-                        .saturating_add(usage.cache_creation_input_tokens);
-                }
+                self.record(model, usage.as_ref());
+            }
+            ActivityKind::CompactionFinished { model, usage, .. } if !model.is_empty() => {
+                self.record(model.clone(), usage.as_ref());
             }
             _ => {}
         }
+    }
+
+    /// One model call: its usage added to its model, or counted as
+    /// unreported. Every call goes through here, once.
+    fn record(&mut self, model: String, usage: Option<&TokenUsage>) {
+        let Some(usage) = usage else {
+            self.unreported += 1;
+            return;
+        };
+        let total = self.by_model.entry(model).or_default();
+        total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+        total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+        total.cache_read_input_tokens = total
+            .cache_read_input_tokens
+            .saturating_add(usage.cache_read_input_tokens);
+        total.cache_creation_input_tokens = total
+            .cache_creation_input_tokens
+            .saturating_add(usage.cache_creation_input_tokens);
+    }
+
+    /// Calls that reported no usage.
+    pub fn unreported(&self) -> usize {
+        self.unreported
     }
 
     pub fn total(&self) -> TokenUsage {
@@ -160,5 +179,50 @@ mod tests {
             cache_write: None,
         };
         assert_eq!(SessionUsage::default().cost(|_| Some(price)), None);
+    }
+
+    #[test]
+    fn compaction_calls_count_and_unreported_usage_is_not_zero() {
+        let clock = ActivityClock::start(0);
+        let mut session = SessionUsage::default();
+        session.observe(&clock.event(
+            1,
+            ActivityKind::RoundStarted {
+                model: "opus".into(),
+            },
+        ));
+        // The provider sent no usage for this round.
+        session.observe(&clock.event(
+            1,
+            ActivityKind::RoundFinished {
+                stop_reason: None,
+                usage: None,
+                ttft_ms: None,
+                elapsed_ms: 0,
+            },
+        ));
+        session.observe(&clock.event(
+            0,
+            ActivityKind::CompactionFinished {
+                covered_messages: 10,
+                used_llm: true,
+                model: "haiku".into(),
+                usage: Some(usage(1_000, 200, 0)),
+            },
+        ));
+        // A fallback that never reached a model costs nothing.
+        session.observe(&clock.event(
+            0,
+            ActivityKind::CompactionFinished {
+                covered_messages: 12,
+                used_llm: false,
+                model: String::new(),
+                usage: None,
+            },
+        ));
+
+        assert_eq!(session.by_model["haiku"], usage(1_000, 200, 0));
+        assert_eq!(session.total(), usage(1_000, 200, 0));
+        assert_eq!(session.unreported(), 1);
     }
 }

@@ -10,7 +10,7 @@ use crate::constants::{
 };
 use crate::error::AgentError;
 use crate::providers::error::ProviderError;
-use crate::providers::{Provider, ProviderEvent};
+use crate::providers::{Provider, ProviderEvent, TokenUsage};
 
 /// Heads a summary written without the compaction model.
 const FALLBACK_SUMMARY_NOTE: &str = "(Line-by-line summary: the summarizer was unavailable, so decisions, open issues and verification results may be missing. Check before relying on it.)";
@@ -80,6 +80,22 @@ pub(crate) struct Compaction {
     pub(crate) covered_messages: usize,
     /// Why the compaction model was not used, when it failed.
     pub(crate) fallback_reason: Option<String>,
+    /// The compaction model and the usage it reported, when it answered.
+    pub(crate) answered: Option<(String, Option<TokenUsage>)>,
+}
+
+impl Compaction {
+    /// The activity event for this compaction, which the session's usage
+    /// counts.
+    pub(crate) fn finished_event(&self) -> crate::activity::ActivityKind {
+        let (model, usage) = self.answered.clone().unwrap_or_default();
+        crate::activity::ActivityKind::CompactionFinished {
+            covered_messages: self.covered_messages,
+            used_llm: self.fallback_reason.is_none(),
+            model,
+            usage,
+        }
+    }
 }
 
 /// Summarizes `messages` up to the newest ones kept verbatim, extending
@@ -112,11 +128,12 @@ pub(crate) async fn compact_history(
         messages: &messages[covered..boundary],
     };
     let (provider, summary_model) = summarizer;
-    let summary_result = tokio::select! {
+    let (summary_result, answered) = tokio::select! {
         biased;
         _ = control.cancelled() => return Err(AgentError::Cancelled),
         result = summarize_with_llm(provider, summary_model, client, &request) => result,
     };
+    let answered = answered.map(|usage| (summary_model.to_string(), usage));
     let (text, fallback_reason) = match summary_result {
         Ok(text) => (text, None),
         Err(err) => {
@@ -156,6 +173,7 @@ pub(crate) async fn compact_history(
         },
         covered_messages: boundary,
         fallback_reason,
+        answered,
     })
 }
 
@@ -169,13 +187,15 @@ pub(crate) struct CompactionRequest<'a> {
 
 /// Summarize conversation history with a dedicated (cheap) model. Returns
 /// an error on transport failure, an empty completion, or one cut at the
-/// output limit; callers fall back to the deterministic summarizer.
+/// output limit; callers fall back to the deterministic summarizer. Also
+/// returns, when the model answered, the usage it reported, since the call
+/// is charged even when its summary is not used.
 pub(crate) async fn summarize_with_llm(
     provider: &dyn Provider,
     model: &str,
     client: &reqwest::Client,
     request: &CompactionRequest<'_>,
-) -> Result<String, ProviderError> {
+) -> (Result<String, ProviderError>, Option<Option<TokenUsage>>) {
     let transcript = render_transcript_for_compaction(request.messages);
     let mut prompt = String::new();
     if let Some(previous) = request.previous_summary {
@@ -196,25 +216,31 @@ pub(crate) async fn summarize_with_llm(
         &[],
     );
     let mut discard_deltas = |_event: ProviderEvent| {};
-    let response = provider
+    let response = match provider
         .send_message(client, &message_request, &mut discard_deltas)
-        .await?;
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => return (Err(err), None),
+    };
+    // Charged whether or not the summary below is used.
+    let answered = Some(response.usage);
 
     // A summary cut mid-sentence would pass for a complete one and silently
     // lose its later sections; the deterministic summary says what it omits.
     if response.message.stop_reason.as_deref() == Some("max_tokens") {
-        return Err(ProviderError::Api(format!(
+        let err = ProviderError::Api(format!(
             "Compaction model's summary was cut at the output limit of {COMPACTION_MAX_OUTPUT_TOKENS} tokens"
-        )));
+        ));
+        return (Err(err), answered);
     }
     let summary = extract_text(&response.message.content);
     let summary = summary.trim();
     if summary.is_empty() {
-        return Err(ProviderError::Api(
-            "Compaction model returned an empty summary".to_string(),
-        ));
+        let err = ProviderError::Api("Compaction model returned an empty summary".to_string());
+        return (Err(err), answered);
     }
-    Ok(summary.to_string())
+    (Ok(summary.to_string()), answered)
 }
 
 /// Render messages as plain text for the compaction model. Long message
@@ -436,10 +462,10 @@ mod tests {
             messages: &messages,
         };
 
-        let summary = summarize_with_llm(&provider, DEFAULT_COMPACTION_MODEL, &client, &request)
-            .await
-            .unwrap();
-        assert_eq!(summary, "1. User request: fix the bug");
+        let (summary, answered) =
+            summarize_with_llm(&provider, DEFAULT_COMPACTION_MODEL, &client, &request).await;
+        assert_eq!(summary.unwrap(), "1. User request: fix the bug");
+        assert!(answered.is_some(), "the call is counted");
 
         let recorded = provider.recorded_requests.lock().unwrap();
         assert_eq!(recorded.len(), 1);
@@ -460,10 +486,12 @@ mod tests {
             messages: &messages,
         };
 
-        let result =
+        let (result, answered) =
             summarize_with_llm(&provider, DEFAULT_COMPACTION_MODEL, &client, &request).await;
 
         assert!(result.is_err());
+        // Charged although its summary is not used.
+        assert!(answered.is_some());
     }
 
     #[tokio::test]
@@ -478,11 +506,12 @@ mod tests {
             messages: &messages,
         };
 
-        let err = summarize_with_llm(&provider, DEFAULT_COMPACTION_MODEL, &client, &request)
-            .await
-            .unwrap_err();
+        let (result, answered) =
+            summarize_with_llm(&provider, DEFAULT_COMPACTION_MODEL, &client, &request).await;
+        let err = result.unwrap_err();
 
         assert!(err.to_string().contains("output limit"), "{err}");
+        assert!(answered.is_some());
     }
 
     #[tokio::test]

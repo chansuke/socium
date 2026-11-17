@@ -119,6 +119,13 @@ pub enum ActivityKind {
     CompactionFinished {
         covered_messages: usize,
         used_llm: bool,
+        /// The model that answered the summary request, which is charged
+        /// even when its summary was not used; empty when none answered.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        model: String,
+        /// What that model reported using; `None` when it reported nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<TokenUsage>,
     },
     TurnFinished {
         ok: bool,

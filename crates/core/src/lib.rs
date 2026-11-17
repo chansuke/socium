@@ -199,6 +199,8 @@ pub struct CompactionReport {
     /// Why the compaction model was not used, when it failed.
     pub fallback_reason: Option<String>,
     pub metrics: ContextMetrics,
+    /// The activity event for it, which carries the summary call's usage.
+    pub(crate) finished: ActivityKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1341,6 +1343,15 @@ impl AgentService {
         (usage.total(), cost)
     }
 
+    /// Model calls this session whose provider reported no usage, so
+    /// `session_usage` is a lower bound.
+    pub fn unreported_model_calls(&self) -> usize {
+        self.session_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unreported()
+    }
+
     /// Other saved sessions in this workspace, most recently saved first.
     pub fn list_sessions(&mut self) -> std::io::Result<Vec<SessionSummary>> {
         self.ensure_state_lock()?;
@@ -1591,13 +1602,7 @@ impl AgentService {
                         covered_messages: report.covered_messages,
                         used_llm: report.used_llm,
                     });
-                    emit(
-                        &mut on_progress,
-                        ActivityKind::CompactionFinished {
-                            covered_messages: report.covered_messages,
-                            used_llm: report.used_llm,
-                        },
-                    );
+                    emit(&mut on_progress, report.finished);
                 }
                 // Compaction must never block the conversation; the
                 // budget-based trimming below still bounds the prompt.
@@ -1718,6 +1723,7 @@ impl AgentService {
                         covered_messages: report.covered_messages,
                         used_llm: report.used_llm,
                     });
+                    on_progress(AgentProgress::Activity(clock.event(0, report.finished)));
                     "The history was compacted; ask Socium to continue.".to_string()
                 }
                 Err(err) => {
@@ -1762,7 +1768,13 @@ impl AgentService {
     /// already fits in the retained window.
     pub async fn compact(&mut self) -> Result<CompactionReport, AgentError> {
         self.ensure_state_lock()?;
-        self.run_compaction().await
+        let report = self.run_compaction().await?;
+        // Outside a turn nothing else observes the event; count its call.
+        self.session_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .observe(&ActivityClock::start(0).event(0, report.finished.clone()));
+        Ok(report)
     }
 
     fn should_auto_compact(&self) -> Result<bool, AgentError> {
@@ -1789,6 +1801,7 @@ impl AgentService {
             &self.summary_state,
         )
         .await?;
+        let finished = compaction.finished_event();
         self.summary_state = compaction.summary_state;
         self.persist_state()?;
 
@@ -1802,6 +1815,7 @@ impl AgentService {
             used_llm: compaction.fallback_reason.is_none(),
             fallback_reason: compaction.fallback_reason,
             metrics,
+            finished,
         })
     }
 
@@ -2115,6 +2129,38 @@ mod tests {
                 .covered_messages,
             15
         );
+    }
+
+    #[tokio::test]
+    async fn the_summary_call_counts_toward_the_session_usage() {
+        let workspace = make_temp_dir("compaction_usage");
+        let used = |input, output| TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            ..TokenUsage::default()
+        };
+        let provider = ScriptedProvider::new(vec![
+            Ok(text_provider_response(
+                "1. User request: summary",
+                Some(used(5_000, 300)),
+            )),
+            // The turn's own call reports nothing.
+            Ok(text_provider_response("turn answer", None)),
+        ]);
+        let mut service = service_with_scripted_provider(
+            workspace.path(),
+            provider,
+            plain_user_messages(30),
+            Some(TokenUsage {
+                input_tokens: 170_000,
+                ..TokenUsage::default()
+            }),
+        );
+
+        service.submit("next question".to_string()).await.unwrap();
+
+        assert_eq!(service.session_usage().0, used(5_000, 300));
+        assert_eq!(service.unreported_model_calls(), 1);
     }
 
     #[tokio::test]
