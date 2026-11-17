@@ -5,8 +5,9 @@ use crate::activity::{
 use crate::agent::subagent::catalog::SubagentCatalog;
 use crate::agent::subagent::run_subagent;
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message};
-use crate::constants::{AGENT_TOOL_NAME, MAX_TOOL_ROUNDS};
+use crate::constants::{AGENT_TOOL_NAME, MAX_TOOL_ROUNDS, PLAN_TOOL_NAME};
 use crate::error::AgentError;
+use crate::plan::PlanLedger;
 use crate::providers::{Provider, ProviderEvent, TokenUsage};
 use crate::tools::ToolDefinition;
 use crate::tools::error::ToolError;
@@ -69,9 +70,13 @@ pub(crate) struct TurnOutcome {
 const MAX_RETRIES: u32 = 3;
 const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// `plan` is the main agent's plan, lent for this turn; a subagent's turn
+/// gets `None` and is never offered `update_plan`. `TurnContext` stays
+/// plan-free, so a child context built from it cannot reach the plan.
 pub(crate) async fn run_agent_turn<F>(
     ctx: &TurnContext<'_>,
     messages: &mut Vec<Message>,
+    mut plan: Option<&mut PlanLedger>,
     on_progress: &mut F,
     checkpoint: &mut (impl FnMut(&[Message], serde_json::Value) -> std::io::Result<()> + Send),
 ) -> Result<TurnOutcome, AgentError>
@@ -485,6 +490,7 @@ where
             };
             let offered = ctx.tools.iter().any(|tool| tool.name() == name);
             let invalid = invalid_inputs.iter().find(|(invalid, _)| *invalid == id);
+            let mut plan_view = None;
             let result = if ctx.control.is_cancelled() {
                 ContentBlock::ToolResult {
                     tool_use_id: id,
@@ -503,6 +509,30 @@ where
                 // A model may name a tool it was not given, such as a
                 // subagent asking for one outside its type.
                 tool_error(id, ToolError::UnsupportedTool(name.clone()))
+            } else if name == PLAN_TOOL_NAME {
+                // No approval and no intent checkpoint: the call changes
+                // nothing outside the conversation, and its result is the
+                // record the plan is replayed from.
+                tool_progress(AgentProgress::ToolCallStarted { name: name.clone() });
+                let outcome = match plan.as_deref_mut() {
+                    Some(ledger) => ledger.record(&input),
+                    None => Err(ToolError::UnsupportedTool(name.clone())),
+                };
+                tool_progress(AgentProgress::ToolCallFinished {
+                    name: name.clone(),
+                    is_error: outcome.is_err(),
+                });
+                match outcome {
+                    Ok(recorded) => {
+                        plan_view = Some(recorded.view);
+                        ContentBlock::ToolResult {
+                            tool_use_id: id,
+                            content: recorded.receipt,
+                            is_error: None,
+                        }
+                    }
+                    Err(err) => tool_error(id, err),
+                }
             } else if name == AGENT_TOOL_NAME {
                 tool_progress(AgentProgress::ToolCallStarted { name: name.clone() });
                 let started = checkpoint(
@@ -578,6 +608,25 @@ where
             results.push(bounded(result));
             *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
             checkpoint(messages,serde_json::json!({"type":"tool_finished","round":round+1,"attempt":1,"tool_call_id":call_id,"tool":tool_name,"is_error":failed,"result_index":results.len()-1})).map_err(|e|std::io::Error::other(format!("Tool finished but its result could not be saved; outcome may be unknown after restart: {e}")))?;
+            // Shown only once the result that carries it is saved, so the
+            // Timeline never shows a plan the history cannot replay.
+            if let Some(plan) = plan_view {
+                emit(on_progress, ActivityKind::PlanUpdated { plan });
+            }
+        }
+        if let Some(ledger) = plan.as_deref_mut()
+            && let Some((reminder, rounds)) = ledger.round_finished()
+            && let Some(ContentBlock::ToolResult { content, .. }) = results.last_mut()
+        {
+            // Appended to a result that was not sent yet, so no earlier
+            // request's prefix changes.
+            content.push_str(&reminder);
+            *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
+            checkpoint(
+                messages,
+                serde_json::json!({"type":"plan_reminder","round":round+1}),
+            )?;
+            emit(on_progress, ActivityKind::PlanNudged { rounds });
         }
         if ctx.control.is_cancelled() {
             return Err(AgentError::Cancelled);

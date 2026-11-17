@@ -8,6 +8,7 @@ mod control;
 mod execution;
 mod instructions;
 mod models;
+pub mod plan;
 mod process;
 mod session;
 mod settings;
@@ -30,6 +31,7 @@ pub use crate::activity::{ActivityEvent, ActivityKind, ThoughtRole};
 pub use crate::agent::context::ContextMetrics;
 pub use crate::agent::subagent::record::{SubagentStatus, SubagentSummary};
 pub use crate::error::AgentError;
+pub use crate::plan::PlanView;
 
 use crate::activity::ActivityClock;
 use crate::activity_log::{ACTIVITY_LOG_FILE_NAME, ActivityRecorder};
@@ -1391,6 +1393,15 @@ impl AgentService {
     }
 
     /// Activity of the most recent saved turns, oldest first.
+    /// The plan this conversation's `update_plan` calls left, or `None`
+    /// when it has none. Derived from the history on every call, so rewind,
+    /// resume and /clear need no plan code of their own.
+    pub fn plan(&self) -> Option<PlanView> {
+        crate::plan::replay(&self.messages)
+            .plan
+            .map(|plan| plan.view())
+    }
+
     pub fn recent_activity(&self) -> Vec<ActivityEvent> {
         crate::activity_log::load_recent(
             &self.activity_log_path(),
@@ -1505,6 +1516,10 @@ impl AgentService {
         self.messages.push(Message::user_text(user_input));
         self.persist_state()?;
         emit(&mut on_progress, ActivityKind::TurnStarted);
+        let mut plan = crate::plan::PlanLedger::resume(&self.messages);
+        for message in plan.take_replay_warnings() {
+            emit(&mut on_progress, ActivityKind::Warning { message });
+        }
         if self.should_auto_compact()? {
             on_progress(AgentProgress::CompactionStarted);
             emit(&mut on_progress, ActivityKind::CompactionStarted);
@@ -1609,10 +1624,21 @@ impl AgentService {
         let result = run_agent_turn(
             &turn_context,
             &mut context_messages,
+            Some(&mut plan),
             &mut on_progress,
             &mut checkpoint,
         )
         .await;
+        // The live plan and the replay of what was saved must agree. A failed
+        // turn may have applied a call whose result was not saved, so only a
+        // finished turn is checked.
+        if result.is_ok() {
+            debug_assert_eq!(
+                plan.plan(),
+                crate::plan::replay(&self.messages).plan.as_ref(),
+                "the live plan and its replay diverged"
+            );
+        }
         self.events.push(serde_json::json!({"type":if result.is_ok(){"turn_finished"}else{"turn_failed"},"sequence":self.events.len(),"turn_id":turn_id,"error":result.as_ref().err().map(ToString::to_string)}));
         on_progress(AgentProgress::Activity(clock.event(
             0,
@@ -1745,6 +1771,9 @@ mod test_support;
 
 #[cfg(test)]
 mod security_tests;
+
+#[cfg(test)]
+mod plan_tests;
 
 #[cfg(test)]
 mod tests {

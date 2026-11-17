@@ -128,7 +128,12 @@ pub(crate) fn tools_with_settings(
             }
             definition => definition,
         })
-        .chain([crate::agent::subagent::catalog::SubagentCatalog::builtin().tool_definition()])
+        // `agent` and `update_plan` need state the stateless `Tool` trait
+        // does not carry; the turn loop runs them itself.
+        .chain([
+            crate::agent::subagent::catalog::SubagentCatalog::builtin().tool_definition(),
+            crate::plan::tool_definition(),
+        ])
         .collect()
 }
 

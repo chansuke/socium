@@ -123,6 +123,16 @@ pub enum ActivityKind {
     Warning {
         message: String,
     },
+    /// The plan after an `update_plan` call, sent once its result is saved.
+    /// The Timeline shows it; Activity already shows the call itself.
+    PlanUpdated {
+        plan: crate::plan::PlanView,
+    },
+    /// The main agent ran `rounds` tool rounds without updating its open
+    /// plan, and a reminder was appended to the round's last result.
+    PlanNudged {
+        rounds: usize,
+    },
 }
 
 /// Stamps events with the turn they belong to and the time since it began.
@@ -332,12 +342,16 @@ fn primary_input_key(tool: &str) -> Option<&'static str> {
         "apply_patch" => "patch",
         "agent" => "description",
         "git_commit" => "message",
+        "update_plan" => "goal",
         _ => return None,
     })
 }
 
 /// One-line description of a complete tool input.
 pub fn summarize_tool_input(tool: &str, input: &Value) -> String {
+    if tool == crate::constants::PLAN_TOOL_NAME {
+        return crate::plan::summarize_update(input);
+    }
     let Some(key) = primary_input_key(tool) else {
         return String::new();
     };
