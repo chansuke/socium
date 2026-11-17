@@ -8,7 +8,7 @@ use crate::tools::ripgrep::{
     SearchExecution, SearchMode, format_search_results, search_with_ripgrep,
 };
 use crate::tools::workspace::resolve_workspace_path;
-use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -20,7 +20,7 @@ impl Tool for SearchTextTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::Custom(CustomToolDefinition {
+        ToolDefinition {
             name: "search_text".to_string(),
             description: "Search repository text using ripgrep and return line-addressable matches in the form path:line:text."
                 .to_string(),
@@ -47,7 +47,7 @@ impl Tool for SearchTextTool {
                 "required": ["pattern"],
                 "additionalProperties": false
             }),
-        })
+        }
     }
 
     fn run(

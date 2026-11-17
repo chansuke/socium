@@ -8,7 +8,7 @@ use crate::tools::ripgrep::{
     SearchExecution, SearchMode, escape_regex, format_search_results, search_with_ripgrep,
 };
 use crate::tools::workspace::resolve_workspace_path;
-use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -20,7 +20,7 @@ impl Tool for FindSymbolTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::Custom(CustomToolDefinition {
+        ToolDefinition {
             name: "find_symbol".to_string(),
             description: "Find declaration-like Rust symbol references for quick navigation. Returns line-addressable matches in the form path:line:text."
                 .to_string(),
@@ -43,7 +43,7 @@ impl Tool for FindSymbolTool {
                 "required": ["symbol"],
                 "additionalProperties": false
             }),
-        })
+        }
     }
 
     fn run(

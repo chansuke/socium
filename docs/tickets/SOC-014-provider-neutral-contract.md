@@ -57,7 +57,12 @@ Provider traitはあるが、request、Role、ToolDefinitionにAnthropic固有�
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 完了（branch `refactor/provider-neutral-contract`）。
+
+- 既に満たしていたもの: 同じ turn ループと tool 実行に Anthropic・OpenAI Chat Completions・OpenAI Responses の 3 wire が接続済み（SOC-016、SOC-042）。各 adapter が text・tool 呼び出し・usage・stop reason・thinking を内部の型へ変換し、未対応の終了理由は安全でない停止として扱う。provider 固有の機能は model の features と capabilities で選び、対応しないものは送らずに警告する。
+- 直したもの: core の `ToolDefinition` が Anthropic の built-in text editor 型（`text_editor_20250728`）を variant として持ち、`tools_for_model(native)` で model の feature を見て形を選んでいた。core は名前・説明・JSON Schema の一つの形だけを持ち、Anthropic adapter が feature を持つ model への送信時だけ text editor を built-in 型に差し替える。OpenAI adapter は同じ定義を function として送る（以前は built-in 型を拒否していた）。一つの variant だけになった enum は struct にした。
+- 試験: Anthropic の built-in model には built-in 型、互換 endpoint と OpenAI の 2 wire には schema のまま送ることを各 adapter の試験で確認。model 切替の前後で core の tool 一覧が変わらないことを確認。既存の stream・context 契約の試験はそのまま通過。
+- 範囲外: stop reason の内部語彙は Anthropic 由来の文字列（`tool_use`・`max_tokens` など）のまま。各 adapter が変換しており欠落はない。
 
 [一覧へ戻る](README.md)
 

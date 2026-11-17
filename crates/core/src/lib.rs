@@ -816,10 +816,7 @@ impl AgentService {
             .max_output_tokens
             .or(self.max_tokens_override)
             .unwrap_or(DEFAULT_MAX_TOKENS);
-        self.tools = crate::tools::tools_with_settings(
-            self.active_model.features.anthropic_text_editor,
-            &self.settings,
-        );
+        self.tools = crate::tools::tools_with_settings(&self.settings);
         if let Some(agent) = self
             .tools
             .iter_mut()
@@ -2581,7 +2578,6 @@ mod tests {
         use super::*;
         use crate::SessionStart;
         use crate::models::ModelRegistry;
-        use crate::tools::ToolDefinition;
         use std::collections::HashMap;
         use std::sync::Arc;
 
@@ -3031,9 +3027,6 @@ id = "plain-id"
                     .iter()
                     .find(|tool| tool.name() == crate::constants::AGENT_TOOL_NAME)
                     .unwrap();
-                let ToolDefinition::Custom(agent) = agent else {
-                    panic!("agent is a schema tool");
-                };
                 agent.input_schema["properties"]["agent_type"]["enum"].clone()
             };
 
@@ -3042,14 +3035,11 @@ id = "plain-id"
                 json!(["explorer", "worker", "scout"])
             );
             // Only models whose key is set can be chosen for a subagent.
-            let ToolDefinition::Custom(agent) = service
+            let agent = service
                 .tools
                 .iter()
                 .find(|tool| tool.name() == crate::constants::AGENT_TOOL_NAME)
-                .unwrap()
-            else {
-                panic!("agent is a schema tool");
-            };
+                .unwrap();
             assert_eq!(
                 agent.input_schema["properties"]["model"]["enum"],
                 json!(["opus", "sonnet", "haiku"])
@@ -3086,22 +3076,21 @@ id = "plain-id"
         fn switching_applies_the_models_limits_tools_and_compaction() {
             let root = make_temp_dir("model_limits");
             let mut service = open(root.path(), &KEYS);
-            assert!(
+            let names = |service: &AgentService| {
                 service
                     .tools
                     .iter()
-                    .any(|tool| matches!(tool, ToolDefinition::AnthropicTextEditor(_)))
-            );
+                    .map(|t| t.name().to_string())
+                    .collect::<Vec<_>>()
+            };
+            let before = names(&service);
             service.last_measured_usage = Some(TokenUsage::default());
 
             service.switch_model("ds-flash").unwrap();
             assert_eq!(service.max_tokens, 32_000);
-            assert!(
-                service
-                    .tools
-                    .iter()
-                    .all(|tool| matches!(tool, ToolDefinition::Custom(_)))
-            );
+            // Core offers every model the same tools; a provider's built-in
+            // form, such as Anthropic's text editor, is its adapter's job.
+            assert_eq!(names(&service), before);
             assert_eq!(service.compaction_model, "deepseek-flash");
             assert!(service.compaction_provider.is_none());
             assert!(service.last_measured_usage.is_none());

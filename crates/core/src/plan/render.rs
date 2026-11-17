@@ -13,7 +13,7 @@ use super::{
 };
 use super::{Plan, PlanRow, PlanView, TaskStatus};
 use crate::constants::PLAN_TOOL_NAME;
-use crate::tools::{CustomToolDefinition, ToolDefinition};
+use crate::tools::ToolDefinition;
 use serde_json::{Value, json};
 
 /// Open tasks a receipt lists before "+N more".
@@ -25,7 +25,7 @@ const SUMMARY_PATCHES: usize = 3;
 
 pub(crate) fn tool_definition() -> ToolDefinition {
     let statuses = TaskStatus::ALL.map(TaskStatus::label);
-    ToolDefinition::Custom(CustomToolDefinition {
+    ToolDefinition {
         name: PLAN_TOOL_NAME.to_string(),
         description: "Record the plan for work with several steps, and your progress on it. The user follows this plan in the Timeline view. Each call applies all of its task changes or none of them; tasks and fields you leave out stay as they are. The result lists the open tasks.".to_string(),
         input_schema: json!({
@@ -58,7 +58,7 @@ pub(crate) fn tool_definition() -> ToolDefinition {
                 }
             }
         }),
-    })
+    }
 }
 
 /// `Plan r5 "Add a Timeline": 32% (2 of 7 tasks done), 1 active, 1 blocked`
@@ -349,9 +349,7 @@ mod tests {
 
     #[test]
     fn the_schema_lists_every_status() {
-        let ToolDefinition::Custom(definition) = tool_definition() else {
-            panic!("update_plan is a custom tool");
-        };
+        let definition = tool_definition();
         let listed = &definition.input_schema["properties"]["tasks"]["items"]["properties"]["status"]
             ["enum"];
         assert_eq!(

@@ -9,9 +9,7 @@ use crate::tools::text_file::{
     apply_view_range, byte_index_after_line, count_lines, read_utf8_file_with_limit,
 };
 use crate::tools::workspace::{resolve_workspace_path, resolve_workspace_path_for_create};
-use crate::tools::{
-    AnthropicTextEditorToolDefinition, CustomToolDefinition, Tool, ToolContext, ToolDefinition,
-};
+use crate::tools::{Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
@@ -21,7 +19,7 @@ pub(crate) struct TextEditorTool;
 /// The text editor as an ordinary JSON-schema tool with the same name and
 /// input, for models that do not know Anthropic's built-in tool type.
 pub(crate) fn portable_text_editor_definition() -> ToolDefinition {
-    ToolDefinition::Custom(CustomToolDefinition {
+    ToolDefinition {
         name: TEXT_EDITOR_TOOL_NAME.to_string(),
         description: "View, create, and edit text files in the workspace. \
 view: show a file, or list a directory; view_range [start, end] limits the lines shown. \
@@ -48,7 +46,7 @@ insert: insert insert_text after line insert_line (0 inserts at the top)."
             },
             "required": ["command", "path"]
         }),
-    })
+    }
 }
 
 impl Tool for TextEditorTool {
@@ -56,12 +54,10 @@ impl Tool for TextEditorTool {
         TEXT_EDITOR_TOOL_NAME
     }
 
+    /// The schema form. Anthropic models with the native editor get
+    /// Anthropic's built-in definition instead, from the adapter.
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::AnthropicTextEditor(AnthropicTextEditorToolDefinition {
-            tool_type: "text_editor_20250728".to_string(),
-            name: TEXT_EDITOR_TOOL_NAME.to_string(),
-            max_characters: Some(MAX_TEXT_EDITOR_VIEW_CHARACTERS),
-        })
+        portable_text_editor_definition()
     }
 
     fn run(
