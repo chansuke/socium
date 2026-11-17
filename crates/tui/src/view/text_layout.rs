@@ -51,7 +51,7 @@ pub(crate) fn command_output_preview_lines(
 
 pub(crate) fn help_text() -> String {
     format!(
-        "{}\n\nexit           Quit Socium (same as /exit)\n/              Show command suggestions; Up/Down select, Tab completes\nEsc / Ctrl+C   Cancel a running task\nApproval       Up/Down and Enter, 1/2, or y/n to allow once or deny;\n               PgUp/PgDn, Home/End, Space/b scroll the request\nCtrl+A         Focus the activity pane; Up/Down select, Ctrl+L goes to\n               the top, Enter expands, z fills the screen, Esc returns\nSandbox        Linux; network denied; private HOME; no host fallback",
+        "{}\n\nexit           Quit Socium (same as /exit)\n/              Show command suggestions; Up/Down select, Tab completes\nEsc / Ctrl+C   Cancel a running task\nApproval       Up/Down and Enter, 1/2, or y/n to allow once or deny;\n               PgUp/PgDn, Home/End, Space/b scroll the request\nCtrl+A         Focus the activity pane; Up/Down select, Ctrl+L goes to\n               the top, Enter expands, z fills the screen, Esc returns\nCtrl+T         Switch the pane between Activity and the plan's Timeline;\n               focused, Enter shows a task's history\nSandbox        Linux; network denied; private HOME; no host fallback",
         crate::slash_command::command_list_text()
     )
 }

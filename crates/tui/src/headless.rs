@@ -4,7 +4,7 @@
 //! - `started`: the session ID and the model;
 //! - `activity`: an `ActivityEvent` as the Activity pane and the session's
 //!   activity log record it;
-//! - `finished`: `ok`, the reply text or the error, notices, and the tokens
+//! - `finished`: `ok`, the reply text or the error, notices, the plan, and the tokens
 //!   the turn used.
 //!
 //! Diagnostics go to standard error. No one can answer an approval here, so
@@ -106,6 +106,8 @@ pub(crate) async fn run(
     finished["session"] = json!(agent.session_id());
     finished["usage"] = json!(usage);
     finished["cost_usd"] = json!(cost);
+    // The plan the session's `update_plan` calls left; null without one.
+    finished["plan"] = json!(agent.plan());
     emit(finished);
     status
 }

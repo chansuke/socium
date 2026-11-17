@@ -2,10 +2,12 @@ pub(crate) mod activity;
 pub(crate) mod cells;
 pub(crate) mod text_layout;
 pub(crate) mod theme;
+pub(crate) mod timeline;
 
 use crate::app::{App, InputMode};
 use crate::approval::ApprovalPrompt;
 use crate::model_picker::{ModelPicker, model_label};
+use crate::pane_slot::SlotView;
 use crate::transcript::transcript_window_start;
 use crate::view::text_layout::*;
 use crate::view::theme::*;
@@ -29,6 +31,11 @@ const APPROVAL_SUMMARY_MAX_ROWS: usize = 3;
 const MODEL_PICKER_MAX_ROWS: usize = 8;
 /// Terminal width from which the Activity pane becomes a right-hand column.
 const WIDE_LAYOUT_COLUMNS: u16 = 140;
+/// Rows the right-hand column needs to show the Timeline above Activity
+/// instead of one of them at a time.
+const STACKED_SLOT_ROWS: u16 = 24;
+/// The most of that column the Timeline takes when stacked, in percent.
+const STACKED_TIMELINE_PERCENT: u16 = 45;
 /// Terminal height from which the header is shown.
 const HEADER_MIN_ROWS: u16 = 32;
 /// The header card: the name and version, then the model and the
@@ -40,15 +47,24 @@ const SANDBOX_FACTS: [(&str, &str); 2] = [("sandbox", "workspace only"), ("netwo
 pub(crate) struct Areas {
     pub(crate) header: Rect,
     pub(crate) transcript: Rect,
-    pub(crate) activity: Rect,
+    /// The pane that shows Activity or the Timeline.
+    pub(crate) slot: Rect,
     pub(crate) composer: Rect,
     pub(crate) footer: Rect,
 }
 
-/// Splits the screen. Wide terminals put Activity beside the transcript;
+impl Areas {
+    /// The transcript and the pane together, which an approval or a picker
+    /// takes over.
+    pub(crate) fn body(&self) -> Rect {
+        self.transcript.union(self.slot)
+    }
+}
+
+/// Splits the screen. Wide terminals put the pane beside the transcript;
 /// narrower ones stack it below, sized to the screen. Full screen gives the
-/// Activity pane the transcript's space as well.
-pub(crate) fn layout(area: Rect, activity_fullscreen: bool, composer_rows: u16) -> Areas {
+/// pane the transcript's space as well.
+pub(crate) fn layout(area: Rect, slot_fullscreen: bool, composer_rows: u16) -> Areas {
     let header_rows = if area.height >= HEADER_MIN_ROWS {
         HEADER_CARD_ROWS + 1
     } else {
@@ -61,7 +77,7 @@ pub(crate) fn layout(area: Rect, activity_fullscreen: bool, composer_rows: u16) 
         Constraint::Length(1),
     ])
     .areas(area);
-    let (transcript, activity) = if activity_fullscreen {
+    let (transcript, slot) = if slot_fullscreen {
         (Rect::new(body.x, body.y, body.width, 0), body)
     } else if area.width >= WIDE_LAYOUT_COLUMNS {
         let [transcript, activity] =
@@ -77,7 +93,7 @@ pub(crate) fn layout(area: Rect, activity_fullscreen: bool, composer_rows: u16) 
     Areas {
         header,
         transcript,
-        activity,
+        slot,
         composer,
         footer,
     }
@@ -231,6 +247,17 @@ fn model_picker_lines(picker: &ModelPicker, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
+/// A bordered pane with its title cut to the frame.
+fn draw_pane(frame: &mut Frame, area: Rect, title: &str, focused: bool, text: Text<'static>) {
+    let title = truncate_text(title, area.width.saturating_sub(2) as usize);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(title)
+        .border_style(Style::default().fg(if focused { FOCUS_BORDER } else { BORDER }))
+        .style(Style::default().bg(BG));
+    frame.render_widget(Paragraph::new(text).block(block), area);
+}
+
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
         frame.render_widget(Block::new().style(Style::default().bg(BG)), frame.area());
@@ -244,24 +271,20 @@ impl App {
             let lines = self.input.split('\n').count().min(COMPOSER_MAX_LINES);
             COMPOSER_ROWS + lines as u16 - 1
         };
-        let areas = layout(frame.area(), self.activity.fullscreen, composer_rows);
+        let areas = layout(frame.area(), self.slot.fullscreen, composer_rows);
 
         self.draw_header(frame, areas.header);
         if let Some(prompt) = &self.approval {
             // The request under review replaces the transcript and Activity
             // so that a long diff gets the whole body of the screen.
-            draw_approval_details(frame, areas.transcript.union(areas.activity), prompt);
+            draw_approval_details(frame, areas.body(), prompt);
         } else if let Some(picker) = &self.rewind_picker {
-            picker.draw(frame, areas.transcript.union(areas.activity));
+            picker.draw(frame, areas.body());
         } else if let Some(picker) = &self.session_picker {
-            picker.draw(
-                frame,
-                areas.transcript.union(areas.activity),
-                std::time::SystemTime::now(),
-            );
+            picker.draw(frame, areas.body(), std::time::SystemTime::now());
         } else {
             self.draw_transcript(frame, areas.transcript);
-            self.draw_activity(frame, areas.activity);
+            self.draw_slot(frame, areas.slot, frame.area().width >= WIDE_LAYOUT_COLUMNS);
         }
         self.draw_composer(frame, areas.composer);
         self.draw_footer(frame, areas.footer);
@@ -396,8 +419,33 @@ impl App {
         frame.render_widget(transcript, area);
     }
 
-    fn draw_activity(&self, frame: &mut Frame, area: Rect) {
-        let focused = self.activity.focused;
+    /// Draws the view in front, or on a wide terminal with a plan, the
+    /// Timeline above Activity at its natural height.
+    fn draw_slot(&self, frame: &mut Frame, area: Rect, wide: bool) {
+        let stacked = wide
+            && !self.slot.fullscreen
+            && area.height >= STACKED_SLOT_ROWS
+            && self.timeline.plan().is_some();
+        if !stacked {
+            match self.slot.view {
+                SlotView::Activity => self.draw_activity(frame, area, self.slot.focused, true),
+                SlotView::Timeline => self.draw_timeline(frame, area, self.slot.focused),
+            }
+            return;
+        }
+        let natural = self.timeline.visible_rows().len() as u16 + 3;
+        let cap = area.height * STACKED_TIMELINE_PERCENT / 100;
+        let [timeline, activity] =
+            Layout::vertical([Constraint::Length(natural.min(cap)), Constraint::Min(0)])
+                .areas(area);
+        let focused = |view| self.slot.focused && self.slot.view == view;
+        self.draw_timeline(frame, timeline, focused(SlotView::Timeline));
+        self.draw_activity(frame, activity, focused(SlotView::Activity), false);
+    }
+
+    /// `chip` puts the plan's progress in the title, for when the Timeline
+    /// is not on screen.
+    fn draw_activity(&self, frame: &mut Frame, area: Rect, focused: bool, chip: bool) {
         let raw_title;
         let title = if let Some(view) = &self.activity.raw_view {
             raw_title = format!(
@@ -410,18 +458,19 @@ impl App {
                 Phase::Idle => String::new(),
                 phase => format!(" · {}", phase.label()),
             };
+            let chip = self
+                .timeline
+                .chip()
+                .filter(|_| chip)
+                .map(|chip| format!(" · {chip} · Ctrl+T"))
+                .unwrap_or_default();
             raw_title = if focused {
                 format!(" activity{phase} · ↑↓ select · Enter expand · r raw · z full · Esc back ")
             } else {
-                format!(" activity{phase} · Ctrl+A focus ")
+                format!(" activity{phase}{chip} · Ctrl+A focus ")
             };
             raw_title.as_str()
         };
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .title(title)
-            .border_style(Style::default().fg(if focused { FOCUS_BORDER } else { BORDER }))
-            .style(Style::default().bg(BG));
         let text = if let Some(view) = &self.activity.raw_view {
             Text::from(activity::raw_lines(
                 &self.activity,
@@ -437,11 +486,29 @@ impl App {
         } else {
             Text::from(activity::activity_lines(
                 &self.activity,
+                focused,
                 area.width.saturating_sub(2) as usize,
                 area.height.saturating_sub(2) as usize,
             ))
         };
-        frame.render_widget(Paragraph::new(text).block(block), area);
+        draw_pane(frame, area, title, focused, text);
+    }
+
+    fn draw_timeline(&self, frame: &mut Frame, area: Rect, focused: bool) {
+        let title = match (focused, self.timeline.plan()) {
+            (true, _) => " timeline · ↑↓ select · Enter history · z full · Esc back ".to_string(),
+            (false, Some(plan)) => {
+                format!(" timeline · r{} · {} · Ctrl+T ", plan.revision, plan.goal)
+            }
+            (false, None) => " timeline · Ctrl+T activity ".to_string(),
+        };
+        let text = Text::from(timeline::timeline_lines(
+            &self.timeline,
+            focused,
+            area.width.saturating_sub(2) as usize,
+            area.height.saturating_sub(2) as usize,
+        ));
+        draw_pane(frame, area, &title, focused, text);
     }
 
     fn draw_composer(&self, frame: &mut Frame, area: Rect) {
@@ -1138,7 +1205,7 @@ mod tests {
 
         let corner_color = |focused| {
             let mut app = app_with_activity();
-            app.activity.focused = focused;
+            app.slot.focused = focused;
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             terminal.draw(|frame| app.draw(frame)).unwrap();
             let buffer = terminal.backend().buffer();
@@ -1155,8 +1222,8 @@ mod tests {
     #[test]
     fn focused_full_screen_activity_marks_the_selection() {
         let mut app = app_with_activity();
-        app.activity.focused = true;
-        app.activity.fullscreen = true;
+        app.slot.focused = true;
+        app.slot.fullscreen = true;
         app.activity.select_first();
         let rows = render_at(&app, 80, 24);
 
@@ -1169,7 +1236,7 @@ mod tests {
     #[ignore = "prints a frame for manual inspection"]
     fn print_activity_frame() {
         let mut app = app_with_activity();
-        app.activity.focused = true;
+        app.slot.focused = true;
         app.activity.selected = Some(3);
         let width = std::env::var("FRAME_WIDTH").map_or(110, |w| w.parse().unwrap());
         let height = std::env::var("FRAME_HEIGHT").map_or(30, |h| h.parse().unwrap());
@@ -1216,7 +1283,7 @@ mod tests {
         for (width, height) in [(1, 1), (20, 5), (80, 8), (200, 3)] {
             let mut app = app_with_activity();
             render_at(&app, width, height);
-            app.activity.fullscreen = true;
+            app.slot.fullscreen = true;
             render_at(&app, width, height);
         }
     }
@@ -1226,6 +1293,110 @@ mod tests {
         let mut app = App::for_test();
         app.input = "hello".into();
         assert!(!render(&app).iter().any(|row| row.contains(" commands · ")));
+    }
+    fn app_with_plan() -> App {
+        let mut app = app_with_activity();
+        app.timeline
+            .show(Some(crate::timeline::tests::sample_plan()));
+        app
+    }
+
+    #[test]
+    fn without_a_plan_the_activity_title_is_unchanged() {
+        let rows = render_at(&app_with_activity(), 80, 24);
+        assert!(rows.iter().all(|row| !row.contains("plan ")), "{rows:#?}");
+    }
+
+    #[test]
+    fn at_80x24_ctrl_t_swaps_activity_for_the_timeline_in_the_same_place() {
+        let mut app = app_with_plan();
+        let rows = render_at(&app, 80, 24);
+        let title = rows
+            .iter()
+            .position(|row| row.contains(" activity "))
+            .unwrap();
+        assert!(
+            rows[title].contains("plan 32% 2/7 · Ctrl+T"),
+            "{}",
+            rows[title]
+        );
+
+        app.slot.swap();
+        let rows = render_at(&app, 80, 24);
+        assert!(
+            rows.iter().all(|row| !row.contains(" activity ")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows[title].contains(" timeline · r5 · Add a Timeline"),
+            "{}",
+            rows[title]
+        );
+        assert!(rows[title + 1].contains("32% · 2 of 7 done"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row.contains("● fold")), "{rows:#?}");
+        assert!(rows.iter().all(|row| row.width() <= 80));
+    }
+
+    #[test]
+    fn at_160x40_the_timeline_sits_above_activity_in_the_right_column() {
+        let mut app = app_with_plan();
+        let rows = render_at(&app, 160, 40);
+        let timeline = rows
+            .iter()
+            .position(|row| row.contains(" timeline · r5"))
+            .unwrap();
+        let activity = rows
+            .iter()
+            .position(|row| row.contains(" activity "))
+            .unwrap();
+        assert!(timeline < activity, "{rows:#?}");
+        assert!(rows[timeline].find(" timeline").unwrap() >= 90);
+        assert!(!rows[activity].contains("plan 32%"), "the bar is on screen");
+        assert!(
+            rows.iter().any(|row| row.contains("✓ adr")),
+            "every task fits: {rows:#?}"
+        );
+
+        // Ctrl+T moves the keys and the focus color, not the panes.
+        app.slot.toggle_focus();
+        app.slot.swap();
+        let rows = render_at(&app, 160, 40);
+        assert!(
+            rows.iter().any(|row| row.contains(" timeline · ↑↓ select")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains(" activity · ")),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn full_screen_shows_only_the_view_in_front() {
+        let mut app = app_with_plan();
+        app.slot.toggle_focus();
+        app.slot.swap();
+        app.slot.toggle_fullscreen();
+        let rows = render_at(&app, 160, 40);
+        assert!(
+            rows.iter().all(|row| !row.contains(" activity ")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.starts_with("╭ timeline")),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "prints the Timeline frames for a visual check"]
+    fn print_timeline_frames() {
+        let mut app = app_with_plan();
+        println!("{}", render_at(&app, 80, 24).join("\n"));
+        app.slot.swap();
+        println!("{}", render_at(&app, 80, 24).join("\n"));
+        app.slot.swap();
+        println!("{}", render_at(&app, 160, 40).join("\n"));
     }
 }
 

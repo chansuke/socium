@@ -233,3 +233,50 @@ fn an_interrupt_cancels_the_turn_and_still_reports_it() {
         "{finished}"
     );
 }
+
+#[test]
+fn a_plan_the_model_records_reaches_the_activity_lines_and_the_result() {
+    let (port, bodies) = serve(vec![
+        tool_reply(
+            "update_plan",
+            json!({"goal": "Fix the parser", "tasks": [
+                {"id": "repro", "title": "Reproduce", "status": "done"},
+                {"id": "fix", "title": "Fix it", "status": "active"}
+            ]}),
+        ),
+        text_reply("planned"),
+    ]);
+    let fixture = fixture(port);
+    let output = command(&fixture, &["-p", "fix the parser"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    assert!(
+        bodies[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "update_plan")
+    );
+    let receipt = bodies[1]["messages"][2]["content"][0]["content"]
+        .as_str()
+        .unwrap();
+    assert!(
+        receipt.starts_with("Plan r1 \"Fix the parser\": 50% (1 of 2 tasks done), 1 active"),
+        "{receipt}"
+    );
+    let records = records(&output);
+    let updated = of_type(&records, "activity")
+        .into_iter()
+        .find(|r| r["event"]["type"] == "plan_updated")
+        .unwrap_or_else(|| panic!("{records:#?}"));
+    assert_eq!(updated["event"]["plan"]["goal"], "Fix the parser");
+    let finished = records.last().unwrap();
+    assert_eq!(finished["plan"], updated["event"]["plan"]);
+}
