@@ -52,6 +52,8 @@ pub(crate) struct TurnContext<'a> {
     /// resumes.
     pub(crate) session_id: &'a str,
     pub(crate) clock: ActivityClock,
+    /// The search endpoint and key, when `web_search` is offered.
+    pub(crate) web_search: Option<&'a crate::tools::web_search::WebSearch>,
 }
 
 pub(crate) struct TurnOutcome {
@@ -540,6 +542,26 @@ where
                     }
                     Err(err) => tool_error(id, err),
                 }
+            } else if name == crate::tools::web_search::WEB_SEARCH_TOOL_NAME {
+                // No side effect in the workspace; the user opted in to the
+                // query leaving the machine when turning the tool on.
+                tool_progress(AgentProgress::ToolCallStarted { name: name.clone() });
+                let outcome = match ctx.web_search {
+                    Some(search) => search.run(ctx.client, ctx.control, &input).await,
+                    None => Err(ToolError::UnsupportedTool(name.clone())),
+                };
+                tool_progress(AgentProgress::ToolCallFinished {
+                    name: name.clone(),
+                    is_error: outcome.is_err(),
+                });
+                match outcome {
+                    Ok(content) => ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        content,
+                        is_error: None,
+                    },
+                    Err(err) => tool_error(id, err),
+                }
             } else if name == AGENT_TOOL_NAME {
                 tool_progress(AgentProgress::ToolCallStarted { name: name.clone() });
                 let started = checkpoint(
@@ -870,6 +892,7 @@ mod tests {
             edit_origin: None,
             session_id: "20261101-000000-0000",
             clock: ActivityClock::start(0),
+            web_search: None,
         };
         let agent = |agent_type: &str| {
             (
