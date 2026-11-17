@@ -6,7 +6,12 @@ use socium_core::AgentProgress;
 impl App {
     pub(crate) fn apply_progress(&mut self, event: AgentProgress) {
         match event {
-            AgentProgress::Activity(event) => self.activity.apply(event),
+            AgentProgress::Activity(event) => {
+                if let socium_core::ActivityKind::PlanUpdated { plan } = &event.kind {
+                    self.timeline.show(Some(plan.clone()));
+                }
+                self.activity.apply(event);
+            }
             AgentProgress::RawProviderEvent {
                 turn_id,
                 round,
