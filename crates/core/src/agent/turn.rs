@@ -74,7 +74,9 @@ const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// `plan` is the main agent's plan, lent for this turn; a subagent's turn
 /// gets `None` and is never offered `update_plan`. `TurnContext` stays
-/// plan-free, so a child context built from it cannot reach the plan.
+/// plan-free, so a child context built from it cannot reach the plan. The
+/// main agent's turn alone, the one with a plan ledger, takes what the
+/// user types while it runs (`TaskControl::steer`).
 pub(crate) async fn run_agent_turn<F>(
     ctx: &TurnContext<'_>,
     messages: &mut Vec<Message>,
@@ -668,6 +670,27 @@ where
             )?;
             emit(on_progress, ActivityKind::PlanNudged { rounds });
         }
+        // At the step boundary: every tool of this round has finished and
+        // its result is saved, so nothing running is read as a new request.
+        // The next round's budget check covers what is added.
+        let added = if plan.is_some() && !ctx.control.is_cancelled() {
+            ctx.control.take_steering()
+        } else {
+            Vec::new()
+        };
+        if !added.is_empty() {
+            results.push(ContentBlock::Text {
+                text: steering_text(&added),
+            });
+            *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
+            checkpoint(
+                messages,
+                serde_json::json!({"type":"user_steered","round":round+1}),
+            )?;
+            for text in added {
+                emit(on_progress, ActivityKind::UserSteered { text });
+            }
+        }
         if ctx.control.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
@@ -718,6 +741,16 @@ async fn next_finished<'a, T>(
         Poll::Pending
     })
     .await
+}
+
+/// The user's words added mid-turn, marked so the model knows they came
+/// while it worked and are not a tool's output.
+fn steering_text(added: &[String]) -> String {
+    format!(
+        "{}{}",
+        crate::constants::USER_STEERING_PREFIX,
+        added.join("\n\n")
+    )
 }
 
 /// Whether `bounded` will cut `content`.

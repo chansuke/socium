@@ -193,7 +193,11 @@ pub(crate) fn transcript_entries(messages: &[Message], events: &[Value]) -> Vec<
                             if !text.is_empty() {
                                 text.push('\n');
                             }
-                            text.push_str(body);
+                            // Words added mid-turn show as the user wrote them.
+                            text.push_str(
+                                body.strip_prefix(crate::constants::USER_STEERING_PREFIX)
+                                    .unwrap_or(body),
+                            );
                         }
                         ContentBlock::ToolUse { id, name, input } => {
                             push_text(&mut entries, &mut text);

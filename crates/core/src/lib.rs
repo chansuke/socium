@@ -2133,6 +2133,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn words_added_mid_turn_reach_the_next_request_after_the_tools_finish() {
+        let workspace = make_temp_dir("steering");
+        let provider = ScriptedProvider::new(vec![
+            Ok(crate::providers::ProviderResponse {
+                message: crate::agent::types::AgentMessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "l1".into(),
+                        name: "list_files".into(),
+                        input: json!({}),
+                    }],
+                    ..Default::default()
+                },
+                streamed_text: false,
+                usage: None,
+            }),
+            Ok(text_provider_response("Done, README too.", None)),
+        ]);
+        let requests = provider.recorded_requests.clone();
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        // Typed while the first request runs.
+        service.task_control().steer("also check the README".into());
+
+        let mut steered = Vec::new();
+        service
+            .submit_with_progress("look around".into(), |event| {
+                if let crate::AgentProgress::Activity(crate::ActivityEvent {
+                    round,
+                    kind: crate::ActivityKind::UserSteered { text },
+                    ..
+                }) = event
+                {
+                    steered.push((round, text));
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(steered, [(1, "also check the README".to_string())]);
+        let requests = requests.lock().unwrap();
+        let first = requests[0].to_string();
+        assert!(
+            !first.contains("also check the README"),
+            "not before the tools ran"
+        );
+        let last = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(last["content"][0]["type"], "tool_result");
+        assert!(
+            last["content"][1]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("also check the README")
+        );
+        assert!(
+            service.task_control().take_steering().is_empty(),
+            "taken once"
+        );
+        // Saved with the conversation.
+        let saved: crate::agent::state::ConversationState =
+            crate::agent::state::load_json_file(&service.conversation_path()).unwrap();
+        assert!(
+            serde_json::to_string(&saved.messages)
+                .unwrap()
+                .contains("also check the README")
+        );
+        // After a restart the transcript shows the words as the user wrote them.
+        assert!(service.transcript_entries().iter().any(|entry| {
+            entry.role == crate::TranscriptRole::User && entry.text == "also check the README"
+        }));
+    }
+
+    #[tokio::test]
+    async fn words_added_to_a_turn_that_ends_without_tools_are_left_for_the_next() {
+        let workspace = make_temp_dir("steering_left");
+        let provider = ScriptedProvider::new(vec![Ok(text_provider_response("hi", None))]);
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.task_control().steer("and then?".into());
+
+        service.submit("hello".into()).await.unwrap();
+
+        assert_eq!(service.task_control().take_steering(), ["and then?"]);
+    }
+
+    #[tokio::test]
     async fn no_turn_starts_after_the_sandbox_check_fails() {
         let workspace = make_temp_dir("sandbox_check");
         let provider = ScriptedProvider::new(vec![Ok(text_provider_response("hi", None))]);

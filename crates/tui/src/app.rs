@@ -56,6 +56,9 @@ pub(crate) struct App {
     pub(crate) history_draft: String,
     pub(crate) slash_selection: usize,
     slash_popup_dismissed: bool,
+    /// What the user added during a turn that ended before taking it, sent
+    /// as the next turn.
+    pub(crate) follow_up: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +112,7 @@ impl App {
             history_draft: String::new(),
             slash_selection: 0,
             slash_popup_dismissed: false,
+            follow_up: None,
         };
         app.load_session_view();
         for body in warnings {
@@ -187,6 +191,7 @@ impl App {
             history_draft: String::new(),
             slash_selection: 0,
             slash_popup_dismissed: false,
+            follow_up: None,
         }
     }
 
@@ -509,11 +514,30 @@ impl App {
     }
 
     fn begin_submit(&mut self) -> Result<SubmitAction> {
-        if self.pending_task.is_some() {
-            self.status = Some(
-                "Request in progress; send this message when it ends, or Esc to cancel it"
-                    .to_string(),
-            );
+        if let Some(task) = &self.pending_task {
+            let text = self.input.trim().to_string();
+            if text.is_empty() || slash_command::command_token(&text).is_some() {
+                self.status = Some(
+                    "Request in progress; commands wait until it ends, or Esc to cancel it"
+                        .to_string(),
+                );
+                return Ok(SubmitAction::None);
+            }
+            // Read by the running turn after its current tools finish;
+            // never mid-tool, so nothing running is read as a new request.
+            task.control.steer(text.clone());
+            if let Err(err) = self.input_history.record_entry(&text) {
+                self.push_message(
+                    Speaker::System,
+                    format!("Warning: failed to persist input history: {err}"),
+                );
+            }
+            self.history_index = None;
+            self.history_draft.clear();
+            self.input.clear();
+            self.reset_cursor();
+            self.push_message(Speaker::User, text);
+            self.status = Some("Added; Socium reads it after its current step".to_string());
             return Ok(SubmitAction::None);
         }
         let user_input = self.input.trim().to_string();
@@ -561,6 +585,35 @@ impl App {
             user_input,
             started_at: Instant::now(),
         }))
+    }
+
+    /// Sends what the user added during the last turn, already shown in the
+    /// transcript, as the next turn.
+    fn start_follow_up(&mut self, text: String) -> Result<()> {
+        self.push_message(
+            Speaker::Thinking,
+            format!("Preparing response for: \"{}\"", truncate_text(&text, 64)),
+        );
+        self.status = Some("Thinking".to_string());
+        self.start_submit_task(PendingSubmission {
+            user_input: text,
+            started_at: Instant::now(),
+        })
+    }
+
+    /// Puts words a cancelled or failed task never read back in the input,
+    /// so nothing runs without the user sending it again.
+    pub(crate) fn restore_unsent(&mut self, text: &str) {
+        if !self.input.is_empty() {
+            self.input.push('\n');
+        }
+        self.input.push_str(text);
+        self.character_index = self.input.chars().count();
+        self.push_message(
+            Speaker::System,
+            "What you added was not read before the request ended; it is back in the input"
+                .to_string(),
+        );
     }
 
     fn run_slash_command(
@@ -677,6 +730,12 @@ impl App {
                 return Err(eyre!(message));
             }
             redraw |= self.poll_pending_task();
+            if self.pending_task.is_none()
+                && let Some(text) = self.follow_up.take()
+            {
+                self.start_follow_up(text)?;
+                redraw = true;
+            }
             if redraw {
                 terminal.draw(|frame| self.draw(frame))?;
             }
@@ -1143,5 +1202,32 @@ mod tests {
         );
         assert!(!app.handle_slot_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
         assert_eq!(app.slot.view, SlotView::Activity);
+    }
+
+    #[test]
+    fn enter_during_a_request_hands_the_words_to_it_and_commands_wait() {
+        let (_progress, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, result_rx) = tokio::sync::oneshot::channel();
+        let control = socium_core::TaskControl::default();
+        let mut app = App::for_test();
+        app.pending_task = Some(crate::agent_task::PendingTask {
+            worker: None,
+            control: control.clone(),
+            progress_rx,
+            result_rx,
+            streamed_assistant_text: false,
+        });
+
+        app.insert_text("also update the docs");
+        assert!(matches!(app.begin_submit().unwrap(), SubmitAction::None));
+        assert_eq!(control.take_steering(), ["also update the docs"]);
+        assert!(app.input.is_empty());
+        assert_eq!(app.messages.last().unwrap().body, "also update the docs");
+
+        app.insert_text("/model");
+        app.begin_submit().unwrap();
+        assert!(control.take_steering().is_empty(), "commands are not added");
+        assert_eq!(app.input, "/model", "the command stays to send later");
+        drop(sender);
     }
 }
