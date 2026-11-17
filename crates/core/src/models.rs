@@ -61,8 +61,27 @@ pub(crate) struct ProviderConfig {
     pub(crate) wire: Wire,
     /// Normalized without a trailing slash.
     pub(crate) base_url: String,
-    pub(crate) api_key_env: String,
+    /// The variable that holds the key; `None` for an endpoint on this
+    /// machine that takes none, which then gets no key header.
+    pub(crate) api_key_env: Option<String>,
     pub(crate) auth: AuthScheme,
+}
+
+impl ProviderConfig {
+    /// The key requests carry: `None` for a provider without one, an error
+    /// naming the variable when it is not set.
+    pub(crate) fn api_key(
+        &self,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Option<String>, String> {
+        let Some(variable) = &self.api_key_env else {
+            return Ok(None);
+        };
+        lookup(variable)
+            .filter(|key| !key.is_empty())
+            .map(Some)
+            .ok_or_else(|| format!("{variable} is not set"))
+    }
 }
 
 /// Anthropic extensions sent only to models that list them, so a
@@ -175,7 +194,8 @@ struct RawFile {
 struct RawProvider {
     wire: String,
     base_url: String,
-    api_key_env: String,
+    #[serde(default)]
+    api_key_env: Option<String>,
     auth: Option<String>,
 }
 
@@ -205,7 +225,7 @@ impl ModelRegistry {
             name: BUILTIN_PROVIDER.to_string(),
             wire: Wire::Anthropic,
             base_url: ANTHROPIC_BASE_URL.to_string(),
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
             auth: AuthScheme::ApiKeyHeader,
         };
         let claude =
@@ -391,18 +411,18 @@ fn parse_provider(name: &str, raw: RawProvider) -> Result<ProviderConfig, String
         return Err("name must not be empty".into());
     }
     let wire = Wire::parse(&raw.wire)?;
-    let base_url = parse_base_url(&raw.base_url)?;
-    if raw.api_key_env.is_empty()
-        || !raw
-            .api_key_env
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        // Never echo the value: it is often the key itself, pasted by mistake.
-        return Err(
-            "api_key_env must be the name of the environment variable that holds the key (letters, digits, and _), not the key itself"
-                .into(),
-        );
+    let (base_url, loopback) = parse_base_url(&raw.base_url)?;
+    match &raw.api_key_env {
+        // A local server such as Ollama or llama.cpp often takes no key; a
+        // remote one left without it is far more likely a mistake.
+        None if !loopback => {
+            return Err(
+                "api_key_env is required unless base_url is on this machine (localhost)".into(),
+            );
+        }
+        None if raw.auth.is_some() => return Err("auth needs api_key_env".into()),
+        None => {}
+        Some(variable) => check_key_variable(variable)?,
     }
     let auth = match (wire, raw.auth.as_deref()) {
         (Wire::Anthropic, None | Some("x-api-key")) => AuthScheme::ApiKeyHeader,
@@ -423,8 +443,24 @@ fn parse_provider(name: &str, raw: RawProvider) -> Result<ProviderConfig, String
     })
 }
 
-/// Keys travel to this URL, so plain HTTP is allowed only on loopback.
-fn parse_base_url(raw: &str) -> Result<String, String> {
+fn check_key_variable(variable: &str) -> Result<(), String> {
+    if variable.is_empty()
+        || !variable
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        // Never echo the value: it is often the key itself, pasted by mistake.
+        return Err(
+            "api_key_env must be the name of the environment variable that holds the key (letters, digits, and _), not the key itself"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// The normalized URL and whether it is on this machine. Keys travel to
+/// this URL, so plain HTTP is allowed only on loopback.
+fn parse_base_url(raw: &str) -> Result<(String, bool), String> {
     let url = reqwest::Url::parse(raw).map_err(|err| format!("invalid base_url '{raw}': {err}"))?;
     let loopback = url.host_str().is_some_and(|host| {
         host == "localhost"
@@ -449,7 +485,7 @@ fn parse_base_url(raw: &str) -> Result<String, String> {
     if url.query().is_some() || url.fragment().is_some() {
         return Err("base_url must not contain a query or fragment".into());
     }
-    Ok(url.as_str().trim_end_matches('/').to_string())
+    Ok((url.as_str().trim_end_matches('/').to_string(), loopback))
 }
 
 fn parse_model(raw: RawModel) -> Result<ModelConfig, String> {
@@ -639,6 +675,14 @@ context_window = 1000000
                 "unknown provider 'nowhere'",
             ),
             (
+                "[providers.x]\nwire = \"openai-chat\"\nbase_url = \"https://a.example\"",
+                "api_key_env is required unless base_url is on this machine",
+            ),
+            (
+                "[providers.x]\nwire = \"openai-chat\"\nbase_url = \"http://localhost:8080/v1\"\nauth = \"bearer\"",
+                "auth needs api_key_env",
+            ),
+            (
                 "[[models]]\nalias = \"m\"\nprovider = \"anthropic\"\nid = \"x\"\ncompact_model = \"tiny\"",
                 "compact_model 'tiny' is not a registered alias",
             ),
@@ -768,5 +812,26 @@ context_window = 1000000
         let err = ModelRegistry::load(&lookup).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert!(err.to_string().starts_with(&path_text));
+    }
+
+    #[test]
+    fn a_provider_on_this_machine_may_go_without_a_key() {
+        let registry = ModelRegistry::from_toml(
+            "[providers.ollama]\nwire = \"openai-chat\"\nbase_url = \"http://127.0.0.1:11434/v1\"\n[[models]]\nalias = \"qwen\"\nprovider = \"ollama\"\nid = \"qwen3\"",
+        )
+        .unwrap();
+        let provider = registry.provider("ollama").unwrap();
+        assert_eq!(provider.api_key(&|_| None), Ok(None));
+
+        let anthropic = ModelRegistry::builtin();
+        let anthropic = anthropic.provider("anthropic").unwrap();
+        assert_eq!(
+            anthropic.api_key(&|_| None),
+            Err("ANTHROPIC_API_KEY is not set".to_string())
+        );
+        assert_eq!(
+            anthropic.api_key(&|_| Some("k".into())),
+            Ok(Some("k".to_string()))
+        );
     }
 }
