@@ -55,7 +55,12 @@ session fork/treeは含めない。
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 完了として整理。
+
+- 前提の「2,000 件超の履歴を先頭から drain する」処理は既に無い。raw の履歴は切り詰めず、要約は `covered_messages` までを覆う。
+- 範囲の不整合: 保存状態の `covered_messages` が履歴長を超えると読込時にエラーで止め、元ファイルを残す（`AgentService::apply_state`）。rewind で要約範囲より前に戻すと要約を捨て、それ以外は `thinking_valid_from` を補正する（`drop_turns_from`）。
+- 保持境界は `compaction::retention_boundary` が tool call/result の組を分けない位置に置く。
+- archive は持たない。raw の履歴は session ごとに全件残る。
 
 [一覧へ戻る](README.md)
 

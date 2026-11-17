@@ -56,7 +56,10 @@ submit時だけcontextを準備し、turn内で増えるtool結果を再予算�
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 完了として整理。
+
+- turn ループが round ごとに実測で補正した予算（`ContextBudget::with_scale`）で request を見積もる。超えると直前の tool 結果を縮め（`shrink_tool_results`）、それでも超えれば `ContextFull` で止まり、圧縮してから利用者に続きを委ねる。無限には再試行しない。
+- 入力中の文字は `context_metrics_for_input` で metrics に入る。model を変えると補正値を戻す（ADR 15）。
 
 [一覧へ戻る](README.md)
 
