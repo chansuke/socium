@@ -857,4 +857,141 @@ mod tests {
 
         assert_eq!(text, "first\nsecond");
     }
+
+    mod properties {
+        use super::super::*;
+        use crate::agent::types::{ContentBlock, Message, MessageContent};
+        use proptest::prelude::*;
+        use serde_json::json;
+
+        /// One turn of a valid conversation: the request, the reply with
+        /// its tool calls, and their results in call order.
+        fn turn(index: usize, calls: usize) -> Vec<Message> {
+            let ids = (0..calls)
+                .map(|call| format!("t{index}-{call}"))
+                .collect::<Vec<_>>();
+            let mut reply = vec![ContentBlock::Text {
+                text: format!("reply {index}"),
+            }];
+            reply.extend(ids.iter().map(|id| ContentBlock::ToolUse {
+                id: id.clone(),
+                name: "read_file".into(),
+                input: json!({"path": id}),
+            }));
+            let mut messages = vec![
+                Message::user_text(format!("request {index}")),
+                Message::assistant_blocks(reply),
+            ];
+            if calls > 0 {
+                messages.push(Message::user_blocks(
+                    ids.iter()
+                        .map(|id| ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: format!("result of {id}"),
+                            is_error: None,
+                        })
+                        .collect(),
+                ));
+            }
+            messages
+        }
+
+        /// A conversation cut off by a crash: complete turns, then a last
+        /// turn whose results were saved only in part, in any order, or
+        /// not at all, as a concurrent batch saves them when each call ends.
+        fn crashed_conversation() -> impl Strategy<Value = Vec<Message>> {
+            (prop::collection::vec(0..3usize, 0..3), 1..4usize).prop_flat_map(
+                |(complete, calls)| {
+                    let mut messages = complete
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(index, calls)| turn(index, *calls))
+                        .collect::<Vec<_>>();
+                    let mut last = turn(complete.len(), calls);
+                    let MessageContent::Blocks(results) = last.pop().unwrap().content else {
+                        unreachable!()
+                    };
+                    messages.extend(last);
+                    (
+                        Just(messages),
+                        Just(results).prop_shuffle(),
+                        0..=calls,
+                        any::<bool>(),
+                    )
+                        .prop_map(
+                            |(mut messages, mut results, saved, any_saved)| {
+                                results.truncate(saved);
+                                if any_saved {
+                                    messages.push(Message::user_blocks(results));
+                                }
+                                messages
+                            },
+                        )
+                },
+            )
+        }
+
+        fn json(messages: &[Message]) -> serde_json::Value {
+            serde_json::to_value(messages).unwrap()
+        }
+
+        fn results(messages: &[Message]) -> Vec<ContentBlock> {
+            messages
+                .iter()
+                .filter_map(|message| match &message.content {
+                    MessageContent::Blocks(blocks) => Some(blocks),
+                    MessageContent::Text(_) => None,
+                })
+                .flatten()
+                .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+                .cloned()
+                .collect()
+        }
+
+        proptest! {
+            /// After a crash the history must again be one the provider accepts, every call answered once.
+            #[test]
+            fn repair_restores_a_valid_protocol(messages in crashed_conversation()) {
+                let mut repaired = messages.clone();
+                repair_incomplete_tools(&mut repaired);
+                prop_assert!(validate_protocol(&repaired).is_ok(), "{:#}", json(&repaired));
+            }
+
+            /// Restoring twice, as `-c` after a second crash does, must not change the history again.
+            #[test]
+            fn repair_is_idempotent(messages in crashed_conversation()) {
+                let mut once = messages;
+                repair_incomplete_tools(&mut once);
+                let mut twice = once.clone();
+                prop_assert!(!repair_incomplete_tools(&mut twice));
+                prop_assert_eq!(json(&twice), json(&once));
+            }
+
+            /// Repair keeps every saved result word for word and marks each missing one unknown, never as a success.
+            #[test]
+            fn repair_keeps_saved_results_and_never_claims_success(messages in crashed_conversation()) {
+                let saved = results(&messages);
+                let mut repaired = messages;
+                repair_incomplete_tools(&mut repaired);
+                let after = results(&repaired);
+                for result in &saved {
+                    prop_assert!(after.contains(result), "{result:?} was lost");
+                }
+                for result in after.iter().filter(|result| !saved.contains(result)) {
+                    let ContentBlock::ToolResult { content, is_error, .. } = result else { unreachable!() };
+                    prop_assert_eq!(*is_error, Some(true));
+                    prop_assert!(content.contains("Outcome unknown"), "{content}");
+                }
+            }
+
+            /// A history with nothing missing is left exactly as it is.
+            #[test]
+            fn repair_leaves_a_complete_history_alone(complete in prop::collection::vec(0..3usize, 0..4)) {
+                let messages = complete.iter().enumerate().flat_map(|(index, calls)| turn(index, *calls)).collect::<Vec<_>>();
+                let mut repaired = messages.clone();
+                prop_assert!(!repair_incomplete_tools(&mut repaired));
+                prop_assert_eq!(json(&repaired), json(&messages));
+            }
+        }
+    }
 }
