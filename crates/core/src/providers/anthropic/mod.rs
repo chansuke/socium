@@ -27,6 +27,8 @@ pub(crate) struct AnthropicProvider {
     anthropic_version: String,
     features: ModelFeatures,
     options: RequestOptions,
+    /// `tools = false` in models.toml.
+    supports_tools: bool,
 }
 
 impl AnthropicProvider {
@@ -52,6 +54,7 @@ impl AnthropicProvider {
             anthropic_version,
             features: model.features,
             options,
+            supports_tools: model.tools,
         })
     }
 
@@ -70,6 +73,7 @@ impl AnthropicProvider {
             anthropic_version: anthropic_version.into(),
             features: ModelFeatures::ALL,
             options: RequestOptions::default(),
+            supports_tools: true,
         }
     }
 
@@ -115,7 +119,7 @@ impl Provider for AnthropicProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            supports_tools: true,
+            supports_tools: self.supports_tools,
         }
     }
 
