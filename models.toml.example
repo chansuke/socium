@@ -98,6 +98,10 @@ max_output_tokens = 32000
 #     US dollars per million tokens, used only to show the session cost.
 #     cache_read and cache_write default to the input price. Socium ships
 #     no prices, so without this field no cost is shown.
+#   tools = false
+#     For a model that rejects tool definitions, such as many small local
+#     models: it is sent none and answers in one reply, without reading,
+#     editing, or running anything. Socium warns when such a model starts.
 #
 # A local server (http is allowed only on localhost), such as Ollama's
 # OpenAI-compatible API. One that takes no key needs no api_key_env, and

@@ -143,6 +143,10 @@ pub(crate) struct ModelConfig {
     pub(crate) compact_at_tokens: Option<u32>,
     /// The user's prices, for the session cost; `None` shows no cost.
     pub(crate) price: Option<crate::usage::Price>,
+    /// Whether the model takes tool definitions. `tools = false` in
+    /// models.toml for one that rejects them: it is sent none, answers in
+    /// one round, and cannot read, edit, or run anything.
+    pub(crate) tools: bool,
 }
 
 impl ModelConfig {
@@ -160,6 +164,7 @@ impl ModelConfig {
             compact_model: Some("haiku".to_string()),
             compact_at_tokens: None,
             price: None,
+            tools: true,
         }
     }
 
@@ -213,6 +218,12 @@ struct RawModel {
     compact_model: Option<String>,
     compact_at_tokens: Option<u32>,
     price: Option<crate::usage::Price>,
+    #[serde(default = "takes_tools")]
+    tools: bool,
+}
+
+fn takes_tools() -> bool {
+    true
 }
 
 /// The window of the built-in Claude models, from Anthropic's model table
@@ -240,6 +251,7 @@ impl ModelRegistry {
                 compact_model: compact_model.map(str::to_string),
                 compact_at_tokens: None,
                 price: None,
+                tools: true,
             };
         Self {
             default: BUILTIN_DEFAULT_MODEL.to_string(),
@@ -535,6 +547,7 @@ fn parse_model(raw: RawModel) -> Result<ModelConfig, String> {
         compact_model: raw.compact_model,
         compact_at_tokens: raw.compact_at_tokens,
         price: raw.price,
+        tools: raw.tools,
     })
 }
 
@@ -833,5 +846,16 @@ context_window = 1000000
             anthropic.api_key(&|_| Some("k".into())),
             Ok(Some("k".to_string()))
         );
+    }
+
+    #[test]
+    fn a_model_can_be_marked_as_taking_no_tools() {
+        let registry = ModelRegistry::from_toml(
+            "[providers.local]\nwire = \"openai-chat\"\nbase_url = \"http://localhost:8080/v1\"\napi_key_env = \"K\"\n[[models]]\nalias = \"plain\"\nprovider = \"local\"\nid = \"tiny\"\ntools = false\n[[models]]\nalias = \"agent\"\nprovider = \"local\"\nid = \"big\"",
+        )
+        .unwrap();
+        assert!(!registry.find("plain").unwrap().tools);
+        assert!(registry.find("agent").unwrap().tools);
+        assert!(registry.find("opus").unwrap().tools);
     }
 }

@@ -144,6 +144,12 @@ impl ModelTarget {
         })?;
         let provider = build_provider(provider_config, &model, lookup)?;
         let mut warnings = Vec::new();
+        if !model.tools {
+            warnings.push(format!(
+                "'{}' is set to take no tools: it answers in one reply and cannot read, edit, or run anything",
+                model.alias
+            ));
+        }
         let compact = model
             .compaction_alias()
             .and_then(|alias| registry.find(alias));
@@ -1852,6 +1858,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_model_without_tools_is_sent_none_and_answers_in_one_round() {
+        let workspace = make_temp_dir("no_tools");
+        let mut provider =
+            ScriptedProvider::new(vec![Ok(text_provider_response("plain answer", None))]);
+        provider.supports_tools = false;
+        let requests = provider.recorded_requests.clone();
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+
+        let reply = service.submit("hello".into()).await.unwrap();
+
+        assert_eq!(reply.text, "plain answer");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .get("tools")
+                .and_then(|tools| tools.as_array())
+                .is_none_or(|tools| tools.is_empty()),
+            "{}",
+            requests[0]["tools"]
+        );
+    }
+
+    #[tokio::test]
     async fn no_turn_starts_after_the_sandbox_check_fails() {
         let workspace = make_temp_dir("sandbox_check");
         let provider = ScriptedProvider::new(vec![Ok(text_provider_response("hi", None))]);
@@ -2439,6 +2470,33 @@ max_output_tokens = 32000
             let mut env = KEYS.to_vec();
             env.push(("MODEL", model));
             env
+        }
+
+        #[test]
+        fn switching_to_a_model_without_tools_says_so() {
+            let root = make_temp_dir("switch_no_tools");
+            let models = format!(
+                "{MODELS}\n[[models]]\nalias = \"ds-plain\"\nprovider = \"deepseek\"\nid = \"deepseek-plain\"\ntools = false\n"
+            );
+            let mut service = AgentService::open(
+                root.path().to_path_buf(),
+                SessionStart::New,
+                ModelRegistry::from_toml(&models).unwrap(),
+                lookup(&KEYS),
+                None,
+                reqwest::Client::new(),
+            )
+            .unwrap();
+            let switch = service.switch_model("ds-plain").unwrap();
+            assert!(
+                switch
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("'ds-plain' is set to take no tools")),
+                "{:?}",
+                switch.warnings
+            );
+            assert!(!service.provider.capabilities().supports_tools);
         }
 
         #[test]

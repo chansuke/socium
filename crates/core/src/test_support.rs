@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct ScriptedProvider {
     responses: Mutex<VecDeque<Result<ProviderResponse, ProviderError>>>,
     pub(crate) recorded_requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    pub(crate) supports_tools: bool,
 }
 
 impl ScriptedProvider {
@@ -20,6 +21,7 @@ impl ScriptedProvider {
         Self {
             responses: Mutex::new(responses.into()),
             recorded_requests: Arc::default(),
+            supports_tools: true,
         }
     }
 }
@@ -45,7 +47,7 @@ impl Provider for ScriptedProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            supports_tools: true,
+            supports_tools: self.supports_tools,
         }
     }
 
