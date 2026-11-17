@@ -55,7 +55,12 @@ chars数をterminal幅として扱う箇所があり、全角・結合文字・�
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 完了（branch `fix/grapheme-input`）。
+
+- 表示側の幅計算と切詰めは既に `crates/tui/src/view/cells.rs` が grapheme と cell 幅で行っていた。残っていたのは入力欄の編集で、左右移動と Backspace が char 単位だったため、結合文字（e + U+0301）、ZWJ 絵文字、国旗の途中で止まり、一部だけを消していた。
+- `App` のカーソル移動・削除・上下移動を grapheme 境界に揃えた。`character_index` は char 数のまま、常に境界に置く。
+- 試験: `editing_moves_and_deletes_whole_graphemes`、`moving_up_or_down_lands_on_a_grapheme_boundary`（修正前に失敗を確認）。既存の全角カーソル位置・小画面の試験も通過。
+- 保証範囲: 幅は `unicode-width` による。ZWJ 列や国旗を複数の字形で描く端末では、表示が計算より広くなる（`cells.rs` に明記）。実端末ごとの確認はしていない。
 
 [一覧へ戻る](README.md)
 
