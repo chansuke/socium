@@ -90,6 +90,8 @@ pub(crate) enum ToolState {
         is_error: bool,
         elapsed_ms: u64,
         summary: String,
+        /// Part of the result was left out.
+        truncated: bool,
     },
 }
 
@@ -446,6 +448,7 @@ impl ActivityModel {
                 is_error,
                 elapsed_ms,
                 summary,
+                truncated,
                 ..
             } => {
                 if let Some(tool) = self.find_tool(turn_id, agent.as_deref(), &call_id) {
@@ -453,6 +456,7 @@ impl ActivityModel {
                         is_error,
                         elapsed_ms,
                         summary,
+                        truncated,
                     };
                 }
             }
@@ -783,6 +787,7 @@ pub(crate) mod tests {
                     is_error: true,
                     elapsed_ms: 12,
                     summary: "File not found".into(),
+                    truncated: false,
                 },
             ),
             event(
@@ -870,7 +875,8 @@ pub(crate) mod tests {
             ToolState::Finished {
                 is_error: true,
                 elapsed_ms: 12,
-                summary: "File not found".into()
+                summary: "File not found".into(),
+                truncated: false,
             }
         );
     }
@@ -1148,6 +1154,7 @@ pub(crate) mod tests {
                     is_error: false,
                     elapsed_ms: 50,
                     summary: "a.txt:1 says hello".into(),
+                    truncated: false,
                 },
             ),
         ]
@@ -1201,6 +1208,7 @@ pub(crate) mod tests {
             is_error: false,
             elapsed_ms: 5,
             summary: summary.into(),
+            truncated: false,
         }
     }
 
@@ -1247,6 +1255,7 @@ pub(crate) mod tests {
             is_error: false,
             elapsed_ms: 5,
             summary: summary.into(),
+            truncated: false,
         };
         assert_eq!(
             reads,

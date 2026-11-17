@@ -83,19 +83,49 @@ impl<'a> ReadFileInput<'a> {
     }
 }
 
+/// A command's saved stdout or stderr, `.socium/outputs/<stem>.stdout`.
+fn is_command_artifact(path: &str) -> bool {
+    path.strip_prefix(".socium/outputs/")
+        .and_then(|name| {
+            name.strip_suffix(".stdout")
+                .or_else(|| name.strip_suffix(".stderr"))
+        })
+        .is_some_and(|stem| {
+            !stem.is_empty() && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+}
+
 pub(crate) fn read_file_from_workspace(
     workspace_root: &Path,
     input: &Value,
 ) -> Result<String, ToolError> {
     let input = ReadFileInput::parse(input)?;
-    let resolved_path = resolve_workspace_path(workspace_root, input.path)?;
+    let artifact = is_command_artifact(input.path);
+    let resolved_path = match resolve_workspace_path(workspace_root, input.path) {
+        Err(_) if artifact && !workspace_root.join(input.path).exists() => {
+            return Err(format!(
+                "The saved output '{}' is no longer kept: Socium keeps the output of the newest {MAX_KEPT_COMMAND_OUTPUTS} commands. Run the command again to see it.",
+                input.path
+            )
+            .into());
+        }
+        resolved => resolved?,
+    };
     let metadata = fs::metadata(&resolved_path)
         .map_err(|e| format!("Failed to inspect file '{}': {e}", input.path))?;
     if !metadata.is_file() {
         return Err(format!("Path is not a file: '{}'", input.path).into());
     }
-    let content =
-        read_utf8_file_with_limit(&resolved_path, input.path, MAX_TEXT_EDITOR_VIEW_READ_BYTES)?;
+    let content = if artifact {
+        // Saved command output can be larger than a source file and need
+        // not be UTF-8; it is read whole and shown with replacements.
+        let bytes = fs::read(&resolved_path)
+            .map_err(|e| format!("Failed to read '{}': {e}", input.path))?;
+        String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_COMMAND_ARTIFACT_BYTES as usize)])
+            .into_owned()
+    } else {
+        read_utf8_file_with_limit(&resolved_path, input.path, MAX_TEXT_EDITOR_VIEW_READ_BYTES)?
+    };
     let window = crate::tools::text_file::numbered_lines(
         &content,
         input.offset,
@@ -222,5 +252,42 @@ mod tests {
         assert!(output.contains("[line cut at 2000 characters]"));
         assert!(output.chars().count() < MAX_READ_OUTPUT_CHARACTERS + 200);
         assert!(output.contains("(more: continue with offset"));
+    }
+
+    #[test]
+    fn saved_command_output_reads_back_past_the_source_file_limit() {
+        let workspace = make_temp_dir("artifact_read");
+        let outputs = workspace.path().join(".socium/outputs");
+        fs::create_dir_all(&outputs).unwrap();
+        let mut bytes = Vec::new();
+        for line in 1..=200_000 {
+            bytes.extend_from_slice(format!("line {line} {}\n", "x".repeat(20)).as_bytes());
+        }
+        bytes.extend_from_slice(b"error: \xff broken\n");
+        assert!(bytes.len() > MAX_TEXT_EDITOR_VIEW_READ_BYTES);
+        fs::write(outputs.join("1-2-0.stderr"), &bytes).unwrap();
+
+        let tail = read_file_from_workspace(
+            workspace.path(),
+            &json!({"path": ".socium/outputs/1-2-0.stderr", "offset": 200_001}),
+        )
+        .unwrap();
+        assert!(tail.contains("(lines 200001-200001 of 200001)"), "{tail}");
+        assert!(tail.contains("error: \u{fffd} broken"), "{tail}");
+
+        let gone = read_file_from_workspace(
+            workspace.path(),
+            &json!({"path": ".socium/outputs/1-3-0.stdout"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(gone.contains("is no longer kept"), "{gone}");
+
+        // Other state is not read past the ordinary limit.
+        fs::write(workspace.path().join(".socium/big.json"), &bytes).unwrap();
+        assert!(
+            read_file_from_workspace(workspace.path(), &json!({"path": ".socium/big.json"}))
+                .is_err()
+        );
     }
 }

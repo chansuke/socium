@@ -301,12 +301,14 @@ fn tool_lines(tool: &ToolItem, expanded: bool, width: usize) -> Vec<Line<'static
         ToolState::Finished {
             is_error,
             elapsed_ms,
+            truncated,
             ..
         } => (
             format!(
-                "{} {}",
+                "{} {}{}",
                 if *is_error { "✗" } else { "✓" },
-                format_ms(*elapsed_ms)
+                format_ms(*elapsed_ms),
+                if *truncated { " · cut" } else { "" }
             ),
             if *is_error { ERROR } else { OK },
         ),
@@ -748,6 +750,19 @@ mod tests {
                 },
             ),
         ])
+    }
+
+    #[test]
+    fn a_cut_result_says_so_on_its_tool_line() {
+        let mut events = sample_turn();
+        for event in &mut events {
+            if let socium_core::ActivityKind::ToolFinished { truncated, .. } = &mut event.kind {
+                *truncated = true;
+            }
+        }
+        let rows = plain(&activity_lines(&model_with(events), false, 100, 50));
+        let tool_row = rows.iter().find(|row| row.contains("read_file")).unwrap();
+        assert!(tool_row.ends_with("✗ 12ms · cut"), "{tool_row}");
     }
 
     #[test]

@@ -19,6 +19,12 @@ pub const MAX_SEARCH_RESULTS: usize = 200;
 pub const MAX_SEARCH_LINE_CHARACTERS: usize = 500;
 pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_COMMAND_OUTPUT_CHARACTERS: usize = 20_000;
+/// A command's stdout and stderr are each saved in full up to this size
+/// under `.socium/outputs`, where `read_file` reads them back.
+pub const MAX_COMMAND_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024;
+/// Commands whose saved output is kept; older ones are deleted when a new
+/// command starts.
+pub const MAX_KEPT_COMMAND_OUTPUTS: usize = 100;
 pub const TEXT_EDITOR_TOOL_NAME: &str = "str_replace_based_edit_tool";
 // Keep this aligned with Anthropic text editor tool output limits.
 pub const MAX_TEXT_EDITOR_VIEW_CHARACTERS: usize = 50_000;

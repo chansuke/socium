@@ -6,7 +6,7 @@ use crate::tools::input::{optional_string_field, optional_timeout_ms, require_st
 use crate::tools::workspace::resolve_workspace_command_cwd;
 use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub(crate) struct RunCommandTool;
@@ -43,7 +43,7 @@ pub(crate) fn definition(max_timeout: Duration) -> ToolDefinition {
     let max_ms = max_timeout.as_millis();
     ToolDefinition::Custom(CustomToolDefinition {
             name: "run_command".to_string(),
-            description: "Run a command in the Linux OS sandbox. Pass the executable and its arguments as an array; nothing is interpreted by a shell unless you run one. Workspace files are writable; Git metadata is read-only and agent state is hidden. System runtimes and directories the user exposed are read-only. There is no network, and the host HOME and credentials are unavailable. Depending on the user's settings the command runs at once or after the user approves it; a denied command must not be retried. Output beyond the limit is cut from the middle and saved in full under .socium/outputs. Use git_commit for commits."
+            description: "Run a command in the Linux OS sandbox. Pass the executable and its arguments as an array; nothing is interpreted by a shell unless you run one. Workspace files are writable; Git metadata is read-only and agent state is hidden. System runtimes and directories the user exposed are read-only. There is no network, and the host HOME and credentials are unavailable. Depending on the user's settings the command runs at once or after the user approves it; a denied command must not be retried. Output beyond the limit is cut from the middle and saved in full under .socium/outputs; read the saved files with read_file and offset. Use git_commit for commits."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -163,10 +163,12 @@ where
         &policy,
         on_progress,
     )?;
+    let cut = |stream: &str| stream.chars().count() > MAX_COMMAND_OUTPUT_CHARACTERS;
     on_progress(AgentProgress::CommandFinished {
         command: execution.command_display.clone(),
         exit_code: execution.exit_code,
         timed_out: execution.timed_out,
+        truncated: cut(&execution.stdout) || cut(&execution.stderr),
         stdout_preview: format_command_stream(&execution.stdout)
             .trim_end_matches('\n')
             .to_string(),
@@ -221,10 +223,11 @@ fn execute_command(
         }
         opts.open(path).map_err(|e| e.to_string())
     };
+    prune_outputs(workspace_root);
     let mut files = [open("stdout")?, open("stderr")?];
     let mut totals = [0u64; 2];
     let mut reported = std::time::Instant::now();
-    const ARTIFACT_LIMIT: u64 = 8 * 1024 * 1024;
+    const ARTIFACT_LIMIT: u64 = crate::constants::MAX_COMMAND_ARTIFACT_BYTES;
     let mut observer = |stderr: bool, bytes: &[u8]| -> std::io::Result<()> {
         let index = usize::from(stderr);
         let keep = (ARTIFACT_LIMIT.saturating_sub(totals[index]) as usize).min(bytes.len());
@@ -246,7 +249,7 @@ fn execute_command(
             .map_err(|e| format!("Command completed but output sync failed: {e}"))?;
     }
     let artifacts = format!(
-        "{stem}.stdout ({} bytes), {stem}.stderr ({} bytes); artifact cap 8 MiB per stream, truncated={}",
+        "{stem}.stdout ({} bytes), {stem}.stderr ({} bytes); artifact cap 8 MiB per stream, truncated={}; read omitted output with read_file and offset",
         totals[0],
         totals[1],
         totals.iter().any(|n| *n > ARTIFACT_LIMIT)
@@ -287,6 +290,49 @@ fn execute_command(
         stdout,
         stderr,
     })
+}
+
+/// Deletes the saved output of all but the newest
+/// `MAX_KEPT_COMMAND_OUTPUTS - 1` commands, oldest first, so the next one
+/// fits. Best effort: a file that cannot be removed is left.
+fn prune_outputs(workspace_root: &Path) {
+    // The checked path of a file in it, as `open` below gets: the state
+    // path checks accept files, not directories.
+    let Some(dir) = crate::agent::state::workspace_state_path(workspace_root, "outputs/0")
+        .ok()
+        .and_then(|file| file.parent().map(Path::to_path_buf))
+    else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    // `<pid>-<nanos>-<n>.stdout|stderr`: one command per stem.
+    let mut commands =
+        std::collections::BTreeMap::<String, (std::time::SystemTime, Vec<PathBuf>)>::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let command = commands
+            .entry(stem.to_string())
+            .or_insert((modified, Vec::new()));
+        command.0 = command.0.max(modified);
+        command.1.push(path);
+    }
+    let mut commands = commands.into_values().collect::<Vec<_>>();
+    commands.sort_by_key(|(modified, _)| *modified);
+    let excess = (commands.len() + 1).saturating_sub(crate::constants::MAX_KEPT_COMMAND_OUTPUTS);
+    for (_, paths) in commands.into_iter().take(excess) {
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn format_command_execution(execution: &CommandExecution) -> String {
@@ -417,5 +463,43 @@ mod tests {
         assert!(shown.ends_with("error: the real failure\n"));
         assert!(shown.contains("characters omitted"));
         assert!(shown.chars().count() < MAX_COMMAND_OUTPUT_CHARACTERS + 100);
+    }
+
+    #[test]
+    fn only_the_newest_command_outputs_are_kept() {
+        let workspace = crate::test_support::make_temp_dir("prune_outputs");
+        // Created the way commands create it, with private permissions.
+        let outputs = crate::agent::state::workspace_state_path(workspace.path(), "outputs/x")
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let total = MAX_KEPT_COMMAND_OUTPUTS + 20;
+        for n in 0..total {
+            for stream in ["stdout", "stderr"] {
+                let path = outputs.join(format!("1-{n:04}-0.{stream}"));
+                std::fs::write(&path, "x").unwrap();
+                let at = std::time::UNIX_EPOCH + Duration::from_secs(1_000 + n as u64);
+                std::fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(at)
+                    .unwrap();
+            }
+        }
+
+        prune_outputs(workspace.path());
+
+        let mut left = std::fs::read_dir(&outputs)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(left.len(), 2 * (MAX_KEPT_COMMAND_OUTPUTS - 1));
+        assert_eq!(
+            left[0],
+            format!("1-{:04}-0.stderr", total - MAX_KEPT_COMMAND_OUTPUTS + 1)
+        );
     }
 }
