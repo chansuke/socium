@@ -62,10 +62,12 @@ impl Provider for ScriptedProvider {
         request: &AgentMessageRequest<'_>,
         _on_delta: &mut (dyn FnMut(ProviderEvent) + Send),
     ) -> Result<ProviderResponse, ProviderError> {
-        self.recorded_requests
-            .lock()
-            .unwrap()
-            .push(serde_json::to_value(request)?);
+        let value = serde_json::to_value(request)?;
+        if let Err(problem) = check_request(&value) {
+            // A test must not pass by sending what no provider accepts.
+            panic!("ScriptedProvider got a request no provider would accept: {problem}\n{value:#}");
+        }
+        self.recorded_requests.lock().unwrap().push(value);
         self.responses
             .lock()
             .unwrap()
@@ -76,6 +78,90 @@ impl Provider for ScriptedProvider {
                 ))
             })
     }
+}
+
+/// What makes a request one no provider accepts: a role other than user or
+/// assistant, an empty message or text block, a history that does not start
+/// and end with the user, a tool call without its result in the next message
+/// or a result without its call, a tool input that is not an object, and
+/// tool definitions with duplicate names or a non-object schema.
+pub(crate) fn check_request(request: &serde_json::Value) -> Result<(), String> {
+    use std::collections::HashSet;
+    if request["max_tokens"].as_u64().is_none_or(|max| max == 0) {
+        return Err("max_tokens must be positive".into());
+    }
+    let mut names = HashSet::new();
+    for tool in request["tools"].as_array().into_iter().flatten() {
+        let name = tool["name"].as_str().ok_or("a tool has no name")?;
+        if !names.insert(name) {
+            return Err(format!("tool {name} is defined twice"));
+        }
+        if tool.get("type").is_none() && tool["input_schema"]["type"] != "object" {
+            return Err(format!("tool {name} has no object input_schema"));
+        }
+    }
+    let messages = request["messages"]
+        .as_array()
+        .ok_or("messages is not a list")?;
+    let role = |index: usize| messages[index]["role"].as_str().unwrap_or_default();
+    if messages.is_empty() || role(0) != "user" || role(messages.len() - 1) != "user" {
+        return Err("the history must start and end with a user message".into());
+    }
+    // Tool calls of the previous assistant message, which this one answers.
+    let mut open: HashSet<String> = HashSet::new();
+    for (index, message) in messages.iter().enumerate() {
+        let role = role(index);
+        if role != "user" && role != "assistant" {
+            return Err(format!("message {index} has role '{role}'"));
+        }
+        let blocks = match &message["content"] {
+            serde_json::Value::String(text) if text.is_empty() => {
+                return Err(format!("message {index} is empty"));
+            }
+            serde_json::Value::String(_) => Vec::new(),
+            serde_json::Value::Array(blocks) if blocks.is_empty() => {
+                return Err(format!("message {index} has no content blocks"));
+            }
+            serde_json::Value::Array(blocks) => blocks.clone(),
+            other => return Err(format!("message {index} has content {other}")),
+        };
+        let mut calls = HashSet::new();
+        let mut answered = HashSet::new();
+        for block in &blocks {
+            match block["type"].as_str().unwrap_or_default() {
+                "text" if block["text"].as_str().is_none_or(str::is_empty) => {
+                    return Err(format!("message {index} has an empty text block"));
+                }
+                "tool_use" => {
+                    let id = block["id"].as_str().unwrap_or_default();
+                    if role != "assistant" || id.is_empty() || !calls.insert(id.to_string()) {
+                        return Err(format!(
+                            "message {index} has a misplaced or repeated tool_use '{id}'"
+                        ));
+                    }
+                    if !block["input"].is_object() {
+                        return Err(format!("tool_use {id} has input {}", block["input"]));
+                    }
+                }
+                "tool_result" => {
+                    let id = block["tool_use_id"].as_str().unwrap_or_default();
+                    if role != "user" || !open.contains(id) || !answered.insert(id.to_string()) {
+                        return Err(format!(
+                            "message {index} has a tool_result '{id}' without its call"
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if answered != open {
+            return Err(format!(
+                "message {index} leaves tool calls of the message before it without results"
+            ));
+        }
+        open = calls;
+    }
+    Ok(())
 }
 
 /// Creates a FIFO, which blocks a plain `open` for reading until a writer
@@ -157,4 +243,87 @@ pub(crate) fn git_stdout(path: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
+}
+
+#[cfg(test)]
+mod request_checks {
+    use super::check_request;
+    use serde_json::{Value, json};
+
+    fn request(messages: Value) -> Value {
+        json!({"model": "m", "max_tokens": 100, "system": "", "messages": messages,
+               "tools": [{"name": "read_file", "description": "", "input_schema": {"type": "object"}}]})
+    }
+
+    fn call(id: &str, input: Value) -> Value {
+        json!({"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": "read_file", "input": input}]})
+    }
+
+    fn result(id: &str) -> Value {
+        json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": "ok"}]})
+    }
+
+    #[test]
+    fn a_well_formed_tool_round_trip_passes() {
+        let messages = json!([{"role": "user", "content": "read a.rs"}, call("t1", json!({"path": "a.rs"})), result("t1")]);
+        assert_eq!(check_request(&request(messages)), Ok(()));
+    }
+
+    #[test]
+    fn what_no_provider_accepts_is_refused() {
+        let user = json!({"role": "user", "content": "hi"});
+        let cases = [
+            (json!([]), "start and end"),
+            (
+                json!([user, {"role": "assistant", "content": "hello"}]),
+                "start and end",
+            ),
+            (
+                json!([{"role": "system", "content": "x"}, user]),
+                "start and end",
+            ),
+            (
+                json!([user, {"role": "tool", "content": "x"}, user]),
+                "role 'tool'",
+            ),
+            (json!([{"role": "user", "content": ""}]), "is empty"),
+            (
+                json!([{"role": "user", "content": []}]),
+                "no content blocks",
+            ),
+            (
+                json!([{"role": "user", "content": [{"type": "text", "text": ""}]}]),
+                "empty text block",
+            ),
+            (
+                json!([user, call("t1", json!({})), user]),
+                "without results",
+            ),
+            (json!([user, result("t9")]), "without its call"),
+            (
+                json!([user, call("t1", json!({})), result("t1"), {"role": "assistant", "content": "ok"}, result("t1")]),
+                "without its call",
+            ),
+            (
+                json!([user, call("t1", json!("a.rs")), result("t1")]),
+                "has input",
+            ),
+            (
+                json!([user, {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "read_file", "input": {}},
+                {"type": "tool_use", "id": "t1", "name": "read_file", "input": {}}]}, result("t1")]),
+                "repeated tool_use",
+            ),
+        ];
+        for (messages, expected) in cases {
+            let err = check_request(&request(messages.clone())).unwrap_err();
+            assert!(err.contains(expected), "{messages}: {err}");
+        }
+        let mut twice = request(json!([user]));
+        twice["tools"] = json!([{"name": "a", "input_schema": {"type": "object"}}, {"name": "a", "input_schema": {"type": "object"}}]);
+        assert!(check_request(&twice).unwrap_err().contains("defined twice"));
+        let mut zero = request(json!([user]));
+        zero["max_tokens"] = json!(0);
+        assert!(check_request(&zero).is_err());
+    }
 }

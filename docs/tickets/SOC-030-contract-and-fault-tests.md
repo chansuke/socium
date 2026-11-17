@@ -58,7 +58,13 @@
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 完了（branch `test/wire-contract-fixtures`）。
+
+- `ScriptedProvider` が受け取る request を毎回 `test_support::check_request` で検査し、どの provider も受け付けない request なら test を失敗させる。user/assistant 以外の role、空の message・text block、user で始まり user で終わらない履歴、次の message に result のない tool call、call のない result、object でない tool 入力、名前の重複する・object の schema を持たない tool 定義、0 の max_tokens を拒否する。導入時点の既存 491 件はすべて通過（不正な request を送っていた試験はなかった）。検査そのものは `request_checks` の試験で固定した。
+- 故障の注入: provider の失敗は `ScriptedProvider` の応答列、HTTP・SSE の失敗と遅延は `test_server::{serve_once, serve_paced}`、状態保存の失敗は `atomic_write_with_checkpoint` と reliability_tests の checkpoint 失敗で既に注入できる。
+- watchdog: loopback の試験 server は接続と読み取りを 10 秒で打ち切り、理由付きで失敗する。実 credential・外部 network には依存しない。
+- 15 件の観察条件と修正チケット・回帰試験の対応を [regression-map.md](../review-evidence/2026-11-11/regression-map.md) に記録した。観察試験そのものは一時コピーで実行したもので build に含まれず、CI に安全性の合格試験として登録されていない。
+- 範囲外: fake clock。時間に依存する試験は短い実時間（再試行の間隔など）で足りている。
 
 [一覧へ戻る](README.md)
 
