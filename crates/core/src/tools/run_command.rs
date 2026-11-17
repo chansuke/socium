@@ -4,7 +4,7 @@ use crate::execution::{ExecutionPolicy, WorkspaceAccess};
 use crate::tools::error::ToolError;
 use crate::tools::input::{optional_string_field, optional_timeout_ms, require_string_array_field};
 use crate::tools::workspace::resolve_workspace_command_cwd;
-use crate::tools::{CustomToolDefinition, Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext, ToolDefinition};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -41,7 +41,7 @@ impl Tool for RunCommandTool {
 /// The tool definition with the user's longest allowed timeout.
 pub(crate) fn definition(max_timeout: Duration) -> ToolDefinition {
     let max_ms = max_timeout.as_millis();
-    ToolDefinition::Custom(CustomToolDefinition {
+    ToolDefinition {
             name: "run_command".to_string(),
             description: "Run a command in the Linux OS sandbox. Pass the executable and its arguments as an array; nothing is interpreted by a shell unless you run one. Workspace files are writable; Git metadata is read-only and agent state is hidden. System runtimes and directories the user exposed are read-only. There is no network, and the host HOME and credentials are unavailable. Depending on the user's settings the command runs at once or after the user approves it; a denied command must not be retried. Output beyond the limit is cut from the middle and saved in full under .socium/outputs; read the saved files with read_file and offset. Use git_commit for commits."
                 .to_string(),
@@ -69,7 +69,7 @@ pub(crate) fn definition(max_timeout: Duration) -> ToolDefinition {
                 "required": ["command"],
                 "additionalProperties": false
             }),
-        })
+        }
 }
 
 struct CommandExecution {

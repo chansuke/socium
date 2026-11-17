@@ -89,10 +89,7 @@ pub(crate) fn run_subagent<'a>(
         let child = match model {
             None => *ctx,
             Some(model) => {
-                model_tools = crate::tools::tools_with_settings(
-                    model.config.features.anthropic_text_editor,
-                    ctx.settings,
-                );
+                model_tools = crate::tools::tools_with_settings(ctx.settings);
                 // Its compaction model when that one can run, else itself,
                 // as for the main agent.
                 let summarizer = model

@@ -30,36 +30,21 @@ use crate::tools::search_text::SearchTextTool;
 use crate::tools::text_editor::TextEditorTool;
 use std::path::Path;
 
+/// A tool as every provider is offered it: a name, a description, and a
+/// JSON Schema for the input. A provider with a built-in form of a tool,
+/// such as Anthropic's text editor, swaps it in when the request is built;
+/// core never holds a provider's wire format.
 #[derive(Debug, Serialize, Clone)]
-#[serde(untagged)]
-pub enum ToolDefinition {
-    Custom(CustomToolDefinition),
-    AnthropicTextEditor(AnthropicTextEditorToolDefinition),
-}
-
-impl ToolDefinition {
-    pub fn name(&self) -> &str {
-        match self {
-            ToolDefinition::Custom(tool) => &tool.name,
-            ToolDefinition::AnthropicTextEditor(tool) => &tool.name,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct CustomToolDefinition {
+pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct AnthropicTextEditorToolDefinition {
-    #[serde(rename = "type")]
-    pub tool_type: String,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_characters: Option<usize>,
+impl ToolDefinition {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 pub(crate) struct ToolContext<'a> {
@@ -102,28 +87,22 @@ static BUILTIN_TOOLS: &[&dyn Tool] = &[
 ];
 
 pub fn default_tools() -> Vec<ToolDefinition> {
-    tools_for_model(true)
+    tools_for_model()
 }
 
-/// Tool definitions for a model: the built-in tools and the `agent` tool
-/// with the built-in subagent types. Without the native text editor, the text
-/// editor is sent as an ordinary schema tool of the same name and input.
-pub(crate) fn tools_for_model(native_text_editor: bool) -> Vec<ToolDefinition> {
-    tools_with_settings(native_text_editor, &crate::settings::Settings::default())
+/// Tool definitions for a model: the built-in tools, the `agent` tool with
+/// the built-in subagent types, and `update_plan`. The same for every
+/// provider.
+pub(crate) fn tools_for_model() -> Vec<ToolDefinition> {
+    tools_with_settings(&crate::settings::Settings::default())
 }
 
 /// As `tools_for_model`, with the command time limit the user set.
-pub(crate) fn tools_with_settings(
-    native_text_editor: bool,
-    settings: &crate::settings::Settings,
-) -> Vec<ToolDefinition> {
+pub(crate) fn tools_with_settings(settings: &crate::settings::Settings) -> Vec<ToolDefinition> {
     BUILTIN_TOOLS
         .iter()
         .map(|tool| match tool.definition() {
-            ToolDefinition::AnthropicTextEditor(_) if !native_text_editor => {
-                text_editor::portable_text_editor_definition()
-            }
-            ToolDefinition::Custom(_) if tool.name() == "run_command" => {
+            _ if tool.name() == "run_command" => {
                 run_command::definition(settings.sandbox.max_command_timeout)
             }
             definition => definition,
@@ -641,24 +620,11 @@ mod tests {
     }
 
     #[test]
-    fn models_without_the_native_editor_get_a_schema_tool_of_the_same_name() {
-        let native = tools_for_model(true);
-        let portable = tools_for_model(false);
-        assert_eq!(native.len(), portable.len());
-        assert!(
-            portable
-                .iter()
-                .all(|tool| matches!(tool, ToolDefinition::Custom(_)))
-        );
-        let editor = portable
-            .iter()
-            .find_map(|tool| match tool {
-                ToolDefinition::Custom(custom) if custom.name == TEXT_EDITOR_TOOL_NAME => {
-                    Some(custom)
-                }
-                _ => None,
-            })
-            .expect("portable text editor");
+    fn the_text_editor_is_a_schema_tool_every_provider_can_send() {
+        let editor = tools_for_model()
+            .into_iter()
+            .find(|tool| tool.name == TEXT_EDITOR_TOOL_NAME)
+            .expect("text editor");
         assert_eq!(editor.input_schema["required"], json!(["command", "path"]));
         assert!(editor.input_schema["properties"]["insert_text"].is_object());
     }

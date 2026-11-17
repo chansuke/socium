@@ -14,7 +14,6 @@ use crate::providers::sse::SseParser;
 use crate::providers::{
     Provider, ProviderCapabilities, ProviderEvent, ProviderKind, ProviderResponse, bearer,
 };
-use crate::tools::ToolDefinition;
 use serde_json::{Value, json};
 use std::io::{Error, ErrorKind};
 use stream::ResponsesStreamBuilder;
@@ -141,8 +140,8 @@ fn request_body(
     let tools = request
         .tools
         .iter()
-        .map(|tool| match tool {
-            ToolDefinition::Custom(custom) => Ok(json!({
+        .map(|custom| {
+            json!({
                 "type": "function",
                 "name": custom.name,
                 "description": custom.description,
@@ -151,13 +150,9 @@ fn request_body(
                 // which these schemas do not do; say so rather than rely on
                 // the endpoint's default.
                 "strict": false,
-            })),
-            ToolDefinition::AnthropicTextEditor(editor) => Err(ProviderError::Api(format!(
-                "{} is an Anthropic built-in tool and cannot be sent to an OpenAI endpoint",
-                editor.name
-            ))),
+            })
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
 
     let mut body = json!({
         "model": request.model,
@@ -336,7 +331,7 @@ features = ["effort"]
     #[test]
     fn requests_go_to_responses_without_server_state() {
         let messages = [Message::user_text("hi".into())];
-        let tools = tools_for_model(false);
+        let tools = tools_for_model();
         let request = AgentMessageRequest::new("gpt-6-astra", 1000, &messages, &tools);
         let built = provider(Some("high"))
             .build_request(&reqwest::Client::new(), &request)
@@ -446,16 +441,26 @@ features = ["effort"]
     }
 
     #[test]
-    fn the_anthropic_text_editor_type_is_refused() {
-        let tools = tools_for_model(true);
+    fn the_text_editor_goes_as_an_ordinary_function() {
+        let tools = tools_for_model();
         let request = AgentMessageRequest::new("m", 10, &[], &tools);
-        let err = request_body(
+        let body = request_body(
             &request,
             ModelFeatures::default(),
             &RequestOptions::default(),
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("Anthropic built-in tool"));
+        .unwrap();
+        let editor = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == crate::constants::TEXT_EDITOR_TOOL_NAME)
+            .unwrap();
+        assert!(
+            editor["parameters"]["properties"]["command"].is_object(),
+            "{editor}"
+        );
+        assert!(editor.get("max_characters").is_none());
     }
 
     fn local_provider(base_url: &str) -> OpenAiResponsesProvider {
@@ -488,7 +493,7 @@ features = ["effort"]
         provider: &OpenAiResponsesProvider,
         messages: &[Message],
     ) -> Result<ProviderResponse, ProviderError> {
-        let tools = tools_for_model(false);
+        let tools = tools_for_model();
         let request = AgentMessageRequest::new("local-model", 100, messages, &tools);
         provider
             .send_message(

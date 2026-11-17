@@ -20,7 +20,7 @@ use crate::constants::{
 };
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::Provider;
-use crate::tools::{CustomToolDefinition, ToolDefinition, tools_for_model};
+use crate::tools::{ToolDefinition, tools_for_model};
 use serde::Deserialize;
 use serde_json::json;
 use std::fs;
@@ -207,11 +207,11 @@ impl SubagentCatalog {
                 "description": "Model alias for this run; see the list in this tool's description."
             });
         }
-        ToolDefinition::Custom(CustomToolDefinition {
+        ToolDefinition {
             name: AGENT_TOOL_NAME.to_string(),
             description,
             input_schema: schema,
-        })
+        }
     }
 }
 
@@ -286,7 +286,7 @@ pub(crate) fn parse_definition(text: &str) -> Result<Definition, String> {
     let tools = match front.tools {
         None => ToolSet::ReadOnly,
         Some(names) => {
-            let known = tools_for_model(true);
+            let known = tools_for_model();
             let mut chosen = Vec::new();
             for tool in names {
                 if MAIN_AGENT_TOOLS.contains(&tool.as_str()) {
@@ -658,9 +658,7 @@ mod tests {
             }],
         );
 
-        let ToolDefinition::Custom(tool) = catalog.tool_definition() else {
-            panic!("agent is a schema tool");
-        };
+        let tool = catalog.tool_definition();
 
         assert_eq!(
             tool.input_schema["properties"]["agent_type"]["enum"],
@@ -683,9 +681,7 @@ mod tests {
             json!(["haiku"])
         );
         // Without models to choose from, there is no model input.
-        let ToolDefinition::Custom(builtin) = SubagentCatalog::builtin().tool_definition() else {
-            panic!("agent is a schema tool");
-        };
+        let builtin = SubagentCatalog::builtin().tool_definition();
         assert!(builtin.input_schema["properties"].get("model").is_none());
     }
 
