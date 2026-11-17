@@ -66,3 +66,10 @@ Anthropic以外のproviderはNotImplemented。local modelや第二実providerで
 
 
 公開準備時に未動作のCodex/Opencode雛形を削除した。実装は現行のProvider traitから開始する。
+
+2026-11-17 残りを実装。
+
+- 認証不要の local endpoint: localhost の `base_url` なら `api_key_env` を省略でき、そのとき key header を送らない。remote で省略したもの、key なしの `auth` は読込時に拒否する（`feat/keyless-local-endpoint`）。
+- tool 非対応 model: models.toml の `tools = false` で、tool 定義を送らず 1 回の応答で終える。起動時と `/model` 切替時に警告し、無言で別 model へ送らない（`feat/models-without-tools`）。
+- 試験: `a_provider_on_this_machine_may_go_without_a_key`、`a_local_endpoint_without_a_key_gets_no_authorization_header`、`a_model_without_tools_is_sent_none_and_answers_in_one_round`、`switching_to_a_model_without_tools_says_so`。
+- 未検証: 実際の Ollama・llama.cpp・tool 非対応 model への送信。

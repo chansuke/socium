@@ -27,6 +27,8 @@ pub(crate) struct OpenAiResponsesProvider {
     api_key: Option<String>,
     features: ModelFeatures,
     options: RequestOptions,
+    /// `tools = false` in models.toml.
+    supports_tools: bool,
 }
 
 impl OpenAiResponsesProvider {
@@ -47,6 +49,7 @@ impl OpenAiResponsesProvider {
             api_key,
             features: model.features,
             options,
+            supports_tools: model.tools,
         })
     }
 
@@ -76,7 +79,7 @@ impl Provider for OpenAiResponsesProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            supports_tools: true,
+            supports_tools: self.supports_tools,
         }
     }
 

@@ -24,6 +24,8 @@ pub(crate) struct OpenAiChatProvider {
     api_key: Option<String>,
     features: ModelFeatures,
     options: RequestOptions,
+    /// `tools = false` in models.toml.
+    supports_tools: bool,
 }
 
 impl OpenAiChatProvider {
@@ -43,6 +45,7 @@ impl OpenAiChatProvider {
             api_key,
             features: model.features,
             options,
+            supports_tools: model.tools,
         })
     }
 
@@ -72,7 +75,7 @@ impl Provider for OpenAiChatProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            supports_tools: true,
+            supports_tools: self.supports_tools,
         }
     }
 

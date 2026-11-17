@@ -158,7 +158,8 @@ where
             ctx.max_tokens,
             ctx.system,
             readable.as_deref().unwrap_or(messages),
-            ctx.tools,
+            // A model that rejects tool definitions is sent none.
+            if supports_tools { ctx.tools } else { &[] },
         );
         let mut attempt = 0;
         let result = loop {
