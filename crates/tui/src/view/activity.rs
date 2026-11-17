@@ -19,15 +19,17 @@ const EXPANDED_INPUT_LINES: usize = 40;
 const OK: Color = Color::Green;
 
 /// Visible lines for a pane of `width` × `height` cells.
+/// `focused` marks the selection.
 pub(crate) fn activity_lines(
     model: &ActivityModel,
+    focused: bool,
     width: usize,
     height: usize,
 ) -> Vec<Line<'static>> {
     if height == 0 {
         return Vec::new();
     }
-    let selected = model.selected_index();
+    let selected = model.selected_index().filter(|_| focused);
     let newest = model.items.len().checked_sub(1);
     let mut output_tokens = std::collections::HashMap::<usize, u32>::new();
     for item in &model.items {
@@ -602,7 +604,7 @@ mod tests {
     #[test]
     fn renders_turn_rounds_thoughts_tools_and_stats() {
         let model = model_with(sample_turn());
-        let rows = plain(&activity_lines(&model, 100, 50));
+        let rows = plain(&activity_lines(&model, false, 100, 50));
 
         assert_eq!(rows[0], "  ━ turn 1  ✓ 1.5s · out 412");
         assert_eq!(
@@ -620,12 +622,11 @@ mod tests {
     #[test]
     fn follows_the_newest_lines_and_scrolls_to_the_selection() {
         let mut model = model_with(sample_turn());
-        let tail = plain(&activity_lines(&model, 100, 2));
+        let tail = plain(&activity_lines(&model, false, 100, 2));
         assert_eq!(tail.last().unwrap(), "  ✎ response · 312 chars");
 
-        model.focused = true;
         model.select_first();
-        let head = plain(&activity_lines(&model, 100, 2));
+        let head = plain(&activity_lines(&model, true, 100, 2));
         assert_eq!(head[0], "› ━ turn 1  ✓ 1.5s · out 412");
     }
 
@@ -636,13 +637,12 @@ mod tests {
             *text = "one two three four five six seven eight nine ten".repeat(4);
         }
         let mut model = model_with(events);
-        let collapsed = plain(&activity_lines(&model, 40, 80));
+        let collapsed = plain(&activity_lines(&model, false, 40, 80));
         assert!(collapsed.iter().any(|row| row.contains("lines")));
 
-        model.focused = true;
         model.selected = Some(2);
         model.toggle_expanded();
-        let expanded = plain(&activity_lines(&model, 40, 80));
+        let expanded = plain(&activity_lines(&model, true, 40, 80));
         assert!(expanded.len() > collapsed.len());
         assert!(!expanded.iter().any(|row| row.contains("+")));
     }
@@ -673,7 +673,7 @@ mod tests {
         if let socium_core::ActivityKind::ThoughtDelta { text, .. } = &mut events[3].kind {
             *text = "safe\u{1b}]52;c;bad\u{7}".into();
         }
-        let rows = plain(&activity_lines(&model_with(events), 100, 50));
+        let rows = plain(&activity_lines(&model_with(events), false, 100, 50));
         assert!(rows.iter().all(|row| !row.chars().any(|c| c.is_control())));
     }
 
@@ -753,7 +753,7 @@ mod tests {
     #[test]
     fn a_tool_waiting_for_approval_is_not_shown_as_running() {
         let model = command_awaiting_approval();
-        let rows = plain(&activity_lines(&model, 100, 50));
+        let rows = plain(&activity_lines(&model, false, 100, 50));
         let tool_row = rows.iter().find(|row| row.contains("run_command")).unwrap();
 
         assert!(tool_row.ends_with("  awaiting approval"), "{tool_row}");
@@ -763,10 +763,9 @@ mod tests {
     #[test]
     fn expanded_input_shows_string_values_with_real_line_breaks() {
         let mut model = command_awaiting_approval();
-        model.focused = true;
         model.select_last();
         model.toggle_expanded();
-        let rows = plain(&activity_lines(&model, 100, 50));
+        let rows = plain(&activity_lines(&model, true, 100, 50));
         let input = rows
             .iter()
             .skip_while(|row| row.trim() != "input:")
@@ -805,7 +804,7 @@ mod tests {
             model.apply(event);
         }
 
-        let lines = plain(&activity_lines(&model, 60, 40));
+        let lines = plain(&activity_lines(&model, false, 60, 40));
 
         let guided = lines
             .iter()
@@ -834,7 +833,7 @@ mod tests {
             replayed.apply_replayed(event);
         }
 
-        let rows = plain(&activity_lines(&live, 80, 40));
+        let rows = plain(&activity_lines(&live, false, 80, 40));
         assert_eq!(
             rows[2..],
             [
@@ -851,6 +850,9 @@ mod tests {
             ],
             "{rows:#?}"
         );
-        assert_eq!(plain(&activity_lines(&replayed, 80, 40))[1..], rows[1..]);
+        assert_eq!(
+            plain(&activity_lines(&replayed, false, 80, 40))[1..],
+            rows[1..]
+        );
     }
 }

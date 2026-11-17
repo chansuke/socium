@@ -6,11 +6,13 @@ mod cli;
 mod headless;
 mod input_history;
 mod model_picker;
+mod pane_slot;
 mod progress;
 mod rewind_picker;
 mod session_picker;
 mod slash_command;
 mod subagents;
+mod timeline;
 mod transcript;
 mod view;
 

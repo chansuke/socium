@@ -3,9 +3,11 @@ use crate::agent_task::{PendingSubmission, PendingTask};
 use crate::approval::ApprovalPrompt;
 use crate::input_history;
 use crate::model_picker::{ModelPicker, model_label};
+use crate::pane_slot::{PaneSlot, SlotView};
 use crate::rewind_picker::RewindPicker;
 use crate::session_picker::SessionPicker;
 use crate::slash_command::{self, SlashAction, SlashCommand};
+use crate::timeline::TimelineModel;
 use crate::transcript::{ChatEntry, Speaker, transcript_entries_to_chat_entries};
 use crate::view::text_layout::{help_text, truncate_text};
 use color_eyre::{Result, eyre::eyre};
@@ -29,6 +31,9 @@ pub(crate) struct App {
     pub(crate) input_mode: InputMode,
     pub(crate) messages: Vec<ChatEntry>,
     pub(crate) activity: ActivityModel,
+    pub(crate) timeline: TimelineModel,
+    /// Which of Activity and the Timeline is in front, and the pane's focus.
+    pub(crate) slot: PaneSlot,
     pub(crate) transcript_scroll: usize,
     pub(crate) status: Option<String>,
     pub(crate) workspace_label: String,
@@ -81,6 +86,8 @@ impl App {
             input_mode: InputMode::Editing,
             messages: Vec::new(),
             activity: ActivityModel::default(),
+            timeline: TimelineModel::default(),
+            slot: PaneSlot::default(),
             transcript_scroll: 0,
             status: None,
             workspace_label,
@@ -138,6 +145,7 @@ impl App {
             return;
         };
         self.messages = transcript_entries_to_chat_entries(agent.transcript_entries());
+        self.timeline.show(agent.plan());
         self.transcript_scroll = 0;
         self.last_latency_ms = None;
         self.refresh_context_metrics();
@@ -152,6 +160,8 @@ impl App {
             input_mode: InputMode::Editing,
             messages: Vec::new(),
             activity: ActivityModel::default(),
+            timeline: TimelineModel::default(),
+            slot: PaneSlot::default(),
             transcript_scroll: 0,
             status: None,
             workspace_label: "test".into(),
@@ -383,29 +393,74 @@ impl App {
         true
     }
 
-    /// Keys owned by the Activity pane. Ctrl+A toggles focus from anywhere;
-    /// while focused, navigation keys are consumed here and Esc returns to
-    /// the input instead of cancelling. Cancel (Ctrl+C) and approval (y / n)
-    /// still reach the task handling.
-    fn handle_activity_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    /// Keys owned by the pane beside the transcript. From anywhere, Ctrl+A
+    /// focuses or unfocuses it and Ctrl+T brings Activity or the Timeline
+    /// forward. While focused, navigation keys go to the view in front and
+    /// Esc returns to the input instead of cancelling. Cancel (Ctrl+C) and
+    /// approval (y / n) still reach the task handling.
+    fn handle_slot_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         // An open approval owns the screen and the keys until it is answered.
         if self.approval.is_some() {
             return false;
         }
         let control = modifiers.contains(KeyModifiers::CONTROL);
         if control && code == KeyCode::Char('a') {
-            self.activity.toggle_focus();
-            self.status = Some(if self.activity.focused {
-                "Activity: Up/Down select · Ctrl+L top · Enter expand · r raw · z full screen · Esc back"
-                    .to_string()
-            } else {
-                "Ready".to_string()
-            });
+            self.slot.toggle_focus();
+            if !self.slot.focused {
+                self.activity.raw_view = None;
+            }
+            self.status = Some(self.slot_status());
             return true;
         }
-        if !self.activity.focused {
+        if control && code == KeyCode::Char('t') {
+            self.slot.swap();
+            self.status = Some(self.slot_status());
+            return true;
+        }
+        if !self.slot.focused {
             return false;
         }
+        match code {
+            KeyCode::Esc
+                if self.activity.raw_view.is_none() || self.slot.view == SlotView::Timeline =>
+            {
+                self.slot.toggle_focus();
+                self.activity.raw_view = None;
+                self.status = Some("Ready".to_string());
+                return true;
+            }
+            KeyCode::Char('z')
+                if self.activity.raw_view.is_none() || self.slot.view == SlotView::Timeline =>
+            {
+                self.slot.toggle_fullscreen();
+                return true;
+            }
+            KeyCode::Char('c') if control => return false,
+            KeyCode::Char('y' | 'n' | '1' | '2') if self.approval.is_some() => return false,
+            _ => {}
+        }
+        match self.slot.view {
+            SlotView::Activity => self.handle_activity_key(code, control),
+            SlotView::Timeline => self.handle_timeline_key(code, control),
+        }
+        true
+    }
+
+    fn slot_status(&self) -> String {
+        match (self.slot.focused, self.slot.view) {
+            (false, _) => "Ready".to_string(),
+            (true, SlotView::Activity) => {
+                "Activity: Up/Down select · Ctrl+L top · Enter expand · r raw · z full screen · Ctrl+T timeline · Esc back"
+                    .to_string()
+            }
+            (true, SlotView::Timeline) => {
+                "Timeline: Up/Down select · Enter history · z full screen · Ctrl+T activity · Esc back"
+                    .to_string()
+            }
+        }
+    }
+
+    fn handle_activity_key(&mut self, code: KeyCode, control: bool) {
         if let Some(view) = self.activity.raw_view.as_mut() {
             match code {
                 KeyCode::Esc | KeyCode::Char('r') => self.activity.raw_view = None,
@@ -413,17 +468,11 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => view.scroll = view.scroll.saturating_sub(1),
                 KeyCode::PageUp => view.scroll += 10,
                 KeyCode::PageDown => view.scroll = view.scroll.saturating_sub(10),
-                KeyCode::Char('c') if control => return false,
-                KeyCode::Char('y' | 'n' | '1' | '2') if self.approval.is_some() => return false,
                 _ => {}
             }
-            return true;
+            return;
         }
         match code {
-            KeyCode::Esc => {
-                self.activity.toggle_focus();
-                self.status = Some("Ready".to_string());
-            }
             KeyCode::Up | KeyCode::Char('k') => self.activity.select_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.activity.select_by(1),
             KeyCode::PageUp => self.activity.select_by(-10),
@@ -432,17 +481,27 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.activity.select_first(),
             KeyCode::End | KeyCode::Char('G') => self.activity.select_last(),
             KeyCode::Enter => self.activity.toggle_expanded(),
-            KeyCode::Char('z') => self.activity.fullscreen = !self.activity.fullscreen,
             KeyCode::Char('r') => {
                 if let Err(reason) = self.activity.open_raw_view() {
                     self.status = Some(reason.to_string());
                 }
             }
-            KeyCode::Char('c') if control => return false,
-            KeyCode::Char('y' | 'n' | '1' | '2') if self.approval.is_some() => return false,
             _ => {}
         }
-        true
+    }
+
+    fn handle_timeline_key(&mut self, code: KeyCode, control: bool) {
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => self.timeline.select_by(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.timeline.select_by(1),
+            KeyCode::PageUp => self.timeline.select_by(-10),
+            KeyCode::PageDown => self.timeline.select_by(10),
+            KeyCode::Char('l') if control => self.timeline.select_first(),
+            KeyCode::Home | KeyCode::Char('g') => self.timeline.select_first(),
+            KeyCode::End | KeyCode::Char('G') => self.timeline.select_last(),
+            KeyCode::Enter => self.timeline.toggle_history(),
+            _ => {}
+        }
     }
 
     fn begin_submit(&mut self) -> Result<SubmitAction> {
@@ -523,6 +582,7 @@ impl App {
                 agent.clear()?;
                 self.messages.clear();
                 self.activity.clear();
+                self.timeline.show(None);
                 self.last_latency_ms = None;
                 self.status = Some(match previous {
                     Some(id) => format!("Conversation cleared; resume it with -r {id}"),
@@ -663,8 +723,7 @@ impl App {
                     }
                     continue;
                 }
-                if key.kind == KeyEventKind::Press
-                    && self.handle_activity_key(key.code, key.modifiers)
+                if key.kind == KeyEventKind::Press && self.handle_slot_key(key.code, key.modifiers)
                 {
                     continue;
                 }
@@ -1012,20 +1071,20 @@ mod tests {
             app.activity.apply(event);
         }
 
-        assert!(!app.handle_activity_key(KeyCode::Up, KeyModifiers::NONE));
-        assert!(app.handle_activity_key(KeyCode::Char('a'), KeyModifiers::CONTROL));
-        assert!(app.activity.focused);
+        assert!(!app.handle_slot_key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(app.handle_slot_key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(app.slot.focused);
 
-        assert!(app.handle_activity_key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(app.handle_slot_key(KeyCode::Up, KeyModifiers::NONE));
         assert!(app.activity.selected.is_some());
-        assert!(app.handle_activity_key(KeyCode::Char('z'), KeyModifiers::NONE));
-        assert!(app.activity.fullscreen);
+        assert!(app.handle_slot_key(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert!(app.slot.fullscreen);
         // Cancel still reaches the task handling while focused.
-        assert!(!app.handle_activity_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.handle_slot_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
-        assert!(app.handle_activity_key(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.activity.focused);
-        assert!(!app.activity.fullscreen);
+        assert!(app.handle_slot_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.slot.focused);
+        assert!(!app.slot.fullscreen);
     }
 
     #[test]
@@ -1035,11 +1094,49 @@ mod tests {
             app.activity.apply(event);
         }
 
-        assert!(!app.handle_activity_key(KeyCode::Char('l'), KeyModifiers::CONTROL));
-        app.handle_activity_key(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert!(!app.handle_slot_key(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        app.handle_slot_key(KeyCode::Char('a'), KeyModifiers::CONTROL);
         app.activity.select_last();
 
-        assert!(app.handle_activity_key(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert!(app.handle_slot_key(KeyCode::Char('l'), KeyModifiers::CONTROL));
         assert_eq!(app.activity.selected, Some(0));
+    }
+
+    #[test]
+    fn ctrl_t_swaps_the_views_and_keys_go_to_the_one_in_front() {
+        let mut app = App::for_test();
+        for event in crate::activity::tests::sample_turn() {
+            app.activity.apply(event);
+        }
+        app.timeline
+            .show(Some(crate::timeline::tests::sample_plan()));
+
+        assert!(app.handle_slot_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.slot.view, SlotView::Timeline);
+        assert!(!app.slot.focused, "swapping does not take the input's keys");
+        app.handle_slot_key(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert!(app.handle_slot_key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.timeline.current().unwrap().id, "tui");
+        assert_eq!(app.activity.selected, None, "Activity kept its own state");
+
+        assert!(app.handle_slot_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.slot.view, SlotView::Activity);
+        assert!(app.slot.focused);
+        assert!(app.handle_slot_key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(app.activity.selected.is_some());
+    }
+
+    #[test]
+    fn an_open_approval_keeps_ctrl_t() {
+        let mut app = App::for_test();
+        app.open_approval(
+            1,
+            "run_command".into(),
+            "cargo test".into(),
+            String::new(),
+            None,
+        );
+        assert!(!app.handle_slot_key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.slot.view, SlotView::Activity);
     }
 }

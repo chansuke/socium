@@ -199,6 +199,13 @@ impl App {
         self.pending_task = None;
         self.approval = None;
         self.agent = Some(outcome.agent);
+        // A turn may fail after a plan event but before its result was
+        // saved; the replay of what was saved is the plan.
+        self.timeline.show(
+            self.agent
+                .as_ref()
+                .and_then(socium_core::AgentService::plan),
+        );
         self.refresh_context_metrics();
         self.last_latency_ms = Some(outcome.latency_ms);
         self.pop_thinking_message();

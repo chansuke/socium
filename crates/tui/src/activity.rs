@@ -116,8 +116,6 @@ pub(crate) struct ActivityModel {
     pub(crate) items: Vec<Item>,
     /// `None` follows the newest item.
     pub(crate) selected: Option<usize>,
-    pub(crate) focused: bool,
-    pub(crate) fullscreen: bool,
     pub(crate) raw: VecDeque<RawRound>,
     pub(crate) raw_view: Option<RawView>,
     signals: SignalTracker,
@@ -134,11 +132,7 @@ impl ActivityModel {
     }
 
     pub(crate) fn clear(&mut self) {
-        let focused = self.focused;
-        *self = Self {
-            focused,
-            ..Self::default()
-        };
+        *self = Self::default();
     }
 
     /// Removes turn `turn_id` and the later ones, which a rewind dropped.
@@ -535,14 +529,6 @@ impl ActivityModel {
         }
     }
 
-    pub(crate) fn toggle_focus(&mut self) {
-        self.focused = !self.focused;
-        if !self.focused {
-            self.fullscreen = false;
-            self.raw_view = None;
-        }
-    }
-
     pub(crate) fn select_by(&mut self, delta: isize) {
         if self.items.is_empty() {
             return;
@@ -564,10 +550,10 @@ impl ActivityModel {
         self.selected = None;
     }
 
+    /// The selected item, or the newest one when following. The view marks
+    /// it only while the pane is focused.
     pub(crate) fn selected_index(&self) -> Option<usize> {
-        self.selected
-            .or_else(|| self.items.len().checked_sub(1))
-            .filter(|_| self.focused)
+        self.selected.or_else(|| self.items.len().checked_sub(1))
     }
 
     pub(crate) fn toggle_expanded(&mut self) {
@@ -1004,7 +990,6 @@ pub(crate) mod tests {
     #[test]
     fn selection_moves_within_bounds_and_resumes_following_at_the_end() {
         let mut model = model_with(sample_turn());
-        model.focused = true;
         let last = model.items.len() - 1;
         assert_eq!(model.selected_index(), Some(last));
 
@@ -1014,9 +999,6 @@ pub(crate) mod tests {
         assert_eq!(model.selected_index(), Some(0));
         model.select_by(100);
         assert_eq!(model.selected, None);
-
-        model.focused = false;
-        assert_eq!(model.selected_index(), None);
     }
 
     #[test]
@@ -1075,7 +1057,6 @@ pub(crate) mod tests {
     #[test]
     fn raw_view_opens_only_for_rounds_with_a_kept_stream() {
         let mut model = model_with(sample_turn());
-        model.focused = true;
         model.select_first();
         assert!(model.open_raw_view().is_err());
 
@@ -1281,7 +1262,6 @@ pub(crate) mod tests {
         let mut events = turn_with_concurrent_subagents();
         let late = events.split_off(7);
         let mut model = model_with(events);
-        model.focused = true;
         let scan_docs = model
             .items
             .iter()
@@ -1358,7 +1338,6 @@ pub(crate) mod tests {
             model.apply(event);
         }
         model.push_raw(2, 1, "{}".into());
-        model.focused = true;
         let subagent_round = model
             .items
             .iter()
