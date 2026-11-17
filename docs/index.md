@@ -10,6 +10,7 @@ Start with the [README](../README.md) for installation and everyday use.
 - [Security policy](../SECURITY.md): trust boundaries and private vulnerability reporting.
 - [Public release review](public-release-review.md): cleanup, security findings, checks, and remaining limits.
 - [Contributing](../CONTRIBUTING.md): development and verification.
+- [Verification checklist](verification.md): checks a diff triggers, each from a bug fixed here before.
 
 ## Design decisions
 
