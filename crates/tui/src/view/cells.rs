@@ -2,7 +2,9 @@
 //! a reader sees as one character (a base letter with its combining marks,
 //! or a ZWJ emoji sequence), and cells are the terminal columns a grapheme
 //! occupies: two for CJK and most emoji. Wrapping and truncation measure
-//! cells and cut only between graphemes.
+//! cells and cut only between graphemes. Widths come from `unicode-width`;
+//! a terminal that draws a ZWJ sequence or a flag as several glyphs shows it
+//! wider than counted here, and nothing below can detect that.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
