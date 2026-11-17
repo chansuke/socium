@@ -145,6 +145,11 @@ pub enum ActivityKind {
     PlanNudged {
         rounds: usize,
     },
+    /// What the user typed while the turn ran, added after this round's
+    /// tool results, so the next request carries it.
+    UserSteered {
+        text: String,
+    },
 }
 
 /// Stamps events with the turn they belong to and the time since it began.

@@ -56,7 +56,14 @@ subagentsや自律的な無期限継続は含めない。
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 完了（branch `feat/steering`）。
+
+- 実行中の Enter は `TaskControl::steer` のキューに入る（コマンドは従来どおり終了を待つ。cancel・承認のキーは別経路のまま）。
+- main agent の turn だけが、round の tool がすべて終わり結果を保存した後、次の request の前にキューを取り出し、tool 結果の user メッセージに印付きの text として加えて保存する。実行中の tool の副作用を別の要求に読み替えない。追加分は次の round の予算検査に含まれる。どの round で読んだかは Activity の `UserSteered` に出る。サブエージェントは取り出さない。
+- turn の終了時に読まれずに残った入力は、正常終了なら次の turn として送り、中断・失敗なら入力欄に戻す（勝手に実行しない）。
+- 再起動: 読まれた入力は会話に保存され、transcript には利用者の言葉として出る。読まれる前の入力はプロセス内だけにあり、入力履歴（↑）に残るが自動では実行しない。
+- 試験: `words_added_mid_turn_reach_the_next_request_after_the_tools_finish`（tool 実行前の request には入らない、一度だけ取り出す、保存と再起動後の表示）、`words_added_to_a_turn_that_ends_without_tools_are_left_for_the_next`、TUI の `enter_during_a_request_hands_the_words_to_it_and_commands_wait`、`unread_words_follow_a_finished_turn_and_return_after_a_cancelled_one`。
+- 未検証: 実端末での操作感。
 
 [一覧へ戻る](README.md)
 

@@ -209,6 +209,17 @@ impl App {
         self.refresh_context_metrics();
         self.last_latency_ms = Some(outcome.latency_ms);
         self.pop_thinking_message();
+        // What the user added that the task did not take: the next turn
+        // after a finished one, else back in the input to send or drop.
+        let leftover = self
+            .agent
+            .as_ref()
+            .map(|agent| agent.task_control().take_steering())
+            .unwrap_or_default();
+        self.settle_added(
+            leftover,
+            matches!(outcome.reply, TaskReply::Submission(Ok(_))),
+        );
 
         match outcome.reply {
             TaskReply::Submission(Ok(reply)) => {
@@ -267,9 +278,37 @@ impl App {
     }
 }
 
+impl App {
+    /// After a task: what the user added and it never read becomes the next
+    /// turn when the turn finished, and goes back to the input otherwise,
+    /// so a cancelled request never sends it on its own.
+    pub(crate) fn settle_added(&mut self, leftover: Vec<String>, finished: bool) {
+        if leftover.is_empty() {
+            return;
+        }
+        let text = leftover.join("\n\n");
+        if finished {
+            self.follow_up = Some(text);
+        } else {
+            self.restore_unsent(&text);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_words_follow_a_finished_turn_and_return_after_a_cancelled_one() {
+        let mut app = App::for_test();
+        app.settle_added(vec!["first".into(), "second".into()], true);
+        assert_eq!(app.follow_up.take().unwrap(), "first\n\nsecond");
+
+        app.settle_added(vec!["never read".into()], false);
+        assert_eq!(app.follow_up, None);
+        assert_eq!(app.input, "never read");
+    }
     #[test]
     fn closed_worker_channel_leaves_pending_state() {
         let (_progress, progress_rx) = unbounded_channel();

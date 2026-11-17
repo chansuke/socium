@@ -342,6 +342,11 @@ what it adds.
   that stops at the output limit is kept with a notice.
 - Press Esc or Ctrl+C during a task to cancel and wait for cleanup. In normal
   mode (after Esc) `q` no longer quits; use `/exit` or Ctrl+C.
+- Typing while a task runs adds to it: Enter hands your words to the main agent,
+  which reads them once the tools it is running have finished, before its next
+  request; Activity shows the step. Words it has not read when the turn ends are
+  sent as the next turn, or put back in the input if the task was cancelled or
+  failed. Commands still wait for the task to end.
 - Each start opens a new conversation. `-c` (`--continue`) continues the most
   recently saved one in the workspace, and `-r` (`--resume`) lists the saved
   ones, newest first, to choose from; `-r <ID>` opens one directly, by its full
