@@ -98,6 +98,7 @@ impl App {
                 timed_out,
                 stdout_preview,
                 stderr_preview,
+                ..
             } => {
                 self.status = Some(command_completion_status(&command, exit_code, timed_out));
                 self.activity.attach_command_output(CommandOutputState {

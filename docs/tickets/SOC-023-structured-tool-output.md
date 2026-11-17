@@ -57,7 +57,14 @@ tool結果の多くが文字列だけで、exit/truncationを後段が再解釈�
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 完了（branch `feat/structured-tool-output`）。
+
+- 終了・切詰めの構造化: 終了は既に `CommandFinished.exit_code`・`timed_out` と `ToolFinished.is_error` で判定できた。切詰めを `ToolFinished.truncated`（command の stream が上限を超えたか、結果が `MAX_TOOL_RESULT_CHARACTERS` を超えたか）と `CommandFinished.truncated` に加え、Activity の tool 行に「cut」と出す。旧記録は既定値 false で読める。
+- 原文の再取得: run_command は保存先を伝えていたが、read_file は 4 MiB を超えるファイルを読めず、8 MiB まで保存する artifact の後半を取り出せなかった。`.socium/outputs/<stem>.stdout|stderr` に限り 8 MiB まで UTF-8 置換付きで読み、offset で範囲を指定できる。
+- 保持期限: 新しい command の開始時に、最新 100 件を超える古い出力を消す。消えた artifact を読むと保持数とともにそう返す。
+- 末尾の保持: command の stream は末尾寄り（9 割）、全 tool の結果は先頭と末尾を残す（既存）。
+- 試験: `saved_command_output_reads_back_past_the_source_file_limit`、`only_the_newest_command_outputs_are_kept`（初回実装が state path の検査でディレクトリを弾き、何も消さないことを捕捉）、`a_cut_result_says_so_on_its_tool_line`、`a_saved_tool_event_without_the_cut_flag_still_loads`。
+- 範囲外: git・search の結果を artifact に保存すること。これらは件数・行数の上限で返し、全 tool 共通の上限で切る。
 
 [一覧へ戻る](README.md)
 

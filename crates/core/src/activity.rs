@@ -109,6 +109,11 @@ pub enum ActivityKind {
         is_error: bool,
         elapsed_ms: u64,
         summary: String,
+        /// Part of the result was left out: a command stream beyond its
+        /// limit (kept in full in its artifact) or a result beyond
+        /// `MAX_TOOL_RESULT_CHARACTERS`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
     },
     CompactionStarted,
     CompactionFinished {
@@ -650,6 +655,7 @@ mod tests {
                 is_error: true,
                 elapsed_ms: 12,
                 summary: "exit 1".into(),
+                truncated: false,
             },
         );
         let value = serde_json::to_value(&event).unwrap();
@@ -661,6 +667,20 @@ mod tests {
             serde_json::from_value::<ActivityEvent>(value).unwrap(),
             event
         );
+    }
+
+    #[test]
+    fn a_saved_tool_event_without_the_cut_flag_still_loads() {
+        let saved = r#"{"turn_id":1,"round":1,"at_ms":5,"type":"tool_finished","call_id":"t","name":"read_file","is_error":false,"elapsed_ms":3,"summary":"ok"}"#;
+        let event: ActivityEvent = serde_json::from_str(saved).unwrap();
+        assert!(matches!(
+            event.kind,
+            ActivityKind::ToolFinished {
+                truncated: false,
+                ..
+            }
+        ));
+        assert!(!serde_json::to_string(&event).unwrap().contains("truncated"));
     }
 
     #[test]

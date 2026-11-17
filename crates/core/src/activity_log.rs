@@ -278,6 +278,7 @@ mod tests {
                     is_error: false,
                     elapsed_ms: 3,
                     summary: "Path: a.rs".into(),
+                    truncated: false,
                 },
             ),
             event(

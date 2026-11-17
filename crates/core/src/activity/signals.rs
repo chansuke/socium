@@ -235,6 +235,7 @@ mod tests {
             is_error,
             elapsed_ms: 1,
             summary: String::new(),
+            truncated: false,
         })
     }
 

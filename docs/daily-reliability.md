@@ -25,7 +25,10 @@ Git repositories, with no API keys or paid requests.
 - Cancellation terminates the sandbox PID namespace, including detached descendants. Memory capture is
   capped at 256 KiB per stream, keeping the first 32 KiB and the newest output. `run_command` also
   saves up to 8 MiB per stream under `.socium/outputs/`, reports truncation, and shows byte-count
-  progress while running; the model sees at most 20,000 characters per stream, mostly from the end.
+  progress while running; the model sees at most 20,000 characters per stream, mostly from the end,
+  and reads the rest back with `read_file` on the saved file and an offset. The output of the newest
+  100 commands is kept; older files are deleted when a command starts, and reading one that is gone
+  says so. A result cut this way, or beyond 100,000 characters, is marked `truncated` in Activity.
   Timeout cleanup drains for at most another 200 ms. OS-level uninterruptible I/O
   can still delay kernel cleanup. Unsupported platforms and unavailable sandbox
   backends are rejected; there is no host fallback.
@@ -198,8 +201,8 @@ Legacy raw conversation messages are retained. Legacy separately stored summarie
 are left untouched and not reused because their offsets may have become stale.
 Legacy edit entries are preserved in JSON, but cannot be safely undone without
 post-edit content; new edits use versioned grouped records. No automatic history
-or artifact deletion is performed. Archive output files or a stopped session
-manually when disk usage warrants it. Add `.socium/` to the project's `.gitignore`.
+deletion is performed; command output files are limited to the newest 100
+commands. Archive a stopped session manually when disk usage warrants it. Add `.socium/` to the project's `.gitignore`.
 
 Validation targets Linux. Live model/network behavior and macOS execution have
 not been exercised by the offline tests. Web search is a separate planned feature
