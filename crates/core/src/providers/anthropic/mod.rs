@@ -22,7 +22,8 @@ pub(crate) struct AnthropicProvider {
     first_party: bool,
     messages_url: String,
     auth: AuthScheme,
-    api_key: String,
+    /// `None` for a local endpoint that takes no key.
+    api_key: Option<String>,
     anthropic_version: String,
     features: ModelFeatures,
     options: RequestOptions,
@@ -34,14 +35,9 @@ impl AnthropicProvider {
         model: &ModelConfig,
         lookup: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, ProviderError> {
-        let api_key = lookup(&provider.api_key_env)
-            .filter(|key| !key.is_empty())
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::NotFound,
-                    format!("{} is not set", provider.api_key_env),
-                )
-            })?;
+        let api_key = provider
+            .api_key(lookup)
+            .map_err(|message| Error::new(ErrorKind::NotFound, message))?;
         let anthropic_version =
             lookup("ANTHROPIC_VERSION").unwrap_or_else(|| "2023-06-01".to_string());
         let mut options = RequestOptions::from_lookup(lookup)?;
@@ -70,7 +66,7 @@ impl AnthropicProvider {
             first_party: true,
             messages_url: "https://api.anthropic.com/v1/messages".into(),
             auth: AuthScheme::ApiKeyHeader,
-            api_key: api_key.into(),
+            api_key: Some(api_key.into()),
             anthropic_version: anthropic_version.into(),
             features: ModelFeatures::ALL,
             options: RequestOptions::default(),
@@ -86,18 +82,20 @@ impl AnthropicProvider {
         let mut body = serde_json::to_value(request)?;
         body["stream"] = Value::Bool(true);
         self.options.apply(&mut body, self.features);
-        let (header, value) = match self.auth {
-            AuthScheme::ApiKeyHeader => ("x-api-key", self.api_key.clone()),
-            AuthScheme::Bearer => ("authorization", format!("Bearer {}", self.api_key)),
-        };
-        let mut key = reqwest::header::HeaderValue::from_str(&value)
-            .map_err(|_| ProviderError::Api("Invalid API key header".into()))?;
-        key.set_sensitive(true);
         let mut http_request = client
             .post(&self.messages_url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(header, key)
             .header("anthropic-version", &self.anthropic_version);
+        if let Some(api_key) = &self.api_key {
+            let (header, value) = match self.auth {
+                AuthScheme::ApiKeyHeader => ("x-api-key", api_key.clone()),
+                AuthScheme::Bearer => ("authorization", format!("Bearer {api_key}")),
+            };
+            let mut key = reqwest::header::HeaderValue::from_str(&value)
+                .map_err(|_| ProviderError::Api("Invalid API key header".into()))?;
+            key.set_sensitive(true);
+            http_request = http_request.header(header, key);
+        }
         if let Some(beta) = self.options.beta_header(self.features) {
             http_request = http_request.header("anthropic-beta", beta);
         }

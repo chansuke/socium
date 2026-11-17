@@ -20,7 +20,8 @@ use stream::ChatStreamBuilder;
 pub(crate) struct OpenAiChatProvider {
     name: String,
     completions_url: String,
-    api_key: String,
+    /// `None` for a local endpoint that takes no key.
+    api_key: Option<String>,
     features: ModelFeatures,
     options: RequestOptions,
 }
@@ -31,14 +32,9 @@ impl OpenAiChatProvider {
         model: &ModelConfig,
         lookup: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, ProviderError> {
-        let api_key = lookup(&provider.api_key_env)
-            .filter(|key| !key.is_empty())
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::NotFound,
-                    format!("{} is not set", provider.api_key_env),
-                )
-            })?;
+        let api_key = provider
+            .api_key(lookup)
+            .map_err(|message| Error::new(ErrorKind::NotFound, message))?;
         let mut options = RequestOptions::from_lookup(lookup)?;
         options.warn_unsupported(&model.alias, model.features);
         Ok(Self {
@@ -56,10 +52,11 @@ impl OpenAiChatProvider {
         request: &AgentMessageRequest<'_>,
     ) -> Result<reqwest::RequestBuilder, ProviderError> {
         let body = request_body(request, self.features, &self.options)?;
-        Ok(client
-            .post(&self.completions_url)
-            .header(reqwest::header::AUTHORIZATION, bearer(&self.api_key)?)
-            .json(&body))
+        let mut http_request = client.post(&self.completions_url);
+        if let Some(api_key) = &self.api_key {
+            http_request = http_request.header(reqwest::header::AUTHORIZATION, bearer(api_key)?);
+        }
+        Ok(http_request.json(&body))
     }
 }
 
@@ -455,6 +452,29 @@ features = ["effort"]
                 .contains("authorization: bearer local-key")
         );
         assert!(request.contains("\"stream\":true"));
+    }
+
+    #[tokio::test]
+    async fn a_local_endpoint_without_a_key_gets_no_authorization_header() {
+        let registry = ModelRegistry::from_toml(&format!(
+            "[providers.local]\nwire = \"openai-chat\"\nbase_url = \"{}/v1\"\n[[models]]\nalias = \"m\"\nprovider = \"local\"\nid = \"local-model\"",
+            "http://127.0.0.1:1"
+        ))
+        .unwrap();
+        let body = sse(&[
+            json!({"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]}),
+        ]);
+        let (base_url, server) = serve_once("200 OK", body).await;
+        let mut provider = OpenAiChatProvider::from_config(
+            registry.provider("local").unwrap(),
+            registry.find("m").unwrap(),
+            &|_| None,
+        )
+        .unwrap();
+        provider.completions_url = format!("{base_url}/v1/chat/completions");
+        send(&provider).await.unwrap();
+        let request = server.await.unwrap().to_ascii_lowercase();
+        assert!(!request.contains("authorization:"), "{request}");
     }
 
     #[tokio::test]

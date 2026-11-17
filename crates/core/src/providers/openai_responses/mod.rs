@@ -23,7 +23,8 @@ pub(crate) struct OpenAiResponsesProvider {
     name: String,
     model: String,
     responses_url: String,
-    api_key: String,
+    /// `None` for a local endpoint that takes no key.
+    api_key: Option<String>,
     features: ModelFeatures,
     options: RequestOptions,
 }
@@ -34,14 +35,9 @@ impl OpenAiResponsesProvider {
         model: &ModelConfig,
         lookup: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, ProviderError> {
-        let api_key = lookup(&provider.api_key_env)
-            .filter(|key| !key.is_empty())
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::NotFound,
-                    format!("{} is not set", provider.api_key_env),
-                )
-            })?;
+        let api_key = provider
+            .api_key(lookup)
+            .map_err(|message| Error::new(ErrorKind::NotFound, message))?;
         let mut options = RequestOptions::from_lookup(lookup)?;
         options.warn_unsupported(&model.alias, model.features);
         Ok(Self {
@@ -60,10 +56,11 @@ impl OpenAiResponsesProvider {
         request: &AgentMessageRequest<'_>,
     ) -> Result<reqwest::RequestBuilder, ProviderError> {
         let body = request_body(request, self.features, &self.options)?;
-        Ok(client
-            .post(&self.responses_url)
-            .header(reqwest::header::AUTHORIZATION, bearer(&self.api_key)?)
-            .json(&body))
+        let mut http_request = client.post(&self.responses_url);
+        if let Some(api_key) = &self.api_key {
+            http_request = http_request.header(reqwest::header::AUTHORIZATION, bearer(api_key)?);
+        }
+        Ok(http_request.json(&body))
     }
 }
 
