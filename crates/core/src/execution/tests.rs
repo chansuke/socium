@@ -6,6 +6,7 @@ use crate::{
     process::{ProcessOutput, run_observed},
 };
 use std::{
+    collections::BTreeSet,
     fs,
     os::unix::{
         fs::{PermissionsExt, symlink},
@@ -638,4 +639,121 @@ fn a_gitfile_that_is_not_a_real_linked_worktree_is_refused() {
             "{target}"
         );
     }
+}
+
+/// Names in `dir` as the sandbox lists them.
+fn sandbox_listing(root: &Path, dir: &str) -> BTreeSet<String> {
+    let output = run(root, WorkspaceAccess::Write, &["ls", "-1A", dir]);
+    assert!(
+        output.status.success(),
+        "ls {dir}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Names in `dir` as the host sees them.
+fn host_listing(dir: &Path) -> BTreeSet<String> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Differences between what a command sees in `place` and what it should
+/// see, less the ones `approved` explains.
+fn unexplained(
+    place: &str,
+    seen: &BTreeSet<String>,
+    expected: &BTreeSet<String>,
+    approved: &[(&str, &str)],
+) -> Vec<String> {
+    seen.symmetric_difference(expected)
+        .filter(|name| !approved.contains(&(place, name.as_str())))
+        .map(|name| {
+            let side = if seen.contains(name) {
+                "only in the sandbox"
+            } else {
+                "missing in the sandbox"
+            };
+            format!("{place}: {name} ({side})")
+        })
+        .collect()
+}
+
+/// A differential test of the filesystem view, with the host as the
+/// reference: the runtimes must list exactly as on the host, and the rest
+/// must be what docs/linux-sandbox.md promises (the workspace, the
+/// runtimes, `/etc/ld.so.cache`, and the sandbox's own `/proc`, `/dev`,
+/// `/tmp` and `/socium-home`). A difference not in `APPROVED` is a bug in
+/// the sandbox or in this list.
+#[test]
+fn the_sandbox_view_matches_the_host_where_the_policy_says_it_should() {
+    /// Intentional differences, as (directory, name).
+    const APPROVED: &[(&str, &str)] = &[];
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("file"), "x").unwrap();
+    fs::create_dir(root.path().join("dir")).unwrap();
+    crate::workspace_state_path(root.path(), "conversation.json").unwrap();
+    fs::write(root.path().join(".socium/conversation.json"), "private").unwrap();
+    let workspace = root.path().canonicalize().unwrap();
+    let workspace_text = workspace.to_string_lossy().into_owned();
+    let first_component = |path: &Path| {
+        path.components()
+            .find_map(|part| match part {
+                std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let has_ld_cache = Path::new("/etc/ld.so.cache").is_file();
+    let mut problems = Vec::new();
+    let mut check = |place: &str, dir: &str, expected: BTreeSet<String>| {
+        problems.extend(unexplained(
+            place,
+            &sandbox_listing(&workspace, dir),
+            &expected,
+            APPROVED,
+        ));
+    };
+
+    let mut expected_root = BTreeSet::from(["proc", "dev", "tmp", "socium-home"].map(String::from));
+    for runtime in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/nix/store"] {
+        if Path::new(runtime).symlink_metadata().is_ok() {
+            expected_root.insert(first_component(Path::new(runtime)));
+        }
+    }
+    if has_ld_cache {
+        expected_root.insert("etc".into());
+    }
+    expected_root.insert(first_component(&workspace));
+    check("/", "/", expected_root);
+    for runtime in ["/usr", "/bin", "/sbin", "/lib", "/lib64"] {
+        if Path::new(runtime).is_dir() {
+            check(runtime, runtime, host_listing(Path::new(runtime)));
+        }
+    }
+    if has_ld_cache {
+        check("/etc", "/etc", BTreeSet::from(["ld.so.cache".to_string()]));
+    }
+    check("/socium-home", "/socium-home", BTreeSet::new());
+    // The fresh /tmp holds only the directories leading to the workspace.
+    if let Ok(below) = workspace.strip_prefix("/tmp") {
+        check("/tmp", "/tmp", BTreeSet::from([first_component(below)]));
+    }
+    check("workspace", &workspace_text, host_listing(&workspace));
+    check(
+        "workspace/.socium",
+        &format!("{workspace_text}/.socium"),
+        BTreeSet::new(),
+    );
+    assert!(
+        problems.is_empty(),
+        "unexplained differences:\n{}",
+        problems.join("\n")
+    );
 }
