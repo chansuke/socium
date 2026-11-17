@@ -652,6 +652,175 @@ mod tests {
         assert_eq!(frozen, [".github/workflows", ".vscode", "build.rs"]);
     }
 
+    mod properties {
+        use super::super::*;
+        use crate::settings::ApprovalSettings;
+        use proptest::prelude::*;
+        use serde_json::json;
+
+        const SHELLS_AND_WRAPPERS: &[&str] = &[
+            "sh",
+            "/bin/sh",
+            "bash",
+            "env",
+            "/usr/bin/env",
+            "xargs",
+            "timeout",
+            "nix",
+        ];
+
+        fn word() -> impl Strategy<Value = String> {
+            prop::sample::select(
+                [
+                    "cargo",
+                    "test",
+                    "build",
+                    "git",
+                    "push",
+                    "status",
+                    "rm",
+                    "-rf",
+                    ".",
+                    "./cargo",
+                    "/usr/bin/cargo",
+                    "python3",
+                    "-m",
+                    "pytest",
+                    "-c",
+                    "make",
+                    "npm",
+                    "run",
+                    "a=b",
+                    "x/y",
+                    "",
+                ]
+                .iter()
+                .chain(SHELLS_AND_WRAPPERS)
+                .map(|word| word.to_string())
+                .collect::<Vec<_>>(),
+            )
+        }
+
+        fn argv() -> impl Strategy<Value = Vec<String>> {
+            prop::collection::vec(word(), 1..5)
+        }
+
+        /// A rule close to `argv`: one of its prefixes, possibly one word too
+        /// long or with its last word changed, so that matches and near
+        /// misses are both common.
+        fn near(argv: Vec<String>) -> impl Strategy<Value = Vec<String>> {
+            (1..=argv.len() + 1, any::<bool>(), word()).prop_map(move |(length, change, other)| {
+                let mut rule = argv.iter().take(length).cloned().collect::<Vec<_>>();
+                if length > argv.len() {
+                    rule.push(other);
+                } else if change {
+                    *rule.last_mut().unwrap() = other;
+                }
+                rule
+            })
+        }
+
+        fn rules() -> impl Strategy<Value = Vec<Vec<String>>> {
+            prop::collection::vec(prop::collection::vec(word(), 1..3), 0..3)
+        }
+
+        fn settings(auto: bool, allow: Vec<Vec<String>>, deny: Vec<Vec<String>>) -> Settings {
+            Settings {
+                approval: ApprovalSettings {
+                    commands: if auto {
+                        CommandApproval::Auto
+                    } else {
+                        CommandApproval::Ask
+                    },
+                    allow,
+                    deny,
+                    ..ApprovalSettings::default()
+                },
+                ..Settings::default()
+            }
+        }
+
+        /// A workspace holding one secret and one file host tools run.
+        fn workspace() -> tempfile::TempDir {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join(".env"), "TOKEN=fake\n").unwrap();
+            std::fs::write(root.path().join("build.rs"), "fn main() {}\n").unwrap();
+            root
+        }
+
+        proptest! {
+            // Each case lists the workspace with ripgrep.
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// What runs unasked follows only from config rules, session grants and auto mode, and deny always wins.
+            #[test]
+            fn a_command_runs_unasked_only_when_the_user_allowed_it(
+                (argv, allow, deny, grant) in argv().prop_flat_map(|argv| {
+                    let rules = || prop::collection::vec(near(argv.clone()), 0..3);
+                    (Just(argv.clone()), rules(), rules(), prop::option::of(near(argv.clone())))
+                }),
+                auto in any::<bool>(),
+            ) {
+                let root = workspace();
+                let grants = grant.clone().map(Grant::Command).into_iter().collect::<Vec<_>>();
+                let settings = settings(auto, allow.clone(), deny.clone());
+                let gate = gate("run_command", &json!({"command": argv}), root.path(), &settings, &|wanted| grants_cover(&grants, wanted)).unwrap();
+                let denied = deny.iter().any(|rule| argv.starts_with(rule));
+                let allowed = auto
+                    || allow.iter().any(|rule| argv.starts_with(rule))
+                    || grant.as_ref().is_some_and(|prefix| argv.starts_with(prefix));
+                match gate {
+                    Gate::Deny(_) => prop_assert!(denied),
+                    Gate::Run(_) => prop_assert!(!denied && allowed),
+                    Gate::Ask(_) => prop_assert!(!denied && !allowed),
+                }
+            }
+
+            /// A command nobody reviewed never reads the workspace's secrets or changes files host tools run.
+            #[test]
+            fn an_unreviewed_command_always_runs_restricted(argv in argv(), allow in rules()) {
+                let root = workspace();
+                let settings = settings(true, allow, Vec::new());
+                let gate = gate("run_command", &json!({"command": argv}), root.path(), &settings, &|_| false).unwrap();
+                let Gate::Run(Some(restrictions)) = gate else {
+                    return Err(TestCaseError::fail("an auto-approved command must run with restrictions"));
+                };
+                prop_assert_eq!(restrictions.hidden, vec![root.path().join(".env")]);
+                prop_assert_eq!(restrictions.frozen, vec![root.path().join("build.rs")]);
+            }
+
+            /// "Allow for this session" offers only a prefix of the asked command and never a shell or wrapper.
+            #[test]
+            fn a_session_offer_is_a_prefix_and_never_a_wrapper(argv in argv()) {
+                let Some(prefix) = suggest_prefix(&argv) else { return Ok(()) };
+                prop_assert!(argv.starts_with(&prefix));
+                let name = Path::new(&prefix[0]).file_name().and_then(|name| name.to_str()).unwrap_or_default();
+                prop_assert!(!SHELLS_AND_WRAPPERS.iter().any(|wrapper| wrapper.ends_with(name)), "{:?}", prefix);
+                for word in &prefix[1..] {
+                    prop_assert!(word == "-m" || (!word.is_empty() && !word.starts_with('-') && !word.contains(['/', '=', '.'])), "{:?}", prefix);
+                }
+            }
+
+            /// Edits to host-run files and reads of secrets ask in every mode, whatever command rules exist.
+            #[test]
+            fn protected_edits_and_sensitive_reads_always_ask(
+                auto in any::<bool>(), allow in rules(),
+                grant in prop::option::of(prop::collection::vec(word(), 1..3)),
+                edited in prop::sample::select(vec!["build.rs", "crates/x/build.rs", ".envrc", ".github/workflows/ci.yaml", "a/.vscode/settings.json", ".cargo/config.toml", "./build.rs"]),
+                read in prop::sample::select(vec![".env", "app/.env.local", "id_rsa", "certs/x.pem", "./.env", ".npmrc"]),
+            ) {
+                let root = workspace();
+                let grants = grant.map(Grant::Command).into_iter().collect::<Vec<_>>();
+                let settings = settings(auto, allow, Vec::new());
+                let granted = |wanted: &Grant| grants_cover(&grants, wanted);
+                let edit = gate(crate::constants::TEXT_EDITOR_TOOL_NAME, &json!({"command": "create", "path": edited, "file_text": "x"}), root.path(), &settings, &granted).unwrap();
+                prop_assert!(matches!(edit, Gate::Ask(Ask { grant: Some(Grant::Edit(_)), .. })), "edit {edited}");
+                let decision = gate("read_file", &json!({"path": read}), root.path(), &settings, &granted).unwrap();
+                prop_assert!(matches!(decision, Gate::Ask(Ask { grant: Some(Grant::Read(_)), .. })), "read {read}");
+            }
+        }
+    }
+
     #[test]
     fn patterns_written_from_the_root_with_dot_slash_still_protect() {
         let root = tempfile::tempdir().unwrap();
