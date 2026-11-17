@@ -197,8 +197,17 @@ Model IDs above were checked against the DeepSeek and Z.ai documentation on 2026
 non-Claude names with 400. To check a registered model against its real API
 (this costs money), run
 `SOCIUM_LIVE_MODEL=<alias> nix develop -c cargo test -p socium-core live_ -- --ignored`.
-Web search is not implemented; see
-[SOC-037](docs/tickets/SOC-037-deepseek-web-search.md).
+Web search is off by default. With `[web_search] enabled = true` in
+`config.toml` and `DEEPSEEK_API_KEY` set, the model gets a `web_search` tool
+backed by DeepSeek's paid Search API
+(https://api-docs.deepseek.com/guides/search/), whichever provider runs the
+model. Each query the model writes is sent to DeepSeek and each search with
+results is billed to that key; nothing from the workspace is added to the query.
+Results come back with their URLs and are treated as web text, not as
+instructions. Explorer subagents do not get the tool. Turned on without the
+key, the tool is not offered and startup says why. To try it against the real
+API (this costs money), run
+`nix develop -c cargo test -p socium-core live_web_search -- --ignored`.
 
 Install Git, ripgrep (`rg`), and bubblewrap (`bwrap`, version 0.12 or newer).
 The Linux Nix package includes them on its runtime PATH. Socium's tools look

@@ -39,6 +39,15 @@ DeepSeek Search APIを独立した `web_search` toolとして追加し、Claude�
 
 ## 検証・完了記録
 
-未実施。実装PR、mock試験結果、実API確認の有無を記録して完了する。
+2026-11-17 実装（branch `feat/web-search`）。仕様は https://api-docs.deepseek.com/guides/search/ で 2026-11-17 に再確認した。
+
+- config.toml の `[web_search] enabled = true` と `DEEPSEEK_API_KEY` が揃ったときだけ `web_search` tool を提供する。既定は無効。キーが無ければ提供せず、起動時に理由を出す。`base_url` は https（loopback のみ http）。model からは書けない設定ファイル（ADR 12）。
+- 送るのは model が書いた query と count だけ。`ori_question`・`localization`・`need_content` は送らない。query は文字数で 1〜128、空白のみ不可、count は 1〜50（既定 8）を送信前に検証し、検索演算子はそのまま送る。
+- 結果は番号付きで title・URL・日付・summary（800 字まで）を返し、全体を 24,000 字に収め、収まらない件数を明記する。web の文章であり指示ではないと結果に書く。0 件は失敗ではない。
+- 再試行は 408・429・5xx と通信失敗だけを最大 3 回（1 秒・2 秒の間隔）。401 は鍵、402 は残高の問題として再試行せずに伝える。4 MiB を超える応答と不正な JSON は使わない。1 回 30 秒で打ち切り、中断すると以降の request は送らない。キーは sensitive header で送り、Debug 出力・エラーに出さない。
+- サブエージェント: worker は使える。読み取り専用の explorer には渡さない（外部へ送るため）。
+- 試験（mock）: 成功（日本語と演算子をそのまま送る）、0 件、401、402、429 後の成功、5xx の再試行上限、不正 JSON、巨大応答、中断、入力検証、キー未設定、設定の検証、agent loop から呼んで結果の URL が次の request に入ること。
+- 実 API: `live_web_search`（`--ignored`）を用意。実行はしていない（未確認）。
+- 範囲外: Fetch API、30 秒の timeout そのものの試験（中断の試験で代替）。
 
 

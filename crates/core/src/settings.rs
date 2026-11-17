@@ -72,9 +72,22 @@ pub(crate) const DEFAULT_SENSITIVE: &[&str] = &[
 pub struct Settings {
     pub(crate) sandbox: SandboxSettings,
     pub(crate) approval: ApprovalSettings,
+    /// The `web_search` tool, which sends the model's queries to DeepSeek's
+    /// paid Search API; `None` unless the user turned it on.
+    pub(crate) web_search: Option<WebSearchSettings>,
     /// Where the settings came from, shown in errors and `/help`.
     pub(crate) source: Option<PathBuf>,
 }
+
+/// `[web_search]` in config.toml.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WebSearchSettings {
+    /// The Search API root, normalized without a trailing slash.
+    pub(crate) base_url: String,
+}
+
+/// DeepSeek's API root, where `/v1/tools/search` lives.
+pub(crate) const DEEPSEEK_SEARCH_BASE_URL: &str = "https://api.deepseek.com";
 
 /// What commands see beyond the workspace and the system runtimes.
 #[derive(Debug, Clone)]
@@ -270,6 +283,17 @@ struct RawFile {
     sandbox: RawSandbox,
     #[serde(default)]
     approval: RawApproval,
+    #[serde(default)]
+    web_search: RawWebSearch,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawWebSearch {
+    #[serde(default)]
+    enabled: bool,
+    /// For a test server or a proxy; the key is sent to it.
+    base_url: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -539,10 +563,25 @@ impl Settings {
                 .map(|patterns| PathPatterns::new(&patterns))
                 .unwrap_or_else(|| PathPatterns::new(DEFAULT_SENSITIVE)),
         };
+        let web_search = raw
+            .web_search
+            .enabled
+            .then(|| {
+                let raw_url = raw
+                    .web_search
+                    .base_url
+                    .as_deref()
+                    .unwrap_or(DEEPSEEK_SEARCH_BASE_URL);
+                crate::models::parse_base_url(raw_url)
+                    .map(|(base_url, _)| WebSearchSettings { base_url })
+                    .map_err(|err| format!("web_search.{err}"))
+            })
+            .transpose()?;
         Ok((
             Self {
                 sandbox,
                 approval,
+                web_search,
                 source: None,
             },
             warnings,
@@ -627,6 +666,29 @@ fn reserved_variable(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_search_is_off_unless_turned_on_and_keeps_keys_off_plain_http() {
+        let (off, _) = Settings::from_toml("", None).unwrap();
+        assert_eq!(off.web_search, None);
+        let (on, _) = Settings::from_toml("[web_search]\nenabled = true", None).unwrap();
+        assert_eq!(on.web_search.unwrap().base_url, DEEPSEEK_SEARCH_BASE_URL);
+        let (local, _) = Settings::from_toml(
+            "[web_search]\nenabled = true\nbase_url = \"http://127.0.0.1:9000/\"",
+            None,
+        )
+        .unwrap();
+        assert_eq!(local.web_search.unwrap().base_url, "http://127.0.0.1:9000");
+        let err = Settings::from_toml(
+            "[web_search]\nenabled = true\nbase_url = \"http://search.example\"",
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("web_search.base_url must use https"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn the_example_file_is_valid() {

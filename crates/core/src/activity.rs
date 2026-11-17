@@ -355,6 +355,7 @@ fn primary_input_key(tool: &str) -> Option<&'static str> {
         "agent" => "description",
         "git_commit" => "message",
         "update_plan" => "goal",
+        "web_search" => "query",
         _ => return None,
     })
 }

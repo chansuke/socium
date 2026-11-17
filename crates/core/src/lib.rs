@@ -327,6 +327,9 @@ pub struct AgentService {
     system_prompt: String,
     /// The framed instruction file alone, which subagents also get.
     project_instructions: Option<String>,
+    /// DeepSeek search, when the user turned `web_search` on and its key is
+    /// set.
+    web_search: Option<crate::tools::web_search::WebSearch>,
     /// Why the instruction file could not be used when it was last read,
     /// so the same problem is reported once.
     instructions_problem: Option<String>,
@@ -513,6 +516,7 @@ impl AgentService {
             system_prompt: String::new(),
             project_instructions: None,
             instructions_problem: None,
+            web_search: None,
             sandbox: SandboxCheck::Passed,
         };
         service.context_window_override = service.limit_override("CONTEXT_WINDOW_TOKENS");
@@ -589,7 +593,20 @@ impl AgentService {
     }
 
     /// Makes `settings` the ones tools and commands follow.
-    pub(crate) fn install_settings(&mut self, settings: Settings) {
+    pub(crate) fn install_settings(&mut self, mut settings: Settings) {
+        // The tool is offered only when its key is set too; the settings say
+        // which, so every list of tools agrees.
+        self.web_search = match &settings.web_search {
+            None => None,
+            Some(search) => match crate::tools::web_search::WebSearch::new(search, &*self.env) {
+                Ok(search) => Some(search),
+                Err(warning) => {
+                    self.warnings.push(warning);
+                    settings.web_search = None;
+                    None
+                }
+            },
+        };
         self.settings = Arc::new(settings);
         self.apply_model_limits();
         self.refresh_system_prompt();
@@ -1653,6 +1670,7 @@ impl AgentService {
             control: &self.control,
             settings: &self.settings,
             clock,
+            web_search: self.web_search.as_ref(),
         };
         let raw_len = self.messages.len();
         let active_model = self.selected_model.clone();
@@ -2047,6 +2065,71 @@ mod tests {
 
         assert!(err.contains("leaves no room for input"), "{err}");
         assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_agent_loop_searches_the_web_when_the_user_turned_it_on() {
+        let (base_url, _server) = crate::providers::test_server::serve_once(
+            "200 OK",
+            r#"{"results":[{"title":"Tokio 2.0","url":"https://tokio.rs/blog","summary":"Released.","date":"2026-10-01T00:00:00Z"}]}"#.into(),
+        )
+        .await;
+        let workspace = make_temp_dir("web_search");
+        let provider = ScriptedProvider::new(vec![
+            Ok(crate::providers::ProviderResponse {
+                message: crate::agent::types::AgentMessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "s1".into(),
+                        name: "web_search".into(),
+                        input: json!({"query": "tokio release"}),
+                    }],
+                    ..Default::default()
+                },
+                streamed_text: false,
+                usage: None,
+            }),
+            Ok(text_provider_response(
+                "Tokio 2.0 is out (https://tokio.rs/blog).",
+                None,
+            )),
+        ]);
+        let requests = provider.recorded_requests.clone();
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.env =
+            std::sync::Arc::new(|name| (name == "DEEPSEEK_API_KEY").then(|| "sk".to_string()));
+        let (settings, _) = crate::Settings::from_toml(
+            &format!("[web_search]\nenabled = true\nbase_url = \"{base_url}\""),
+            None,
+        )
+        .unwrap();
+        service.install_settings(settings);
+
+        service
+            .submit("what is new in tokio?".into())
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        let offered = requests[0]["tools"].as_array().unwrap();
+        assert!(offered.iter().any(|tool| tool["name"] == "web_search"));
+        let result = requests[1]["messages"][2]["content"][0]["content"]
+            .as_str()
+            .unwrap();
+        assert!(result.contains("https://tokio.rs/blog"), "{result}");
+
+        // Turned on without its key: not offered, and the user is told.
+        service.env = std::sync::Arc::new(|_| None);
+        let (settings, _) =
+            crate::Settings::from_toml("[web_search]\nenabled = true", None).unwrap();
+        service.install_settings(settings);
+        assert!(!service.tools.iter().any(|tool| tool.name() == "web_search"));
+        assert!(
+            service
+                .startup_warnings()
+                .iter()
+                .any(|w| w.contains("DEEPSEEK_API_KEY is not set"))
+        );
     }
 
     #[tokio::test]

@@ -15,6 +15,7 @@ pub(crate) mod run_command;
 pub(crate) mod search_text;
 pub(crate) mod text_editor;
 pub(crate) mod text_file;
+pub(crate) mod web_search;
 pub(crate) mod workspace;
 
 use crate::AgentProgress;
@@ -113,6 +114,13 @@ pub(crate) fn tools_with_settings(settings: &crate::settings::Settings) -> Vec<T
             crate::agent::subagent::catalog::SubagentCatalog::builtin().tool_definition(),
             crate::plan::tool_definition(),
         ])
+        // Only when the user turned it on and its key is set.
+        .chain(
+            settings
+                .web_search
+                .is_some()
+                .then(web_search::tool_definition),
+        )
         .collect()
 }
 
