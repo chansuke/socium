@@ -372,7 +372,11 @@ Only run Socium in workspaces you trust; see the
 [threat model](docs/threat-model.md). Read files and command output can be
 sent to the model provider; `.gitignore` is not a confidentiality boundary.
 Socium reads `AGENTS.md` (or `CLAUDE.md`) in the workspace root into its
-instructions.
+instructions, again before every turn, so an edit applies from the next one.
+A file in a subdirectory applies to the files under it: it is added to the
+result of the first tool call that reads or edits a path there, and again
+after it changes. Files outside the workspace (through a symlink) or over
+32 KiB are not used, and Socium says so.
 Conversation, input history, edits, and command artifacts are stored locally
 under `.socium/` without encryption. Keep API keys outside source files.
 

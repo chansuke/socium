@@ -322,6 +322,9 @@ pub struct AgentService {
     system_prompt: String,
     /// The framed instruction file alone, which subagents also get.
     project_instructions: Option<String>,
+    /// Why the instruction file could not be used when it was last read,
+    /// so the same problem is reported once.
+    instructions_problem: Option<String>,
     sandbox: SandboxCheck,
 }
 
@@ -504,6 +507,7 @@ impl AgentService {
             session_usage: Default::default(),
             system_prompt: String::new(),
             project_instructions: None,
+            instructions_problem: None,
             sandbox: SandboxCheck::Passed,
         };
         service.context_window_override = service.limit_override("CONTEXT_WINDOW_TOKENS");
@@ -591,18 +595,44 @@ impl AgentService {
     /// Rebuilds the system prompt from the settings and the project's
     /// instruction file. A file that cannot be used is reported, not fatal.
     fn refresh_system_prompt(&mut self) {
-        self.project_instructions = match instructions::project_instructions(&self.workspace_root) {
-            Ok(found) => found,
-            Err(warning) => {
-                self.warnings.push(warning);
-                None
-            }
-        };
+        if let Err(warning) = self.read_instructions() {
+            self.warnings.push(warning);
+        }
+    }
+
+    /// Reads the root's instruction file again and rebuilds the system
+    /// prompt from it. `Err` when the file exists but cannot be used, which
+    /// leaves the prompt without it.
+    fn read_instructions(&mut self) -> Result<(), String> {
+        let found = instructions::project_instructions(&self.workspace_root);
+        self.project_instructions = found.clone().unwrap_or(None);
+        self.instructions_problem = found.clone().err();
         self.system_prompt = instructions::system_prompt(
             DEFAULT_SYSTEM_PROMPT,
             &self.settings,
             self.project_instructions.as_deref(),
         );
+        found.map(drop)
+    }
+
+    /// Before each turn: picks up an edited, added or removed instruction
+    /// file, and says so. The prompt changes only when the file did, so the
+    /// prompt cache is kept otherwise.
+    fn reload_instructions(&mut self) -> Option<String> {
+        let before = self.project_instructions.clone();
+        let reported = self.instructions_problem.clone();
+        let result = self.read_instructions();
+        match (result, &before, &self.project_instructions) {
+            (Err(warning), _, _) => (reported.as_ref() != Some(&warning)).then_some(warning),
+            (Ok(()), old, new) if old == new => None,
+            (Ok(()), _, None) => {
+                Some("The project instruction file was removed; it no longer applies".to_string())
+            }
+            (Ok(()), _, Some(_)) => Some(
+                "The project instruction file changed; the new version applies from this turn"
+                    .to_string(),
+            ),
+        }
     }
 
     /// Opens the session `start` names and selects its model: the alias
@@ -1520,6 +1550,9 @@ impl AgentService {
         self.messages.push(Message::user_text(user_input));
         self.persist_state()?;
         emit(&mut on_progress, ActivityKind::TurnStarted);
+        if let Some(message) = self.reload_instructions() {
+            emit(&mut on_progress, ActivityKind::Warning { message });
+        }
         let mut plan = crate::plan::PlanLedger::resume(&self.messages);
         for message in plan.take_replay_warnings() {
             emit(&mut on_progress, ActivityKind::Warning { message });
@@ -1880,6 +1913,90 @@ mod tests {
                 .is_none_or(|tools| tools.is_empty()),
             "{}",
             requests[0]["tools"]
+        );
+    }
+
+    #[tokio::test]
+    async fn instruction_files_follow_edits_and_reach_the_tools_that_use_their_scope() {
+        let workspace = make_temp_dir("scoped_instructions");
+        let root = workspace.path();
+        std::fs::create_dir_all(root.join("crates/tui")).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "Root rule one.").unwrap();
+        std::fs::write(root.join("crates/tui/AGENTS.md"), "TUI rule.").unwrap();
+        std::fs::write(root.join("crates/tui/app.rs"), "fn main() {}\n").unwrap();
+        let read = |id: &str| {
+            Ok(crate::providers::ProviderResponse {
+                message: crate::agent::types::AgentMessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: id.into(),
+                        name: "read_file".into(),
+                        input: json!({"path": "crates/tui/app.rs"}),
+                    }],
+                    ..Default::default()
+                },
+                streamed_text: false,
+                usage: None,
+            })
+        };
+        let provider = ScriptedProvider::new(vec![
+            read("r1"),
+            read("r2"),
+            Ok(text_provider_response("read it", None)),
+            Ok(text_provider_response("ok", None)),
+        ]);
+        let requests = provider.recorded_requests.clone();
+        let mut service = service_with_scripted_provider(root, provider, Vec::new(), None);
+        service.refresh_system_prompt();
+
+        service.submit("look at the app".into()).await.unwrap();
+        std::fs::write(root.join("AGENTS.md"), "Root rule two.").unwrap();
+        let mut notes = Vec::new();
+        service
+            .submit_with_progress("again".into(), |event| {
+                if let crate::AgentProgress::Activity(crate::ActivityEvent {
+                    kind: crate::ActivityKind::Warning { message },
+                    ..
+                }) = event
+                {
+                    notes.push(message);
+                }
+            })
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        let result = |request: &serde_json::Value, id: &str| {
+            request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["content"].as_array().into_iter().flatten())
+                .find(|b| b["tool_use_id"] == id)
+                .map(|b| b["content"].as_str().unwrap().to_string())
+                .unwrap()
+        };
+        let first = result(&requests[2], "r1");
+        let second = result(&requests[2], "r2");
+        assert!(
+            first.contains("TUI rule.") && first.contains("for files under crates/tui/."),
+            "{first}"
+        );
+        assert!(!second.contains("TUI rule."), "delivered once: {second}");
+        assert!(
+            requests[0]["system"]
+                .as_str()
+                .unwrap()
+                .contains("Root rule one.")
+        );
+        assert!(
+            requests[3]["system"]
+                .as_str()
+                .unwrap()
+                .contains("Root rule two.")
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("instruction file changed")),
+            "{notes:?}"
         );
     }
 
