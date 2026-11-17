@@ -661,6 +661,7 @@ impl AgentService {
             ),
         };
 
+        warnings.extend(crate::execution::missing_tool_programs());
         if lookup("COMPACT_MODEL").is_some() {
             warnings.push(
                 "COMPACT_MODEL is no longer supported and is ignored; set compact_model for the model in models.toml"

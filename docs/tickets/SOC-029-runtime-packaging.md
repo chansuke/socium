@@ -57,7 +57,13 @@ Nix packageのruntime PATHにgit/rgが含まれず、開発shellでは動くが�
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17（branch `feat/runtime-dependency-check`）。
+
+- Nix package は既に git・rg・bwrap を wrapper の PATH に入れていた。
+- 起動診断を追加: tool と同じ探し方（PATH のシステムディレクトリと /usr/bin・/bin）で rg と git を探し、無ければ起動時の警告に、失敗する tool の名前とともに出す。
+- 配布物の smoke: headless の実バイナリ試験 `a_missing_ripgrep_is_named_at_startup` が、bwrap と git だけの PATH で起動する。Nix package build は試験を Nix の sandbox で走らせ、そこには /usr/bin が無いので、CI では警告が出る側を確認する。
+- README に探す場所と警告を記載。
+- 残り: 「実際に検証した OS」の記載。所有者の検証環境が確認できないため未記入（README は Linux のみ対応、macOS・Windows 非対応と記載済み）。
 
 [一覧へ戻る](README.md)
 

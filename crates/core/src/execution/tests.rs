@@ -757,3 +757,19 @@ fn the_sandbox_view_matches_the_host_where_the_policy_says_it_should() {
         problems.join("\n")
     );
 }
+
+#[test]
+fn programs_are_found_where_the_sandbox_looks_for_them() {
+    assert!(linux::finds_program("sh"));
+    assert!(!linux::finds_program("socium-no-such-program"));
+
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = [dir.path().to_path_buf()];
+    assert!(!linux::finds_program_in("rg", &paths));
+    let rg = dir.path().join("rg");
+    std::fs::write(&rg, "").unwrap();
+    assert!(!linux::finds_program_in("rg", &paths), "not executable");
+    std::fs::set_permissions(&rg, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(linux::finds_program_in("rg", &paths));
+}

@@ -101,6 +101,36 @@ impl SandboxExecutor {
     }
 }
 
+/// Host programs Socium's own tools run, with what fails without them.
+const TOOL_PROGRAMS: [(&str, &str); 2] = [
+    (
+        "rg",
+        "ripgrep (rg) is not installed in a system directory on PATH; search_text, find_symbol and recursive list_files will fail",
+    ),
+    (
+        "git",
+        "git is not installed in a system directory on PATH; the git tools and /rewind of files will fail",
+    ),
+];
+
+/// One line per program Socium's tools need but the sandbox cannot find,
+/// for the startup warnings. The tools look programs up the same way, in
+/// the system directories of PATH, so a warning here means they will fail.
+pub(crate) fn missing_tool_programs() -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        TOOL_PROGRAMS
+            .iter()
+            .filter(|(program, _)| !linux::finds_program(program))
+            .map(|(_, warning)| warning.to_string())
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
+}
+
 pub const SANDBOX_DESCRIPTION: &str = "Linux sandbox: workspace access only plus read-only system runtimes; no network; private HOME; no host fallback";
 
 #[cfg(all(test, target_os = "linux"))]

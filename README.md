@@ -197,7 +197,10 @@ Web search is not implemented; see
 [SOC-037](docs/tickets/SOC-037-deepseek-web-search.md).
 
 Install Git, ripgrep (`rg`), and bubblewrap (`bwrap`, version 0.12 or newer).
-The Linux Nix package includes them on its runtime PATH. A project directory can
+The Linux Nix package includes them on its runtime PATH. Socium's tools look
+for `rg` and `git` in the system directories on PATH (`/usr`, `/bin`, `/nix/store`)
+and in `/usr/bin` and `/bin`; when one is not there, startup names it and the
+tools that will fail. A project directory can
 be an ordinary checkout or a linked worktree made by `git worktree add`; for a
 worktree, the main repository's Git directory is mounted read-only (writable only
 during `git_commit`). Submodule gitfiles and other redirected Git metadata are

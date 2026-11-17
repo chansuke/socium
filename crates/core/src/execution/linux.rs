@@ -55,6 +55,16 @@ fn mounted_read_only(policy: &ExecutionPolicy, path: &Path) -> bool {
         .any(|mount| path.starts_with(&mount.source))
 }
 
+/// Whether a command named `program` resolves in the system runtime PATH,
+/// as the read-only helpers such as rg and git look it up.
+pub(super) fn finds_program(program: &str) -> bool {
+    finds_program_in(program, &system_search_path())
+}
+
+pub(super) fn finds_program_in(program: &str, paths: &[PathBuf]) -> bool {
+    paths.iter().any(|path| executable(&path.join(program)))
+}
+
 fn executable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
