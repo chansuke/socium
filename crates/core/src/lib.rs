@@ -516,7 +516,13 @@ impl AgentService {
         service.context_window_override = service.limit_override("CONTEXT_WINDOW_TOKENS");
         service.compaction_threshold_override =
             service.limit_override("COMPACTION_TOKEN_THRESHOLD");
+        if service.max_tokens_override.is_none() {
+            service.max_tokens_override = service.limit_override("MAX_TOKENS");
+        }
         service.apply_model_limits();
+        if let Some(problem) = service.limit_problem() {
+            service.warnings.push(problem);
+        }
         service.refresh_system_prompt();
         service
     }
@@ -541,16 +547,8 @@ impl AgentService {
         let client = HttpClient::start();
         let lookup: EnvLookup = Arc::new(|key| env::var(key).ok());
         let registry = ModelRegistry::load(lookup.as_ref())?;
-        let max_tokens_override = lookup("MAX_TOKENS")
-            .map(|raw| {
-                raw.parse::<u32>().map_err(|e| {
-                    Error::new(
-                        ErrorKind::InvalidInput,
-                        format!("MAX_TOKENS must be an unsigned integer: {e}"),
-                    )
-                })
-            })
-            .transpose()?;
+        // Read from the same lookup as the other limits, in `new`.
+        let max_tokens_override = None;
         settings::ensure_config_outside(&workspace_root, lookup.as_ref())?;
         let (settings, settings_warnings) = Settings::load(lookup.as_ref())?;
 
@@ -950,6 +948,7 @@ impl AgentService {
         self.last_measured_usage = None;
         self.estimate_scale = 1.0;
         warnings.extend(self.provider.startup_warnings());
+        warnings.extend(self.limit_problem());
         let needs_compaction = match self.history_pressure()? {
             Some((history, budget)) => {
                 warnings.push(format!(
@@ -991,6 +990,21 @@ impl AgentService {
     fn context_window(&self) -> Option<u32> {
         self.context_window_override
             .or(self.active_model.context_window)
+    }
+
+    /// Why no message can be sent with the current limits: an output limit
+    /// as large as the window leaves no room for the prompt, and every
+    /// message would be refused as too long.
+    fn limit_problem(&self) -> Option<String> {
+        let window = self
+            .context_window()
+            .unwrap_or(crate::constants::DEFAULT_CONTEXT_WINDOW_TOKENS);
+        (self.max_tokens >= window).then(|| {
+            format!(
+                "The output limit of {} tokens leaves no room for input in the {window}-token context window of '{}'; lower MAX_TOKENS or the model's max_output_tokens, or raise CONTEXT_WINDOW_TOKENS",
+                self.max_tokens, self.active_model.alias
+            )
+        })
     }
 
     fn context_budget(&self) -> crate::agent::context::ContextBudget {
@@ -1523,6 +1537,9 @@ impl AgentService {
     {
         self.wait_for_sandbox()?;
         self.ensure_state_lock()?;
+        if let Some(problem) = self.limit_problem() {
+            return Err(Error::new(ErrorKind::InvalidInput, problem).into());
+        }
         crate::agent::turn::repair_incomplete_tools(&mut self.messages);
         let turn_id = self.messages.len();
         let clock = ActivityClock::start(turn_id);
@@ -2001,6 +2018,24 @@ mod tests {
             notes.iter().any(|n| n.contains("instruction file changed")),
             "{notes:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn no_request_is_sent_when_the_output_limit_fills_the_window() {
+        let workspace = make_temp_dir("limits_refused");
+        let provider = ScriptedProvider::new(vec![Ok(text_provider_response("hi", None))]);
+        let requests = provider.recorded_requests.clone();
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.context_window_override = Some(1_000);
+
+        let Err(err) = service.submit("hello".into()).await else {
+            panic!("the turn ran");
+        };
+        let err = err.to_string();
+
+        assert!(err.contains("leaves no room for input"), "{err}");
+        assert!(requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2618,6 +2653,53 @@ max_output_tokens = 32000
                 switch.warnings
             );
             assert!(!service.provider.capabilities().supports_tools);
+        }
+
+        #[test]
+        fn an_output_limit_that_fills_the_window_is_reported_before_any_request() {
+            let root = make_temp_dir("limits_conflict");
+            let mut env = KEYS.to_vec();
+            // opus has no max_output_tokens, so the 64000-token default
+            // meets a 50000-token window.
+            env.extend([("CONTEXT_WINDOW_TOKENS", "50000"), ("MAX_TOKENS", "0")]);
+            let service = open(root.path(), &env);
+            let warnings = service.startup_warnings();
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.contains("MAX_TOKENS must be a positive integer; '0' is ignored")),
+                "{warnings:?}"
+            );
+            assert!(
+                warnings.iter().any(|w| w.contains(
+                    "The output limit of 64000 tokens leaves no room for input in the 50000-token context window"
+                )),
+                "{warnings:?}"
+            );
+        }
+
+        #[test]
+        fn switching_to_a_model_whose_output_fills_the_window_says_so() {
+            let root = make_temp_dir("switch_limits_conflict");
+            let mut env = KEYS.to_vec();
+            env.push(("CONTEXT_WINDOW_TOKENS", "40000"));
+            let mut service = open(root.path(), &env);
+            // ds-flash's 32000-token output fits a 40000-token window.
+            let fits = service.switch_model("ds-flash").unwrap();
+            assert!(
+                !fits
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("no room for input"))
+            );
+            let opus = service.switch_model("opus").unwrap();
+            assert!(
+                opus.warnings
+                    .iter()
+                    .any(|w| w.contains("no room for input")),
+                "{:?}",
+                opus.warnings
+            );
         }
 
         #[test]

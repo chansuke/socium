@@ -58,7 +58,14 @@ MODEL、compaction model、endpoint、timeout等が固定値や分散したenv�
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 完了（branch `feat/validated-model-config`）。
+
+- 既に満たしていたもの: model registry（ADR 6）が provider・endpoint・window・出力上限・compaction model・features を一か所で検証し、`context_window` と `max_output_tokens`・`compact_at_tokens` の矛盾、未知の wire、資格情報入りの URL は読込時に拒否する。compaction model が使えなければ警告して自分で要約する。設定は `EnvLookup` で注入され、試験は process の環境変数を書き換えない。TUI の model 表示は起動・`/model`・`/resume` で core の `active_model` から作る。
+- 直したもの: `MAX_TOKENS` だけ `from_env` で個別に読み、0 を受け入れ、不正値で起動を止めていた。他の上限と同じく注入された lookup から読み、正の整数でなければ警告して無視する。
+- 直したもの: 出力上限（`MAX_TOKENS` か `max_output_tokens`）が window（`CONTEXT_WINDOW_TOKENS` を含む）以上だと入力予算が 1 token になり、どのメッセージも「長すぎる」と拒否され原因が分からなかった。起動時と `/model` で警告し、turn は request 前に理由付きで止める。
+- 未知の `MODEL` は Claude の model ID として Anthropic に送る方針を README に明記。
+- 試験: `an_output_limit_that_fills_the_window_is_reported_before_any_request`、`no_request_is_sent_when_the_output_limit_fills_the_window`、`switching_to_a_model_whose_output_fills_the_window_says_so`（前二つは修正前に失敗を確認）。
+- 範囲外: image・schema 制約などの capability。使う機能がまだない。
 
 [一覧へ戻る](README.md)
 
