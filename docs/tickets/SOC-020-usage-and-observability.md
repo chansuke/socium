@@ -57,7 +57,13 @@
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 完了（branch `feat/attempt-observability`）。
+
+- 既に満たしていたもの: model 呼び出しは Activity の `RoundStarted`/`RoundFinished` に turn・round・agent 付きで usage・TTFT・経過時間・終了理由を記録し、activity.jsonl と headless に同じ event が出る。出力前の再試行は失敗した試行ごとに Warning を出し、usage を持たないので重複計上しない。tool は `ToolFinished` に経過時間と失敗を、turn は `TurnFinished` に失敗理由を持つ。usage 未報告の round は「usage n/a」と表示し、価格のない model があれば費用は出さない。API key の header は sensitive 指定で、エラー文は key を出さない。
+- 直したもの: 圧縮の LLM 呼び出しの usage を捨てていた（要約を不採用にした場合も課金される）。`CompactionFinished` に応答した model と usage を載せ、通常の round と同じ一つの経路（`SessionUsage::record`）で集計する。自動圧縮・context 超過後の圧縮・手動の `/compact`・サブエージェントの圧縮のすべてで数える。
+- 直したもの: usage を報告しない呼び出しが黙って 0 扱いになり、合計と費用が完全な値に見えた。未報告の呼び出しを数え、TUI の footer では合計と費用の前に「≥」を付け、headless の `finished` に `unreported_calls` を出す。
+- 試験: `compaction_calls_count_and_unreported_usage_is_not_zero`、`the_summary_call_counts_toward_the_session_usage`、footer の表示試験、要約の不採用時も usage を返す試験。
+- 範囲外: 価格表の出典と版の記録。価格は利用者が models.toml に書き、Socium は価格を同梱しない。
 
 [一覧へ戻る](README.md)
 
