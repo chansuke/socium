@@ -606,7 +606,17 @@ where
                     },
                 );
             }
-            results.push(bounded(result));
+            let mut result = bounded(result);
+            if !failed && let ContentBlock::ToolResult { content, .. } = &mut result {
+                let paths = crate::instructions::touched_paths(&tool_name, &input);
+                let (instructions, warnings) =
+                    crate::instructions::nested_instructions(ctx.workspace_root, &paths, messages);
+                content.push_str(instructions.as_deref().unwrap_or_default());
+                for message in warnings {
+                    emit(on_progress, ActivityKind::Warning { message });
+                }
+            }
+            results.push(result);
             *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
             checkpoint(messages,serde_json::json!({"type":"tool_finished","round":round+1,"attempt":1,"tool_call_id":call_id,"tool":tool_name,"is_error":failed,"result_index":results.len()-1})).map_err(|e|std::io::Error::other(format!("Tool finished but its result could not be saved; outcome may be unknown after restart: {e}")))?;
             // Shown only once the result that carries it is saved, so the

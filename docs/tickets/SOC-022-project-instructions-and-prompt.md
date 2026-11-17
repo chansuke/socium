@@ -56,7 +56,14 @@ skills高度化・CLAUDE互換・marketplaceはSOC-036で需要を評価して�
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 完了（branch `feat/scoped-agents-md`）。
+
+- root の AGENTS.md（なければ CLAUDE.md）を turn ごとに読み直す。変わったときだけ system prompt を作り直し、変更・削除・読めない状態を Activity で一度だけ知らせる。
+- 下位ディレクトリのファイルは、そのディレクトリ以下のパスを読む・編集する tool 呼び出しの結果に、外側から順に追記する。root の指示に加わり、その範囲では優先すると明記する。届けたかどうかは文脈中のマーカー（ファイル名と内容の FNV-1a ハッシュ）で判断するので、変更後と圧縮後に再送され、何を送ったかは会話に残る。prompt cache は保たれる。
+- workspace 外を指す symlink、32 KiB 超、読込失敗は使わずに警告する。1 回の呼び出しで追記する量も 32 KiB まで。
+- 固定 prompt（受け入れ条件 4）: 検証は実施したもの・通ったもの・できなかったものを述べ、拒否された呼び出しは再試行しないと既に指示している。承認を自分で与える経路はない（SOC-001）。
+- 試験: `nested_files_cover_their_directory_once_per_version`、`a_nested_file_outside_the_workspace_or_too_large_is_reported`、`tool_inputs_name_the_paths_they_touch`、`instruction_files_follow_edits_and_reach_the_tools_that_use_their_scope`。
+- 範囲外: run_command の cwd による適用。コマンドが触るパスは引数から分からないため。
 
 [一覧へ戻る](README.md)
 
