@@ -325,7 +325,7 @@ async fn run_in_window(
             }
             saved
         };
-        match run_agent_turn(&segment, &mut context, on_progress, &mut checkpoint).await {
+        match run_agent_turn(&segment, &mut context, None, on_progress, &mut checkpoint).await {
             // A loop that got no answer would fill the window again.
             Err(AgentError::ContextFull(_)) if rounds(record) > rounds_done => {}
             result => return result.map(drop),
@@ -464,6 +464,7 @@ fn bounded_report(mut report: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::agent::subagent::catalog::MAIN_AGENT_TOOLS;
     use crate::agent::types::{AgentMessageResponse, ContentBlock};
     use crate::constants::{
         DEFAULT_COMPACTION_MODEL, DEFAULT_SYSTEM_PROMPT, SUBAGENT_EXPLORER_INSTRUCTIONS,
@@ -730,7 +731,7 @@ mod tests {
 
         let requests = requests.lock().unwrap().clone();
         let mut expected = tool_names(&requests[0]);
-        expected.retain(|name| name != "agent");
+        expected.retain(|name| !MAIN_AGENT_TOOLS.contains(&name.as_str()));
         assert_eq!(
             requests[1]["system"],
             format!("{SUBAGENT_FRAMING}\n\n{SUBAGENT_WORKER_INSTRUCTIONS}")

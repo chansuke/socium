@@ -16,7 +16,7 @@
 //! ```
 
 use crate::constants::{
-    AGENT_TOOL_NAME, SUBAGENT_EXPLORER_INSTRUCTIONS, SUBAGENT_WORKER_INSTRUCTIONS,
+    AGENT_TOOL_NAME, PLAN_TOOL_NAME, SUBAGENT_EXPLORER_INSTRUCTIONS, SUBAGENT_WORKER_INSTRUCTIONS,
 };
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::Provider;
@@ -45,8 +45,13 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "git_log",
 ];
 
+/// Tools only the main agent uses, whatever a subagent type lists: `agent`
+/// because subagents do not nest, `update_plan` because the main agent owns
+/// the plan.
+pub(crate) const MAIN_AGENT_TOOLS: &[&str] = &[AGENT_TOOL_NAME, PLAN_TOOL_NAME];
+
 /// The tools a subagent type gets, as a subset of the tools offered to its
-/// model. `agent` is never part of it, so subagents do not nest.
+/// model. `MAIN_AGENT_TOOLS` are never part of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolSet {
     ReadOnly,
@@ -58,7 +63,7 @@ impl ToolSet {
     pub(crate) fn allows(&self, tool: &str) -> bool {
         match self {
             Self::ReadOnly => READ_ONLY_TOOLS.contains(&tool),
-            Self::AllButAgent => tool != AGENT_TOOL_NAME,
+            Self::AllButAgent => !MAIN_AGENT_TOOLS.contains(&tool),
             Self::Only(tools) => tools.iter().any(|name| name == tool),
         }
     }
@@ -284,8 +289,10 @@ pub(crate) fn parse_definition(text: &str) -> Result<Definition, String> {
             let known = tools_for_model(true);
             let mut chosen = Vec::new();
             for tool in names {
-                if tool == AGENT_TOOL_NAME {
-                    return Err("tools cannot include agent; subagents do not nest".into());
+                if MAIN_AGENT_TOOLS.contains(&tool.as_str()) {
+                    return Err(format!(
+                        "tools cannot include {tool}; only the main agent uses it"
+                    ));
                 }
                 if !known.iter().any(|known| known.name() == tool) {
                     return Err(format!("unknown tool '{tool}'"));

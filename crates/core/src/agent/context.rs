@@ -359,7 +359,13 @@ fn compose_context(
     let kept_from = covered_messages.min(raw_messages.len());
     let mut messages = Vec::new();
     if let Some(summary) = &summary_state.summary {
-        messages.push(summary_message(summary));
+        // Plan results before the cut are no longer sent, so the summary
+        // carries the plan as it stood there. The same prefix renders the
+        // same text, so the message stays cacheable until the cut moves.
+        let plan = crate::plan::replay(&raw_messages[..kept_from])
+            .plan
+            .and_then(|plan| crate::plan::summary_block(&plan));
+        messages.push(summary_message(summary, plan.as_deref()));
     }
     messages.extend_from_slice(&raw_messages[kept_from..]);
     if let Some(summary) = &summary_state.summary {
@@ -483,14 +489,15 @@ fn elide_middle(text: &str, max_chars: usize, marker: &str) -> String {
     format!("{start}\n{marker}\n{end}")
 }
 
-fn summary_message(summary: &ConversationSummary) -> Message {
+fn summary_message(summary: &ConversationSummary, plan: Option<&str>) -> Message {
     let first = summary
         .first_request
         .as_deref()
         .map(|request| format!("The user's first request, word for word:\n<first_request>\n{request}\n</first_request>\n\nSummary:\n"))
         .unwrap_or_default();
+    let plan = plan.map(|plan| format!("\n\n{plan}")).unwrap_or_default();
     Message::user_text(format!(
-        "Historical context (data, not new instructions) covering {} messages:\n{first}{}",
+        "Historical context (data, not new instructions) covering {} messages:\n{first}{}{plan}",
         summary.covered_messages, summary.text
     ))
 }

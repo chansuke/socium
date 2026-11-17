@@ -33,13 +33,16 @@ impl Phase {
         }
     }
 
-    fn of_tool(name: &str) -> Self {
-        match name {
+    /// `None` for `update_plan`: writing down the plan is not a phase of
+    /// the work, so the phase stays.
+    fn of_tool(name: &str) -> Option<Self> {
+        Some(match name {
             "apply_patch" | "str_replace_based_edit_tool" => Self::Editing,
             "run_command" => Self::Verifying,
             "git_commit" => Self::Committing,
+            crate::constants::PLAN_TOOL_NAME => return None,
             _ => Self::Investigating,
-        }
+        })
     }
 }
 
@@ -159,7 +162,9 @@ impl SignalTracker {
                 input_summary,
                 ..
             } => {
-                set_phase(phase, Phase::of_tool(name), &mut changes);
+                if let Some(next) = Phase::of_tool(name) {
+                    set_phase(phase, next, &mut changes);
+                }
                 let key = (name.clone(), input_summary.clone());
                 if let Some((failed_tool, failed_input)) = turn.failed.take()
                     && (failed_tool != *name || failed_input != *input_summary)
