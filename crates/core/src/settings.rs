@@ -162,7 +162,7 @@ pub(crate) struct PathPatterns(Vec<String>);
 
 impl PathPatterns {
     pub(crate) fn new<S: AsRef<str>>(patterns: &[S]) -> Self {
-        Self(patterns.iter().map(|p| p.as_ref().to_string()).collect())
+        Self(patterns.iter().map(|p| rooted(p.as_ref())).collect())
     }
 
     pub(crate) fn patterns(&self) -> &[String] {
@@ -184,6 +184,26 @@ impl PathPatterns {
             }
         }
         matched
+    }
+}
+
+/// `pattern` with a leading `./` written as `/`, which anchors it at the
+/// workspace root both here and in ripgrep's globs. Neither matches a
+/// literal `.` component, so `./build.rs` would otherwise match nothing.
+fn rooted(pattern: &str) -> String {
+    let (negation, mut body) = match pattern.strip_prefix('!') {
+        Some(rest) => ("!", rest),
+        None => ("", pattern),
+    };
+    let mut stripped = false;
+    while let Some(rest) = body.strip_prefix("./") {
+        body = rest;
+        stripped = true;
+    }
+    if stripped && !body.starts_with('/') {
+        format!("{negation}/{body}")
+    } else {
+        format!("{negation}{body}")
     }
 }
 
@@ -824,6 +844,17 @@ deny = ["git  push"]
                 prop_assert_eq!(patterns.matches(&format!("./{path}")), expected);
                 prop_assert_eq!(patterns.matches(&format!("{path}/")), expected);
                 prop_assert_eq!(patterns.matches(&path.replace('/', "//")), expected);
+            }
+
+            /// A rooted pattern written as `./p` must protect what `p` protects, or a user's rule silently does nothing.
+            #[test]
+            fn pattern_spelling_does_not_change_a_match(patterns in positive_patterns(), path in relative_path()) {
+                let rooted = patterns
+                    .patterns()
+                    .iter()
+                    .map(|pattern| if pattern.contains('/') && !pattern.starts_with("**") { format!("./{pattern}") } else { pattern.clone() })
+                    .collect::<Vec<_>>();
+                prop_assert_eq!(PathPatterns::new(&rooted).matches(&path), patterns.matches(&path), "{:?}", rooted);
             }
 
             /// Everything inside a protected or sensitive directory is covered too, or a file added there escapes.
