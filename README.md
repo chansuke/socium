@@ -95,7 +95,11 @@ defaults to 64000; a model's `max_output_tokens` in `models.toml` wins over it.
 `CONTEXT_WINDOW_TOKENS` replaces every model's context window,
 `COMPACTION_TOKEN_THRESHOLD` replaces the prompt size at which history is
 compacted, and `ANTHROPIC_VERSION` sets the `anthropic-version` header
-(default `2023-06-01`). Model names must be available to your API account.
+(default `2023-06-01`). A limit that is not a positive integer is ignored with
+a warning, and an output limit as large as the context window is reported at
+startup and on `/model`, and stops a turn before any request. A `MODEL` that is
+neither a registered alias nor a registered ID is sent as a Claude model ID to
+Anthropic. Model names must be available to your API account.
 
 `socium -p "<prompt>"` runs one turn without the terminal UI and prints its
 progress and result as JSON Lines on standard output (`-p -` reads the prompt
