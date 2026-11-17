@@ -49,7 +49,15 @@ ends every line with a newline, `*** End of File` anchors a hunk at the end, and
 an empty line in a hunk is a blank context line.
 
 Each file replacement is atomic and preserves existing permissions; moves and
-undo keep the Unix permission bits (SOC-040). A whole multi-file operation is not
+undo keep the Unix permission bits (SOC-040). Only those bits (`mode & 0o7777`)
+are kept: a moved or restored file is a new file, so it gets the user and group
+of the process that writes it, and ACLs, extended attributes and timestamps are
+not carried over. Off Unix no mode is recorded. The mode is set on the
+replacement before it takes the file's place, so content and mode change
+together; a failure is reported like any other write failure, with the paths
+already applied. Undo refuses a file whose mode was changed after the edit, so a
+`chmod` by a person is never silently reverted. History written before modes
+were recorded undoes as before, without restoring a mode. A whole multi-file operation is not
 atomic. The full before/after record is durable before
 changes begin. Failures list applied paths and retain an incomplete history record.
 Patch and text-editor changes share undo (`/undo`, or `/undo <path>`): undo
