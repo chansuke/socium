@@ -21,6 +21,7 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 const INPUT_HISTORY_FILE_NAME: &str = "input_history.json";
 
@@ -195,18 +196,47 @@ impl App {
         }
     }
 
+    /// The cursor moves and deletes by grapheme, what a reader sees as one
+    /// character, such as a letter with its combining accent or a ZWJ emoji.
+    /// `character_index` still counts chars, always at a grapheme boundary.
     fn move_cursor_left(&mut self) {
-        self.character_index = self.clamp_cursor(self.character_index.saturating_sub(1));
+        self.character_index = self.previous_boundary(self.character_index);
     }
 
     fn move_cursor_right(&mut self) {
-        self.character_index = self.clamp_cursor(self.character_index.saturating_add(1));
+        let current = self.character_index;
+        let next = self
+            .grapheme_boundaries()
+            .find(|&boundary| boundary > current)
+            .unwrap_or(current);
+        self.character_index = next;
+    }
+
+    /// Char offsets where graphemes start, and the end of the input.
+    fn grapheme_boundaries(&self) -> impl Iterator<Item = usize> + '_ {
+        self.input
+            .graphemes(true)
+            .scan(0, |offset, grapheme| {
+                let start = *offset;
+                *offset += grapheme.chars().count();
+                Some(start)
+            })
+            .chain(std::iter::once(self.input.chars().count()))
+    }
+
+    /// The grapheme boundary before `index`, or 0.
+    fn previous_boundary(&self, index: usize) -> usize {
+        self.grapheme_boundaries()
+            .take_while(|&boundary| boundary < index)
+            .last()
+            .unwrap_or(0)
     }
 
     fn enter_char(&mut self, new_char: char) {
         let index = self.byte_index();
         self.input.insert(index, new_char);
-        self.move_cursor_right();
+        // A combining mark joins the grapheme before it, so step one char.
+        self.character_index = self.clamp_cursor(self.character_index + 1);
         self.reset_slash_popup();
         self.refresh_context_metrics();
     }
@@ -276,7 +306,14 @@ impl App {
             .iter()
             .position(|c| *c == '\n')
             .map_or(chars.len(), |offset| target_start + offset);
-        self.character_index = (target_start + column).min(target_end);
+        let target = (target_start + column).min(target_end);
+        // A column counted in chars can fall inside a grapheme.
+        let on_boundary = self.grapheme_boundaries().any(|b| b == target);
+        self.character_index = if on_boundary {
+            target
+        } else {
+            self.previous_boundary(target)
+        };
     }
 
     fn byte_index(&self) -> usize {
@@ -293,10 +330,11 @@ impl App {
         }
 
         let current_index = self.character_index;
-        let before_char_to_delete = self.input.chars().take(current_index - 1);
-        let after_char_to_delete = self.input.chars().skip(current_index);
-        self.input = before_char_to_delete.chain(after_char_to_delete).collect();
-        self.move_cursor_left();
+        let start = self.previous_boundary(current_index);
+        let before = self.input.chars().take(start);
+        let after = self.input.chars().skip(current_index);
+        self.input = before.chain(after).collect();
+        self.character_index = start;
         self.reset_slash_popup();
         self.refresh_context_metrics();
     }
@@ -1229,5 +1267,45 @@ mod tests {
         assert!(control.take_steering().is_empty(), "commands are not added");
         assert_eq!(app.input, "/model", "the command stays to send later");
         drop(sender);
+    }
+
+    #[test]
+    fn editing_moves_and_deletes_whole_graphemes() {
+        // A base letter with a combining accent, a ZWJ family emoji and a
+        // flag are one character to the reader each.
+        let accented = "e\u{301}";
+        let family = "👨\u{200d}👩\u{200d}👧";
+        let flag = "🇯🇵";
+        let mut app = App::for_test();
+        app.insert_text(&format!("a{accented}{family}{flag}日本"));
+
+        app.move_cursor_left();
+        app.move_cursor_left();
+        app.move_cursor_left();
+        assert_eq!(
+            app.input[..app.byte_index()],
+            format!("a{accented}{family}")
+        );
+        app.move_cursor_left();
+        assert_eq!(app.input[..app.byte_index()], format!("a{accented}"));
+
+        app.delete_char();
+        assert_eq!(app.input, format!("a{family}{flag}日本"));
+        app.move_cursor_right();
+        app.delete_char();
+        assert_eq!(app.input, format!("a{flag}日本"));
+    }
+
+    #[test]
+    fn moving_up_or_down_lands_on_a_grapheme_boundary() {
+        let mut app = App::for_test();
+        app.insert_text("abc\ne\u{301}e\u{301}");
+        app.move_cursor_vertically(-1);
+        app.move_cursor_vertically(1);
+        let before = &app.input[..app.byte_index()];
+        assert!(
+            before.ends_with("e\u{301}") || before.ends_with('\n'),
+            "{before:?}"
+        );
     }
 }
