@@ -12,6 +12,9 @@ use crate::error::AgentError;
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, ProviderEvent};
 
+/// Heads a summary written without the compaction model.
+const FALLBACK_SUMMARY_NOTE: &str = "(Line-by-line summary: the summarizer was unavailable, so decisions, open issues and verification results may be missing. Check before relying on it.)";
+
 /// Prompt-token level at which auto-compaction fires: the model's
 /// `compact_at_tokens` or the default, capped at a fixed ratio of the input
 /// budget (the context window minus the output allowance) so compaction
@@ -118,9 +121,17 @@ pub(crate) async fn compact_history(
         Ok(text) => (text, None),
         Err(err) => {
             let text = match previous_summary {
-                Some(previous) => extend_summary_text(previous, messages, covered, boundary),
+                Some(previous) => {
+                    let previous = previous
+                        .strip_prefix(FALLBACK_SUMMARY_NOTE)
+                        .map_or(previous, str::trim_start);
+                    extend_summary_text(previous, messages, covered, boundary)
+                }
                 None => summarize_messages(&messages[..boundary]),
             };
+            // The model reads this later; it must not take it for a full
+            // summary.
+            let text = format!("{FALLBACK_SUMMARY_NOTE}\n{text}");
             (
                 text,
                 Some(format!(
@@ -157,8 +168,8 @@ pub(crate) struct CompactionRequest<'a> {
 }
 
 /// Summarize conversation history with a dedicated (cheap) model. Returns
-/// an error on transport failure or an empty completion; callers fall back
-/// to the deterministic summarizer.
+/// an error on transport failure, an empty completion, or one cut at the
+/// output limit; callers fall back to the deterministic summarizer.
 pub(crate) async fn summarize_with_llm(
     provider: &dyn Provider,
     model: &str,
@@ -189,6 +200,13 @@ pub(crate) async fn summarize_with_llm(
         .send_message(client, &message_request, &mut discard_deltas)
         .await?;
 
+    // A summary cut mid-sentence would pass for a complete one and silently
+    // lose its later sections; the deterministic summary says what it omits.
+    if response.message.stop_reason.as_deref() == Some("max_tokens") {
+        return Err(ProviderError::Api(format!(
+            "Compaction model's summary was cut at the output limit of {COMPACTION_MAX_OUTPUT_TOKENS} tokens"
+        )));
+    }
     let summary = extract_text(&response.message.content);
     let summary = summary.trim();
     if summary.is_empty() {
@@ -446,5 +464,66 @@ mod tests {
             summarize_with_llm(&provider, DEFAULT_COMPACTION_MODEL, &client, &request).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_summary_cut_at_the_output_limit_is_not_taken_as_complete() {
+        let mut cut = text_provider_response("1. User request: fix the par", None);
+        cut.message.stop_reason = Some("max_tokens".into());
+        let provider = ScriptedProvider::new(vec![Ok(cut)]);
+        let client = reqwest::Client::builder().build().unwrap();
+        let messages = transcript_messages();
+        let request = CompactionRequest {
+            previous_summary: None,
+            messages: &messages,
+        };
+
+        let err = summarize_with_llm(&provider, DEFAULT_COMPACTION_MODEL, &client, &request)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("output limit"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_fallback_summary_says_so_once_however_often_it_falls_back() {
+        let failing = ScriptedProvider::new(vec![
+            Err(crate::providers::error::ProviderError::Api("down".into())),
+            Err(crate::providers::error::ProviderError::Api("down".into())),
+        ]);
+        let client = reqwest::Client::builder().build().unwrap();
+        let control = crate::TaskControl::default();
+        let messages = (0..60)
+            .map(|n| Message::user_text(format!("message {n} {}", "x".repeat(4_000))))
+            .collect::<Vec<_>>();
+        let first = super::compact_history(
+            (&failing, DEFAULT_COMPACTION_MODEL),
+            &client,
+            &control,
+            DEFAULT_COMPACTION_MODEL,
+            &messages[..40],
+            &super::ConversationSummaryState::default(),
+        )
+        .await
+        .unwrap();
+        assert!(first.fallback_reason.is_some());
+        let second = super::compact_history(
+            (&failing, DEFAULT_COMPACTION_MODEL),
+            &client,
+            &control,
+            DEFAULT_COMPACTION_MODEL,
+            &messages,
+            &first.summary_state,
+        )
+        .await
+        .unwrap();
+
+        let text = &second.summary_state.summary.unwrap().text;
+        assert!(text.starts_with(super::FALLBACK_SUMMARY_NOTE), "{text}");
+        assert_eq!(
+            text.matches(super::FALLBACK_SUMMARY_NOTE).count(),
+            1,
+            "{text}"
+        );
     }
 }

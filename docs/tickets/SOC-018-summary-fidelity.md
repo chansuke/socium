@@ -56,7 +56,12 @@ message先頭600文字やsummary先頭4,000字への切捨てでは、新しい�
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-17 一部（branch `fix/cut-compaction-summary`）。
+
+- 出力上限で切れた要約（stop_reason `max_tokens`）を完全な要約として採用していた。これを失敗として扱い、決定論的な fallback に回す。試験 `a_summary_cut_at_the_output_limit_is_not_taken_as_complete`（修正前に失敗を確認）。
+- fallback の要約本文の先頭に、要約器が使えず決定・未解決事項・検証結果が欠け得ると明記する。繰り返し fallback しても注記は一つ。試験 `a_fallback_summary_says_so_once_however_often_it_falls_back`。利用者には従来どおり警告が出る。
+- 既に満たしているもの: 要約は 5 節の構造（COMPACTION_SYSTEM_PROMPT）、最初の依頼は原文のまま保持、raw の履歴は全件残り `covered_messages` で範囲を辿れる。
+- 残り: 要約を繰り返しても最新の訂正と未解決事項が残ることの評価（実モデルが必要）。
 
 [一覧へ戻る](README.md)
 
