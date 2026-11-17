@@ -151,20 +151,8 @@ pub(super) fn command(
         return Err(io::Error::other("unsupported sandbox network policy"));
     }
     let root = &policy.workspace;
-    // Prevent a workspace mount from replacing the sandbox's runtime or
-    // isolation mounts, or exposing an entire host tree through an ancestor.
-    for reserved in RUNTIMES.iter().copied().chain(["/proc", "/dev", HOME]) {
-        let reserved = Path::new(reserved);
-        if root.starts_with(reserved) || reserved.starts_with(root) {
-            return Err(io::Error::other(
-                "workspace overlaps a reserved sandbox path",
-            ));
-        }
-    }
-    if root == Path::new("/tmp") {
-        return Err(io::Error::other(
-            "use a project directory, not /tmp itself, as the workspace",
-        ));
+    if let Some(reason) = workspace_refusal(root) {
+        return Err(io::Error::other(reason));
     }
     let cwd = cwd.canonicalize()?;
     if !cwd.starts_with(root) {
@@ -412,6 +400,22 @@ fn linked_worktree_common_dir(root: &Path, gitfile: &Path) -> io::Result<PathBuf
     Ok(common)
 }
 
+/// Why `root` cannot be the workspace: its mount would replace the sandbox's
+/// runtime or isolation mounts, or expose an entire host tree through an
+/// ancestor.
+fn workspace_refusal(root: &Path) -> Option<&'static str> {
+    for reserved in RUNTIMES.iter().copied().chain(["/proc", "/dev", HOME]) {
+        let reserved = Path::new(reserved);
+        if root.starts_with(reserved) || reserved.starts_with(root) {
+            return Some("workspace overlaps a reserved sandbox path");
+        }
+    }
+    if root == Path::new("/tmp") {
+        return Some("use a project directory, not /tmp itself, as the workspace");
+    }
+    None
+}
+
 /// Whether mounting `path` would replace or cover a mount the sandbox makes
 /// itself. A directory inside `/tmp` is fine, since it is mounted after the
 /// fresh `/tmp`; `/tmp` itself or an ancestor of it is not.
@@ -495,6 +499,65 @@ fn network_filter() -> io::Result<fs::File> {
         }
         file.rewind()?;
         Ok(file)
+    }
+}
+
+#[cfg(test)]
+mod properties {
+    use super::{HOME, RUNTIMES, overlaps_reserved, workspace_refusal};
+    use proptest::prelude::*;
+    use std::path::{Path, PathBuf};
+
+    fn absolute_path() -> impl Strategy<Value = PathBuf> {
+        let part = prop::sample::select(vec![
+            "usr",
+            "bin",
+            "lib",
+            "lib64",
+            "nix",
+            "store",
+            "proc",
+            "dev",
+            "tmp",
+            "socium-home",
+            "home",
+            "project",
+        ]);
+        prop::collection::vec(part, 0..4)
+            .prop_map(|parts| PathBuf::from(format!("/{}", parts.join("/"))))
+    }
+
+    /// Paths the sandbox fills itself: the runtimes, its own /proc, /dev,
+    /// private HOME and fresh /tmp.
+    fn sandbox_paths() -> Vec<&'static Path> {
+        RUNTIMES
+            .iter()
+            .chain(&["/proc", "/dev", HOME, "/tmp"])
+            .map(Path::new)
+            .collect()
+    }
+
+    proptest! {
+        /// The workspace bind must not replace a path the sandbox provides or sit inside one, except below the fresh /tmp.
+        #[test]
+        fn an_accepted_workspace_leaves_sandbox_paths_alone(root in absolute_path()) {
+            if workspace_refusal(&root).is_none() {
+                for provided in sandbox_paths() {
+                    prop_assert!(!provided.starts_with(&root), "{} covers {}", root.display(), provided.display());
+                    if provided != Path::new("/tmp") {
+                        prop_assert!(!root.starts_with(provided), "{} is inside {}", root.display(), provided.display());
+                    }
+                }
+            }
+        }
+
+        /// A read-only mount that settings accept must also pass the executor's check, or a valid config fails every command.
+        #[test]
+        fn settings_and_executor_agree_on_read_only_mounts(source in absolute_path(), home in absolute_path()) {
+            if crate::settings::unsafe_mount(&source, Some(&home)).is_none() {
+                prop_assert!(!overlaps_reserved(&source), "{}", source.display());
+            }
+        }
     }
 }
 

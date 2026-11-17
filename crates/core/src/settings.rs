@@ -564,7 +564,7 @@ fn normalize(path: &Path) -> PathBuf {
 /// Why `source` must not be mounted: the whole filesystem, the home
 /// directory or an ancestor of it (which would expose `~/.ssh` and every
 /// credential), or a path the sandbox itself provides.
-fn unsafe_mount(source: &Path, home: Option<&Path>) -> Option<&'static str> {
+pub(crate) fn unsafe_mount(source: &Path, home: Option<&Path>) -> Option<&'static str> {
     if source == Path::new("/") {
         return Some("would expose the whole filesystem");
     }
@@ -738,5 +738,114 @@ deny = ["git  push"]
         let project = home.path().join("project");
         std::fs::create_dir(&project).unwrap();
         ensure_config_outside(&project, &lookup).unwrap();
+    }
+
+    mod properties {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        /// The obvious recursive definition of `*` and `?` within one name.
+        fn reference_glob(pattern: &[char], name: &[char]) -> bool {
+            match pattern.split_first() {
+                None => name.is_empty(),
+                Some(('*', rest)) => {
+                    (0..=name.len()).any(|skip| reference_glob(rest, &name[skip..]))
+                }
+                Some(('?', rest)) => !name.is_empty() && reference_glob(rest, &name[1..]),
+                Some((c, rest)) => name.first() == Some(c) && reference_glob(rest, &name[1..]),
+            }
+        }
+
+        fn component() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just(".env".to_string()),
+                Just(".env.local".to_string()),
+                Just(".github".to_string()),
+                Just("workflows".to_string()),
+                Just(".vscode".to_string()),
+                Just(".cargo".to_string()),
+                Just("config.toml".to_string()),
+                Just("build.rs".to_string()),
+                Just("key.pem".to_string()),
+                "[a-c][a-c.]{0,3}",
+            ]
+        }
+
+        fn relative_path() -> impl Strategy<Value = String> {
+            prop::collection::vec(component(), 1..5).prop_map(|parts| parts.join("/"))
+        }
+
+        /// Patterns without `!`, drawn from the defaults and from shapes users write.
+        fn positive_patterns() -> impl Strategy<Value = PathPatterns> {
+            let defaults = DEFAULT_PROTECTED
+                .iter()
+                .chain(DEFAULT_SENSITIVE)
+                .filter(|pattern| !pattern.starts_with('!'))
+                .map(|pattern| pattern.to_string())
+                .collect::<Vec<_>>();
+            let pattern = prop_oneof![
+                prop::sample::select(defaults),
+                "[a-c*?][a-c.*?]{0,3}",
+                ("[a-c*][a-c.*]{0,2}", "[a-c*][a-c.*]{0,2}").prop_map(|(a, b)| format!("{a}/{b}")),
+                "[a-c][a-c.]{0,2}".prop_map(|dir| format!("{dir}/**")),
+                "[a-c*][a-c.*]{0,2}".prop_map(|name| format!("**/{name}")),
+            ];
+            prop::collection::vec(pattern, 0..5).prop_map(|patterns| PathPatterns::new(&patterns))
+        }
+
+        fn absolute_path() -> impl Strategy<Value = PathBuf> {
+            let part = prop::sample::select(vec![
+                "proc",
+                "dev",
+                "tmp",
+                "socium-home",
+                "home",
+                "user",
+                "usr",
+                "nix",
+                "x",
+            ]);
+            prop::collection::vec(part, 0..4)
+                .prop_map(|parts| PathBuf::from(format!("/{}", parts.join("/"))))
+        }
+
+        proptest! {
+            /// The backtracking matcher protects and hides files, so it must agree with the plain definition.
+            #[test]
+            fn glob_segment_agrees_with_the_reference(pattern in "[ab.*?]{0,6}", name in "[ab.]{0,6}") {
+                let (p, n) = (pattern.chars().collect::<Vec<_>>(), name.chars().collect::<Vec<_>>());
+                prop_assert_eq!(glob_segment(&pattern, &name), reference_glob(&p, &n));
+            }
+
+            /// Spelling a path as `./p` or `p//` must not let it dodge a protected or sensitive pattern.
+            #[test]
+            fn path_spelling_does_not_change_a_match(patterns in positive_patterns(), path in relative_path()) {
+                let expected = patterns.matches(&path);
+                prop_assert_eq!(patterns.matches(&format!("./{path}")), expected);
+                prop_assert_eq!(patterns.matches(&format!("{path}/")), expected);
+                prop_assert_eq!(patterns.matches(&path.replace('/', "//")), expected);
+            }
+
+            /// Everything inside a protected or sensitive directory is covered too, or a file added there escapes.
+            #[test]
+            fn a_match_covers_everything_below_it(patterns in positive_patterns(), path in relative_path(), child in relative_path()) {
+                if patterns.matches(&path) {
+                    prop_assert!(patterns.matches(&format!("{path}/{child}")), "{path}/{child}");
+                }
+            }
+
+            /// An accepted read-only mount never exposes the home directory or covers a mount the sandbox makes.
+            #[test]
+            fn accepted_mounts_cover_no_home_and_no_sandbox_mount(source in absolute_path(), home in absolute_path()) {
+                if unsafe_mount(&source, Some(&home)).is_none() {
+                    for covered in [home.as_path(), Path::new("/proc"), Path::new("/dev"), Path::new("/socium-home"), Path::new("/tmp")] {
+                        prop_assert!(!covered.starts_with(&source), "{} covers {}", source.display(), covered.display());
+                    }
+                    for owned in ["/proc", "/dev", "/socium-home"] {
+                        prop_assert!(!source.starts_with(owned), "{} is inside {owned}", source.display());
+                    }
+                }
+            }
+        }
     }
 }
