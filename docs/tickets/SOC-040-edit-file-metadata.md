@@ -15,3 +15,12 @@ GitHub: [#93](https://github.com/chansuke/socium/issues/93) / 親: [#52](https:/
 ## 依存関係
 #60 共通MutationPlan、#61 変更前後とundoの記録。今回の既存内容保護と、中断・再開の基盤を前提に追加する。
 
+
+## 完了記録
+
+2026-11-17 完了。
+
+- 実装は `a8597ba fix(core): keep file modes across moves and undo`。MutationPlan と編集履歴に変更前後の mode を記録し、置き換えるファイルに rename 前に mode を付ける。外部で mode が変わったファイルの undo は拒否する。復元の失敗は他の書き込み失敗と同じく、適用済みのパスと残した記録を返す。
+- 試験: `crates/core/src/tools/edit_history.rs` の move・delete・undo で実行ビットを保つ試験と、外部 chmod 後の undo 拒否。
+- 保証範囲を [daily-reliability.md](../daily-reliability.md) に明記した。保つのは permission bits だけで、所有者・ACL・xattr・時刻は引き継がない。Unix 以外では mode を記録しない。mode のない旧履歴は従来どおり undo する。
+- 未検証: macOS。
