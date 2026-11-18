@@ -6,4 +6,4 @@ turns = [
   "Now add days_in_month(year, month) to dates.py, using is_leap.",
 ]
 check = ["python3", "{task}/check.py"]
-allowed_changes = ["dates.py", "tests/*.py"]
+allowed_changes = ["dates.py", "tests/*.py", "test_*.py"]

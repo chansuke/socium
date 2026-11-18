@@ -3,4 +3,4 @@ category = "spec-implementation"
 difficulty = "hard"
 prompt = "Implement parse(text) in confparse.py following docs/format.md exactly."
 check = ["python3", "{task}/check.py"]
-allowed_changes = ["confparse.py", "tests/*.py"]
+allowed_changes = ["confparse.py", "tests/*.py", "test_*.py"]
