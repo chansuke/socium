@@ -90,10 +90,11 @@ class MockRuns(unittest.TestCase):
         self.assertTrue(records[-1]["reason"].startswith("budget"), records[-1])
         self.assertIn("not run", done.stdout)
 
-    def test_a_run_past_its_token_cap_is_stopped(self):
-        records, _ = run("--mock", "solution", "--max-tokens", "100", "--only", "conversation-accumulate")
+    def test_a_run_past_its_cost_cap_is_stopped(self):
+        # The first round alone costs more than this.
+        records, _ = run("--mock", "solution", "--max-cost-usd", "0.0001", "--only", "conversation-accumulate")
         (r,) = results(records)
-        self.assertEqual(r["stopped"], "token_cap")
+        self.assertEqual(r["stopped"], "cost_cap")
         self.assertEqual(r["turns_sent"], 1)
         self.assertFalse(r["passed"])
 
@@ -101,6 +102,28 @@ class MockRuns(unittest.TestCase):
         _, done = run("--only", "crlf-edit")
         self.assertEqual(done.returncode, 2)
         self.assertIn("--budget-usd", done.stderr)
+
+
+class CostCap(unittest.TestCase):
+    def test_cache_reads_cost_their_own_price(self):
+        import run as runner
+
+        usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000,
+                 "cache_read_input_tokens": 1_000_000, "cache_creation_input_tokens": 1_000_000}
+        cost = runner.round_cost(usage, {"input": 0.3, "output": 1.2, "cache_read": 0.006})
+        self.assertAlmostEqual(cost, 0.3 + 1.2 + 0.006 + 0.3)
+
+    def test_a_model_without_a_price_has_none(self):
+        import run as runner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            models = Path(tmp) / "models.toml"
+            models.write_text('[[models]]\nalias = "a"\nprice = { input = 1.0 }\n[[models]]\nalias = "b"\n')
+            env = {"SOCIUM_MODELS_FILE": str(models)}
+            self.assertEqual(runner.price_of(env, "a"), {"input": 1.0})
+            self.assertIsNone(runner.price_of(env, "b"))
+            self.assertIsNone(runner.price_of(env, "missing"))
+            self.assertIsNone(runner.price_of({"SOCIUM_MODELS_FILE": str(Path(tmp) / "none")}, "a"))
 
 
 def side(path, label, passes, model="m", task_digest="t"):
