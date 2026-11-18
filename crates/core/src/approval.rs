@@ -30,14 +30,13 @@ pub enum Grant {
 }
 
 impl Grant {
-    /// The choice as the approval picker offers it.
-    pub fn label(&self) -> String {
+    /// What the grant covers, as the approval picker names it after
+    /// "Allow".
+    pub fn scope(&self) -> String {
         match self {
-            Grant::Command(prefix) => {
-                format!("Allow `{}` commands until Socium exits", prefix.join(" "))
-            }
-            Grant::Edit(paths) => format!("Allow edits to {} until Socium exits", paths.join(", ")),
-            Grant::Read(paths) => format!("Allow reading {} until Socium exits", paths.join(", ")),
+            Grant::Command(prefix) => format!("`{}` commands", prefix.join(" ")),
+            Grant::Edit(paths) => format!("edits to {}", paths.join(", ")),
+            Grant::Read(paths) => format!("reading {}", paths.join(", ")),
         }
     }
 
