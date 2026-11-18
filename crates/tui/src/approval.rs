@@ -32,7 +32,7 @@ pub(crate) struct ApprovalPrompt {
     pub(crate) tool: String,
     pub(crate) summary: String,
     /// What "allow for this session" would cover, when the request offers
-    /// it; see `socium_core::Grant::label`.
+    /// it; see `socium_core::Grant::scope`.
     pub(crate) session_option: Option<String>,
     pub(crate) choice: ApprovalChoice,
     /// The whole request, Git diff included, as the user reviews it.
@@ -187,6 +187,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use socium_core::Grant;
 
     fn app_with_prompt() -> App {
         let mut app = App::for_test();
@@ -207,7 +208,7 @@ mod tests {
             "run_command".into(),
             "cargo test".into(),
             "Tool call: c2".into(),
-            Some("commands starting with `cargo test`".into()),
+            Some(Grant::Command(vec!["cargo".into(), "test".into()]).scope()),
         );
         app
     }
@@ -216,6 +217,10 @@ mod tests {
     fn a_request_that_offers_it_can_be_allowed_for_the_session() {
         let mut app = app_with_session_option();
         let prompt = app.approval.as_ref().unwrap();
+        assert_eq!(
+            prompt.label(ApprovalChoice::AllowForSession),
+            "Allow `cargo test` commands until Socium exits"
+        );
         assert_eq!(
             prompt.choices(),
             [
@@ -232,7 +237,7 @@ mod tests {
         app.handle_approval_key(KeyCode::Enter);
         assert_eq!(
             last_message(&app),
-            "✓ run_command allowed; commands starting with `cargo test` allowed until Socium exits"
+            "✓ run_command allowed; `cargo test` commands allowed until Socium exits"
         );
 
         for (key, expected) in [
