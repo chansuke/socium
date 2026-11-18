@@ -5,7 +5,7 @@ A side is only called better on a task, or overall, when the 95% Wilson
 intervals of the two pass rates do not overlap; anything else is reported as
 no clear difference, with the run counts. Tasks run on one side only are
 listed as not compared, and tasks whose files differ between the runs are
-refused. A controlled comparison must hold the model, budget, and token cap
+refused. A controlled comparison must hold the model, budget, and per-run cost cap
 fixed; a defaults comparison lets them differ and says so.
 
 usage: compare.py A.jsonl B.jsonl
@@ -17,7 +17,7 @@ import sys
 
 Z = 1.96
 # What a controlled comparison must hold fixed between the two sides.
-CONTROLLED = ("model", "budget_usd", "max_tokens", "config_sha256", "models_sha256")
+CONTROLLED = ("model", "budget_usd", "max_cost_usd", "config_sha256", "models_sha256")
 
 
 def load(path):

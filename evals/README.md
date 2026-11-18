@@ -22,8 +22,11 @@ nix develop -c python3 evals/compare.py before.jsonl after.jsonl
 ```
 
 No run starts once the money spent plus the dearest run so far would pass
-the budget, and each run is stopped (as with Ctrl+C) at its `max_tokens`
-(400,000 by default, or `--max-tokens`) or its `timeout`. The budget can
+the budget, and each run is stopped (as with Ctrl+C) at its `max_cost_usd`
+($0.50 by default, or `--max-cost-usd`) or its `timeout`. The runner adds up
+each model call's cost from the `price` in `models.toml` as the run streams,
+with cache reads at their own price, and stops a run whose model has no
+price after its first call. The budget can
 therefore be passed by at most one run. Runs that were not started are
 counted as not run, never as failures or passes.
 
@@ -36,7 +39,7 @@ is always 0 and work that needed a person shows as `approvals_refused`.
 
 The first line of the output is a manifest with what a rerun must keep
 fixed: the harness commit and whether it had local changes, the binary,
-config and models file hashes, the model, the budget, the token cap, the
+config and models file hashes, the model, the budget, the per-run cost cap, the
 repeat count, and a hash of every task directory. Socium sends no sampling
 seed, so repetitions stand in for one. Each result line holds, per task and
 repetition:
@@ -62,7 +65,7 @@ tasks whose files changed between the runs and lists tasks run on one side
 only.
 
 Run each side with `--comparison controlled` (the default) to compare
-harnesses or changes with the same model, endpoint, budget, and token cap;
+harnesses or changes with the same model, endpoint, budget, and per-run cost cap;
 `compare.py` refuses the pair if those differ. Use `--comparison defaults`
 for each harness as it ships, where they may differ and the report lists
 which do. Keep the two kinds in separate files. Only Socium is wired in
@@ -80,7 +83,7 @@ nix develop -c bash -c 'cargo build && python3 -m unittest evals/test_evals.py'
 and passes on the task's `solution/` without unintended changes. The tests
 run the real binary against `mock_provider.py`, a loopback model that writes
 the solution, does nothing, or adds a stray file, and confirm the pass,
-fail, scope, budget, token cap, and comparison rules. CI runs them.
+fail, scope, budget, cost cap, and comparison rules. CI runs them.
 
 ## Tasks
 
