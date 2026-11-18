@@ -1,0 +1,11 @@
+# Two features over three turns, then one removed completely while the other stays.
+category = "requirement-change"
+difficulty = "hard"
+turns = [
+  "Add coupon support: Cart.apply_coupon(code) with the codes in a COUPONS dict in pricing.py (start with SAVE10 for 10 percent off the subtotal, rounded down to whole cents). The receipt shows a 'Discount: -$x.yz' line before the total when a coupon applies. Add tests in tests/.",
+  "Also add gift wrap: setting cart.gift_wrap = True adds 300 cents to the total, and the receipt shows 'Gift wrap: $3.00' before the total. Add tests for it too.",
+  "We've dropped coupons. Remove coupon support completely: the code, the receipt line, and its tests. Keep gift wrap working exactly as it is.",
+]
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["cart.py", "pricing.py", "receipt.py", "tests/*.py"]
+timeout = 900

@@ -1,0 +1,6 @@
+# The symptom is in one module, the cause in a helper other modules share.
+category = "bug-fix"
+difficulty = "hard"
+prompt = "A customer's invoice with three items at $1.005 each totals $3.00, but it should be $3.03. Please fix it."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["money/*.py", "tests/*.py", "test_*.py"]

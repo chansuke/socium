@@ -1,0 +1,6 @@
+# One reported symptom of a wider bug: every change must invalidate every query.
+category = "bug-fix"
+difficulty = "hard"
+prompt = "Catalog in catalog.py gives stale answers: after update_price, price_with_tax still returns the old price. Make sure no Catalog query can return a stale result after any change to the catalog."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["catalog.py", "tests/*.py", "test_*.py"]
