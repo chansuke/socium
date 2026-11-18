@@ -14,7 +14,7 @@ Git repositories, with no API keys or paid requests.
   human to approve the exact request and displayed policy in the TUI, once or,
   for its command prefix, for the rest of the session; `approval.commands =
   "auto"` and `approval.allow` rules run commands unasked in a narrower sandbox
-  (see the [README](../README.md#sandbox-and-approval-settings)). An approval
+  (see [configuration](configuration.md#sandbox-and-approval-settings)). An approval
   wait has no time limit, and approval cannot be supplied by model arguments.
   Headless callers without an approval handler (`-p`) refuse what needs
   approval. Children receive a fixed environment allowlist, private HOME, and

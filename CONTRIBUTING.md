@@ -18,6 +18,19 @@ cargo test --locked --all-targets --all-features
 nix build .#default
 ```
 
+Run the application from a checkout with
+`nix develop -c cargo run --locked -p socium-tui`, or build and run the
+packaged application with `nix run .`. `nix develop` provides the pinned
+toolchain and bubblewrap 0.12.0; plain `cargo run` outside it uses the host
+`bwrap`, which is refused when older than 0.12.0.
+
+The workspace has two crates and an evaluation suite:
+
+- `crates/core`: domain logic, providers, tool runtime, and input handling.
+- `crates/tui`: Ratatui application entrypoint (binary crate).
+- `evals/`: fixed tasks with hidden checks for comparing changes against a real
+  model within a budget.
+
 Tests use temporary repositories and scripted providers. Do not add paid API
 calls or real credentials to ordinary tests. Run from the repository root.
 
