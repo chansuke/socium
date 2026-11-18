@@ -1,9 +1,11 @@
 # Documentation
 
-Start with the [README](../README.md) for installation and everyday use.
+Start with the [README](../README.md) for installation, then [Using Socium](usage.md).
 
 ## Current behavior
 
+- [Using Socium](usage.md): the terminal UI, approvals, subagents, sessions, and `socium -p`.
+- [Configuration](configuration.md): requirements, environment variables, models, sandbox and approval settings.
 - [Reliability and recovery](daily-reliability.md): permissions, editing, cancellation, saved state, and recovery.
 - [Linux sandbox](linux-sandbox.md): enforced execution policy, installation, limits, and tests.
 - [Threat model](threat-model.md): what is trusted, what is protected and how, and what is not.
