@@ -1,0 +1,10 @@
+# A cache specified over three turns, with exact edges.
+category = "long-conversation"
+difficulty = "hard"
+turns = [
+  "Add caching to Fetcher.fetch in fetcher.py so the same URL is only read once.",
+  "Entries should expire. Give Fetcher a ttl parameter in seconds (default 60) and a clock parameter (default time.monotonic) so tests can control time. An entry older than ttl seconds is read again; one exactly ttl seconds old is still used.",
+  "Last thing: when get raises, cache nothing for that call and let the exception through. Also add a clear() method that forgets every entry.",
+]
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["fetcher.py", "tests/*.py"]

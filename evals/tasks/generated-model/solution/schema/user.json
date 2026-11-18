@@ -1,0 +1,9 @@
+{
+  "name": "User",
+  "description": "An account that can sign in.",
+  "fields": [
+    {"name": "id", "type": "int", "description": "Unique id."},
+    {"name": "email", "type": "str", "description": "Address used to sign in."},
+    {"name": "nickname", "type": "str", "default": "", "description": "Name shown to other users."}
+  ]
+}

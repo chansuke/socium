@@ -1,0 +1,6 @@
+# Implementing a precise ordering from a written spec.
+category = "spec-implementation"
+difficulty = "hard"
+prompt = "Implement compare(a, b) and latest(versions) in semver.py as docs/precedence.md describes."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["semver.py", "tests/*.py"]

@@ -1,0 +1,6 @@
+# A required parameter added, with callers that reach the function in different ways.
+category = "refactor"
+difficulty = "hard"
+prompt = "notify.send() must now know its channel. Make channel a required keyword-only parameter of send() and pass it on as _transport(channel, message). Update every caller in this repository: code under billing/ sends by \"email\" and code under alerts/ by \"sms\"."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["notify.py", "billing/*.py", "alerts/*.py", "tests/*.py"]
