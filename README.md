@@ -65,7 +65,7 @@ To let builds see your toolchains and caches, copy
 
 - `crates/core`: domain logic, providers, tool runtime, and input handling.
 - `crates/tui`: Ratatui application entrypoint (binary crate).
-- `evals/`: fixed tasks for comparing changes against a real model.
+- `evals/`: fixed tasks with hidden checks for comparing changes against a real model within a budget.
 
 ## Run from a checkout
 

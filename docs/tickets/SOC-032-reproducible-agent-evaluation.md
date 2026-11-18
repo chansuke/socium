@@ -7,7 +7,7 @@
 | 起票時ラベル | `review:2026-11-11`、`priority:p2`、`type:testing`、`area:quality`、`status:blocked` |
 | GitHub前提 | [SOC-016 / #68](https://github.com/chansuke/socium/issues/68)、[SOC-020 / #72](https://github.com/chansuke/socium/issues/72)、[SOC-030 / #82](https://github.com/chansuke/socium/issues/82)、[SOC-031 / #83](https://github.com/chansuke/socium/issues/83) |
 | GitHub後続 | [SOC-033 / #85](https://github.com/chansuke/socium/issues/85)、[SOC-036 / #88](https://github.com/chansuke/socium/issues/88) |
-| 状態 | 未着手 |
+| 状態 | 基盤完了・実モデル評価未実施 |
 | 優先度 | P2 |
 | 起票日 | 2026-11-11 |
 | 出典 | [詳細レビュー](../review-socium-pi-dsh-2026-11-11.md) — 評価方法／実装順8 |
@@ -54,7 +54,16 @@ SWE-bench等の大規模bench全面対応は初期完了条件に含めない。
 
 **完了記録**
 
-未実施。実装PR/commit、検証結果、残課題を記入してから状態を更新する。
+2026-11-18 基盤を完了（branch `feat/agent-evaluation`）。実モデルでの評価は未実施で、使うモデルと予算の決定待ち。
+
+- task set: 既存 5 件に 16 件を足して 21 件。repo 理解 3、bug fix 4、refactor 3、tests 追加 2、既存変更 3（CRLF、未 commit の変更が残る repository、既存出力を保つ CLI 拡張）、長い依頼 1、長い出力 1、長い会話 2、途中の要件変更 2。複数 turn の task は `-p` の後に `-c -p` で同じ session を続ける。
+- 判定: 成功は agent に見せない check（`{task}/check.py` は repository の外）と差分確認の両方で決める。`allowed_changes` の外の変更があれば check が通っても失敗。tests 追加 task は壊した実装（mutant）を検出できるか、regression test は修正前に失敗し修正後に通るかで判定する。
+- 記録: task と反復ごとに、成功、check 単独の結果、変更 path と意図しない変更、tool error、provider の再試行、それでも成功したか、承認の拒否（`-p` では人が介入できないので `interventions` は常に 0）、token、費用、未報告 call、時間、round、tool、送った turn、停止理由を JSONL に保存する。
+- 再実行: 先頭の manifest に harness commit と未 commit の有無、binary・config・models の hash、model、予算、token 上限、反復数、各 task directory の hash を残す。Socium は sampling seed を送らないので、反復で代える。
+- 予算: 実モデルでの実行は `--budget-usd` が必須。models.toml に price のない model や usage を報告しない call があると費用が不明として止める。使った額に最も高かった run の額を足すと予算を超える時点で、次の run を始めない。各 run は `max_tokens` と `timeout` で SIGINT により止めるので、超過は最大 1 run 分。始めなかった run は失敗にも成功にも数えない。
+- 比較: `compare.py` は 95% Wilson 区間が重ならない場合だけ一方を優位とし、それ以外は「no clear difference」と件数を出す。task の file が変わった比較は拒否し、片側だけの task は比較外として示す。`controlled`（同じ model・予算・token 上限・設定）と `defaults`（各 harness の既定構成）を manifest で区別し、controlled で条件が違えば比較を拒否する。現時点で接続済みの harness は Socium だけ。
+- 検証（mock、費用なし）: `run.py --self-check` で 21 件すべての check が未着手の repository で失敗し、正解例では意図しない変更なしに通ることを確認した。`evals/test_evals.py`（13 件）は実 binary を loopback の `mock_provider.py` に向けて実行し、次を確認する。正解を書くと全 task 成功、何もせず完了と返すと全 task 失敗、余計な file を足すと check が通っても失敗、複数 turn が 1 会話になる、予算で次の run が止まる、token 上限で run が止まる、予算なしの実モデル実行は拒否される、比較の規則。範囲外の変更の判定と token 上限を壊すと該当試験が落ちることも確認した。CI にも追加した。
+- 未実施: 実モデルでの評価（費用が発生するため、使うモデルと予算の決定待ち）。他 harness の runner。
 
 [一覧へ戻る](README.md)
 
