@@ -131,6 +131,9 @@ pub(crate) fn resolve_workspace_mutation_path(
     let resolved = resolve_workspace_path_for_create(root, requested)?;
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let relative = resolved.strip_prefix(&root).map_err(|e| e.to_string())?;
+    if in_scratch_dir(&root, &resolved) {
+        return Ok(resolved);
+    }
     if matches!(relative.components().next(), Some(Component::Normal(name)) if name == ".git" || name == ".socium")
         || [".git", ".socium"].iter().any(|name| {
             root.join(name)
@@ -143,6 +146,17 @@ pub(crate) fn resolve_workspace_mutation_path(
         );
     }
     Ok(resolved)
+}
+
+/// Inside `.socium/scratch`, reached without symlinks. `resolved` is
+/// canonical, so a link that leads back out of it is not inside.
+fn in_scratch_dir(root: &Path, resolved: &Path) -> bool {
+    let state = root.join(".socium");
+    let scratch = state.join("scratch");
+    let real_dir = |path: &Path| {
+        fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+    };
+    resolved.starts_with(&scratch) && resolved != scratch && real_dir(&state) && real_dir(&scratch)
 }
 
 #[cfg(test)]
@@ -301,6 +315,58 @@ mod tests {
                 .to_string()
                 .contains("dangling symlink")
         );
+    }
+
+    #[test]
+    fn file_tools_may_change_the_scratch_directory_but_no_other_state() {
+        let workspace = make_temp_dir("scratch");
+        let root = workspace.path();
+        crate::agent::state::workspace_state_path(root, "conversation.json").unwrap();
+        fs::write(root.join(".socium/conversation.json"), "private").unwrap();
+        crate::scratch_dir(root).unwrap();
+
+        let scratch = root.canonicalize().unwrap().join(".socium/scratch");
+        for path in [".socium/scratch/check.py", ".socium/scratch/new/deeper.py"] {
+            assert!(
+                resolve_workspace_mutation_path(root, path)
+                    .unwrap()
+                    .starts_with(&scratch),
+                "{path}"
+            );
+        }
+        for path in [
+            ".socium/conversation.json",
+            ".socium/scratch/../conversation.json",
+            ".socium/new.json",
+            ".socium",
+            ".socium/scratch",
+        ] {
+            assert!(
+                resolve_workspace_mutation_path(root, path).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_scratch_directory_is_still_state() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = make_temp_dir("scratch_link");
+        let root = workspace.path();
+        crate::agent::state::workspace_state_path(root, "conversation.json").unwrap();
+        fs::write(root.join(".socium/conversation.json"), "private").unwrap();
+        let scratch = crate::scratch_dir(root).unwrap();
+        symlink("../conversation.json", scratch.join("link.json")).unwrap();
+        symlink("..", scratch.join("up")).unwrap();
+
+        for path in [".socium/scratch/link.json", ".socium/scratch/up/new.json"] {
+            assert!(
+                resolve_workspace_mutation_path(root, path).is_err(),
+                "{path}"
+            );
+        }
     }
 
     #[cfg(unix)]

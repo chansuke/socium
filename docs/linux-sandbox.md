@@ -66,10 +66,10 @@ versions Socium refuses to run; the exact path allows only the pinned one.
 
 | Operation | Workspace | Existing root `.git` | Root `.socium` | Network |
 |---|---|---|---|---|
-| Search, symbol search, Git queries | Read-only | Read-only | Hidden | Denied |
-| Approved `run_command` | Read/write | Read-only | Hidden | Denied |
-| `run_command` nobody reviewed (`approval.commands = "auto"` or an `allow` rule) | Read/write, except protected paths (read-only) and sensitive files (read as empty) | Read-only | Hidden | Denied |
-| Approved `git_commit`, including hooks | Read/write | Read/write | Hidden | Denied |
+| Search, symbol search, Git queries | Read-only | Read-only | Hidden, except `scratch/` (read-only) | Denied |
+| Approved `run_command` | Read/write | Read-only | Hidden, except `scratch/` (read/write) | Denied |
+| `run_command` nobody reviewed (`approval.commands = "auto"` or an `allow` rule) | Read/write, except protected paths (read-only) and sensitive files (read as empty) | Read-only | Hidden, except `scratch/` (read/write) | Denied |
+| Approved `git_commit`, including hooks | Read/write | Read/write | Hidden, except `scratch/` (read/write) | Denied |
 
 Directories in `sandbox.read_only` are read-only in every row. A command
 nobody reviewed gets the narrower view only when the protected and sensitive
@@ -86,7 +86,9 @@ at its original absolute path. Available `/usr`, `/bin`, `/sbin`, `/lib`, `/lib6
 and `/nix/store` are read-only runtime mounts. `/etc/ld.so.cache` is the only host
 `/etc` file mounted. `/proc` belongs to the new PID namespace, `/dev` contains
 bubblewrap's private devices, and `/tmp` and `/socium-home` are fresh tmpfs mounts
-per command. The existing state directory is masked by an empty read-only mount.
+per command. The existing state directory is masked by an empty read-only mount
+that holds only `.socium/scratch/`, the agent's directory for temporary files,
+which keeps its contents between commands.
 The backend and bare executable names resolve through canonical absolute system
 runtime PATH directories; relative/current-directory PATH entries are discarded.
 Use `./program` to explicitly execute a workspace program. Its permissions are
