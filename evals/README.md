@@ -108,7 +108,7 @@ fail, scope, budget, token cap, and comparison rules. CI runs them.
 | `changed-format` | requirement-change | A requirement replaced mid-conversation |
 | `narrowed-scope` | requirement-change | A wider change narrowed, and partly undone, in a later turn |
 
-The tasks have not yet been run against a real model.
+On 2026-11-18 `ds-flash` passed all 21 tasks in each of 3 repetitions for about $0.16, so the set is too easy to tell changes apart on that model; harder tasks are needed before comparing.
 
 ## Adding a task
 
