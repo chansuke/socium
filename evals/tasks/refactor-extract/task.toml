@@ -1,0 +1,5 @@
+# Extracting a helper without changing behavior or messages.
+category = "refactor"
+prompt = "The quantity check is duplicated in orders.py. Move it into one helper named _check_qty(qty) and call it from both functions. Behavior and error messages must stay the same."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["orders.py"]
