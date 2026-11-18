@@ -1,0 +1,11 @@
+# Rust: borrowing iterators and moving values out of a collection.
+category = "feature"
+difficulty = "hard"
+prompt = """Add two methods to Inventory in src/lib.rs, then run cargo test:
+
+- by_category(&self, category: &str) returns an iterator over references to the items in that category, in the order they were added. Don't collect into a Vec.
+- take_cheapest(&mut self, n: usize) -> Vec<Item> removes the n cheapest items and returns them cheapest first. Among equal prices the one added earlier comes first. The items left keep their order. If n is larger than the inventory, it takes everything."""
+check = ["python3", "{task}/check.py"]
+# cargo writes Cargo.lock on the first build.
+allowed_changes = ["src/*.rs", "tests/*.rs", "Cargo.lock"]
+timeout = 900

@@ -1,0 +1,6 @@
+# A race that only shows under load, with an ordering guarantee to keep.
+category = "concurrency"
+difficulty = "hard"
+prompt = "Meter totals in meter.py come out short when several threads add at once; in production on_change is a logging hook. Fix it. on_change must still be called once for every add, with the new totals in increasing order."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["meter.py", "tests/*.py", "test_*.py"]
