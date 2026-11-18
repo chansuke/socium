@@ -1,0 +1,6 @@
+# One business rule changed in a long file, where the same number means other things.
+category = "existing-change"
+difficulty = "hard"
+prompt = "In legacy_billing.py, business accounts (account['type'] == 'business') now get 30 days before a late fee instead of 14. Personal accounts keep 14 days. Reminders and tax codes don't change."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["legacy_billing.py", "tests/*.py", "test_*.py"]

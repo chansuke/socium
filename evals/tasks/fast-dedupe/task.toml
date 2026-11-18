@@ -1,0 +1,6 @@
+# Making code fast without changing any result, including ties and order.
+category = "performance"
+difficulty = "hard"
+prompt = "latest_versions in events.py takes minutes on our exports of 200,000 events. Make it fast, well under a few seconds for that size, without changing its results in any case."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["events.py", "tests/*.py", "test_*.py", "bench*.py"]

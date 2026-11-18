@@ -121,6 +121,15 @@ These are marked `difficulty = "hard"`:
 | `generated-model` | project-rules | Changing the schema and regenerating, as AGENTS.md says, instead of the generated file |
 | `required-channel` | refactor | A required parameter, with callers through an alias, a partial, and a list |
 | `conversation-cache` | long-conversation | A cache specified over three turns, with exact expiry edges |
+| `spec-config` | feature-from-spec | A config parser from SPEC.md, with each rule and error checked |
+| `rust-inventory` | feature | Rust borrowing iterators and moving the cheapest items out, with stable ties |
+| `shared-rounding` | bug-fix | A symptom in one module, caused by a helper other modules share |
+| `stale-cache` | bug-fix | One reported stale answer of a wider bug: every change must invalidate every query |
+| `fast-dedupe` | performance | A fast version with the same results, including ties and order |
+| `racy-meter` | concurrency | A race under load, keeping the callback order |
+| `long-billing` | existing-change | One rule changed in a long file where the same number means other things |
+| `api-migration` | refactor | A signature change across call styles, with a deprecation path |
+| `reverted-feature` | requirement-change | Two features over three turns, then one removed completely |
 
 On 2026-11-18 `ds-flash` passed all 21 basic tasks in each of 3 repetitions for about $0.16, which is why the hard tasks were added.
 

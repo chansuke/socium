@@ -1,0 +1,6 @@
+# An API change across many callers in different call styles, with a deprecation path.
+category = "refactor"
+difficulty = "hard"
+prompt = "Change netkit.conn.connect to take one address string, 'host:port' (IPv6 hosts as '[::1]:8080'), and update every caller in this repository to the new form. Old calls like connect(host, port) must keep working for one more release but raise a DeprecationWarning."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["netkit/*.py", "services/*.py", "tests/*.py", "test_*.py"]

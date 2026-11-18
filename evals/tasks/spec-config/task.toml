@@ -1,0 +1,7 @@
+# A feature from a written spec with many rules; hidden cases cover each rule.
+category = "feature-from-spec"
+difficulty = "hard"
+prompt = "Implement confparse.parse as described in SPEC.md. Follow every rule there exactly, including the errors and their line numbers. Run the tests in tests/ when you're done, and add your own if you like."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["confparse/*.py", "tests/*.py"]
+timeout = 900
