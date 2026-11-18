@@ -1,0 +1,6 @@
+# Implementing a small Rust type from its documented contract.
+category = "spec-implementation"
+difficulty = "hard"
+prompt = "Implement Ring in src/lib.rs as its doc comments describe, and add tests. Run cargo test to confirm."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["src/*.rs", "tests/*.rs", "Cargo.lock"]
