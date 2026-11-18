@@ -1,0 +1,5 @@
+# A change in a repository with the user's uncommitted work, which must survive.
+category = "existing-change"
+prompt = "Add a half(x) function to calc.py that returns x / 2. I have uncommitted work in this repository; leave it as it is and don't commit."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["calc.py"]

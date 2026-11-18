@@ -1,0 +1,5 @@
+# Naming a repeated value without touching an equal value that means something else.
+category = "refactor"
+prompt = "client.py repeats the request timeout of 30 seconds. Replace those with a module constant REQUEST_TIMEOUT = 30. Only the timeouts: other 30s in the file mean something else."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["client.py"]

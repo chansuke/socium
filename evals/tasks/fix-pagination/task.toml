@@ -1,0 +1,5 @@
+# Failing tests: fix the code, not the tests; hidden cases check the edges.
+category = "bug-fix"
+prompt = "The tests in tests/ fail. Fix the code, not the tests, and run them with python3 -m unittest to confirm."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["pager.py"]

@@ -1,0 +1,9 @@
+# A rule stated in the first turn that later requests do not repeat.
+category = "long-conversation"
+turns = [
+  "Some ground rules for this session: this project still supports Python 3.8, so no match statements, no X | Y type unions, and no other syntax newer than 3.8. Every public function needs a docstring. Just say OK for now.",
+  "Add is_leap(year) to dates.py.",
+  "Now add days_in_month(year, month) to dates.py, using is_leap.",
+]
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["dates.py", "tests/*.py"]

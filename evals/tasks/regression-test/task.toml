@@ -1,0 +1,5 @@
+# A regression test that fails before the fix and passes after it.
+category = "tests"
+prompt = "median([]) in stats.py crashes with IndexError. It should raise ValueError('median of empty data'). First add a test in tests/test_stats.py that reproduces this, then fix stats.py."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["stats.py", "tests/*.py"]

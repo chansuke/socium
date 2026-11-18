@@ -1,0 +1,9 @@
+# Requests that build on each other across turns; all of them must hold at the end.
+category = "long-conversation"
+turns = [
+  "Read inventory.py and tell me in one or two sentences what restock() does. Don't change anything yet.",
+  "Give restock() a keyword-only parameter skip, a set of item names (default: none), whose items it leaves alone.",
+  "One more thing: restock() should now return a pair (new_stock, added), where added is the total number of units it added. Update its callers in this repository too.",
+]
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["inventory.py", "report.py", "tests/*.py"]
