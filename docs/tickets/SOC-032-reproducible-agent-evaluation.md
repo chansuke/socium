@@ -66,6 +66,13 @@ SWE-bench等の大規模bench全面対応は初期完了条件に含めない。
 - 初回の実モデル評価（2026-11-18、harness `2097a89`、debug build）: `ds-flash`（`deepseek-flash`）で 21 task × 3 反復、予算 $5。price は公式料金表（https://api-docs.deepseek.com/quick_start/pricing）のピーク価格（入力 $0.30、出力 $1.20、cache hit $0.006 / 1M token）で計上したので、実際の請求以下。結果は 63/63 成功、意図しない変更 0、provider 再試行 0、承認拒否 0、token 上限・時間切れでの停止 0、未報告 call 0、計上費用 $0.158、1 run の中央値はおおむね 5〜28 秒。tool error は 21 run で計 30 件あったが、すべて成功に回復した（regression-test では修正前に失敗する test を走らせるのが手順に含まれる）。
 - 解釈: 全 task が成功したため、この task set はこの model では天井に達しており、変更の良し悪しを区別できない。3 反復では差の判定にも足りない。改善の比較には、より難しい task（複数 file にまたがる修正、曖昧な依頼、長い既存コード）を足す必要がある。
 - 難しい task の追加（2026-11-18）: 天井に達したため、`difficulty = "hard"` の task を 9 件足して 30 件にした（仕様からの実装 3、別 module に原因がある bug と複数 bug 2、性能 1、AGENTS.md の生成規則 1、多様な呼び出し元の更新 1、3 turn の会話 1）。`ds-flash`、3 反復、予算 $5 で再評価した結果、basic 63/63（$0.167）、hard 26/27（$0.271）。失敗は `slow-events` の 1 run で、check は通ったが作業用の `_scratch/*.py` を 6 つ残したため範囲外の変更として失敗。hard では tool error 25 件のうち 13 run が回復して成功し、1 run の中央値は 12〜111 秒に伸びた。3 反復なので task 単位の差は判定できない（`compare.py` の規則では hard と basic の差も「no clear difference」の範囲）。この実行は同じ作業ツリーに並行して追加された別の hard 9 task（`api-migration`、`fast-dedupe`、`long-billing`、`racy-meter`、`reverted-feature`、`rust-inventory`、`shared-rounding`、`spec-config`、`stale-cache`）も含めた 39 task で回した。manifest の harness commit `09abb8e` は commit を分け直したため main に残らない。別の 9 task は後から取り込み、`tests/` のない repository では直下の `test_*.py` も許可するよう全 task の `allowed_changes` を直した。記録済みの変更 path をこの規則で判定し直すと、別の 9 task は 24/27（$0.415）。失敗は `fast-dedupe` の 2 run（check は通ったが作業用 script を残した）と `racy-meter` の 1 run（check 失敗）。basic と自作 hard の結果は判定し直しても変わらない。
+- 10 反復の評価（2026-11-18、harness `a5374cd`、debug build）: `ds-flash` で 39 task × 10 反復、予算 $5、計上費用 $2.835（ピーク価格）、予算での停止なし、未報告 call 0。basic 209/210（95% Wilson 区間 0.974〜0.999、$0.561）、hard 168/180（0.887〜0.961、$2.274）で、区間が重ならないので hard の方が難しいとは言える。10 回未満の成功は 5 task:
+  - `slow-events` 4/10: check 失敗 1、作業用 script（`_check_events.py` など）を残した 5。10 run 中 7 run が token 上限（400,000）、1 run が時間切れで止まっていた。
+  - `reverted-feature` 7/10: 3 run が coupon のコードやテストを消し切れなかった（check 失敗）。6 run が 3 turn 目で token 上限に達した。
+  - `racy-meter` 8/10: check 失敗 2（`add()` の戻り値が契約と違う）。
+  - `fast-dedupe` 9/10: 作業用 script を `.scratch/` に残した 1。
+  - `regression-test` 9/10: 追加した test が修正後の実装で落ちた 1。
+- 測定上の問題: token 上限で止まった 18 run の入力は、ほとんどが cache read（1 run あたり約 37 万 token、ds-flash の価格で約 $0.002）だった。上限は cache read を他の token と同じに数えるため、費用がほぼかからない run を途中で止めている。`slow-events` の作業用 file の残存は、片付ける前に止められた結果である可能性がある（未確認）。したがって `slow-events` と `reverted-feature` の成功率は、model の能力より harness 側の上限の影響を含む。上限を費用基準にするか、cache read を除いて数えるかは未決定。
 - 未実施: 他 harness の runner、他 model での評価、release build での実行。
 
 [一覧へ戻る](README.md)
