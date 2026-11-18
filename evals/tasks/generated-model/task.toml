@@ -1,0 +1,6 @@
+# Following the project's rule for generated files.
+category = "project-rules"
+difficulty = "hard"
+prompt = "Add an optional nickname to User: a string that defaults to empty."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["schema/*.json", "gen/*.py"]

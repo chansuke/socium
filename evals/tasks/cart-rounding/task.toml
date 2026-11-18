@@ -1,0 +1,6 @@
+# Two causes, neither in the file where the symptom shows.
+category = "bug-fix"
+difficulty = "hard"
+prompt = "Customers report cart totals that are a cent off. tests/test_cart.py has two cases that fail. Find the causes and fix them where they are, without special-casing values, and run the tests with python3 -m unittest."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["shop/*.py"]

@@ -1,0 +1,6 @@
+# Several independent bugs against a written spec; one visible failure.
+category = "bug-fix"
+difficulty = "hard"
+prompt = "textstats.py gives wrong numbers. README.md says what each function must return; make the code match it everywhere, not only for the failing case in tests/."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["textstats.py", "tests/*.py"]

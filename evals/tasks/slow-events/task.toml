@@ -1,0 +1,6 @@
+# Making code fast on large inputs without changing any result.
+category = "performance"
+difficulty = "hard"
+prompt = "dedupe and merge_ranges in events.py are far too slow on large inputs (hundreds of thousands of items). Make them fast without changing what they return for any input."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["events.py", "tests/*.py"]

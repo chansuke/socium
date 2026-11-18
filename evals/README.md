@@ -108,7 +108,21 @@ fail, scope, budget, token cap, and comparison rules. CI runs them.
 | `changed-format` | requirement-change | A requirement replaced mid-conversation |
 | `narrowed-scope` | requirement-change | A wider change narrowed, and partly undone, in a later turn |
 
-On 2026-11-18 `ds-flash` passed all 21 tasks in each of 3 repetitions for about $0.16, so the set is too easy to tell changes apart on that model; harder tasks are needed before comparing.
+These are marked `difficulty = "hard"`:
+
+| Task | Category | What it measures |
+|---|---|---|
+| `semver-precedence` | spec-implementation | A precise ordering from a written spec, with its edge cases |
+| `ini-format` | spec-implementation | A parser with many small rules and line-numbered errors |
+| `rust-ring` | spec-implementation | A Rust type from its doc comments, judged by hidden tests |
+| `cart-rounding` | bug-fix | Two causes, neither in the file where the symptom shows |
+| `text-stats` | bug-fix | Several bugs against a written spec, only one with a failing test |
+| `slow-events` | performance | Fast code with exactly the old results, against a reference |
+| `generated-model` | project-rules | Changing the schema and regenerating, as AGENTS.md says, instead of the generated file |
+| `required-channel` | refactor | A required parameter, with callers through an alias, a partial, and a list |
+| `conversation-cache` | long-conversation | A cache specified over three turns, with exact expiry edges |
+
+On 2026-11-18 `ds-flash` passed all 21 basic tasks in each of 3 repetitions for about $0.16, which is why the hard tasks were added.
 
 ## Adding a task
 
