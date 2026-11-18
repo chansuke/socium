@@ -6,4 +6,4 @@ turns = [
   "One more thing: restock() should now return a pair (new_stock, added), where added is the total number of units it added. Update its callers in this repository too.",
 ]
 check = ["python3", "{task}/check.py"]
-allowed_changes = ["inventory.py", "report.py", "tests/*.py"]
+allowed_changes = ["inventory.py", "report.py", "tests/*.py", "test_*.py"]

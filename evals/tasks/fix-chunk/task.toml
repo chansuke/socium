@@ -2,4 +2,4 @@
 category = "bug-fix"
 prompt = "chunk([1, 2, 3, 4, 5], 2) in listkit/chunk.py returns [[1, 2], [3, 4]] and loses the 5. It should return [[1, 2], [3, 4], [5]]. Please fix it."
 check = ["python3", "{task}/check.py"]
-allowed_changes = ["listkit/chunk.py", "tests/*.py"]
+allowed_changes = ["listkit/chunk.py", "tests/*.py", "test_*.py"]

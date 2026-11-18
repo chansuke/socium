@@ -5,4 +5,4 @@ turns = [
   "Change of plan: we launch in Germany first. format_price must return euros in German style instead, like 12,50 €, with a period between thousands: 1.234,50 €. Keep the function name and drop the dollar version.",
 ]
 check = ["python3", "{task}/check.py"]
-allowed_changes = ["money.py", "tests/*.py"]
+allowed_changes = ["money.py", "tests/*.py", "test_*.py"]

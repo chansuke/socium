@@ -5,4 +5,4 @@ turns = [
   "Sorry, I changed my mind: only charge should log. Remove the logging you added to the other functions.",
 ]
 check = ["python3", "{task}/check.py"]
-allowed_changes = ["service.py", "tests/*.py"]
+allowed_changes = ["service.py", "tests/*.py", "test_*.py"]

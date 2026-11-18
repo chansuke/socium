@@ -2,4 +2,4 @@
 category = "existing-change"
 prompt = "Add a --json flag to `python3 todo.py list` that prints the tasks as a JSON array of objects with title and done. Without the flag the output must stay exactly as it is now."
 check = ["python3", "{task}/check.py"]
-allowed_changes = ["todo.py", "tests/*.py"]
+allowed_changes = ["todo.py", "tests/*.py", "test_*.py"]
