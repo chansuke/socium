@@ -23,6 +23,10 @@
 - **Your model, your session.** Claude by default, or any provider you add in
   `models.toml`. Stop at any time and resume with `-c` or `-r`.
 
+<p align="center">
+  <img src="docs/assets/demo.gif" width="860" alt="Socium runs a failing test, reads the file, fixes it, and runs the test again, asking before each command">
+</p>
+
 Socium is pre-release software developed by one person. It runs on Linux only
 and expects breaking changes. The first tag is `v0.1.0`.
 
