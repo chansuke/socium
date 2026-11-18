@@ -72,7 +72,8 @@ SWE-bench等の大規模bench全面対応は初期完了条件に含めない。
   - `racy-meter` 8/10: check 失敗 2（`add()` の戻り値が契約と違う）。
   - `fast-dedupe` 9/10: 作業用 script を `.scratch/` に残した 1。
   - `regression-test` 9/10: 追加した test が修正後の実装で落ちた 1。
-- 測定上の問題: token 上限で止まった 18 run の入力は、ほとんどが cache read（1 run あたり約 37 万 token、ds-flash の価格で約 $0.002）だった。上限は cache read を他の token と同じに数えるため、費用がほぼかからない run を途中で止めている。`slow-events` の作業用 file の残存は、片付ける前に止められた結果である可能性がある（未確認）。したがって `slow-events` と `reverted-feature` の成功率は、model の能力より harness 側の上限の影響を含む。上限を費用基準にするか、cache read を除いて数えるかは未決定。
+- 測定上の問題: token 上限で止まった 18 run の入力は、ほとんどが cache read（1 run あたり約 37 万 token、ds-flash の価格で約 $0.002）だった。上限は cache read を他の token と同じに数えるため、費用がほぼかからない run を途中で止めている。`slow-events` の作業用 file の残存は、片付ける前に止められた結果である可能性がある（未確認）。したがって `slow-events` と `reverted-feature` の成功率は、model の能力より harness 側の上限の影響を含む。この問題を受けて、上限を token 数から 1 run あたりの費用（既定 $0.50、models.toml の price で round ごとに積算し、cache read は cache の価格）に替えた。
+- 費用上限での再測定（2026-11-19、harness `0021f7e`）: 2 task を 10 反復、計上費用 $0.523、上限・時間切れでの停止 0。`reverted-feature` 9/10（区間 0.60〜0.98、前回 7/10）、失敗 1 は coupon の残存。`slow-events` 6/10（0.31〜0.83、前回 4/10）、失敗 4 はすべて check は通ったが作業用 script を残したもの。停止されていない run でも残しているので、前回の「片付ける前に止められたため」という推測は外れで、model の傾向と見る。どちらも前回との差は区間が重なり、明確な差とは言えない。1 run の費用は $0.016〜0.048、時間は 54〜464 秒。
 - 未実施: 他 harness の runner、他 model での評価、release build での実行。
 
 [一覧へ戻る](README.md)
