@@ -1,0 +1,1 @@
+The delay is computed in src/net/backoff.py:9 (next_delay).

@@ -11,3 +11,4 @@
 .envrc
 .socium/
 *.bak
+__pycache__/
