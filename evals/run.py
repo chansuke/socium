@@ -100,9 +100,13 @@ def load_task(name):
 
 
 def tree_digest(root):
-    """A hash of every file under root, so a result names the exact task."""
+    """A hash of every file under root, so a result names the exact task.
+
+    Bytecode is left out: running a check writes it, with the source's mtime.
+    """
     digest = hashlib.sha256()
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+    files = (p for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.relative_to(root).parts)
+    for path in sorted(files):
         digest.update(path.relative_to(root).as_posix().encode() + b"\0")
         digest.update(hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
