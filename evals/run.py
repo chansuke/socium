@@ -16,6 +16,7 @@ nothing. Each task directory holds:
 task.toml has:
 
     category = "bug-fix"       # what the task measures, for the report
+    difficulty = "hard"        # optional; "basic" when absent
     prompt = "..."             # one request; or
     turns = ["...", "..."]     # several, sent as one conversation (-p, then -c -p)
     check = ["argv", ...]      # run in the repository afterwards; exit 0 passes.
@@ -61,9 +62,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TASKS = HERE / "tasks"
 RESULT_SCHEMA = 2
-TASK_KEYS = {"category", "prompt", "turns", "check", "allowed_changes", "timeout", "max_tokens"}
+TASK_KEYS = {"category", "difficulty", "prompt", "turns", "check", "allowed_changes", "timeout", "max_tokens"}
 DEFAULT_TIMEOUT = 600
 DEFAULT_MAX_TOKENS = 400_000
+CHECK_TIMEOUT = 600
 # Files a run leaves that are not changes to the work: Socium's state and
 # build or bytecode caches from running the tests.
 IGNORED = [".socium/", "__pycache__/", "*.pyc", "target/", ".pytest_cache/"]
@@ -91,6 +93,7 @@ def load_task(name):
         if key not in task:
             raise SystemExit(f"{path}: {key} is required")
     task["turns"] = task.pop("turns", None) or [task.pop("prompt")]
+    task.setdefault("difficulty", "basic")
     task["check"] = [arg.replace("{task}", str(TASKS / name)) for arg in task["check"]]
     return task
 
@@ -155,14 +158,17 @@ def unintended(changed, allowed):
 def judge(task, repo, before, reply_text, env):
     reply = repo.parent / "reply-for-check.txt"
     reply.write_text(reply_text)
-    check = subprocess.run(
-        task["check"],
-        cwd=repo,
-        env={**env, "EVAL_REPLY_FILE": str(reply)},
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
+    try:
+        check = subprocess.run(
+            task["check"],
+            cwd=repo,
+            env={**env, "EVAL_REPLY_FILE": str(reply)},
+            capture_output=True,
+            text=True,
+            timeout=CHECK_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        check = subprocess.CompletedProcess(task["check"], 1, "", f"the check took over {CHECK_TIMEOUT}s")
     changed = changes(repo, before)
     stray = unintended(changed, task["allowed_changes"])
     return {
@@ -452,6 +458,7 @@ def main():
                             server.terminate()
                             server.wait()
                 result = {"type": "result", "task": name, "category": task["category"],
+                          "difficulty": task["difficulty"],
                           "repetition": repetition, **result}
                 results.append(result)
                 out.write(json.dumps(result) + "\n")
@@ -471,6 +478,9 @@ def main():
         if halted:
             out.write(json.dumps({"type": "halted", "reason": halted}) + "\n")
             print(f"stopped: {halted}")
+    for difficulty in sorted({r["difficulty"] for r in results}):
+        group = [r for r in results if r["difficulty"] == difficulty]
+        print(f"{difficulty}: {sum(r['passed'] for r in group)}/{len(group)} passed")
     passed = sum(r["passed"] for r in results)
     planned = len(names) * args.repeat
     print(f"{passed}/{len(results)} passed ({planned - len(results)} not run); details in {args.out}")
