@@ -1,5 +1,6 @@
 pub use crate::agent::state::{
-    load_json_file as load_local_state, save_json_file as save_local_state, workspace_state_path,
+    load_json_file as load_local_state, save_json_file as save_local_state, scratch_dir,
+    workspace_state_path,
 };
 pub mod activity;
 mod activity_log;

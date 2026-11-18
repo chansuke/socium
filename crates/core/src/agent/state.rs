@@ -24,6 +24,17 @@ pub fn workspace_state_path(root: &Path, relative: &str) -> io::Result<PathBuf> 
     Ok(path)
 }
 
+/// `.socium/scratch`, where the agent keeps temporary files out of the
+/// user's tree. File tools and commands may change it, unlike the rest of
+/// `.socium`. Created private, like any state directory.
+pub fn scratch_dir(root: &Path) -> io::Result<PathBuf> {
+    let placeholder = workspace_state_path(root, "scratch/placeholder")?;
+    Ok(placeholder
+        .parent()
+        .expect("a state path has a parent")
+        .to_path_buf())
+}
+
 pub(crate) fn check_state_file(metadata: &fs::Metadata) -> io::Result<()> {
     if !metadata.is_file() || metadata.len() > MAX_STATE_BYTES {
         return Err(Error::other(
