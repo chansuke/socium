@@ -308,6 +308,48 @@ fn environment_allowlist_excludes_credentials_and_loader_overrides() {
 }
 
 #[test]
+fn commands_keep_scratch_files_but_cannot_reach_other_state() {
+    let root = tempfile::tempdir().unwrap();
+    crate::workspace_state_path(root.path(), "conversation.json").unwrap();
+    fs::write(root.path().join(".socium/conversation.json"), "private").unwrap();
+    let scratch = crate::scratch_dir(root.path()).unwrap();
+    success(run(
+        root.path(),
+        WorkspaceAccess::Write,
+        &[
+            "sh",
+            "-c",
+            "echo kept > .socium/scratch/probe.txt && test ! -e .socium/conversation.json \
+             && ! touch .socium/other 2>/dev/null",
+        ],
+    ));
+    assert_eq!(
+        fs::read_to_string(scratch.join("probe.txt")).unwrap(),
+        "kept\n"
+    );
+    assert!(!root.path().join(".socium/other").exists());
+    success(run(
+        root.path(),
+        WorkspaceAccess::Write,
+        &[
+            "sh",
+            "-c",
+            "test \"$(cat .socium/scratch/probe.txt)\" = kept",
+        ],
+    ));
+    // Read-only tools see it but cannot change it.
+    success(run(
+        root.path(),
+        WorkspaceAccess::ReadOnly,
+        &[
+            "sh",
+            "-c",
+            "test -e .socium/scratch/probe.txt && ! touch .socium/scratch/probe.txt 2>/dev/null",
+        ],
+    ));
+}
+
+#[test]
 fn invalid_setup_does_not_execute_payload_on_host() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -749,7 +791,7 @@ fn the_sandbox_view_matches_the_host_where_the_policy_says_it_should() {
     check(
         "workspace/.socium",
         &format!("{workspace_text}/.socium"),
-        BTreeSet::new(),
+        BTreeSet::from(["scratch".to_string()]),
     );
     assert!(
         problems.is_empty(),

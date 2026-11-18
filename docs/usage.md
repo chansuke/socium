@@ -41,7 +41,8 @@ answer.
 Commands can write workspace files, but cannot access the host home or
 network. Existing Git metadata is read-only except during `git_commit`, which
 commits a symlink named in `paths` as a link, never the file it points to;
-Socium's state is hidden from all child processes. What asks and what runs
+Socium's state is hidden from all child processes, except
+`.socium/scratch/`, where commands may keep temporary files. What asks and what runs
 without asking is set in [`config.toml`](configuration.md#sandbox-and-approval-settings).
 
 ## Files, edits, and command output
