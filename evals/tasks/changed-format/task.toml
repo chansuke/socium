@@ -1,0 +1,8 @@
+# A requirement replaced mid-conversation: the first version must not survive.
+category = "requirement-change"
+turns = [
+  "Add format_price(cents) to money.py that returns dollars, like $12.50.",
+  "Change of plan: we launch in Germany first. format_price must return euros in German style instead, like 12,50 €, with a period between thousands: 1.234,50 €. Keep the function name and drop the dollar version.",
+]
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["money.py", "tests/*.py"]

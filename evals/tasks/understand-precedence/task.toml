@@ -1,0 +1,5 @@
+# Following a value through several files, not just the first that sets it.
+category = "repo-understanding"
+prompt = "If APP_PORT is set in the environment and the config file also sets port, which value does app.main.start() end up using? Explain briefly, then end your reply with one line: ANSWER: env or ANSWER: file."
+check = ["python3", "{task}/check.py"]
+allowed_changes = []

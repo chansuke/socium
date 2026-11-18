@@ -1,0 +1,8 @@
+# A request narrowed in a later turn: the earlier, wider change must be undone.
+category = "requirement-change"
+turns = [
+  "Make every function in service.py log its own name with logging.getLogger(__name__).info when it is called.",
+  "Sorry, I changed my mind: only charge should log. Remove the logging you added to the other functions.",
+]
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["service.py", "tests/*.py"]

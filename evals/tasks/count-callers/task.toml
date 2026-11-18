@@ -1,0 +1,5 @@
+# Counting call sites, past names in comments, strings, and longer names.
+category = "repo-understanding"
+prompt = "How many places in the calendar package call parse_date? Do not count its definition or the tests. End your reply with one line: ANSWER: <number>."
+check = ["python3", "{task}/check.py"]
+allowed_changes = []

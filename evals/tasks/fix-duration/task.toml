@@ -1,0 +1,5 @@
+# A parser bug in one form of input; the other forms must keep working.
+category = "bug-fix"
+prompt = "parse_duration('45m') in durations.py raises ValueError, but it should return 2700 (seconds). '2h' and '1h30m' already work. Fix it without breaking those."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["durations.py", "tests/*.py", "test_*.py"]

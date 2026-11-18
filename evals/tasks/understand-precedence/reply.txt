@@ -1,0 +1,2 @@
+finalize() puts the locked keys back from the file after load() applied APP_PORT.
+ANSWER: file

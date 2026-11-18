@@ -1,0 +1,5 @@
+# A rename across code, tests, and docs, with no old name left behind.
+category = "refactor"
+prompt = "Rename fetch_usr to fetch_user everywhere in this repository, including the tests and the README. Don't keep the old name as an alias."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["shop/*.py", "tests/*.py", "README.md"]

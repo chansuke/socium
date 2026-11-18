@@ -1,0 +1,5 @@
+# Writing tests: judged by whether they catch broken versions of the code.
+category = "tests"
+prompt = "Add unittest tests for wrap.wrap in tests/test_wrap.py. Cover these: empty text gives [], a line exactly width characters long is not split, a word longer than width stays whole on its own line, and runs of spaces between words count as one. Don't change wrap.py."
+check = ["python3", "{task}/check.py"]
+allowed_changes = ["tests/*.py"]
