@@ -130,7 +130,7 @@ impl TaskControl {
                 input["review"].as_str().unwrap_or("")
             ),
             requested_by: None,
-            session_option: grant.as_ref().map(Grant::label),
+            session_option: grant.as_ref().map(Grant::scope),
         });
         let start = Instant::now();
         loop {
