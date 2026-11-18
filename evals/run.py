@@ -23,14 +23,15 @@ task.toml has:
                                # {task} is replaced with the task directory.
     allowed_changes = ["glob"] # paths the task may change; anything else is unintended
     timeout = 600              # seconds for all turns (optional)
-    max_tokens = 400000        # tokens per run before it is stopped (optional)
+    max_cost_usd = 0.5         # dollars per run before it is stopped (optional)
 
 The check sees the agent's final reply in the file named by EVAL_REPLY_FILE.
 
 Real runs call the configured model (MODEL, keys, models.toml) and need
 --budget-usd: the model must have a price in models.toml, and no run starts
 once the money spent plus the dearest run so far would pass the budget. A run
-is stopped at its max_tokens, so the budget can be passed by at most one run.
+is stopped at its max_cost_usd, so the budget can be passed by at most one run.
+A run whose model has no price is stopped after its first model call.
 SOCIUM_CONFIG_FILE defaults to evals/config.toml, which lets commands run
 without asking.
 
@@ -39,7 +40,7 @@ solution (must pass, inside allowed_changes) without any model. --mock PLAY
 runs the real binary against mock_provider.py instead of a model.
 
 usage: run.py [--binary socium] [--only NAME ...] [--repeat N] [--out FILE]
-              [--label NAME] [--comparison controlled|defaults] [--max-tokens N]
+              [--label NAME] [--comparison controlled|defaults] [--max-cost-usd USD]
               (--budget-usd USD | --mock solution|nothing|stray | --self-check)
 """
 import argparse
@@ -62,9 +63,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TASKS = HERE / "tasks"
 RESULT_SCHEMA = 2
-TASK_KEYS = {"category", "difficulty", "prompt", "turns", "check", "allowed_changes", "timeout", "max_tokens"}
+TASK_KEYS = {"category", "difficulty", "prompt", "turns", "check", "allowed_changes", "timeout", "max_cost_usd"}
 DEFAULT_TIMEOUT = 600
-DEFAULT_MAX_TOKENS = 400_000
+DEFAULT_MAX_COST_USD = 0.5
 CHECK_TIMEOUT = 600
 # Files a run leaves that are not changes to the work: Socium's state and
 # build or bytecode caches from running the tests.
@@ -180,13 +181,43 @@ def judge(task, repo, before, reply_text, env):
     }
 
 
-def run_turn(argv, repo, env, deadline, token_cap, tokens_so_far):
-    """One `socium -p`, read as it streams so a run past its token cap or
-    deadline is cancelled (SIGINT, as Ctrl+C) rather than left to spend."""
+def models_file(env):
+    if env.get("SOCIUM_MODELS_FILE"):
+        return Path(env["SOCIUM_MODELS_FILE"])
+    config = env.get("XDG_CONFIG_HOME") or str(Path(env.get("HOME", str(Path.home()))) / ".config")
+    return Path(config) / "socium" / "models.toml"
+
+
+def price_of(env, alias):
+    """The models.toml price of `alias` in dollars per million tokens, or None."""
+    try:
+        registry = tomllib.loads(models_file(env).read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    model = next((m for m in registry.get("models", []) if m.get("alias") == alias), None)
+    return model.get("price") if model else None
+
+
+def round_cost(usage, price):
+    """Dollars for one round, with cache reads and writes at their own prices
+    as Socium counts them (both default to the input price)."""
+    rates = {
+        "input_tokens": price.get("input", 0.0),
+        "output_tokens": price.get("output", 0.0),
+        "cache_read_input_tokens": price.get("cache_read", price.get("input", 0.0)),
+        "cache_creation_input_tokens": price.get("cache_write", price.get("input", 0.0)),
+    }
+    return sum(usage.get(kind, 0) * rate for kind, rate in rates.items()) / 1_000_000
+
+
+def run_turn(argv, repo, env, deadline, cost_cap, spent_so_far):
+    """One `socium -p`, read as it streams so a run past its cost cap or
+    deadline is cancelled (SIGINT, as Ctrl+C) rather than left to spend.
+    A model without a price cannot be capped, so its run stops at once."""
     agent = subprocess.Popen(
         argv, cwd=repo, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
-    records, stopped, tokens = [], None, tokens_so_far
+    records, stopped, spent, price = [], None, spent_so_far, None
     stderr = []
     reader = threading.Thread(target=lambda: stderr.append(agent.stderr.read()), daemon=True)
     reader.start()
@@ -211,16 +242,19 @@ def run_turn(argv, repo, env, deadline, token_cap, tokens_so_far):
             continue
         records.append(record)
         event = record.get("event") or {}
+        if record.get("type") == "started":
+            price = price_of(env, record.get("model"))
         if record.get("type") == "activity" and event.get("type") == "round_finished":
-            usage = event.get("usage") or {}
-            tokens += sum(usage.get(k, 0) for k in (
-                "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
-            if tokens > token_cap:
-                stop("token_cap")
+            if price is None:
+                stop("unpriced")
+                continue
+            spent += round_cost(event.get("usage") or {}, price)
+            if spent > cost_cap:
+                stop("cost_cap")
     agent.wait()
     timer.cancel()
     reader.join(timeout=5)
-    return records, agent.returncode, stopped, tokens, "".join(stderr)
+    return records, agent.returncode, stopped, spent, "".join(stderr)
 
 
 def measure(records):
@@ -257,12 +291,12 @@ def run_task(name, task, binary, workdir, env):
     repo = workdir / "repo"
     before = prepare_repo(name, repo)
     deadline = time.monotonic() + task.get("timeout", DEFAULT_TIMEOUT)
-    cap = task.get("max_tokens", DEFAULT_MAX_TOKENS)
+    cap = task.get("max_cost_usd", DEFAULT_MAX_COST_USD)
     started = time.monotonic()
-    records, statuses, stopped, tokens, stderr = [], [], None, 0, ""
+    records, statuses, stopped, spent, stderr = [], [], None, 0.0, ""
     for index, prompt in enumerate(task["turns"]):
         argv = [binary, *(["-c"] if index else []), "-p", prompt]
-        turn, status, stopped, tokens, err = run_turn(argv, repo, env, deadline, cap, tokens)
+        turn, status, stopped, spent, err = run_turn(argv, repo, env, deadline, cap, spent)
         records += turn
         statuses.append(status)
         stderr += err
@@ -353,7 +387,7 @@ def manifest(args, names):
         "config_sha256": file_digest(HERE / "config.toml" if args.mock else config),
         "models_sha256": None if args.mock else file_digest(models),
         "budget_usd": args.budget_usd,
-        "max_tokens": args.max_tokens,
+        "max_cost_usd": args.max_cost_usd,
         "repeat": args.repeat,
         # Socium sends no sampling seed; repetitions stand in for one.
         "seed": None,
@@ -408,7 +442,7 @@ def main():
         "defaults: each harness as it ships",
     )
     parser.add_argument("--budget-usd", type=float, help="required for runs against a real model")
-    parser.add_argument("--max-tokens", type=int, help="tokens per run, in place of each task's max_tokens")
+    parser.add_argument("--max-cost-usd", type=float, help="dollars per run, in place of each task's max_cost_usd")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--mock", choices=["solution", "nothing", "stray"])
     mode.add_argument("--self-check", action="store_true")
@@ -441,8 +475,8 @@ def main():
                     halted = f"budget: ${spent:.4f} spent, the dearest run cost ${dearest:.4f}"
                     break
                 task = load_task(name)
-                if args.max_tokens:
-                    task["max_tokens"] = args.max_tokens
+                if args.max_cost_usd:
+                    task["max_cost_usd"] = args.max_cost_usd
                 with tempfile.TemporaryDirectory(prefix=f"socium-eval-{name}-") as workdir:
                     workdir = Path(workdir)
                     server = None
