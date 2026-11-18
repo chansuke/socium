@@ -126,6 +126,21 @@ class CostCap(unittest.TestCase):
             self.assertIsNone(runner.price_of({"SOCIUM_MODELS_FILE": str(Path(tmp) / "none")}, "a"))
 
 
+class TaskDigest(unittest.TestCase):
+    def test_bytecode_from_running_a_check_does_not_change_the_task(self):
+        import run as runner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "check.py").write_text("print(1)\n")
+            before = runner.tree_digest(root)
+            (root / "__pycache__").mkdir()
+            (root / "__pycache__" / "check.cpython-313.pyc").write_bytes(b"mtime")
+            self.assertEqual(runner.tree_digest(root), before)
+            (root / "check.py").write_text("print(2)\n")
+            self.assertNotEqual(runner.tree_digest(root), before)
+
+
 def side(path, label, passes, model="m", task_digest="t"):
     with open(path, "w") as f:
         f.write(json.dumps({"type": "manifest", "label": label, "comparison": "controlled",
