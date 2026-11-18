@@ -7,6 +7,12 @@ This guide describes what the terminal UI does; see
 Add `.socium/` to your project's `.gitignore`. Conversation, input history,
 edits, and command artifacts are stored there without encryption.
 
+Socium is told to keep temporary scripts and other helper files in
+`.socium/scratch/`, which its file tools and commands can write, and to
+remove any it makes elsewhere, as Anthropic's
+[prompting guide](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)
+suggests.
+
 ## Composer and commands
 
 - Type `/` to show command suggestions: Up/Down select, Tab completes, Enter
