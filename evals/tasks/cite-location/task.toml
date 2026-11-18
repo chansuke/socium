@@ -1,3 +1,5 @@
 # Line-numbered reads: the answer must name the exact line.
+category = "repo-understanding"
 prompt = "Where is the delay before the next retry computed? Answer with path:line."
 check = ["python3", "-c", "import os,sys; sys.exit(0 if 'src/net/backoff.py:9' in open(os.environ['EVAL_REPLY_FILE']).read() else 1)"]
+allowed_changes = []
