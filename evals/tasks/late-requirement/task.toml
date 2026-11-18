@@ -1,4 +1,5 @@
 # Long requests: the requirement at the end must not be lost.
+category = "long-request"
 prompt = """We publish blog posts whose titles come from many authors, so they \
 contain mixed case, punctuation, accents, repeated spaces, and sometimes emoji. \
 The site needs a URL fragment for each title. The textkit package already has \
@@ -12,3 +13,4 @@ docstring. Do not change the existing functions. Finally, and this matters \
 for the importers that call it: name the new function slugify_title and put \
 it in textkit/slug.py."""
 check = ["python3", "-c", "import sys; sys.path.insert(0, '.'); from textkit.slug import slugify_title as s; sys.exit(0 if s('  Héllo,  Wörld!! Été 2026 ') == 'hello-world-ete-2026' and s('---') == '' else 1)"]
+allowed_changes = ["textkit/slug.py", "textkit/__init__.py"]
