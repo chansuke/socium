@@ -3,6 +3,9 @@ number: 9
 title: 利用者定義のサブエージェントを設定ディレクトリのMarkdownで定める
 status: accepted
 date: 2026-11-14
+links:
+- target: 23
+  kind: amendedby
 ---
 
 # 利用者定義のサブエージェントを設定ディレクトリのMarkdownで定める
