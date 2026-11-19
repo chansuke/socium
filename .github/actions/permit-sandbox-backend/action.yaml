@@ -1,0 +1,28 @@
+name: Permit sandbox backend user namespaces
+description: Load an AppArmor profile that lets the pinned bwrap create user namespaces
+runs:
+  using: composite
+  steps:
+    # Ubuntu's default userns restriction denies capabilities inside a new
+    # namespace for binaries without a profile, including Nix's bwrap path.
+    # Permit only our pinned backend; do not disable AppArmor or its sysctl.
+    # Remove the profile at the end of the job with
+    # `sudo apparmor_parser -R "$RUNNER_TEMP/socium-ci-bwrap.apparmor"`.
+    - name: Permit sandbox backend user namespaces
+      shell: bash
+      run: |
+        if [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] &&
+           [[ $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns) != 0 ]]; then
+          sandbox_backend=$(readlink -f "$(nix develop --command sh -c 'command -v bwrap')")
+          case "$sandbox_backend" in
+            /nix/store/*-bubblewrap-0.12.0/bin/bwrap) ;;
+            *) echo "Unexpected sandbox backend: $sandbox_backend" >&2; exit 1 ;;
+          esac
+          printf '%s\n' \
+            'abi <abi/4.0>,' \
+            'include <tunables/global>' \
+            "profile socium-ci-bwrap \"$sandbox_backend\" flags=(unconfined) {" \
+            '  userns,' \
+            '}' > "$RUNNER_TEMP/socium-ci-bwrap.apparmor"
+          sudo apparmor_parser -r "$RUNNER_TEMP/socium-ci-bwrap.apparmor"
+        fi
