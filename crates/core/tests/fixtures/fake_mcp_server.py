@@ -1,18 +1,28 @@
 """A small MCP server over stdio for Socium's client tests.
 
 `--crash` exits during startup and `--hang` never answers `initialize`.
+`--version=V` answers `initialize` with revision V, `--no-tools` offers no
+tools capability, `--big` adds a tool with a long description and one with
+a huge schema, and `--on-eof=PATH` writes PATH when its input closes. With
+`FAKE_LOG` set it appends each method it receives to that file.
 Otherwise it lists its tools over two pages and answers `tools/call`:
 `echo`, `fail` (isError), `image`, `structured`, `slow` (never answers,
 so the caller must cancel), `cancelled` (the request IDs the client
-cancelled), `die` (exits mid-call), `env` (the variable names it sees) and
-`pong` (whether the client answered its ping).
+cancelled), `die` (exits mid-call), `env` (the variable names it sees),
+`pong` (whether the client answered its ping), `where` (its directory and
+PATH), `deaf` (stops reading its input), `malformed` (an answer with
+neither result nor error), `empty` (a result without content), `batch`
+(its answer inside a batch) and `secret` (an error that repeats
+`FAKE_SECRET`).
 """
 
 import json
 import os
 import sys
+import time
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else ""
+VERSION = MODE.split("=", 1)[1] if MODE.startswith("--version=") else "2025-06-18"
 
 PAGES = [
     [
@@ -36,8 +46,21 @@ PAGES = [
         {"name": "die", "description": "Exits during the call."},
         {"name": "env", "description": "Environment variable names."},
         {"name": "pong", "description": "Whether the ping was answered."},
+        {"name": "where", "description": "Its directory and PATH."},
+        {"name": "deaf", "description": "Stops reading its input."},
+        {"name": "malformed", "description": "Neither result nor error."},
+        {"name": "empty", "description": "A result without content."},
+        {"name": "batch", "description": "Answers inside a batch."},
+        {"name": "secret", "description": "Repeats FAKE_SECRET in an error."},
     ],
 ]
+if MODE == "--big":
+    PAGES[1].append({"name": "wordy", "description": "w" * 3000})
+    PAGES[1].append({
+        "name": "huge",
+        "description": "A huge schema.",
+        "inputSchema": {"type": "object", "description": "x" * 70000},
+    })
 
 cancelled = []
 pong = []
@@ -81,7 +104,18 @@ def call(name, arguments):
         return text(",".join(sorted(os.environ)))
     if name == "pong":
         return text(json.dumps(pong))
+    if name == "where":
+        return text(os.getcwd() + "\n" + os.environ.get("PATH", ""))
+    if name == "deaf":
+        time.sleep(3600)
     raise KeyError(name)
+
+
+def log(method):
+    path = os.environ.get("FAKE_LOG")
+    if path and method:
+        with open(path, "a") as file:
+            file.write(method + "\n")
 
 
 def main():
@@ -89,10 +123,13 @@ def main():
     sys.stderr.flush()
     if MODE == "--crash":
         sys.stderr.write("error: missing credentials\n")
+        if "FAKE_SECRET" in os.environ:
+            sys.stderr.write("token=" + os.environ["FAKE_SECRET"] + "\n")
         sys.exit(1)
     for line in sys.stdin:
         message = json.loads(line)
         method = message.get("method")
+        log(method)
         if method is None:
             if message.get("id") == "server-ping":
                 pong.append(message.get("result"))
@@ -111,8 +148,8 @@ def main():
             if MODE == "--hang":
                 continue
             reply["result"] = {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {"tools": {}},
+                "protocolVersion": VERSION,
+                "capabilities": {} if MODE == "--no-tools" else {"tools": {}},
                 "serverInfo": {"name": "fake", "version": "1"},
             }
         elif method == "tools/list":
@@ -122,6 +159,22 @@ def main():
                 reply["result"]["nextCursor"] = str(page + 1)
         elif method == "tools/call":
             params = message["params"]
+            if params["name"] == "malformed":
+                send(reply)
+                continue
+            if params["name"] == "empty":
+                reply["result"] = {}
+                send(reply)
+                continue
+            if params["name"] == "batch":
+                reply["result"] = text("batched")
+                sys.stdout.write(json.dumps([reply]) + "\n")
+                sys.stdout.flush()
+                continue
+            if params["name"] == "secret":
+                reply["error"] = {"code": -32000, "message": "bad token " + os.environ.get("FAKE_SECRET", "")}
+                send(reply)
+                continue
             try:
                 result = call(params["name"], params.get("arguments") or {})
             except KeyError:
@@ -134,6 +187,9 @@ def main():
         else:
             reply["error"] = {"code": -32601, "message": "Method not found"}
         send(reply)
+    if MODE.startswith("--on-eof="):
+        with open(MODE.split("=", 1)[1], "w") as file:
+            file.write("closed\n")
 
 
 main()

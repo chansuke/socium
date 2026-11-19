@@ -342,9 +342,26 @@ pub struct AgentService {
 }
 
 enum McpStartup {
-    Connecting(std::thread::JoinHandle<(crate::mcp::McpRegistry, Vec<String>)>),
+    Connecting {
+        /// `None` once taken.
+        handle: Option<std::thread::JoinHandle<(crate::mcp::McpRegistry, Vec<String>)>>,
+        stop: TaskControl,
+    },
     /// `None` when no server is configured.
     Ready(Option<Arc<crate::mcp::McpRegistry>>),
+}
+
+impl Drop for McpStartup {
+    /// Stops a startup still under way and waits for it, so the servers it
+    /// started are stopped too.
+    fn drop(&mut self) {
+        if let Self::Connecting { handle, stop } = self {
+            stop.cancel();
+            if let Some(handle) = handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
 }
 
 impl McpStartup {
@@ -357,20 +374,27 @@ impl McpStartup {
             return Self::Ready(None);
         }
         let (servers, root) = (servers.to_vec(), workspace_root.to_path_buf());
-        Self::Connecting(std::thread::spawn(move || {
+        let stop = TaskControl::default();
+        let stopper = stop.clone();
+        let handle = std::thread::spawn(move || {
             crate::mcp::McpRegistry::connect(
                 &servers,
                 &root,
                 env.as_ref(),
                 crate::mcp::STARTUP_TIMEOUT,
+                &stopper,
             )
-        }))
+        });
+        Self::Connecting {
+            handle: Some(handle),
+            stop,
+        }
     }
 
     fn registry(&self) -> Option<&Arc<crate::mcp::McpRegistry>> {
         match self {
             Self::Ready(registry) => registry.as_ref(),
-            Self::Connecting(_) => None,
+            Self::Connecting { .. } => None,
         }
     }
 }
@@ -658,16 +682,21 @@ impl AgentService {
         self.refresh_system_prompt();
     }
 
-    /// Waits for the MCP servers to finish starting and offers their tools.
-    /// Returns, once, why a server or a tool was left out.
-    fn settle_mcp(&mut self) -> Vec<String> {
-        if !matches!(self.mcp, McpStartup::Connecting(_)) {
-            return Vec::new();
+    /// Waits for the MCP servers to finish starting, or for the user to
+    /// cancel, and offers their tools. Returns, once, why a server or a
+    /// tool was left out.
+    async fn settle_mcp(&mut self) -> Result<Vec<String>, AgentError> {
+        let McpStartup::Connecting { handle, .. } = &mut self.mcp else {
+            return Ok(Vec::new());
+        };
+        while handle.as_ref().is_some_and(|handle| !handle.is_finished()) {
+            tokio::select! {
+                _ = self.control.cancelled() => return Err(AgentError::Cancelled),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            }
         }
-        let McpStartup::Connecting(handle) =
-            std::mem::replace(&mut self.mcp, McpStartup::Ready(None))
-        else {
-            unreachable!("checked above");
+        let Some(handle) = handle.take() else {
+            unreachable!("a startup's handle is taken only here");
         };
         let (registry, warnings) = handle.join().unwrap_or_else(|_| {
             (
@@ -677,7 +706,7 @@ impl AgentService {
         });
         self.mcp = McpStartup::Ready(Some(Arc::new(registry)));
         self.apply_model_limits();
-        warnings
+        Ok(warnings)
     }
 
     /// Rebuilds the system prompt from the settings and the project's
@@ -1632,7 +1661,7 @@ impl AgentService {
         F: FnMut(AgentProgress) + Send,
     {
         self.wait_for_sandbox()?;
-        let mcp_warnings = self.settle_mcp();
+        let mcp_warnings = self.settle_mcp().await?;
         self.ensure_state_lock()?;
         if let Some(problem) = self.limit_problem() {
             return Err(Error::new(ErrorKind::InvalidInput, problem).into());

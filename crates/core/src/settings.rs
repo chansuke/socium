@@ -101,18 +101,23 @@ pub(crate) struct WebSearchSettings {
 /// One `[mcp.servers.<name>]` table (ADR 20).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct McpServerSettings {
-    /// Matches `[A-Za-z0-9_-]{1,32}` without `__`, so `mcp__<name>__<tool>`
-    /// names one server.
+    /// Matches `[A-Za-z0-9_-]{1,32}` without `__` and not ending in `_`, so
+    /// `mcp__<name>__<tool>` names one server.
     pub(crate) name: String,
-    /// The program and its arguments, run with the workspace as its
-    /// directory.
+    /// The program, an absolute path or a name looked up on PATH, and its
+    /// arguments, run with `/` as the directory.
     pub(crate) command: Vec<String>,
     /// Variables set for the server on top of PATH, HOME, USER and LANG,
     /// `${NAME}` already expanded from Socium's environment.
     pub(crate) env: BTreeMap<String, String>,
     /// Remote tool names that run without asking.
     pub(crate) allow: Vec<String>,
+    /// How long a tool call may take before it is given up.
+    pub(crate) tool_timeout: Duration,
 }
+
+/// How long an MCP tool call may take unless `tool_timeout_secs` says.
+const DEFAULT_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Longest server name, so `mcp__<server>__<tool>` leaves room for the tool
 /// within the 64 characters providers accept.
@@ -336,6 +341,7 @@ struct RawMcpServer {
     env: BTreeMap<String, String>,
     #[serde(default)]
     allow: Vec<String>,
+    tool_timeout_secs: Option<u64>,
     #[serde(default = "enabled_by_default")]
     enabled: bool,
 }
@@ -680,8 +686,7 @@ impl Settings {
         for server in &self.mcp_servers {
             lines.push(format!(
                 "MCP server {} runs on the host, outside the sandbox: {}",
-                server.name,
-                server.command.join(" ")
+                server.name, server.command[0]
             ));
         }
         lines
@@ -701,15 +706,26 @@ fn mcp_server(
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-        && !name.contains("__");
+        && !name.contains("__")
+        && !name.ends_with('_');
     if !valid_name {
         return Err(format!(
-            "mcp.servers.{name}: a server name must be 1 to {MAX_MCP_SERVER_NAME} letters, digits, '_' or '-', without '__'"
+            "mcp.servers.{name}: a server name must be 1 to {MAX_MCP_SERVER_NAME} letters, digits, '_' or '-', without '__' and not ending in '_'"
         ));
     }
-    if raw.command.first().is_none_or(|program| program.is_empty()) {
+    let Some(program) = raw.command.first().filter(|program| !program.is_empty()) else {
         return Err(format!(
             "mcp.servers.{name}.command must name a program and its arguments"
+        ));
+    };
+    if program.contains('/') && !Path::new(program).is_absolute() {
+        return Err(format!(
+            "mcp.servers.{name}.command: '{program}' must be an absolute path or a program name found on PATH"
+        ));
+    }
+    if raw.tool_timeout_secs == Some(0) {
+        return Err(format!(
+            "mcp.servers.{name}.tool_timeout_secs must be at least 1"
         ));
     }
     if let Some(tool) = raw.allow.iter().find(|tool| tool.trim().is_empty()) {
@@ -749,6 +765,9 @@ fn mcp_server(
         command: raw.command,
         env: variables,
         allow: raw.allow,
+        tool_timeout: raw
+            .tool_timeout_secs
+            .map_or(DEFAULT_MCP_TOOL_TIMEOUT, Duration::from_secs),
     }))
 }
 
@@ -878,7 +897,8 @@ env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}", MODE = "read-$only" }
 allow = ["get_issue"]
 
 [mcp.servers.time]
-command = ["uvx", "mcp-server-time"]
+command = ["/usr/local/bin/uvx", "mcp-server-time"]
+tool_timeout_secs = 30
 
 [mcp.servers.off]
 command = ["off"]
@@ -898,19 +918,21 @@ enabled = false
                         ("MODE".into(), "read-$only".into()),
                     ]),
                     allow: vec!["get_issue".into()],
+                    tool_timeout: Duration::from_secs(600),
                 },
                 McpServerSettings {
                     name: "time".into(),
-                    command: vec!["uvx".into(), "mcp-server-time".into()],
+                    command: vec!["/usr/local/bin/uvx".into(), "mcp-server-time".into()],
                     env: BTreeMap::new(),
                     allow: Vec::new(),
+                    tool_timeout: Duration::from_secs(30),
                 },
             ]
         );
         let summary = settings.summary();
         assert!(
             summary.contains(
-                &"MCP server github runs on the host, outside the sandbox: github-mcp-server stdio"
+                &"MCP server github runs on the host, outside the sandbox: github-mcp-server"
                     .to_string()
             ),
             "{summary:?}"
@@ -953,7 +975,16 @@ enabled = false
                 &format!("[mcp.servers.{}]\ncommand = [\"x\"]", "a".repeat(33)),
                 "a server name",
             ),
+            ("[mcp.servers.a_]\ncommand = [\"x\"]", "not ending in '_'"),
             ("[mcp.servers.x]\ncommand = []", "mcp.servers.x.command"),
+            (
+                "[mcp.servers.x]\ncommand = [\"./server\"]",
+                "'./server' must be an absolute path",
+            ),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\ntool_timeout_secs = 0",
+                "mcp.servers.x.tool_timeout_secs",
+            ),
             ("[mcp.servers.x]\nenv = {}", "missing field `command`"),
             (
                 "[mcp.servers.x]\ncommand = [\"x\"]\nalow = []",
