@@ -42,6 +42,11 @@ Use the [ticket index](docs/tickets/README.md) for acceptance criteria and
 dependencies. GitHub issue state is authoritative; historical reviews are not a
 second backlog. Update current documentation when behavior changes.
 
+`nix develop -c pre-commit install` runs the checks above before each commit.
+It also checks each commit message, because links to coding-agent sessions do
+not belong in the history. The Commit metadata workflow checks the commits of
+each pull request the same way.
+
 Local sessions, `.env` files, Nix `result` links, and research checkouts must not
 be committed. Before publishing, scan both the tracked tree and Git history for
 secrets; deleting a credential from the latest tree does not remove it from Git.
