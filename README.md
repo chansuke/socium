@@ -25,9 +25,10 @@
 - **Your model, your session.** Claude by default, or any provider you add in
   `models.toml`. Stop at any time and resume with `-c` or `-r`.
 - **Your MCP servers.** Tools of the MCP servers you list in `config.toml`,
-  local over stdio or remote over Streamable HTTP, are offered to the model
-  and ask before each call unless you allow them. Local servers run on the
-  host, outside the sandbox.
+  local over stdio or remote over Streamable HTTP with a header or an OAuth
+  login (`socium mcp login`), are offered to the model and ask before each
+  call unless you allow them. Local servers run on the host, outside the
+  sandbox.
 
 <p align="center">
   <img src="docs/assets/demo.gif" width="860" alt="Socium runs a failing test, reads the file, fixes it, and runs the test again, asking before each command">

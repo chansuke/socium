@@ -161,6 +161,21 @@ See [ADR 8](adr/0008-agentツールで独立した文脈のサブエージェン
 See the [reliability and recovery guide](daily-reliability.md) for storage
 limits, editing guarantees, migration, and recovery procedures.
 
+## MCP login
+
+`socium mcp login <server>` logs in to a remote MCP server of `config.toml`
+that needs OAuth. It finds the server's authorization server, registers
+Socium with it unless the server's `oauth` table names a client, prints the
+authorization URL, and tries to open it with `xdg-open` (`open` on macOS).
+Agree in the browser; it comes back to a listener on 127.0.0.1, and Socium
+stores the token for later runs, the TUI and `socium -p` alike. The command
+waits up to five minutes and exits with status 1 and a reason when the login
+fails. Run it again when Socium warns that the server needs you to log in.
+
+`socium mcp logout <server>` removes the stored token. It does not revoke the
+token at the server; revoke it there if it may have leaked. See
+[configuration](configuration.md#mcp-servers) for where tokens are kept.
+
 ## Running without the TUI
 
 `socium -p "<prompt>"` runs one turn without the terminal UI and prints the

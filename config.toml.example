@@ -84,9 +84,18 @@ enabled = false
 #
 # A remote server receives the arguments of every call to its tools and the
 # `headers`, expanded like `env`; keep tokens in your environment. The url
-# must use https (http only for localhost). No OAuth: a server that needs
-# authorization takes a token in a header.
+# must use https (http only for localhost). A server that needs OAuth is
+# logged in to once with `socium mcp login <name>`; the token is kept in
+# ~/.local/state/socium/mcp-auth/, outside every workspace. An Authorization
+# header, when configured, is sent instead of that token.
 # [mcp.servers.github-remote]
 # url = "https://api.githubcopilot.com/mcp/"
 # headers = { Authorization = "Bearer ${GITHUB_TOKEN}" }
 # allow = ["get_issue"]
+#
+# `oauth` is only for a client registered ahead of time (GitHub's server, for
+# one, does not register clients itself). client_secret is expanded like
+# headers; callback_port fixes the redirect URI http://127.0.0.1:<port>/callback.
+# [mcp.servers.linear]
+# url = "https://mcp.linear.app/mcp"
+# oauth = { client_id = "my-client", client_secret = "${LINEAR_CLIENT_SECRET}", scopes = ["read"], callback_port = 8976 }
