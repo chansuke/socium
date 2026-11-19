@@ -204,26 +204,39 @@ allow = ["get_issue"]
 # enabled = false
 ```
 
-- `command` is the program and its arguments. It runs on the host, outside the
-  sandbox, with the workspace as its directory, so it has your network and
-  your files. Configure only servers you trust.
-- The server gets PATH, HOME, USER, and LANG from Socium's environment, plus
-  `env`; nothing else, so provider API keys never reach it. `${NAME}` in an
-  `env` value is replaced by that variable from Socium's environment. When it
-  is not set, the server is not started and startup says why.
+- `command` is the program, an absolute path or a name found on PATH, and its
+  arguments. It runs on the host, outside the sandbox, so it has your network
+  and your files. Configure only servers you trust. Its directory is `/`, not
+  the workspace, so a launcher such as `python3 -m` or `npx` does not pick up
+  the workspace's modules or packages; give a server that works on a directory
+  its absolute path.
+- The server gets PATH (without relative entries or entries in the workspace),
+  HOME, USER, and LANG from Socium's environment, plus `env`; nothing else, so
+  provider API keys reach it only if `env` names them. `${NAME}` in an `env`
+  value is replaced by that variable from Socium's environment. When it is not
+  set, the server is not started and startup says why.
+- `tool_timeout_secs` (default 600) is how long a tool call may take. A call
+  that runs longer, or that you cancel, is given up and the server is asked to
+  stop it; whether it ran is then unknown, and it is not sent again.
 - The model sees each tool as `mcp__<server>__<tool>`, with the server's
-  description and input schema. A server name is 1 to 32 letters, digits, `_`,
-  or `-`, without `__`. A tool whose full name would exceed 64 characters or
-  contain other characters is not offered, with a warning.
+  description (cut at 2048 characters) and input schema. A server name is 1 to
+  32 letters, digits, `_`, or `-`, without `__` and not ending in `_`. A tool
+  whose full name would exceed 64 characters or contain other characters, or
+  whose input schema is larger than 64 KiB, is not offered, with a warning.
 - A tool call asks for approval, since nothing confines what the server does;
   you can allow that one tool for the rest of the session. Tools listed in
   `allow` (their names on the server) run without asking. `socium -p` refuses a
   call that needs approval and tells the model to add the tool to `allow`.
 - Servers start in parallel while the interface opens, and the first turn waits
-  for them, at most 30 seconds each. A server that fails to start is skipped
-  with a warning that ends with its last standard error lines. When Socium
-  exits it kills the server's process group, and the server's standard input
-  closes in any case.
+  for them, at most 30 seconds each; you can cancel the wait. A server must
+  answer with protocol revision 2025-06-18, 2025-03-26, or 2024-11-05. A server
+  that fails to start is skipped with a warning that ends with its last
+  standard error lines. Its standard error is never sent to the model, and
+  `env` values of 8 or more characters are shown as `[redacted]` in warnings
+  and errors. A server that writes a value into a tool result is not filtered.
+- When Socium exits it closes each server's standard input, waits a second,
+  sends the server's process group SIGTERM, waits another second, and then
+  sends SIGKILL.
 - Subagents do not get MCP tools.
 
 The design and what is deferred are in

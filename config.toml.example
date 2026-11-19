@@ -67,14 +67,16 @@ deny = [
 enabled = false
 
 # MCP servers whose tools the model may call, each started over stdio when
-# Socium starts. A server runs on the host, outside the sandbox, with the
-# workspace as its directory; configure only servers you trust. It gets PATH,
-# HOME, USER, LANG and its `env`, where ${NAME} is read from Socium's
-# environment (an unset variable keeps the server from starting). Tool calls
-# ask unless the tool is listed in `allow`. Tools reach the model as
+# Socium starts. A server runs on the host, outside the sandbox, with `/` as
+# its directory; configure only servers you trust. It gets PATH (without the
+# workspace), HOME, USER, LANG and its `env`, where ${NAME} is read from
+# Socium's environment (an unset variable keeps the server from starting).
+# Tool calls ask unless the tool is listed in `allow`, and are given up after
+# `tool_timeout_secs` (default 600). Tools reach the model as
 # mcp__<server>__<tool>.
 # [mcp.servers.github]
 # command = ["github-mcp-server", "stdio"]
 # env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }
 # allow = ["get_issue"]
+# tool_timeout_secs = 600
 # enabled = true
