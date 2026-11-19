@@ -240,8 +240,9 @@ allow = ["read_wiki_structure"]
   your environment rather than written in the file. Socium does not show header
   values: startup lists only the URL and the header names, and a value (or the
   token after `Bearer`) that the server writes back into an error is shown as
-  `[redacted]`. A proxy from the environment is used, except for a loopback
-  URL. `env` does not
+  `[redacted]`. An error in `config.toml` names its line, column, and key without
+  quoting the line or a value from it. A proxy from the environment is used,
+  except for a loopback URL. `env` does not
   apply to a `url` server, nor `headers` to a `command` server.
 - A remote server receives every argument the model passes to its tools, and
   what it does with them is up to its operator, as with a model provider.
