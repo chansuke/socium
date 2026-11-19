@@ -3,8 +3,9 @@
 Fixed tasks for measuring a change to prompts, tools, or limits against the
 same requests. Each task in `tasks/` has a `repo/` copied into a fresh Git
 repository, one or more requests, a check the agent never sees, and the paths
-the task may change. `run.py` runs Socium on each with `socium -p` (ADR 17),
-continuing the same session with `-c -p` for tasks with several turns.
+the task may change. `run.py` runs Socium on each with
+`socium -p --output-format stream-json` (ADR 17, ADR 19), continuing the
+same session with `-c -p` for tasks with several turns.
 
 A run passes only when its check passes and nothing outside the task's
 `allowed_changes` changed. The agent's own report of success is not used.

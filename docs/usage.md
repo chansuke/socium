@@ -163,12 +163,17 @@ limits, editing guarantees, migration, and recovery procedures.
 
 ## Running without the TUI
 
-`socium -p "<prompt>"` runs one turn without the terminal UI and prints its
-progress and result as JSON Lines on standard output (`-p -` reads the prompt
-from standard input). Each line has the schema version in `v` and a `type`:
-`started`, then one `activity` per Activity event, then `finished` with `ok`,
-the reply `text` or the `error`, and the tokens used. Diagnostics go to standard
-error.
+`socium -p "<prompt>"` runs one turn without the terminal UI and prints the
+reply text on standard output. Text piped into it comes before the prompt,
+separated by a blank line, so `git diff | socium -p "review this"` works; the
+piped text alone is also a prompt. Errors, notices, and diagnostics go to
+standard error.
+
+`--output-format` picks what standard output carries: `text` (the default),
+`json` (only the final `finished` record), or `stream-json` (JSON Lines). In
+JSON each line has the schema version in `v` and a `type`: `started`, then one
+`activity` per Activity event, then `finished` with `ok`, the reply `text` or
+the `error`, and the tokens used.
 
 Nobody can answer an approval there, so a call that needs one is refused and
 the model is told how to allow it; Ctrl+C cancels. The exit status is 0, 1 on
