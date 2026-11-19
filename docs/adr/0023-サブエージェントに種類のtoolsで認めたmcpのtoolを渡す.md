@@ -34,7 +34,7 @@ ADR 20 は MCP の tool をメインのエージェントだけに渡し、サ�
 Chosen option: 「種類の tool の集合 (`ToolSet`) で決め、利用者の種類は `tools` に MCP の tool を書く」。既存の `tools` の意味を広げるだけで、組み込みの種類の性質から渡す範囲が決まる。
 
 * 読み取り専用の種類 (`ToolSet::ReadOnly`: `explorer` と `tools` を省いた利用者の種類) には MCP の tool を渡さない。`worker` (`ToolSet::AllButAgent`) には、メインのエージェントに渡しているすべての MCP の tool を渡す。
-* 利用者の種類の `tools` には、`mcp__<server>__<tool>` で一つの tool を、`mcp__<server>__*` でそのサーバーのすべての tool を書ける。定義を読む時点ではサーバーがまだ接続していないので、形だけを確かめる: 接頭辞、設定と同じ規則のサーバー名、続いて tool 名 (64 文字以内の名前の文字) か `*`。サーバーや tool が実在するかは確かめない。
+* 利用者の種類の `tools` には、`mcp__<server>__<tool>` で一つの tool を、`mcp__<server>__*` でそのサーバーのすべての tool を書ける。定義を読む時点ではサーバーがまだ接続していないので、形だけを確かめる: 接頭辞、設定と同じ規則のサーバー名、続いて tool 名 (64 文字以内の名前の文字) か `*`。サーバーや tool が実在するかは確かめない。`mcp__<server>__*` は `mcp__<server>__` で始まる名前に一致する。サーバー名は `_` で終われない (ADR 20) ので、この接頭辞が別のサーバーの tool に一致することはない。
 * 実行時に子へ渡すのは、メインのエージェントに渡している tool のうち、種類が認めるもの。種類が名前を挙げても、どのサーバーも提供していない tool は黙って渡さず、子はそれなしで動く。種類に別のモデルがあっても、そのモデルの tool の一覧に同じ MCP の tool を足す。
 * 承認は、メインと同じ `run_tool_call_checkpointed` と同じ `TaskControl` を通す。`allow` に無い tool は尋ね、セッション中の許可は子とメインの両方を覆う。承認の要求には、コマンドと同じく、どのサブエージェントが求めたか (`requested_by`) が付く。答える人がいない実行では拒否し、`allow` に足す方法を伝える。
 * MCP の tool を一つでも持つ種類は、ADR 10 の「workspace を変えられる種類」に数える。同じ応答に並んでも他の呼び出しと同時には動かさず、途中で止まったときは変更が残りうることを書き添える。MCP の tool の名前は読み取り専用の一覧に無いので、既存の判定 (`may_change_workspace`) がそのまま当てはまる。
@@ -50,7 +50,7 @@ Chosen option: 「種類の tool の集合 (`ToolSet`) で決め、利用者の�
 
 ### Confirmation
 
-`catalog.rs` のテストで、`mcp__<server>__<tool>` と `mcp__<server>__*` の読み取りと照合、形の誤り (接頭辞だけ、サーバー名の誤り、空や不正な tool 名、64 文字超) の文言、MCP の tool を持つ種類が workspace を変えうると判定されること、`explorer` が MCP の tool を認めず `worker` が認めることを確かめる。サブエージェントのテストで、偽の MCP サーバー (`crates/core/tests/fixtures/fake_mcp_server.py`) を使い、`worker` にメインと同じ MCP の tool が渡り `explorer` には渡らないこと、`mcp__fake__*` の種類が `mcp__fake__echo` を呼び結果が次の要求に入ること、提供されていない tool を挙げた種類も起動すること、別のモデルの種類にも渡ること、MCP が無くなった後の再開がそれなしで動くこと、`allow` に無い呼び出しがサブエージェントの名前を付けて尋ね、セッション中の許可がメインの呼び出しも覆うこと、答える人がいない実行で設定の案内とともに拒否されること、MCP の tool を持つ種類の呼び出しが同時に動かないことを確かめる。
+`catalog.rs` のテストで、`mcp__<server>__<tool>` と `mcp__<server>__*` の読み取りと照合、形の誤り (接頭辞だけ、サーバー名の誤り、`_` で終わるサーバー名、空や不正な tool 名、64 文字超) の文言、`mcp__<server>__*` が `_` で始まる tool に一致し別のサーバーに一致しないこと、MCP の tool を持つ種類が workspace を変えうると判定されること、`explorer` が MCP の tool を認めず `worker` が認めることを確かめる。サブエージェントのテストで、偽の MCP サーバー (`crates/core/tests/fixtures/fake_mcp_server.py`) を使い、`worker` にメインと同じ MCP の tool が渡り `explorer` には渡らないこと、`mcp__fake__*` の種類が `mcp__fake__echo` を呼び結果が次の要求に入ること、提供されていない tool を挙げた種類も起動すること、別のモデルの種類にも渡ること、MCP が無くなった後の再開がそれなしで動くこと、`allow` に無い呼び出しがサブエージェントの名前を付けて尋ね、セッション中の許可がメインの呼び出しも覆うこと、答える人がいない実行で設定の案内とともに拒否されること、MCP の tool を持つ種類の呼び出しが同時に動かないことを確かめる。
 
 ## Pros and Cons of the Options
 
