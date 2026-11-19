@@ -3,6 +3,9 @@ number: 17
 title: TUIなしで一つのturnを実行しJSON Linesで報告する
 status: proposed
 date: 2026-11-15
+links:
+- target: 19
+  kind: amendedby
 ---
 
 # TUIなしで一つのturnを実行しJSON Linesで報告する
