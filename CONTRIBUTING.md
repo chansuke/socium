@@ -38,9 +38,8 @@ Keep changes focused and explain the behavior, tests, and remaining limitations
 in a pull request. Add regression tests for behavior and security fixes. Preserve
 the user's staged, unstaged, and untracked changes in tool fixtures.
 
-Use the [ticket index](docs/tickets/README.md) for acceptance criteria and
-dependencies. GitHub issue state is authoritative; historical reviews are not a
-second backlog. Update current documentation when behavior changes.
+Planned work and its acceptance criteria are in GitHub Issues. Update current
+documentation when behavior changes.
 
 `nix develop -c pre-commit install` runs the checks above before each commit.
 It also checks each commit message, because links to coding-agent sessions do

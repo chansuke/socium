@@ -70,4 +70,4 @@ TUI の crate の統合テストで、実際のバイナリを環境を空にし
 
 ## More Information
 
-[SOC-031](../tickets/SOC-031-headless-jsonl.md)。2026-11-14 のレビューの N14。event の形は [ADR 2](0002-activity欄でllmの思考とエージェントの実行を構造化したイベントとして表示する.md) と [ADR 4](0004-activityの記録をセッション単位のjsonlに保存し起動時に再生する.md)。
+[SOC-031](https://github.com/chansuke/socium/issues/36)。2026-11-14 のレビューの N14。event の形は [ADR 2](0002-activity欄でllmの思考とエージェントの実行を構造化したイベントとして表示する.md) と [ADR 4](0004-activityの記録をセッション単位のjsonlに保存し起動時に再生する.md)。

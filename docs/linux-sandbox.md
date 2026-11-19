@@ -1,6 +1,6 @@
 # Linux command sandbox
 
-SOC-003 / [#55](https://github.com/chansuke/socium/issues/55) separates application
+SOC-003 / [#8](https://github.com/chansuke/socium/issues/8) separates application
 authority (`ExecutionPolicy`) from enforcement (`SandboxExecutor`). Executable
 names never grant permissions. The model cannot request additional paths,
 environment variables, network access, or an unconfined mode. You can add
