@@ -5,7 +5,9 @@ use crate::activity::{
 use crate::agent::subagent::catalog::SubagentCatalog;
 use crate::agent::subagent::run_subagent;
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message};
-use crate::constants::{AGENT_TOOL_NAME, MAX_TOOL_ROUNDS, PLAN_TOOL_NAME};
+use crate::constants::{
+    AGENT_TOOL_NAME, MAX_CONCURRENT_SUBAGENTS, MAX_TOOL_ROUNDS, PLAN_TOOL_NAME,
+};
 use crate::error::AgentError;
 use crate::plan::PlanLedger;
 use crate::providers::{Provider, ProviderEvent, TokenUsage};
@@ -709,7 +711,8 @@ where
 
 /// How many calls from the start of `calls` can run at once: consecutive
 /// new subagents whose types cannot change the workspace, so they never
-/// ask for approval or edit the same file. A resumed subagent runs alone.
+/// ask for approval or edit the same file, at most
+/// `MAX_CONCURRENT_SUBAGENTS` of them. A resumed subagent runs alone.
 fn concurrent_batch_len(ctx: &TurnContext<'_>, calls: &[(String, String, Value)]) -> usize {
     calls
         .iter()
@@ -723,6 +726,7 @@ fn concurrent_batch_len(ctx: &TurnContext<'_>, calls: &[(String, String, Value)]
                     .and_then(|agent_type| ctx.subagents.find(agent_type))
                     .is_some_and(|kind| !kind.tools.may_change_workspace())
         })
+        .take(MAX_CONCURRENT_SUBAGENTS)
         .count()
 }
 
@@ -962,7 +966,13 @@ mod tests {
             concurrent_batch_len(&ctx, &[explorer.clone(), read, explorer.clone()]),
             1
         );
-        assert_eq!(concurrent_batch_len(&ctx, &[agent("unknown"), explorer]), 0);
+        assert_eq!(
+            concurrent_batch_len(&ctx, &[agent("unknown"), explorer.clone()]),
+            0
+        );
+        // The rest of a long run waits for the next batch.
+        let many = vec![explorer; MAX_CONCURRENT_SUBAGENTS + 2];
+        assert_eq!(concurrent_batch_len(&ctx, &many), MAX_CONCURRENT_SUBAGENTS);
     }
 
     #[test]

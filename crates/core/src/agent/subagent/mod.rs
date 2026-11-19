@@ -1772,6 +1772,109 @@ mod tests {
         assert_eq!(record(&service, "agent-b")["status"], "finished");
     }
 
+    /// Answers the main agent from `main` and every subagent after a short
+    /// wait, counting how many subagent requests are open at once.
+    struct CountingProvider {
+        main: ScriptedProvider,
+        open: std::sync::atomic::AtomicUsize,
+        most: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::providers::Provider for CountingProvider {
+        fn kind(&self) -> crate::providers::ProviderKind {
+            crate::providers::ProviderKind::Anthropic
+        }
+
+        fn capabilities(&self) -> crate::providers::ProviderCapabilities {
+            crate::providers::ProviderCapabilities {
+                supports_tools: true,
+            }
+        }
+
+        async fn send_message(
+            &self,
+            client: &reqwest::Client,
+            request: &crate::agent::types::AgentMessageRequest<'_>,
+            on_delta: &mut (dyn FnMut(crate::providers::ProviderEvent) + Send),
+        ) -> Result<ProviderResponse, ProviderError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let value = serde_json::to_value(request)?;
+            if value["system"] == DEFAULT_SYSTEM_PROMPT {
+                return self.main.send_message(client, request, on_delta).await;
+            }
+            let open = self.open.fetch_add(1, SeqCst) + 1;
+            self.most.fetch_max(open, SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.open.fetch_sub(1, SeqCst);
+            let prompt = value["messages"][0]["content"].as_str().unwrap_or_default();
+            Ok(text_provider_response(&format!("report on {prompt}"), None))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_long_run_of_subagents_runs_a_few_at_a_time_and_keeps_every_result() {
+        use crate::constants::MAX_CONCURRENT_SUBAGENTS;
+        let workspace = make_temp_dir("subagent_cap");
+        let count = MAX_CONCURRENT_SUBAGENTS + 2;
+        let batch = (0..count)
+            .map(|n| {
+                (
+                    format!("agent-{n}"),
+                    json!({"description": "Look", "prompt": format!("part {n}"), "agent_type": "explorer"}),
+                )
+            })
+            .collect::<Vec<_>>();
+        let most = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = CountingProvider {
+            main: ScriptedProvider::new(vec![
+                calls(
+                    &batch
+                        .iter()
+                        .map(|(id, input)| (id.as_str(), "agent", input.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+                text("All done."),
+            ]),
+            open: std::sync::atomic::AtomicUsize::new(0),
+            most: most.clone(),
+        };
+        let requests = provider.main.recorded_requests.clone();
+        let mut service = AgentService::with_provider(
+            workspace.path().into(),
+            Box::new(provider),
+            "test".into(),
+            1000,
+            reqwest::Client::new(),
+        );
+
+        let reply = service.submit("Look at all".into()).await.unwrap();
+
+        assert_eq!(reply.text, "All done.");
+        assert_eq!(
+            most.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_CONCURRENT_SUBAGENTS
+        );
+        let results = last_results(&requests.lock().unwrap()[1]);
+        let ids = results
+            .iter()
+            .map(|result| result["tool_use_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            batch.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>()
+        );
+        for (n, result) in results.iter().enumerate() {
+            assert!(
+                result["content"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("report on part {n}\n")),
+                "{result}"
+            );
+        }
+    }
+
     /// The tool entries a turn shows live, then the ones a restarted
     /// session rebuilds from the saved conversation.
     async fn live_and_restored_tool_entries(
