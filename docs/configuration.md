@@ -237,15 +237,19 @@ allow = ["read_wiki_structure"]
   plain http is accepted only for localhost and loopback addresses. It may not
   contain credentials, a query, or a fragment. `headers` are sent with every
   request, with `${NAME}` expanded as in `env`; put tokens there, read from
-  your environment rather than written in the file. Header values are never
-  shown: startup lists only the URL and the header names. `env` does not
+  your environment rather than written in the file. Socium does not show header
+  values: startup lists only the URL and the header names, and a value (or the
+  token after `Bearer`) that the server writes back into an error is shown as
+  `[redacted]`. A proxy from the environment is used, except for a loopback
+  URL. `env` does not
   apply to a `url` server, nor `headers` to a `command` server.
 - A remote server receives every argument the model passes to its tools, and
   what it does with them is up to its operator, as with a model provider.
   Socium speaks the Streamable HTTP transport of MCP 2025-06-18 only: no
   older HTTP+SSE servers, no OAuth (a 401 is reported as such), and no
-  redirects. When the server ends the session (HTTP 404), its tools fail until
-  you reload the settings or restart Socium. On exit Socium ends the session
+  redirects. When the server ends the session (HTTP 404), Socium starts a new
+  one; the call that got the 404 did not run and is not sent again, and the
+  model is told to call the tool again. On exit Socium ends the session
   with a DELETE.
 - A tool call asks for approval, since nothing confines what the server does
   (the request says whether it runs on the host or at the server's address);
