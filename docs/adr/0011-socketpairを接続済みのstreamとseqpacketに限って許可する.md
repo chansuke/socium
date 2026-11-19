@@ -63,4 +63,4 @@ Chosen option: 「`SOCK_STREAM` と `SOCK_SEQPACKET` だけ許可する」。接
 
 ## More Information
 
-2026-11-14 のレビュー `docs/review-socium-2026-11-14.md` の N1。サンドボックスの方針は [Linux sandbox guide](../linux-sandbox.md)。
+2026-11-14 のレビューの指摘 N1 から。サンドボックスの方針は [Linux sandbox guide](../linux-sandbox.md)。

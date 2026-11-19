@@ -5,7 +5,7 @@
 | 状態 | 実装済み (Phase 0〜4) |
 | ADR | [5](adr/0005-実行の事実から導いたシグナルでエージェントの状態をactivity欄に示す.md)、[2](adr/0002-activity欄でllmの思考とエージェントの実行を構造化したイベントとして表示する.md)、[3](adr/0003-adaptive-thinkingの表示を既定でsummarizedにしthinking-budget-tokensを廃止する.md)、[4](adr/0004-activityの記録をセッション単位のjsonlに保存し起動時に再生する.md) |
 | 作成日 | 2026-11-12 |
-| 関連チケット | [SOC-020](tickets/SOC-020-usage-and-observability.md)、[SOC-026](tickets/SOC-026-named-sessions-and-replay.md)、[SOC-027](tickets/SOC-027-tui-layout-and-output.md)、[SOC-031](tickets/SOC-031-headless-jsonl.md) |
+| 関連チケット | [SOC-020](https://github.com/chansuke/socium/issues/25)、[SOC-026](https://github.com/chansuke/socium/issues/31)、[SOC-027](https://github.com/chansuke/socium/issues/32)、[SOC-031](https://github.com/chansuke/socium/issues/36) |
 
 ## 1. 目的
 

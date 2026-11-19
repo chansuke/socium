@@ -3,8 +3,7 @@
 These results compare Socium with seven coding agents from
 [llm-agents.nix](https://github.com/numtide/llm-agents.nix) at commit
 `7a60511`, and test whether the [lean-ctx](https://github.com/yvgude/lean-ctx)
-proxy makes Socium faster. They describe Socium at `aaab51a`. The raw numbers
-are in [review-evidence/2026-11-19](review-evidence/2026-11-19/), and
+proxy makes Socium faster. They describe Socium at `aaab51a`.
 [bench/README.md](../bench/README.md) explains how to rerun them.
 
 All runs used one 24-core Linux machine with a load average near 2, with 7
@@ -109,6 +108,3 @@ Of the tool time, 142 seconds were `slow-events`, where the agent ran the
 task's slow reference code. Without that task, tools took 1% to 5% of each
 turn. Socium's own time is about 11 ms a round. A faster Socium could save at
 most that 0.2%.
-
-The raw numbers are `eval-ds-flash.json` and `time-split.json` in
-[review-evidence/2026-11-19](review-evidence/2026-11-19/).
