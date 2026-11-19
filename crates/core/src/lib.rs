@@ -33,6 +33,7 @@ pub use crate::activity::{ActivityEvent, ActivityKind, ThoughtRole};
 pub use crate::agent::context::ContextMetrics;
 pub use crate::agent::subagent::record::{SubagentStatus, SubagentSummary};
 pub use crate::error::AgentError;
+pub use crate::mcp::{McpDisabled, McpServerState, McpServerStatus, McpServerTransport};
 pub use crate::plan::PlanView;
 
 use crate::activity::ActivityClock;
@@ -361,6 +362,9 @@ pub struct AgentService {
     /// The MCP servers in the settings, which start on a thread while the
     /// interface opens; the first turn waits for them.
     mcp: McpStartup,
+    /// Why a server or a tool was left out, kept from a startup that
+    /// settled before a turn until the next turn reports it.
+    mcp_warnings: Vec<String>,
 }
 
 enum McpStartup {
@@ -606,6 +610,7 @@ impl AgentService {
             web_search: None,
             sandbox: SandboxCheck::Passed,
             mcp: McpStartup::Ready(None),
+            mcp_warnings: Vec::new(),
         };
         service.context_window_override = service.limit_override("CONTEXT_WINDOW_TOKENS");
         service.compaction_threshold_override =
@@ -696,6 +701,7 @@ impl AgentService {
             },
         };
         // Servers of earlier settings are stopped when replaced.
+        self.mcp_warnings.clear();
         self.mcp = McpStartup::start(
             &settings.mcp_servers,
             &self.workspace_root,
@@ -706,31 +712,83 @@ impl AgentService {
         self.refresh_system_prompt();
     }
 
-    /// Waits for the MCP servers to finish starting, or for the user to
-    /// cancel, and offers their tools. Returns, once, why a server or a
-    /// tool was left out.
-    async fn settle_mcp(&mut self) -> Result<Vec<String>, AgentError> {
-        let McpStartup::Connecting { handle, .. } = &mut self.mcp else {
-            return Ok(Vec::new());
+    /// Every configured MCP server and how it is doing, in name order.
+    /// Never waits: a server whose startup has not finished is `Starting`.
+    pub fn mcp_servers(&mut self) -> Vec<McpServerStatus> {
+        self.collect_mcp();
+        let mut statuses = match &self.mcp {
+            McpStartup::Connecting { .. } => self
+                .settings
+                .mcp_servers
+                .iter()
+                .map(|server| McpServerStatus {
+                    name: server.name.clone(),
+                    transport: McpServerTransport::of(&server.transport),
+                    state: McpServerState::Starting,
+                })
+                .collect(),
+            McpStartup::Ready(registry) => registry
+                .as_ref()
+                .map(|registry| registry.statuses())
+                .unwrap_or_default(),
         };
-        while handle.as_ref().is_some_and(|handle| !handle.is_finished()) {
+        statuses.extend(
+            self.settings
+                .mcp_disabled
+                .iter()
+                .map(|server| McpServerStatus {
+                    name: server.name.clone(),
+                    transport: server.transport.clone(),
+                    state: McpServerState::Disabled {
+                        reason: server.reason.clone(),
+                    },
+                }),
+        );
+        statuses.sort_by(|a, b| a.name.cmp(&b.name));
+        statuses
+    }
+
+    /// Waits for the MCP servers to finish starting, or for the user to
+    /// cancel, and offers their tools.
+    async fn settle_mcp(&mut self) -> Result<(), AgentError> {
+        while let McpStartup::Connecting {
+            handle: Some(handle),
+            ..
+        } = &self.mcp
+            && !handle.is_finished()
+        {
             tokio::select! {
                 _ = self.control.cancelled() => return Err(AgentError::Cancelled),
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
             }
         }
+        self.collect_mcp();
+        Ok(())
+    }
+
+    /// Takes the MCP servers' startup result once it is in, and offers
+    /// their tools; what was left out waits in `mcp_warnings`.
+    fn collect_mcp(&mut self) {
+        let McpStartup::Connecting { handle, .. } = &mut self.mcp else {
+            return;
+        };
+        if handle.as_ref().is_none_or(|handle| !handle.is_finished()) {
+            return;
+        }
         let Some(handle) = handle.take() else {
             unreachable!("a startup's handle is taken only here");
         };
         let (registry, warnings) = handle.join().unwrap_or_else(|_| {
+            let reason = "their startup panicked.";
+            let registry = crate::mcp::McpRegistry::failed(&self.settings.mcp_servers, reason);
             (
-                crate::mcp::McpRegistry::default(),
-                vec!["MCP servers were not started: their startup panicked".into()],
+                registry,
+                vec![format!("MCP servers were not started: {reason}")],
             )
         });
         self.mcp = McpStartup::Ready(Some(Arc::new(registry)));
+        self.mcp_warnings.extend(warnings);
         self.apply_model_limits();
-        Ok(warnings)
     }
 
     /// Rebuilds the system prompt from the settings and the project's
@@ -1685,7 +1743,7 @@ impl AgentService {
         F: FnMut(AgentProgress) + Send,
     {
         self.wait_for_sandbox()?;
-        let mcp_warnings = self.settle_mcp().await?;
+        self.settle_mcp().await?;
         self.ensure_state_lock()?;
         if let Some(problem) = self.limit_problem() {
             return Err(Error::new(ErrorKind::InvalidInput, problem).into());
@@ -1725,7 +1783,12 @@ impl AgentService {
             .registry()
             .map(|registry| registry.take_notices())
             .unwrap_or_default();
-        for message in mcp_warnings.into_iter().chain(notices) {
+        // Taken only now, so a turn that failed before this still leaves
+        // them for the next one.
+        for message in std::mem::take(&mut self.mcp_warnings)
+            .into_iter()
+            .chain(notices)
+        {
             emit(&mut on_progress, ActivityKind::Warning { message });
         }
         if let Some(message) = self.reload_instructions() {
@@ -2325,6 +2388,200 @@ mod tests {
         // The tool providers would refuse is reported once, in the first turn.
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("`bad.name`"), "{warnings:?}");
+    }
+
+    #[tokio::test]
+    async fn mcp_servers_are_starting_until_startup_settles_without_waiting_for_it() {
+        let workspace = make_temp_dir("mcp_status");
+        let provider = ScriptedProvider::new(vec![Ok(text_provider_response("Done.", None))]);
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.env = std::sync::Arc::new(|name| std::env::var(name).ok());
+        let (settings, _) = crate::Settings::from_toml(
+            &format!(
+                "[mcp.servers.slow]\ncommand = [\"python3\", \"{0}\", \"--hang\"]\n\
+                 [mcp.servers.fake]\ncommand = [\"python3\", \"{0}\"]",
+                crate::mcp::tests::FAKE_SERVER
+            ),
+            None,
+        )
+        .unwrap();
+        service.install_settings(settings);
+
+        let started = std::time::Instant::now();
+        let statuses = service.mcp_servers();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|status| (status.name.as_str(), &status.state))
+                .collect::<Vec<_>>(),
+            [
+                ("fake", &crate::McpServerState::Starting),
+                ("slow", &crate::McpServerState::Starting)
+            ]
+        );
+        assert_eq!(
+            statuses[1].transport,
+            crate::McpServerTransport::Local {
+                program: "python3".into()
+            }
+        );
+    }
+
+    #[test]
+    fn mcp_servers_include_the_disabled_ones_and_say_why() {
+        let workspace = make_temp_dir("mcp_status_disabled");
+        let provider = ScriptedProvider::new(Vec::new());
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        let (settings, _) = crate::Settings::from_toml(
+            "[mcp.servers.off]\ncommand = [\"off-mcp\", \"--port\", \"1\"]\nenabled = false\n\
+             [mcp.servers.github]\nurl = \"https://a.example/mcp\"\n\
+             headers = { Authorization = \"Bearer ${SOCIUM_TEST_UNSET_TOKEN}\" }",
+            None,
+        )
+        .unwrap();
+        service.install_settings(settings);
+
+        assert_eq!(
+            service.mcp_servers(),
+            [
+                crate::McpServerStatus {
+                    name: "github".into(),
+                    transport: crate::McpServerTransport::Remote {
+                        url: "https://a.example/mcp".into()
+                    },
+                    state: crate::McpServerState::Disabled {
+                        reason: crate::McpDisabled::UnsetVariable {
+                            setting: "headers.Authorization".into(),
+                            variable: "SOCIUM_TEST_UNSET_TOKEN".into(),
+                        }
+                    },
+                },
+                crate::McpServerStatus {
+                    name: "off".into(),
+                    transport: crate::McpServerTransport::Local {
+                        program: "off-mcp".into()
+                    },
+                    state: crate::McpServerState::Disabled {
+                        reason: crate::McpDisabled::Setting
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mcp_servers_never_hold_header_env_or_secret_values() {
+        let workspace = make_temp_dir("mcp_status_secrets");
+        let provider = ScriptedProvider::new(Vec::new());
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.env = std::sync::Arc::new(|name| {
+            (name == "SOCIUM_TEST_TOKEN").then(|| "s3cret-from-env".to_string())
+        });
+        let (settings, _) = crate::Settings::parse(
+            "[mcp.servers.local]\ncommand = [\"/nonexistent/mcp-server\", \"--token\", \"s3cret-arg\"]\n\
+             env = { TOKEN = \"${SOCIUM_TEST_TOKEN}\", PLAIN = \"s3cret-plain\" }\n\
+             [mcp.servers.remote]\nurl = \"http://127.0.0.1:9/mcp\"\n\
+             headers = { Authorization = \"Bearer s3cret-header\", X-Key = \"${SOCIUM_TEST_TOKEN}\" }\n\
+             [mcp.servers.client]\nurl = \"http://127.0.0.1:9/other\"\n\
+             oauth = { client_id = \"app\", client_secret = \"s3cret-client\", issuer = \"https://a.example\" }",
+            None,
+            &|name| (name == "SOCIUM_TEST_TOKEN").then(|| "s3cret-from-env".to_string()),
+        )
+        .unwrap();
+        service.install_settings(settings);
+
+        let mut seen = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let statuses = service.mcp_servers();
+            seen.push(format!("{statuses:?}"));
+            if statuses
+                .iter()
+                .all(|status| status.state != crate::McpServerState::Starting)
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{statuses:?}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        for text in &seen {
+            assert!(!text.contains("s3cret"), "{text}");
+        }
+        assert!(seen.last().unwrap().contains("127.0.0.1:9/mcp"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn mcp_servers_show_a_settled_startup_and_its_warnings_still_reach_the_next_turn() {
+        let workspace = make_temp_dir("mcp_status_settled");
+        let provider = ScriptedProvider::new(vec![Ok(text_provider_response("Done.", None))]);
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.env = std::sync::Arc::new(|name| std::env::var(name).ok());
+        let (settings, _) = crate::Settings::from_toml(
+            &format!(
+                "[mcp.servers.fake]\ncommand = [\"python3\", \"{}\"]\n\
+                 [mcp.servers.missing]\ncommand = [\"/nonexistent/mcp-server\"]",
+                crate::mcp::tests::FAKE_SERVER
+            ),
+            None,
+        )
+        .unwrap();
+        service.install_settings(settings);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let statuses = loop {
+            let statuses = service.mcp_servers();
+            if statuses
+                .iter()
+                .all(|status| status.state != crate::McpServerState::Starting)
+            {
+                break statuses;
+            }
+            assert!(std::time::Instant::now() < deadline, "{statuses:?}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let crate::McpServerState::Connected { tools } = &statuses[0].state else {
+            panic!("{statuses:?}");
+        };
+        assert_eq!(tools[0], "echo");
+        let crate::McpServerState::Failed { reason } = &statuses[1].state else {
+            panic!("{statuses:?}");
+        };
+        assert!(reason.contains("could not run"), "{reason}");
+        // Settled without a turn, the tools are offered already.
+        assert!(
+            service
+                .tools
+                .iter()
+                .any(|tool| tool.name == "mcp__fake__echo")
+        );
+        let mut warnings = Vec::new();
+
+        service
+            .submit_with_progress("hi".into(), |event| {
+                if let crate::AgentProgress::Activity(crate::ActivityEvent {
+                    kind: crate::ActivityKind::Warning { message },
+                    ..
+                }) = event
+                {
+                    warnings.push(message);
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("`bad.name`"), "{warnings:?}");
+        assert!(
+            warnings[1].starts_with(
+                "MCP server missing was not started: `/nonexistent/mcp-server` could not run"
+            ),
+            "{warnings:?}"
+        );
     }
 
     #[tokio::test]

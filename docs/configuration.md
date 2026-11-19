@@ -292,7 +292,8 @@ url = "https://mcp.linear.app/mcp"
   `allow` (their names on the server) run without asking. `socium -p` refuses a
   call that needs approval and tells the model to add the tool to `allow`.
 - Servers start in parallel while the interface opens, and the first turn waits
-  for them, at most 30 seconds each; you can cancel the wait. A server must
+  for them, at most 30 seconds each; you can cancel the wait. `/mcp` shows each server's state and tools (see
+  [usage](usage.md#mcp-servers)). A server must
   answer with protocol revision 2025-06-18, 2025-03-26, or 2024-11-05. A server
   that fails to start is skipped with a warning; a local one's ends with its
   last standard error lines. Its standard error is never sent to the model, and

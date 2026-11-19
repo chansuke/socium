@@ -87,6 +87,8 @@ pub struct Settings {
     /// `[mcp.servers.<name>]`: MCP servers Socium starts on the host or
     /// connects to, in name order, the disabled ones left out.
     pub(crate) mcp_servers: Vec<McpServerSettings>,
+    /// The disabled ones, in name order, for `/mcp`.
+    pub(crate) mcp_disabled: Vec<DisabledMcpServer>,
     /// Where the settings came from, shown in errors and `/help`.
     pub(crate) source: Option<PathBuf>,
 }
@@ -113,6 +115,14 @@ pub(crate) struct McpServerSettings {
 
 /// How long an MCP tool call may take unless `tool_timeout_secs` says.
 const DEFAULT_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// A `[mcp.servers.<name>]` that is not started, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DisabledMcpServer {
+    pub(crate) name: String,
+    pub(crate) transport: crate::mcp::McpServerTransport,
+    pub(crate) reason: crate::mcp::McpDisabled,
+}
 
 /// How Socium reaches an MCP server.
 #[derive(Clone, PartialEq, Eq)]
@@ -780,9 +790,11 @@ impl Settings {
             })
             .transpose()?;
         let mut mcp_servers = Vec::new();
+        let mut mcp_disabled = Vec::new();
         for (name, server) in raw.mcp.servers {
-            if let Some(server) = mcp_server(name, server, env, &mut warnings)? {
-                mcp_servers.push(server);
+            match mcp_server(name, server, env, &mut warnings)? {
+                Ok(server) => mcp_servers.push(server),
+                Err(disabled) => mcp_disabled.push(disabled),
             }
         }
         Ok((
@@ -791,6 +803,7 @@ impl Settings {
                 approval,
                 web_search,
                 mcp_servers,
+                mcp_disabled,
                 source: None,
             },
             warnings,
@@ -847,14 +860,22 @@ impl Settings {
     }
 }
 
-/// A validated `[mcp.servers.<name>]`, or `None` when it is turned off or
-/// names a variable that is not set (with a warning).
+/// A validated `[mcp.servers.<name>]`, or `Err` inside when it is turned
+/// off or names a variable that is not set (with a warning).
 fn mcp_server(
     name: String,
     raw: RawMcpServer,
     env: &dyn Fn(&str) -> Option<String>,
     warnings: &mut Vec<String>,
-) -> Result<Option<McpServerSettings>, String> {
+) -> Result<Result<McpServerSettings, DisabledMcpServer>, String> {
+    use crate::mcp::{McpDisabled, McpServerTransport};
+    let disabled = |name: &str, transport: McpServerTransport, reason: McpDisabled| {
+        Ok(Err(DisabledMcpServer {
+            name: name.to_string(),
+            transport,
+            reason,
+        }))
+    };
     if !is_valid_mcp_server_name(&name) {
         return Err(format!("mcp.servers.{name}: {MCP_SERVER_NAME_RULE}"));
     }
@@ -899,11 +920,15 @@ fn mcp_server(
                     "mcp.servers.{name}.env: '{variable}' is not a variable name"
                 ));
             }
+            let local = || McpServerTransport::Local {
+                program: command[0].clone(),
+            };
             if !raw.enabled {
-                return Ok(None);
+                return disabled(&name, local(), McpDisabled::Setting);
             }
-            let Some(env) = expand_table(&name, "env", raw_env, env, warnings)? else {
-                return Ok(None);
+            let env = match expand_table(&name, "env", raw_env, env, warnings)? {
+                Ok(env) => env,
+                Err(unset) => return disabled(&name, local(), unset),
             };
             McpTransportSettings::Stdio { command, env }
         }
@@ -928,11 +953,13 @@ fn mcp_server(
                     ));
                 }
             }
+            let remote = || McpServerTransport::Remote { url: url.clone() };
             if !raw.enabled {
-                return Ok(None);
+                return disabled(&name, remote(), McpDisabled::Setting);
             }
-            let Some(headers) = expand_table(&name, "headers", raw_headers, env, warnings)? else {
-                return Ok(None);
+            let headers = match expand_table(&name, "headers", raw_headers, env, warnings)? {
+                Ok(headers) => headers,
+                Err(unset) => return disabled(&name, remote(), unset),
             };
             // Never repeat the value: it is usually a token.
             if let Some(header) = headers
@@ -946,8 +973,8 @@ fn mcp_server(
             }
             let oauth = match raw.oauth {
                 Some(oauth) => match oauth_settings(&name, oauth, env, warnings)? {
-                    Some(oauth) => Some(oauth),
-                    None => return Ok(None),
+                    Ok(oauth) => Some(oauth),
+                    Err(unset) => return disabled(&name, remote(), unset),
                 },
                 None => None,
             };
@@ -963,7 +990,7 @@ fn mcp_server(
             ));
         }
     };
-    Ok(Some(McpServerSettings {
+    Ok(Ok(McpServerSettings {
         name,
         transport,
         allow: raw.allow,
@@ -973,14 +1000,14 @@ fn mcp_server(
     }))
 }
 
-/// A validated `oauth` table, or `None` when `client_secret` names a
+/// A validated `oauth` table, or `Err` inside when `client_secret` names a
 /// variable that is not set (with a warning). The secret is never repeated.
 fn oauth_settings(
     name: &str,
     raw: RawMcpOAuth,
     env: &dyn Fn(&str) -> Option<String>,
     warnings: &mut Vec<String>,
-) -> Result<Option<McpOAuthSettings>, String> {
+) -> Result<Result<McpOAuthSettings, crate::mcp::McpDisabled>, String> {
     let printable =
         |value: &str| !value.trim().is_empty() && value.chars().all(|c| c.is_ascii_graphic());
     if let Some(client_id) = &raw.client_id
@@ -1033,8 +1060,9 @@ fn oauth_settings(
     let client_secret = match raw.client_secret {
         Some(secret) => {
             let table = BTreeMap::from([("client_secret".to_string(), secret)]);
-            let Some(mut expanded) = expand_table(name, "oauth", table, env, warnings)? else {
-                return Ok(None);
+            let mut expanded = match expand_table(name, "oauth", table, env, warnings)? {
+                Ok(expanded) => expanded,
+                Err(unset) => return Ok(Err(unset)),
             };
             let secret = expanded.remove("client_secret").unwrap_or_default();
             if !printable(&secret) {
@@ -1046,7 +1074,7 @@ fn oauth_settings(
         }
         None => None,
     };
-    Ok(Some(McpOAuthSettings {
+    Ok(Ok(McpOAuthSettings {
         client_id: raw.client_id,
         client_secret,
         scopes: raw.scopes,
@@ -1056,15 +1084,16 @@ fn oauth_settings(
     }))
 }
 
-/// `table` (`env` or `headers`) with each `${NAME}` expanded, or `None`
-/// when a variable is not set (with a warning).
+/// `table` (`env` or `headers`) with each `${NAME}` expanded, or `Err`
+/// inside naming the setting and the variable when one is not set (with a
+/// warning).
 fn expand_table(
     name: &str,
     table: &str,
     raw: BTreeMap<String, String>,
     env: &dyn Fn(&str) -> Option<String>,
     warnings: &mut Vec<String>,
-) -> Result<Option<BTreeMap<String, String>>, String> {
+) -> Result<Result<BTreeMap<String, String>, crate::mcp::McpDisabled>, String> {
     let mut expanded = BTreeMap::new();
     for (key, value) in raw {
         match expand_variables(&value, env) {
@@ -1075,7 +1104,10 @@ fn expand_table(
                 warnings.push(format!(
                     "mcp.servers.{name}.{table}.{key}: ${{{missing}}} is not set, so the {name} server is not started"
                 ));
-                return Ok(None);
+                return Ok(Err(crate::mcp::McpDisabled::UnsetVariable {
+                    setting: format!("{table}.{key}"),
+                    variable: missing,
+                }));
             }
             Err(Expansion::Malformed) => {
                 return Err(format!(
@@ -1084,7 +1116,7 @@ fn expand_table(
             }
         }
     }
-    Ok(Some(expanded))
+    Ok(Ok(expanded))
 }
 
 /// A TOML error by its place, with what it quotes of the file blanked
@@ -1302,6 +1334,16 @@ enabled = false
                 },
             ]
         );
+        assert_eq!(
+            settings.mcp_disabled,
+            [DisabledMcpServer {
+                name: "off".into(),
+                transport: crate::mcp::McpServerTransport::Local {
+                    program: "off".into()
+                },
+                reason: crate::mcp::McpDisabled::Setting,
+            }]
+        );
         let summary = settings.summary();
         assert!(
             summary.contains(
@@ -1325,6 +1367,19 @@ enabled = false
         let (settings, warnings) = Settings::from_toml(text, None).unwrap();
         assert_eq!(settings.mcp_servers.len(), 1);
         assert_eq!(settings.mcp_servers[0].name, "time");
+        assert_eq!(
+            settings.mcp_disabled,
+            [DisabledMcpServer {
+                name: "github".into(),
+                transport: crate::mcp::McpServerTransport::Local {
+                    program: "gh-mcp".into()
+                },
+                reason: crate::mcp::McpDisabled::UnsetVariable {
+                    setting: "env.TOKEN".into(),
+                    variable: "GITHUB_TOKEN".into(),
+                },
+            }]
+        );
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
             warnings[0].contains("${GITHUB_TOKEN} is not set")
@@ -1416,6 +1471,13 @@ oauth = {}
         // An unset secret skips the server, like a header.
         let (settings, warnings) = Settings::from_toml(text, None).unwrap();
         assert_eq!(settings.mcp_servers.len(), 1);
+        assert_eq!(
+            settings.mcp_disabled[0].reason,
+            crate::mcp::McpDisabled::UnsetVariable {
+                setting: "oauth.client_secret".into(),
+                variable: "GITHUB_SECRET".into(),
+            }
+        );
         assert_eq!(
             warnings,
             [

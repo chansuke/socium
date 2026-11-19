@@ -14,7 +14,7 @@ cancelled), `die` (exits mid-call), `env` (the variable names it sees),
 PATH), `deaf` (stops reading its input), `malformed` (an answer with
 neither result nor error), `empty` (a result without content), `batch`
 (its answer inside a batch), `secret` (an error that repeats
-`FAKE_SECRET`) and `expire` (over HTTP, ends every session).
+`FAKE_SECRET`) and `expire` (over HTTP, ends every session and revokes every access token).
 
 `--http` serves the MCP endpoint `/mcp` on 127.0.0.1 and prints
 `PORT <n>` once it listens. With `--sse` every request is answered with an
@@ -151,6 +151,7 @@ def call(name, arguments):
     if name == "expire":
         with state:
             sessions.clear()
+            access_tokens.clear()
         return text("expired")
     raise KeyError(name)
 

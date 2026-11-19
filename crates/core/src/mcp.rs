@@ -246,8 +246,7 @@ struct RemoteTool {
 
 impl McpServer {
     /// Connects to the server, performs the handshake, and lists its tools,
-    /// within `timeout` and until `stop` is cancelled. `Err` is a warning
-    /// for the user, with the end of a child's standard error.
+    /// within `timeout` and until `stop` is cancelled.
     fn connect(
         settings: &McpServerSettings,
         workspace_root: &Path,
@@ -256,14 +255,19 @@ impl McpServer {
         timeout: Duration,
         stop: &TaskControl,
         notices: &Notices,
-    ) -> Result<(Self, Vec<RemoteTool>), String> {
+    ) -> Result<(Self, Vec<RemoteTool>), StartError> {
+        let not_started = |reason: String| StartError::NotStarted {
+            origin: None,
+            reason,
+        };
         let wait = Wait {
             deadline: Instant::now() + timeout,
             control: stop,
         };
         let transport = match &settings.transport {
             McpTransportSettings::Stdio { command, env } => Transport::Stdio(
-                StdioTransport::spawn(&settings.name, command, env, workspace_root, host_env)?,
+                StdioTransport::spawn(command, env, workspace_root, host_env)
+                    .map_err(not_started)?,
             ),
             McpTransportSettings::Http {
                 url,
@@ -301,12 +305,10 @@ impl McpServer {
                         None => http::Authorization::None,
                     }
                 };
-                Transport::Http(http::HttpTransport::start(
-                    &settings.name,
-                    url,
-                    headers,
-                    auth,
-                )?)
+                Transport::Http(
+                    http::HttpTransport::start(&settings.name, url, headers, auth)
+                        .map_err(not_started)?,
+                )
             }
         };
         let server = Self {
@@ -371,9 +373,8 @@ impl McpServer {
     }
 
     /// `initialize` and `notifications/initialized`, after which the
-    /// server takes other requests. Returns the initialize result, or the
-    /// warning for the user.
-    fn handshake(&self, wait: &Wait<'_>, timeout: Duration) -> Result<Value, String> {
+    /// server takes other requests. Returns the initialize result.
+    fn handshake(&self, wait: &Wait<'_>, timeout: Duration) -> Result<Value, StartError> {
         let initialized = self
             .request(
                 "initialize",
@@ -403,10 +404,27 @@ impl McpServer {
         Ok(initialized)
     }
 
-    /// The warning for a server that failed to `what`.
-    fn not_started(&self, what: &str, err: RequestError, timeout: Duration) -> String {
+    /// How a server that started is doing when it no longer serves: it
+    /// exited, or it wants a login. `None` while it may still answer.
+    fn ended(&self) -> Option<McpServerState> {
+        match &self.transport {
+            Transport::Stdio(stdio) => {
+                let status = stdio.exited()?;
+                Some(McpServerState::Failed {
+                    reason: self.secrets.redact(&format!(
+                        "it exited after it started ({status}).{}",
+                        stdio.stderr_tail()
+                    )),
+                })
+            }
+            Transport::Http(http) => http.needs_login().then_some(McpServerState::NeedsLogin),
+        }
+    }
+
+    /// Why the server did not start after it failed to `what`.
+    fn not_started(&self, what: &str, err: RequestError, timeout: Duration) -> StartError {
         if let RequestError::NeedsLogin = err {
-            return needs_login(&self.name);
+            return StartError::NeedsLogin;
         }
         let reason = match err {
             RequestError::TimedOut => {
@@ -423,23 +441,20 @@ impl McpServer {
                 )
             }
         };
-        let at = match self.transport.origin() {
-            Some(origin) => format!(" at {origin}"),
-            None => String::new(),
-        };
-        self.secrets.redact(&format!(
-            "MCP server {}{at} was not started: it {reason}.{}",
-            self.name,
-            self.transport.stderr_tail()
-        ))
+        StartError::NotStarted {
+            origin: self.transport.origin().map(str::to_string),
+            reason: self
+                .secrets
+                .redact(&format!("it {reason}.{}", self.transport.stderr_tail())),
+        }
     }
 
-    /// The warning for a server whose answers Socium cannot use.
-    fn refused(&self, problem: &str) -> String {
-        self.secrets.redact(&format!(
-            "MCP server {} was not started: {problem}.",
-            self.name
-        ))
+    /// Why a server whose answers Socium cannot use did not start.
+    fn refused(&self, problem: &str) -> StartError {
+        StartError::NotStarted {
+            origin: None,
+            reason: self.secrets.redact(&format!("{problem}.")),
+        }
     }
 
     fn request(&self, method: &str, params: Value, wait: &Wait<'_>) -> Result<Value, RequestError> {
@@ -593,6 +608,99 @@ fn needs_login(server: &str) -> String {
     format!("MCP server {server} needs you to log in: run socium mcp login {server}")
 }
 
+/// Why a server did not start.
+#[derive(Debug)]
+enum StartError {
+    /// A remote server refused Socium, which has no token or could not
+    /// renew it.
+    NeedsLogin,
+    NotStarted {
+        /// Where a remote server is, when it was reached.
+        origin: Option<String>,
+        /// A sentence that says what went wrong, with the end of a child's
+        /// standard error.
+        reason: String,
+    },
+}
+
+impl StartError {
+    /// The warning the user sees at the first turn.
+    fn warning(&self, server: &str) -> String {
+        match self {
+            Self::NeedsLogin => needs_login(server),
+            Self::NotStarted { origin, reason } => {
+                let at = match origin {
+                    Some(origin) => format!(" at {origin}"),
+                    None => String::new(),
+                };
+                format!("MCP server {server}{at} was not started: {reason}")
+            }
+        }
+    }
+
+    fn state(self) -> McpServerState {
+        match self {
+            Self::NeedsLogin => McpServerState::NeedsLogin,
+            Self::NotStarted { reason, .. } => McpServerState::Failed { reason },
+        }
+    }
+}
+
+/// One configured MCP server as `/mcp` shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub transport: McpServerTransport,
+    pub state: McpServerState,
+}
+
+/// Where a server runs. Only the program or the URL: arguments, which may
+/// hold a token, env and header values, and client secrets are never part
+/// of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpServerTransport {
+    /// A child process on the host, by the program its command runs.
+    Local { program: String },
+    /// A server over Streamable HTTP; settings reject a URL with
+    /// credentials, a query, or a fragment.
+    Remote { url: String },
+}
+
+impl McpServerTransport {
+    pub(crate) fn of(settings: &McpTransportSettings) -> Self {
+        match settings {
+            McpTransportSettings::Stdio { command, .. } => Self::Local {
+                program: command[0].clone(),
+            },
+            McpTransportSettings::Http { url, .. } => Self::Remote { url: url.clone() },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpServerState {
+    /// The startup thread has not finished.
+    Starting,
+    /// Started; the tools it offers, by their names on the server.
+    Connected { tools: Vec<String> },
+    /// A remote server wants `socium mcp login <name>`.
+    NeedsLogin,
+    /// Did not start, as a sentence such as "it did not initialize within
+    /// 30 seconds."
+    Failed { reason: String },
+    /// Not started because of the settings.
+    Disabled { reason: McpDisabled },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpDisabled {
+    /// `enabled = false`.
+    Setting,
+    /// `setting` (such as `headers.Authorization`) names `${variable}`,
+    /// which is not set.
+    UnsetVariable { setting: String, variable: String },
+}
+
 /// A server running as a child process that speaks newline-delimited
 /// JSON-RPC on stdin and stdout. It is stopped when this is dropped.
 struct StdioTransport {
@@ -605,8 +713,8 @@ struct StdioTransport {
 }
 
 impl StdioTransport {
+    /// `Err` says why, as a sentence.
     fn spawn(
-        name: &str,
         argv: &[String],
         env: &BTreeMap<String, String>,
         workspace_root: &Path,
@@ -636,12 +744,9 @@ impl StdioTransport {
         // with the server it started.
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut child = command.spawn().map_err(|err| {
-            format!(
-                "MCP server {name} was not started: `{}` could not run: {err}.",
-                argv[0]
-            )
-        })?;
+        let mut child = command
+            .spawn()
+            .map_err(|err| format!("`{}` could not run: {err}.", argv[0]))?;
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
@@ -989,13 +1094,16 @@ struct Route {
     allowed: bool,
 }
 
-/// The servers that started and the tools they offer.
+/// The servers that started and the tools they offer, and how every
+/// server it was given ended up.
 #[derive(Default)]
 pub(crate) struct McpRegistry {
     servers: Vec<McpServer>,
     routes: HashMap<String, Route>,
     definitions: Vec<ToolDefinition>,
     notices: Notices,
+    /// With the index in `servers` of each server that started.
+    statuses: Vec<(McpServerStatus, Option<usize>)>,
 }
 
 impl McpRegistry {
@@ -1032,9 +1140,12 @@ impl McpRegistry {
             handles
                 .into_iter()
                 .map(|handle| {
-                    handle
-                        .join()
-                        .unwrap_or_else(|_| Err("An MCP server's startup panicked.".into()))
+                    handle.join().unwrap_or_else(|_| {
+                        Err(StartError::NotStarted {
+                            origin: None,
+                            reason: "its startup panicked.".into(),
+                        })
+                    })
                 })
                 .collect::<Vec<_>>()
         });
@@ -1043,15 +1154,25 @@ impl McpRegistry {
         let mut warnings = Vec::new();
         let mut all_bytes = 0;
         for (settings, result) in servers.iter().zip(connected) {
+            let transport = McpServerTransport::of(&settings.transport);
             let (server, tools) = match result {
                 Ok(connected) => connected,
-                Err(warning) => {
-                    warnings.push(warning);
+                Err(err) => {
+                    warnings.push(err.warning(&settings.name));
+                    registry.statuses.push((
+                        McpServerStatus {
+                            name: settings.name.clone(),
+                            transport,
+                            state: err.state(),
+                        },
+                        None,
+                    ));
                     continue;
                 }
             };
+            let mut offered = Vec::new();
             let index = registry.servers.len();
-            let (mut offered, mut bytes, mut left_out) = (0, 0, 0);
+            let (mut bytes, mut left_out) = (0, 0);
             for tool in tools {
                 let exposed = format!("{PREFIX}{}__{}", settings.name, tool.name);
                 let valid = exposed.len() <= MAX_TOOL_NAME
@@ -1082,7 +1203,7 @@ impl McpRegistry {
                     continue;
                 }
                 let size = tool.description.len() + tool.input_schema.to_string().len();
-                if offered == MAX_TOOLS_PER_SERVER
+                if offered.len() == MAX_TOOLS_PER_SERVER
                     || registry.definitions.len() == MAX_MCP_TOOLS
                     || bytes + size > MAX_SERVER_DEFINITION_BYTES
                     || all_bytes + size > MAX_MCP_DEFINITION_BYTES
@@ -1090,12 +1211,13 @@ impl McpRegistry {
                     left_out += 1;
                     continue;
                 }
-                (offered, bytes, all_bytes) = (offered + 1, bytes + size, all_bytes + size);
+                (bytes, all_bytes) = (bytes + size, all_bytes + size);
                 registry.definitions.push(ToolDefinition {
                     name: exposed.clone(),
                     description: tool.description,
                     input_schema: tool.input_schema,
                 });
+                offered.push(tool.name.clone());
                 registry.routes.insert(
                     exposed,
                     Route {
@@ -1113,6 +1235,14 @@ impl McpRegistry {
                     MAX_MCP_DEFINITION_BYTES / 1024
                 ));
             }
+            registry.statuses.push((
+                McpServerStatus {
+                    name: settings.name.clone(),
+                    transport,
+                    state: McpServerState::Connected { tools: offered },
+                },
+                Some(index),
+            ));
             registry.servers.push(server);
         }
         (registry, warnings)
@@ -1121,6 +1251,44 @@ impl McpRegistry {
     /// Warnings that arose since the last call.
     pub(crate) fn take_notices(&self) -> Vec<String> {
         std::mem::take(&mut lock(&self.notices))
+    }
+
+    /// A registry where every one of `servers` failed for `reason`.
+    pub(crate) fn failed(servers: &[McpServerSettings], reason: &str) -> Self {
+        let mut registry = Self::default();
+        registry.statuses = servers
+            .iter()
+            .map(|server| {
+                let state = McpServerState::Failed {
+                    reason: reason.to_string(),
+                };
+                let status = McpServerStatus {
+                    name: server.name.clone(),
+                    transport: McpServerTransport::of(&server.transport),
+                    state,
+                };
+                (status, None)
+            })
+            .collect();
+        registry
+    }
+
+    /// How each server it was given ended up, in the order given.
+    /// A server that started shows how it is now: one that exited or that
+    /// wants a login since is no longer connected.
+    pub(crate) fn statuses(&self) -> Vec<McpServerStatus> {
+        self.statuses
+            .iter()
+            .map(
+                |(status, started)| match started.and_then(|index| self.servers[index].ended()) {
+                    Some(state) => McpServerStatus {
+                        state,
+                        ..status.clone()
+                    },
+                    None => status.clone(),
+                },
+            )
+            .collect()
     }
 
     /// The tools to offer the model.
@@ -1399,6 +1567,125 @@ pub(crate) mod tests {
             "{}",
             warnings[2]
         );
+    }
+
+    #[test]
+    fn the_registry_remembers_how_every_server_ended_up() {
+        let root = tempfile::tempdir().unwrap();
+        let login = FakeHttpServer::start(&["--oauth"]);
+        let missing = McpServerSettings {
+            transport: McpTransportSettings::Stdio {
+                command: vec!["/nonexistent/mcp-server".into(), "--flag".into()],
+                env: BTreeMap::new(),
+            },
+            ..fake_settings("missing", "", &[])
+        };
+        let (registry, _) = McpRegistry::connect(
+            &[
+                fake_settings("good", "", &[]),
+                missing,
+                fake_settings("hang", "--hang", &[]),
+                login.settings("remote", &[], &[]),
+            ],
+            root.path(),
+            &host_env,
+            None,
+            Duration::from_secs(2),
+            &TaskControl::default(),
+        );
+
+        let statuses = registry.statuses();
+        let names = statuses.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, ["good", "missing", "hang", "remote"]);
+        assert_eq!(
+            statuses[0].transport,
+            McpServerTransport::Local {
+                program: "python3".into()
+            }
+        );
+        // The tool whose exposed name providers refuse is not counted.
+        assert_eq!(
+            statuses[0].state,
+            McpServerState::Connected {
+                tools: [
+                    "echo",
+                    "fail",
+                    "image",
+                    "structured",
+                    "slow",
+                    "cancelled",
+                    "die",
+                    "env",
+                    "pong",
+                    "where",
+                    "deaf",
+                    "malformed",
+                    "empty",
+                    "batch",
+                    "secret",
+                    "expire",
+                    "reflect"
+                ]
+                .map(String::from)
+                .to_vec()
+            }
+        );
+        let McpServerState::Failed { reason } = &statuses[1].state else {
+            panic!("{:?}", statuses[1]);
+        };
+        assert!(
+            reason.starts_with("`/nonexistent/mcp-server` could not run: "),
+            "{reason}"
+        );
+        assert_eq!(
+            statuses[2].state,
+            McpServerState::Failed {
+                reason: "it did not initialize within 2 seconds. Its last standard error lines:\nfake server starting".into()
+            }
+        );
+        assert_eq!(
+            statuses[3].transport,
+            McpServerTransport::Remote {
+                url: login.url.clone()
+            }
+        );
+        assert_eq!(statuses[3].state, McpServerState::NeedsLogin);
+    }
+
+    #[test]
+    fn a_server_that_exits_after_starting_is_no_longer_connected() {
+        let (registry, _) = connect_fake(&[fake_settings("fake", "", &[])]);
+        assert!(matches!(
+            registry.statuses()[0].state,
+            McpServerState::Connected { .. }
+        ));
+
+        call(&registry, "mcp__fake__die", json!({})).unwrap_err();
+
+        let McpServerState::Failed { reason } = &registry.statuses()[0].state else {
+            panic!("{:?}", registry.statuses());
+        };
+        assert!(
+            reason.starts_with("it exited after it started (exit status: 3)."),
+            "{reason}"
+        );
+        assert!(reason.contains("fatal: the database is gone"), "{reason}");
+    }
+
+    #[test]
+    fn a_failure_the_server_wrote_a_secret_into_is_blanked_in_the_status() {
+        let mut settings = fake_settings("crash", "--crash", &[]);
+        stdio(&mut settings)
+            .1
+            .insert("FAKE_SECRET".into(), "s3cret-value-123".into());
+
+        let (registry, _) = connect_fake(&[settings]);
+
+        let McpServerState::Failed { reason } = &registry.statuses()[0].state else {
+            panic!("{:?}", registry.statuses());
+        };
+        assert!(reason.contains("token=[redacted]"), "{reason}");
+        assert!(!reason.contains("s3cret"), "{reason}");
     }
 
     #[cfg(target_os = "linux")]

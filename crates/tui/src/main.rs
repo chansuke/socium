@@ -5,6 +5,7 @@ mod approval;
 mod cli;
 mod headless;
 mod input_history;
+mod mcp_status;
 mod model_picker;
 mod pane_slot;
 mod progress;

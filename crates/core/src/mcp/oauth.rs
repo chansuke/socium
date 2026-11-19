@@ -2111,6 +2111,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_server_whose_token_cannot_be_renewed_after_starting_needs_a_login() {
+        let (fake, _home, store) = logged_in(&["--oauth", "--refresh=fail"]);
+        let (registry, warnings) = crate::mcp::tests::connect_with_tokens(
+            &[oauth_settings(&fake, "fake", None)],
+            Some(&store),
+        );
+        assert!(
+            !warnings.iter().any(|w| w.contains("log in")),
+            "{warnings:?}"
+        );
+        assert!(matches!(
+            registry.statuses()[0].state,
+            crate::mcp::McpServerState::Connected { .. }
+        ));
+
+        // The server revokes the token, and the refresh is refused.
+        let expire = registry
+            .call(
+                "mcp__fake__expire",
+                &json!({}),
+                &crate::TaskControl::default(),
+            )
+            .unwrap();
+        assert!(expire.is_ok(), "{expire:?}");
+        assert!(echo(&registry).unwrap_err().contains("needs you to log in"));
+
+        assert_eq!(
+            registry.statuses()[0].state,
+            crate::mcp::McpServerState::NeedsLogin
+        );
+    }
+
+    #[test]
     fn a_refused_token_is_renewed_once_and_the_request_retried() {
         let (fake, _home, store) = logged_in(&["--oauth"]);
         let mut stale = store.load("fake", &fake.url).unwrap().unwrap();
