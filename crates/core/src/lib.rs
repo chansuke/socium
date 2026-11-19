@@ -396,10 +396,12 @@ impl McpStartup {
         let stop = TaskControl::default();
         let stopper = stop.clone();
         let handle = std::thread::spawn(move || {
+            let tokens = crate::mcp::token_store::TokenStore::from_env(env.as_ref());
             crate::mcp::McpRegistry::connect(
                 &servers,
                 &root,
                 env.as_ref(),
+                tokens.as_ref(),
                 crate::mcp::STARTUP_TIMEOUT,
                 &stopper,
             )
@@ -2370,6 +2372,78 @@ mod tests {
             .chain([&requests[0].to_string(), &requests[1].to_string()])
         {
             assert!(!text.contains("s3cret"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_agent_loop_calls_a_remote_mcp_server_with_the_stored_oauth_token() {
+        let workspace = make_temp_dir("mcp_oauth");
+        let state = tempfile::tempdir().unwrap();
+        let fake = crate::mcp::tests::FakeHttpServer::start(&["--oauth"]);
+        let (settings, _) = crate::Settings::parse(
+            &format!(
+                "[mcp.servers.remote]\nurl = \"{}\"\nallow = [\"echo\"]",
+                fake.url
+            ),
+            None,
+            &|_| None,
+        )
+        .unwrap();
+        let state_home = state.path().to_str().unwrap().to_string();
+        let lookup = move |name: &str| (name == "XDG_STATE_HOME").then(|| state_home.clone());
+        let store = crate::mcp::token_store::TokenStore::from_env(&lookup).unwrap();
+        let browser = crate::mcp::oauth::tests::Browser::new(|location| location);
+        crate::mcp::oauth::login(
+            &settings.mcp_servers[0],
+            &store,
+            &|url| browser.open(url),
+            std::time::Duration::from_secs(20),
+        )
+        .unwrap();
+        let token = store.load("remote", &fake.url).unwrap().unwrap();
+        let provider = ScriptedProvider::new(vec![
+            Ok(crate::providers::ProviderResponse {
+                message: crate::agent::types::AgentMessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "m1".into(),
+                        name: "mcp__remote__echo".into(),
+                        input: json!({"text": "from the model"}),
+                    }],
+                    ..Default::default()
+                },
+                streamed_text: false,
+                usage: None,
+            }),
+            Ok(text_provider_response("The server echoed it.", None)),
+        ]);
+        let requests = provider.recorded_requests.clone();
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.env = std::sync::Arc::new(lookup);
+        service.install_settings(settings);
+        let mut events = Vec::new();
+
+        service
+            .submit_with_progress("echo something".into(), |event| {
+                events.push(format!("{event:?}"));
+            })
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        let result = &requests[1]["messages"][2]["content"][0];
+        assert_eq!(result["content"], "echo: from the model");
+        let secrets = [
+            token.access_token.as_str(),
+            token.refresh_token.as_deref().unwrap(),
+        ];
+        for text in events
+            .iter()
+            .chain([&requests[0].to_string(), &requests[1].to_string()])
+        {
+            for secret in secrets {
+                assert!(!text.contains(secret), "{text} holds {secret}");
+            }
         }
     }
 

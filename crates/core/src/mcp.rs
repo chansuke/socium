@@ -11,10 +11,6 @@
 
 mod http;
 pub(crate) mod oauth;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the transport uses it in the next steps")
-)]
 pub(crate) mod token_store;
 
 use crate::TaskControl;
@@ -29,6 +25,7 @@ use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
+use token_store::TokenStore;
 
 /// The revision this client asks for.
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -181,6 +178,9 @@ enum RequestError {
     /// A remote server answered 404 to the session: it no longer knows it,
     /// so the request was not run.
     SessionEnded,
+    /// A remote server refused Socium, which has no token or could not
+    /// renew it: the user has to run `socium mcp login`.
+    NeedsLogin,
 }
 
 /// When a request stops waiting for its response.
@@ -248,6 +248,7 @@ impl McpServer {
         settings: &McpServerSettings,
         workspace_root: &Path,
         host_env: &dyn Fn(&str) -> Option<String>,
+        tokens: Option<&TokenStore>,
         timeout: Duration,
         stop: &TaskControl,
     ) -> Result<(Self, Vec<RemoteTool>), String> {
@@ -259,8 +260,41 @@ impl McpServer {
             McpTransportSettings::Stdio { command, env } => Transport::Stdio(
                 StdioTransport::spawn(&settings.name, command, env, workspace_root, host_env)?,
             ),
-            McpTransportSettings::Http { url, headers, .. } => {
-                Transport::Http(http::HttpTransport::start(&settings.name, url, headers)?)
+            McpTransportSettings::Http {
+                url,
+                headers,
+                oauth,
+            } => {
+                let auth = if headers
+                    .keys()
+                    .any(|header| header.eq_ignore_ascii_case("authorization"))
+                {
+                    http::Authorization::Header
+                } else {
+                    // An unreadable token file counts as none: the server's
+                    // 401 then asks the user to log in again.
+                    let stored = tokens.and_then(|store| {
+                        let token = store.load(&settings.name, url).ok().flatten()?;
+                        Some((store.clone(), token))
+                    });
+                    match stored {
+                        Some((store, token)) => {
+                            http::Authorization::OAuth(Box::new(oauth::OAuthSession::new(
+                                &settings.name,
+                                store,
+                                oauth.as_ref().and_then(|oauth| oauth.client_secret.clone()),
+                                token,
+                            )))
+                        }
+                        None => http::Authorization::None,
+                    }
+                };
+                Transport::Http(http::HttpTransport::start(
+                    &settings.name,
+                    url,
+                    headers,
+                    auth,
+                )?)
             }
         };
         let server = Self {
@@ -359,6 +393,9 @@ impl McpServer {
 
     /// The warning for a server that failed to `what`.
     fn not_started(&self, what: &str, err: RequestError, timeout: Duration) -> String {
+        if let RequestError::NeedsLogin = err {
+            return needs_login(&self.name);
+        }
         let reason = match err {
             RequestError::TimedOut => {
                 format!("did not {what} within {} seconds", timeout.as_secs())
@@ -367,7 +404,7 @@ impl McpServer {
             RequestError::Malformed => format!("sent a malformed answer when asked to {what}"),
             RequestError::Transport(message) => message,
             RequestError::SessionEnded => "ended the session it had just started".into(),
-            RequestError::Gone | RequestError::Cancelled => {
+            RequestError::Gone | RequestError::Cancelled | RequestError::NeedsLogin => {
                 format!(
                     "stopped before it could {what}{}",
                     self.transport.exit_status()
@@ -514,6 +551,7 @@ impl McpServer {
                             ),
                         }
                     }
+                    RequestError::NeedsLogin => needs_login(&self.name),
                     // A child's standard error stays out: it is for the
                     // user, and may hold what the server was given.
                     RequestError::Gone => format!(
@@ -535,6 +573,12 @@ impl McpServer {
         }
         Ok(text)
     }
+}
+
+/// What the user sees when a remote server wants a login Socium does not
+/// have.
+fn needs_login(server: &str) -> String {
+    format!("MCP server {server} needs you to log in: run socium mcp login {server}")
 }
 
 /// A server running as a child process that speaks newline-delimited
@@ -949,6 +993,7 @@ impl McpRegistry {
         servers: &[McpServerSettings],
         workspace_root: &Path,
         host_env: &(dyn Fn(&str) -> Option<String> + Sync),
+        tokens: Option<&TokenStore>,
         timeout: Duration,
         stop: &TaskControl,
     ) -> (Self, Vec<String>) {
@@ -957,7 +1002,14 @@ impl McpRegistry {
                 .iter()
                 .map(|settings| {
                     scope.spawn(move || {
-                        McpServer::connect(settings, workspace_root, host_env, timeout, stop)
+                        McpServer::connect(
+                            settings,
+                            workspace_root,
+                            host_env,
+                            tokens,
+                            timeout,
+                            stop,
+                        )
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1121,8 +1173,15 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn connect_fake(servers: &[McpServerSettings]) -> (McpRegistry, Vec<String>) {
+        connect_with_tokens(servers, None)
+    }
+
+    pub(crate) fn connect_with_tokens(
+        servers: &[McpServerSettings],
+        tokens: Option<&TokenStore>,
+    ) -> (McpRegistry, Vec<String>) {
         let root = tempfile::tempdir().unwrap();
-        connect_in(root.path(), servers, &host_env, STARTUP_TIMEOUT)
+        connect_in(root.path(), servers, &host_env, tokens, STARTUP_TIMEOUT)
     }
 
     fn call(registry: &McpRegistry, name: &str, input: Value) -> Result<String, String> {
@@ -1291,6 +1350,7 @@ pub(crate) mod tests {
                 fake_settings("good", "", &[]),
             ],
             &host_env,
+            None,
             Duration::from_secs(2),
         );
 
@@ -1339,9 +1399,10 @@ pub(crate) mod tests {
         root: &Path,
         servers: &[McpServerSettings],
         env: &(dyn Fn(&str) -> Option<String> + Sync),
+        tokens: Option<&TokenStore>,
         timeout: Duration,
     ) -> (McpRegistry, Vec<String>) {
-        McpRegistry::connect(servers, root, env, timeout, &TaskControl::default())
+        McpRegistry::connect(servers, root, env, tokens, timeout, &TaskControl::default())
     }
 
     fn stdio(
@@ -1379,7 +1440,8 @@ pub(crate) mod tests {
             .unwrap();
         let mut settings = fake_settings("fake", "", &[]);
         stdio(&mut settings).0[0] = python.display().to_string();
-        let (registry, warnings) = connect_in(root.path(), &[settings], &env, STARTUP_TIMEOUT);
+        let (registry, warnings) =
+            connect_in(root.path(), &[settings], &env, None, STARTUP_TIMEOUT);
         assert!(
             registry.target("mcp__fake__where").is_some(),
             "{warnings:?}"
@@ -1405,8 +1467,13 @@ pub(crate) mod tests {
         let mut settings = fake_settings("planted", "", &[]);
         *stdio(&mut settings).0 = vec!["python3".into(), "-m".into(), "socium_planted".into()];
 
-        let (registry, warnings) =
-            connect_in(root.path(), &[settings], &host_env, Duration::from_secs(5));
+        let (registry, warnings) = connect_in(
+            root.path(),
+            &[settings],
+            &host_env,
+            None,
+            Duration::from_secs(5),
+        );
 
         assert!(registry.definitions().is_empty());
         assert!(warnings[0].contains("was not started"), "{warnings:?}");
@@ -1609,7 +1676,13 @@ pub(crate) mod tests {
             .1
             .insert("FAKE_LOG".into(), log.display().to_string());
 
-        let (_, warnings) = connect_in(root.path(), &[settings], &host_env, Duration::from_secs(1));
+        let (_, warnings) = connect_in(
+            root.path(),
+            &[settings],
+            &host_env,
+            None,
+            Duration::from_secs(1),
+        );
 
         assert!(warnings[0].contains("did not initialize"), "{warnings:?}");
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "initialize\n");
@@ -1624,6 +1697,7 @@ pub(crate) mod tests {
             root.path(),
             &[fake_settings("fake", &mode, &[])],
             &host_env,
+            None,
             STARTUP_TIMEOUT,
         );
 
@@ -1642,6 +1716,7 @@ pub(crate) mod tests {
             &[fake_settings("hang", "--hang", &[])],
             root.path(),
             &host_env,
+            None,
             STARTUP_TIMEOUT,
             &stop,
         );
@@ -1858,16 +1933,15 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         assert_eq!(warnings.len(), 3, "{warnings:?}");
         let origin = fake.url.trim_end_matches("/mcp");
-        assert!(
-            warnings[0].starts_with(&format!("MCP server anonymous at {origin} was not started: it needs authorization (HTTP 401)"))
-                && warnings[0].contains("does not support OAuth"),
-            "{}",
-            warnings[0]
+        assert_eq!(
+            warnings[0],
+            "MCP server anonymous needs you to log in: run socium mcp login anonymous"
         );
-        assert!(
-            warnings[1].contains("needs authorization"),
-            "{}",
-            warnings[1]
+        assert_eq!(
+            warnings[1],
+            format!(
+                "MCP server wrong at {origin} was not started: it refused the Authorization header of its [mcp.servers] table (HTTP 401)."
+            )
         );
         assert!(
             warnings[2].starts_with(

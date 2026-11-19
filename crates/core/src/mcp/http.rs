@@ -9,10 +9,13 @@
 //!
 //! The configured headers usually hold a token: they are marked sensitive,
 //! and the client blanks their values out of the messages it builds from
-//! what the server answers.
+//! what the server answers. So is the OAuth token of a server the user
+//! logged in to (ADR 22), which is sent only when no `Authorization` header
+//! is configured.
 
+use super::oauth::OAuthSession;
 use super::{MAX_MESSAGE_BYTES, Reply, RequestError, lock};
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, Response, StatusCode, Url};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -60,12 +63,23 @@ enum Command {
     Shutdown,
 }
 
+/// How requests to a server are authorized.
+pub(super) enum Authorization {
+    /// No `Authorization` header and no stored token: a 401 means the user
+    /// has to log in.
+    None,
+    /// The configured headers hold `Authorization`, which wins over OAuth.
+    Header,
+    OAuth(Box<OAuthSession>),
+}
+
 struct Connection {
     client: reqwest::Client,
     url: Url,
     /// `scheme://host[:port]`, for messages.
     origin: String,
     headers: HeaderMap,
+    auth: Authorization,
     /// From the initialize response, sent on every later request.
     session: Mutex<Option<HeaderValue>>,
     /// The negotiated revision, sent on every request after initialize.
@@ -92,6 +106,7 @@ impl HttpTransport {
         name: &str,
         url: &str,
         headers: &BTreeMap<String, String>,
+        auth: Authorization,
     ) -> Result<Self, String> {
         let not_started = |why: String| format!("MCP server {name} was not started: {why}.");
         let url =
@@ -119,6 +134,7 @@ impl HttpTransport {
             origin: url.origin().ascii_serialization(),
             url,
             headers: header_map,
+            auth,
             session: Mutex::new(None),
             protocol_version: Mutex::new(None),
             answers: Arc::new(tokio::sync::Semaphore::new(SERVER_ANSWERS)),
@@ -249,43 +265,82 @@ fn run(connection: &Arc<Connection>, mut commands: UnboundedReceiver<Command>) {
 }
 
 impl Connection {
-    /// Sends `body` and checks the status. An error is a phrase that
-    /// follows "it", and never holds a header value.
+    /// Sends `body` and checks the status; with OAuth, renews the token and
+    /// tries once more after a 401. An error is a phrase that follows "it",
+    /// and never holds a header value.
     async fn send(&self, method: Method, body: Option<&Value>) -> Result<Response, RequestError> {
-        let session = lock(&self.session).clone();
-        let mut request = self
-            .client
-            .request(method, self.url.clone())
-            .headers(self.headers.clone())
-            .header(ACCEPT, "application/json, text/event-stream");
-        if let Some(body) = body {
-            request = request
-                .header(CONTENT_TYPE, "application/json")
-                .body(serde_json::to_vec(body).unwrap_or_default());
+        let mut renewed = false;
+        loop {
+            let bearer = match &self.auth {
+                Authorization::OAuth(session) => Some(
+                    session
+                        .access_token(&self.client)
+                        .await
+                        .map_err(|()| RequestError::NeedsLogin)?,
+                ),
+                Authorization::None | Authorization::Header => None,
+            };
+            let session = lock(&self.session).clone();
+            let mut request = self
+                .client
+                .request(method.clone(), self.url.clone())
+                .headers(self.headers.clone())
+                .header(ACCEPT, "application/json, text/event-stream");
+            if let Some(bearer) = &bearer {
+                // The token endpoint's answer was checked to fit.
+                let mut value = HeaderValue::from_str(&format!("Bearer {bearer}"))
+                    .map_err(|_| RequestError::NeedsLogin)?;
+                value.set_sensitive(true);
+                request = request.header(AUTHORIZATION, value);
+            }
+            if let Some(body) = body {
+                request = request
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(serde_json::to_vec(body).unwrap_or_default());
+            }
+            if let Some(session) = &session {
+                request = request.header(SESSION_HEADER, session.clone());
+            }
+            if let Some(version) = lock(&self.protocol_version).clone() {
+                request = request.header(VERSION_HEADER, version);
+            }
+            let response = request.send().await.map_err(|err| {
+                RequestError::Transport(format!("could not be reached: {}", describe(&err)))
+            })?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response);
+            }
+            if status == StatusCode::UNAUTHORIZED {
+                match (&self.auth, &bearer) {
+                    (Authorization::OAuth(session), Some(sent)) if !renewed => {
+                        session
+                            .refused(&self.client, sent)
+                            .await
+                            .map_err(|()| RequestError::NeedsLogin)?;
+                        renewed = true;
+                        continue;
+                    }
+                    (Authorization::Header, _) => {
+                        return Err(RequestError::Transport(
+                            "refused the Authorization header of its [mcp.servers] table (HTTP 401)"
+                                .into(),
+                        ));
+                    }
+                    _ => return Err(RequestError::NeedsLogin),
+                }
+            }
+            if status == StatusCode::NOT_FOUND && session.is_some() {
+                // The next initialize starts a new session.
+                lock(&self.session).take();
+                lock(&self.protocol_version).take();
+                return Err(RequestError::SessionEnded);
+            }
+            return Err(RequestError::Transport(format!(
+                "answered HTTP {status}{}",
+                quoted_error(response).await
+            )));
         }
-        if let Some(session) = &session {
-            request = request.header(SESSION_HEADER, session.clone());
-        }
-        if let Some(version) = lock(&self.protocol_version).clone() {
-            request = request.header(VERSION_HEADER, version);
-        }
-        let response = request.send().await.map_err(|err| {
-            RequestError::Transport(format!("could not be reached: {}", describe(&err)))
-        })?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(response);
-        }
-        if status == StatusCode::NOT_FOUND && session.is_some() {
-            // The next initialize starts a new session.
-            lock(&self.session).take();
-            lock(&self.protocol_version).take();
-            return Err(RequestError::SessionEnded);
-        }
-        Err(RequestError::Transport(match status {
-            StatusCode::UNAUTHORIZED => "needs authorization (HTTP 401); Socium sends only the headers of its [mcp.servers] table and does not support OAuth".to_string(),
-            _ => format!("answered HTTP {status}{}", quoted_error(response).await),
-        }))
     }
 
     /// Posts a notification or response, which the server accepts with

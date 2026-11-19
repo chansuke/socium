@@ -379,6 +379,118 @@ fn code_challenge(verifier: &str) -> String {
     ))
 }
 
+/// A stored token renews this long before it expires.
+const REFRESH_MARGIN_SECONDS: u64 = 60;
+
+/// A connected server's token: sent as `Authorization: Bearer`, refreshed
+/// before it expires or once after a 401, and saved again when renewed.
+pub(super) struct OAuthSession {
+    server: String,
+    store: TokenStore,
+    /// The configured `client_secret`, which is not in the token file.
+    client_secret: Option<String>,
+    token: tokio::sync::Mutex<StoredToken>,
+}
+
+impl OAuthSession {
+    pub(super) fn new(
+        server: &str,
+        store: TokenStore,
+        client_secret: Option<String>,
+        token: StoredToken,
+    ) -> Self {
+        Self {
+            server: server.to_string(),
+            store,
+            client_secret,
+            token: tokio::sync::Mutex::new(token),
+        }
+    }
+
+    /// The access token to send, renewed first when it is about to expire.
+    /// `Err` means the user has to log in again.
+    pub(super) async fn access_token(&self, client: &Client) -> Result<String, ()> {
+        let mut token = self.token.lock().await;
+        if token.expires_within(REFRESH_MARGIN_SECONDS) && token.refresh_token.is_some() {
+            self.renew(&mut token, client).await?;
+        }
+        Ok(token.access_token.clone())
+    }
+
+    /// After the server refused `sent` with 401: renews the token unless
+    /// another request already did. `Err` means the user has to log in.
+    pub(super) async fn refused(&self, client: &Client, sent: &str) -> Result<(), ()> {
+        let mut token = self.token.lock().await;
+        if token.access_token != sent {
+            return Ok(());
+        }
+        if token.refresh_token.is_none() {
+            return Err(());
+        }
+        self.renew(&mut token, client).await
+    }
+
+    async fn renew(&self, token: &mut StoredToken, client: &Client) -> Result<(), ()> {
+        match refresh(client, token, self.client_secret.as_deref()).await {
+            Ok(renewed) => {
+                // A token that cannot be saved still works for this run.
+                let _ = self.store.save(&self.server, &renewed);
+                *token = renewed;
+                Ok(())
+            }
+            Err(_) => {
+                // Another Socium may have renewed it first, using up the
+                // refresh token this one holds.
+                match self.store.load(&self.server, &token.url) {
+                    Ok(Some(stored)) if stored.access_token != token.access_token => {
+                        *token = stored;
+                        Ok(())
+                    }
+                    _ => Err(()),
+                }
+            }
+        }
+    }
+}
+
+/// Exchanges the refresh token of `token` for a new access token (OAuth
+/// 2.1 4.3), keeping the old refresh token when the server issues none.
+pub(super) async fn refresh(
+    client: &Client,
+    token: &StoredToken,
+    configured_secret: Option<&str>,
+) -> Result<StoredToken, String> {
+    let refresh_token = token
+        .refresh_token
+        .clone()
+        .ok_or("there is no refresh token")?;
+    let (endpoint, _) = crate::models::check_endpoint_url("token_endpoint", &token.token_endpoint)?;
+    let oauth_client = OAuthClient {
+        id: token.client_id.clone(),
+        secret: configured_secret
+            .map(str::to_string)
+            .or_else(|| token.client_secret.clone()),
+        auth: token.client_auth,
+    };
+    let issued = token_request(
+        client,
+        &endpoint,
+        vec![
+            ("grant_type", "refresh_token".into()),
+            ("refresh_token", refresh_token),
+            ("resource", token.resource.clone()),
+        ],
+        &oauth_client,
+    )
+    .await?;
+    Ok(StoredToken {
+        access_token: issued.access_token,
+        refresh_token: issued.refresh_token.or_else(|| token.refresh_token.clone()),
+        expires_at: issued.expires_at,
+        ..token.clone()
+    })
+}
+
 /// What a token endpoint issued.
 pub(super) struct Issued {
     pub(super) access_token: String,
@@ -862,7 +974,7 @@ fn strings(value: &Value) -> Option<Vec<String>> {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::mcp::tests::FakeHttpServer;
 
@@ -1363,6 +1475,202 @@ pub(super) mod tests {
             "MCP server fake has no stored token."
         );
         assert!(logout_configured(&lookup, "../x").is_err());
+    }
+
+    /// A server of the fake with a token stored by a real login.
+    pub(crate) fn logged_in(options: &[&str]) -> (FakeHttpServer, tempfile::TempDir, TokenStore) {
+        let fake = FakeHttpServer::start(options);
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        let browser = Browser::new(|location| location);
+        login(
+            &oauth_settings(&fake, "fake", None),
+            &store,
+            &|url| browser.open(url),
+            Duration::from_secs(20),
+        )
+        .unwrap();
+        (fake, home, store)
+    }
+
+    /// The `Authorization` header of each MCP request.
+    fn sent_authorization(fake: &FakeHttpServer) -> Vec<Value> {
+        fake.requests()
+            .into_iter()
+            .filter(|request| request.get("rpc").is_some())
+            .map(|request| request["auth"].clone())
+            .collect()
+    }
+
+    fn grants(fake: &FakeHttpServer) -> Vec<String> {
+        params_of(fake, "/auth/token")
+            .iter()
+            .map(|params| params["grant_type"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn echo(registry: &crate::mcp::McpRegistry) -> Result<String, String> {
+        registry
+            .call(
+                "mcp__fake__echo",
+                &json!({"text": "hi"}),
+                &crate::TaskControl::default(),
+            )
+            .expect("offered")
+            .map_err(|err| err.to_string())
+    }
+
+    /// Every secret the login and its refreshes produced.
+    fn secrets(fake: &FakeHttpServer) -> Vec<String> {
+        let mut secrets = Vec::new();
+        for params in params_of(fake, "/auth/token") {
+            for key in ["code", "code_verifier", "refresh_token", "client_secret"] {
+                if let Some(value) = params[key].as_str() {
+                    secrets.push(value.to_string());
+                }
+            }
+        }
+        for request in fake.requests() {
+            if let Some(bearer) = request["auth"].as_str() {
+                secrets.push(bearer.trim_start_matches("Bearer ").to_string());
+            }
+        }
+        secrets
+    }
+
+    #[test]
+    fn a_stored_token_is_sent_as_a_bearer_and_reused_on_the_next_connect() {
+        let (fake, _home, store) = logged_in(&["--oauth"]);
+        let token = store.load("fake", &fake.url).unwrap().unwrap();
+        let settings = oauth_settings(&fake, "fake", None);
+
+        for _ in 0..2 {
+            let (registry, warnings) = crate::mcp::tests::connect_with_tokens(
+                std::slice::from_ref(&settings),
+                Some(&store),
+            );
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert_eq!(echo(&registry), Ok("echo: hi".into()));
+        }
+
+        let bearer = format!("Bearer {}", token.access_token);
+        let sent = sent_authorization(&fake);
+        // The probe of the login went without one.
+        assert_eq!(sent[0], Value::Null);
+        assert!(
+            sent[1..].iter().all(|auth| *auth == bearer.as_str()),
+            "{sent:?}"
+        );
+        assert_eq!(grants(&fake), ["authorization_code"]);
+    }
+
+    #[test]
+    fn a_token_about_to_expire_is_renewed_and_saved() {
+        // Within the renewal margin from the start.
+        let (fake, _home, store) = logged_in(&["--oauth", "--expires=30"]);
+        let before = store.load("fake", &fake.url).unwrap().unwrap();
+        let settings = oauth_settings(&fake, "fake", None);
+
+        let (registry, _) = crate::mcp::tests::connect_with_tokens(&[settings], Some(&store));
+
+        assert_eq!(echo(&registry), Ok("echo: hi".into()));
+        let after = store.load("fake", &fake.url).unwrap().unwrap();
+        assert_ne!(after.access_token, before.access_token);
+        assert_ne!(after.refresh_token, before.refresh_token);
+        let refresh = &params_of(&fake, "/auth/token")[1];
+        assert_eq!(refresh["grant_type"], "refresh_token");
+        assert_eq!(
+            refresh["refresh_token"],
+            before.refresh_token.unwrap().as_str()
+        );
+        assert_eq!(refresh["resource"], fake.url.as_str());
+        let sent = sent_authorization(&fake);
+        assert_eq!(
+            sent.last().unwrap(),
+            &format!("Bearer {}", after.access_token).as_str()
+        );
+    }
+
+    #[test]
+    fn a_refused_token_is_renewed_once_and_the_request_retried() {
+        let (fake, _home, store) = logged_in(&["--oauth"]);
+        let mut stale = store.load("fake", &fake.url).unwrap().unwrap();
+        stale.access_token = "revoked-token".into();
+        store.save("fake", &stale).unwrap();
+
+        let (registry, warnings) = crate::mcp::tests::connect_with_tokens(
+            &[oauth_settings(&fake, "fake", None)],
+            Some(&store),
+        );
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(echo(&registry), Ok("echo: hi".into()));
+        assert_eq!(grants(&fake), ["authorization_code", "refresh_token"]);
+        let sent = sent_authorization(&fake);
+        assert_eq!(sent[1], "Bearer revoked-token");
+        assert_ne!(sent[2], "Bearer revoked-token");
+    }
+
+    #[test]
+    fn without_a_usable_token_the_server_asks_for_a_login() {
+        let login_warning = "MCP server fake needs you to log in: run socium mcp login fake";
+        // The refresh is refused.
+        let (fake, _home, store) = logged_in(&["--oauth", "--expires=30", "--refresh=fail"]);
+        let (registry, warnings) = crate::mcp::tests::connect_with_tokens(
+            &[oauth_settings(&fake, "fake", None)],
+            Some(&store),
+        );
+        assert!(registry.target("mcp__fake__echo").is_none());
+        assert_eq!(warnings, [login_warning]);
+        let mut texts = warnings;
+
+        // The token was stored for another URL.
+        let (fake, _home, store) = logged_in(&["--oauth"]);
+        let mut moved = store.load("fake", &fake.url).unwrap().unwrap();
+        moved.url = "https://elsewhere.example/mcp".into();
+        store.save("fake", &moved).unwrap();
+        let (_, warnings) = crate::mcp::tests::connect_with_tokens(
+            &[oauth_settings(&fake, "fake", None)],
+            Some(&store),
+        );
+        assert_eq!(warnings, [login_warning]);
+        assert!(sent_authorization(&fake).iter().all(Value::is_null));
+        texts.extend(warnings);
+
+        // A configured Authorization header wins over the stored token.
+        let (fake, _home, store) = logged_in(&["--oauth"]);
+        let settings = fake.settings("fake", &[("Authorization", "Bearer configured")], &[]);
+        let (_, warnings) = crate::mcp::tests::connect_with_tokens(&[settings], Some(&store));
+        assert!(
+            warnings[0].contains("refused the Authorization header"),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            sent_authorization(&fake).last().unwrap(),
+            "Bearer configured"
+        );
+        texts.extend(warnings);
+        texts.push(format!("{:?}", store.load("fake", &fake.url).unwrap()));
+
+        // A call whose token can no longer be renewed.
+        let (fake, _home, store) = logged_in(&["--oauth", "--expires=2", "--refresh=fail"]);
+        let mut lasting = store.load("fake", &fake.url).unwrap().unwrap();
+        lasting.expires_at = Some(now_seconds() + 3600);
+        store.save("fake", &lasting).unwrap();
+        let (registry, _) = crate::mcp::tests::connect_with_tokens(
+            &[oauth_settings(&fake, "fake", None)],
+            Some(&store),
+        );
+        std::thread::sleep(Duration::from_millis(2500));
+        let err = echo(&registry).unwrap_err();
+        assert_eq!(err, login_warning);
+        texts.push(err);
+
+        for secret in secrets(&fake) {
+            for text in &texts {
+                assert!(!text.contains(&secret), "{text} holds {secret}");
+            }
+        }
     }
 
     #[test]
