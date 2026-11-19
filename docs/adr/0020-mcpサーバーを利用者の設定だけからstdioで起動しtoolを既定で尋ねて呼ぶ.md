@@ -10,6 +10,8 @@ links:
     kind: amendedby
   - target: 23
     kind: amendedby
+  - target: 24
+    kind: amendedby
 ---
 
 # MCPサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ

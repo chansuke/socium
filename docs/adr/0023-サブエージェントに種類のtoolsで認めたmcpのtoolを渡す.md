@@ -8,6 +8,8 @@ links:
   kind: amends
 - target: 9
   kind: amends
+- target: 24
+  kind: amendedby
 ---
 
 # サブエージェントに種類のtoolsで認めたMCPのtoolを渡す
