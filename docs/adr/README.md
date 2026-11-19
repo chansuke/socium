@@ -19,3 +19,4 @@
 * [19. socium -pの既定を返答の本文にしstdinと出力形式の選択をclaude -pに揃える](0019-socium-pの既定を返答の本文にしstdinと出力形式の選択をclaude-pに揃える.md)
 * [20. MCPサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ](0020-mcpサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ.md)
 * [21. 遠隔のMCPサーバーにStreamable HTTPとヘッダーだけで接続する](0021-遠隔のmcpサーバーにstreamable-httpとヘッダーだけで接続する.md)
+* [22. 遠隔のMCPサーバーをCLIのOAuthログインで認可しトークンを利用者の状態に保つ](0022-遠隔のmcpサーバーをcliのoauthログインで認可しトークンを利用者の状態に保つ.md)

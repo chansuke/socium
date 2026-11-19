@@ -61,6 +61,28 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// `socium mcp login <server>` (ADR 22): logs in to a remote MCP server of
+/// config.toml with OAuth and keeps its token for later runs. `browser`
+/// gets the authorization URL to show or open; it must not block. Waits up
+/// to five minutes for the browser. `Ok` and `Err` are messages for the
+/// user, and neither holds a secret.
+pub fn mcp_login(server: &str, browser: &(dyn Fn(&str) + Sync)) -> Result<String, String> {
+    let workspace = env::current_dir().map_err(|err| err.to_string())?;
+    mcp::oauth::login_configured(
+        &|name| env::var(name).ok(),
+        &workspace,
+        server,
+        browser,
+        mcp::oauth::LOGIN_TIMEOUT,
+    )
+}
+
+/// `socium mcp logout <server>`: forgets the server's stored token.
+pub fn mcp_logout(server: &str) -> Result<String, String> {
+    let workspace = env::current_dir().map_err(|err| err.to_string())?;
+    mcp::oauth::logout_configured(&|name| env::var(name).ok(), &workspace, server)
+}
+
 /// Reads configuration and API keys. Injected so tests never touch the
 /// process environment.
 type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -377,10 +399,12 @@ impl McpStartup {
         let stop = TaskControl::default();
         let stopper = stop.clone();
         let handle = std::thread::spawn(move || {
+            let tokens = crate::mcp::token_store::TokenStore::from_env(env.as_ref());
             crate::mcp::McpRegistry::connect(
                 &servers,
                 &root,
                 env.as_ref(),
+                tokens.as_ref(),
                 crate::mcp::STARTUP_TIMEOUT,
                 &stopper,
             )
@@ -1696,7 +1720,12 @@ impl AgentService {
         self.messages.push(Message::user_text(user_input));
         self.persist_state()?;
         emit(&mut on_progress, ActivityKind::TurnStarted);
-        for message in mcp_warnings {
+        let notices = self
+            .mcp
+            .registry()
+            .map(|registry| registry.take_notices())
+            .unwrap_or_default();
+        for message in mcp_warnings.into_iter().chain(notices) {
             emit(&mut on_progress, ActivityKind::Warning { message });
         }
         if let Some(message) = self.reload_instructions() {
@@ -2351,6 +2380,78 @@ mod tests {
             .chain([&requests[0].to_string(), &requests[1].to_string()])
         {
             assert!(!text.contains("s3cret"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_agent_loop_calls_a_remote_mcp_server_with_the_stored_oauth_token() {
+        let workspace = make_temp_dir("mcp_oauth");
+        let state = tempfile::tempdir().unwrap();
+        let fake = crate::mcp::tests::FakeHttpServer::start(&["--oauth"]);
+        let (settings, _) = crate::Settings::parse(
+            &format!(
+                "[mcp.servers.remote]\nurl = \"{}\"\nallow = [\"echo\"]",
+                fake.url
+            ),
+            None,
+            &|_| None,
+        )
+        .unwrap();
+        let state_home = state.path().to_str().unwrap().to_string();
+        let lookup = move |name: &str| (name == "XDG_STATE_HOME").then(|| state_home.clone());
+        let store = crate::mcp::token_store::TokenStore::from_env(&lookup).unwrap();
+        let browser = crate::mcp::oauth::tests::Browser::new(|location| location);
+        crate::mcp::oauth::login(
+            &settings.mcp_servers[0],
+            &store,
+            &|url| browser.open(url),
+            std::time::Duration::from_secs(20),
+        )
+        .unwrap();
+        let token = store.load("remote", &fake.url).unwrap().unwrap();
+        let provider = ScriptedProvider::new(vec![
+            Ok(crate::providers::ProviderResponse {
+                message: crate::agent::types::AgentMessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "m1".into(),
+                        name: "mcp__remote__echo".into(),
+                        input: json!({"text": "from the model"}),
+                    }],
+                    ..Default::default()
+                },
+                streamed_text: false,
+                usage: None,
+            }),
+            Ok(text_provider_response("The server echoed it.", None)),
+        ]);
+        let requests = provider.recorded_requests.clone();
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.env = std::sync::Arc::new(lookup);
+        service.install_settings(settings);
+        let mut events = Vec::new();
+
+        service
+            .submit_with_progress("echo something".into(), |event| {
+                events.push(format!("{event:?}"));
+            })
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        let result = &requests[1]["messages"][2]["content"][0];
+        assert_eq!(result["content"], "echo: from the model");
+        let secrets = [
+            token.access_token.as_str(),
+            token.refresh_token.as_deref().unwrap(),
+        ];
+        for text in events
+            .iter()
+            .chain([&requests[0].to_string(), &requests[1].to_string()])
+        {
+            for secret in secrets {
+                assert!(!text.contains(secret), "{text} holds {secret}");
+            }
         }
     }
 

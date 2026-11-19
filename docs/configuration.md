@@ -193,7 +193,7 @@ API (this costs money), run
 
 Socium can start MCP (Model Context Protocol) servers, or connect to remote
 ones, and offer their tools to the model. Only tools are used: no resources,
-prompts, sampling, or OAuth. Each server is a table under `[mcp.servers]` in
+prompts, or sampling. Each server is a table under `[mcp.servers]` in
 `config.toml`; a workspace cannot add one. A table has exactly one of
 `command` (a local server over stdio) or `url` (a remote server over
 Streamable HTTP).
@@ -209,6 +209,11 @@ allow = ["get_issue"]
 url = "https://mcp.deepwiki.com/mcp"
 # headers = { Authorization = "Bearer ${DEEPWIKI_TOKEN}" }
 allow = ["read_wiki_structure"]
+
+[mcp.servers.linear]
+url = "https://mcp.linear.app/mcp"
+# Only for a client registered ahead of time:
+# oauth = { client_id = "...", client_secret = "${LINEAR_CLIENT_SECRET}", scopes = ["read"], callback_port = 8976 }
 ```
 
 - `command` is the program, an absolute path or a name found on PATH, and its
@@ -247,11 +252,40 @@ allow = ["read_wiki_structure"]
 - A remote server receives every argument the model passes to its tools, and
   what it does with them is up to its operator, as with a model provider.
   Socium speaks the Streamable HTTP transport of MCP 2025-06-18 only: no
-  older HTTP+SSE servers, no OAuth (a 401 is reported as such), and no
-  redirects. When the server ends the session (HTTP 404), Socium starts a new
-  one; the call that got the 404 did not run and is not sent again, and the
-  model is told to call the tool again. On exit Socium ends the session
-  with a DELETE.
+  older HTTP+SSE servers and no redirects. When the server ends the session
+  (HTTP 404), Socium starts a new one; the call that got the 404 did not run
+  and is not sent again, and the model is told to call the tool again. On exit
+  Socium ends the session with a DELETE.
+- A server that needs OAuth (MCP 2025-06-18 authorization) is logged in to
+  once with `socium mcp login <server>` (see [usage](usage.md#mcp-login));
+  until then it is skipped with the warning `MCP server <server> needs you to
+  log in: run socium mcp login <server>`. Socium then sends the stored token
+  as `Authorization: Bearer` on every request, renews it with its refresh
+  token shortly before it expires or once after a 401, and shows the same
+  warning when renewal fails. A configured `Authorization` header wins: with
+  one, the stored token is not used.
+- `oauth` is needed only for a client you registered with the server's
+  authorization server ahead of time, such as a GitHub OAuth app (GitHub's
+  server does not register clients itself). `client_id` is the client,
+  `client_secret` its secret with `${NAME}` expanded as in `headers` (never
+  shown or stored), `issuer` the authorization server it was registered with
+  (required with `client_secret`, so the secret goes only there),
+  `token_endpoint_auth_method` how it was registered to prove itself
+  (`client_secret_basic` or `client_secret_post`; by default what the server
+  supports), `scopes` the scopes to ask for (by default those the server
+  lists), and `callback_port` the fixed port of the redirect URI
+  `http://127.0.0.1:<port>/callback` registered for that client. A stored
+  token of another client than `client_id` is not used. Without
+  `oauth`, login registers a new client each time. `oauth` does not apply to
+  a `command` server.
+- Tokens are kept per user in
+  `$XDG_STATE_HOME/socium/mcp-auth/<server>.json` (by default
+  `~/.local/state/socium/mcp-auth/`), owner-only, never in the workspace;
+  Socium, `socium mcp login`, and `socium mcp logout` refuse to run in a
+  workspace that contains that directory or the configuration. Every Socium
+  of the user renews a token under one lock, and none writes a token back
+  after a logout. A
+  token is used only while the server's `url` is the one it was issued for.
 - A tool call asks for approval, since nothing confines what the server does
   (the request says whether it runs on the host or at the server's address);
   you can allow that one tool for the rest of the session. Tools listed in
@@ -271,7 +305,8 @@ allow = ["read_wiki_structure"]
 
 The design and what is deferred are in
 [ADR 20](adr/0020-mcpサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ.md)
-and, for remote servers, [ADR 21](adr/0021-遠隔のmcpサーバーにstreamable-httpとヘッダーだけで接続する.md).
+and, for remote servers, [ADR 21](adr/0021-遠隔のmcpサーバーにstreamable-httpとヘッダーだけで接続する.md)
+and [ADR 22](adr/0022-遠隔のmcpサーバーをcliのoauthログインで認可しトークンを利用者の状態に保つ.md) (OAuth).
 
 ## Project instructions
 

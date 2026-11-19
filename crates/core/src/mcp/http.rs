@@ -9,13 +9,17 @@
 //!
 //! The configured headers usually hold a token: they are marked sensitive,
 //! and the client blanks their values out of the messages it builds from
-//! what the server answers.
+//! what the server answers. So is the OAuth token of a server the user
+//! logged in to (ADR 22), which is sent only when no `Authorization` header
+//! is configured.
 
+use super::oauth::OAuthSession;
 use super::{MAX_MESSAGE_BYTES, Reply, RequestError, lock};
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, Response, StatusCode, Url};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -60,12 +64,25 @@ enum Command {
     Shutdown,
 }
 
+/// How requests to a server are authorized.
+pub(super) enum Authorization {
+    /// No `Authorization` header and no stored token: a 401 means the user
+    /// has to log in.
+    None,
+    /// The configured headers hold `Authorization`, which wins over OAuth.
+    Header,
+    OAuth(Arc<OAuthSession>),
+}
+
 struct Connection {
+    clients: HttpClients,
+    /// The one of `clients` for `url`.
     client: reqwest::Client,
     url: Url,
     /// `scheme://host[:port]`, for messages.
     origin: String,
     headers: HeaderMap,
+    auth: Authorization,
     /// From the initialize response, sent on every later request.
     session: Mutex<Option<HeaderValue>>,
     /// The negotiated revision, sent on every request after initialize.
@@ -74,11 +91,123 @@ struct Connection {
     answers: Arc<tokio::sync::Semaphore>,
 }
 
+/// The clients for an MCP server and its authorization server. They follow
+/// no redirect, since one would carry a token or a code to another address.
+/// They differ only in the proxy: plain http is allowed only to loopback,
+/// where a proxy from the environment would see a token in the clear.
+#[derive(Clone)]
+pub(super) struct HttpClients {
+    direct: reqwest::Client,
+    proxied: reqwest::Client,
+    /// How names are resolved; `None` is the system's resolver.
+    lookup: Option<Lookup>,
+    /// Whether URLs that discovery found may point at this machine or a
+    /// private network: only when the configured server is there too.
+    allow_internal: bool,
+}
+
+/// Resolves a host and port, as tests script it.
+type Lookup = Arc<dyn Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>> + Send + Sync>;
+
+fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
+        .user_agent(concat!("socium/", env!("CARGO_PKG_VERSION")))
+}
+
+impl HttpClients {
+    pub(super) fn new() -> reqwest::Result<Self> {
+        Ok(Self {
+            direct: client_builder().no_proxy().build()?,
+            proxied: client_builder().build()?,
+            lookup: None,
+            allow_internal: false,
+        })
+    }
+
+    /// These clients for the MCP server at `server`.
+    pub(super) fn serving(mut self, server: &Url) -> Self {
+        self.allow_internal = is_internal(server);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_lookup(lookup: Lookup) -> Self {
+        Self {
+            lookup: Some(lookup),
+            ..Self::new().unwrap()
+        }
+    }
+
+    /// The client for a URL that discovery found rather than the user.
+    /// Unless the configured server is on this machine or a private
+    /// network itself, its host must name no such address: a name
+    /// is resolved once, refused if any answer is internal, and pinned to
+    /// those answers, so a second lookup cannot turn it into one. With a
+    /// proxy from the environment, the proxy resolves the name instead.
+    pub(super) async fn for_discovered(&self, url: &Url) -> Result<reqwest::Client, String> {
+        if self.allow_internal {
+            return Ok(self.to(url).clone());
+        }
+        if is_internal(url) {
+            return Err(format!(
+                "{url} points at this machine or a private network, and the server is not there"
+            ));
+        }
+        let Some(host) = url.host_str() else {
+            return Err(format!("{url} has no host"));
+        };
+        if host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok()
+        {
+            // An address, checked above.
+            return Ok(self.to(url).clone());
+        }
+        let port = url.port_or_known_default().unwrap_or(443);
+        let addresses = match &self.lookup {
+            Some(lookup) => lookup(host, port),
+            None => tokio::net::lookup_host((host, port))
+                .await
+                .map(|found| found.collect()),
+        }
+        .map_err(|err| format!("{host} could not be resolved: {err}"))?;
+        if addresses.is_empty() {
+            return Err(format!("{host} resolves to no address"));
+        }
+        if let Some(inside) = addresses
+            .iter()
+            .find(|address| is_internal_address(address.ip()))
+        {
+            return Err(format!(
+                "{host} resolves to {}, an address on this machine or a private network, and the server is not there",
+                inside.ip()
+            ));
+        }
+        client_builder()
+            .resolve_to_addrs(host, &addresses)
+            .build()
+            .map_err(|err| format!("its HTTP client could not be built: {err}"))
+    }
+
+    /// The client for requests to `url`.
+    pub(super) fn to(&self, url: &Url) -> &reqwest::Client {
+        if is_loopback(url) {
+            &self.direct
+        } else {
+            &self.proxied
+        }
+    }
+}
+
 impl HttpTransport {
     pub(super) fn start(
         name: &str,
         url: &str,
         headers: &BTreeMap<String, String>,
+        auth: Authorization,
     ) -> Result<Self, String> {
         let not_started = |why: String| format!("MCP server {name} was not started: {why}.");
         let url =
@@ -93,24 +222,16 @@ impl HttpTransport {
             value.set_sensitive(true);
             header_map.insert(header, value);
         }
-        let mut client = reqwest::Client::builder()
-            // A redirect would carry the headers to another address.
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(CONNECT_TIMEOUT)
-            .user_agent(concat!("socium/", env!("CARGO_PKG_VERSION")));
-        // Plain http is allowed only to loopback, where a proxy from the
-        // environment would see the headers in the clear.
-        if is_loopback(&url) {
-            client = client.no_proxy();
-        }
-        let client = client
-            .build()
-            .map_err(|err| not_started(format!("its HTTP client could not be built: {err}")))?;
+        let clients = HttpClients::new()
+            .map_err(|err| not_started(format!("its HTTP client could not be built: {err}")))?
+            .serving(&url);
         let connection = Arc::new(Connection {
-            client,
+            client: clients.to(&url).clone(),
+            clients,
             origin: url.origin().ascii_serialization(),
             url,
             headers: header_map,
+            auth,
             session: Mutex::new(None),
             protocol_version: Mutex::new(None),
             answers: Arc::new(tokio::sync::Semaphore::new(SERVER_ANSWERS)),
@@ -241,43 +362,86 @@ fn run(connection: &Arc<Connection>, mut commands: UnboundedReceiver<Command>) {
 }
 
 impl Connection {
-    /// Sends `body` and checks the status. An error is a phrase that
-    /// follows "it", and never holds a header value.
+    /// Sends `body` and checks the status; with OAuth, renews the token and
+    /// tries once more after a 401. An error is a phrase that follows "it",
+    /// and never holds a header value.
     async fn send(&self, method: Method, body: Option<&Value>) -> Result<Response, RequestError> {
-        let session = lock(&self.session).clone();
-        let mut request = self
-            .client
-            .request(method, self.url.clone())
-            .headers(self.headers.clone())
-            .header(ACCEPT, "application/json, text/event-stream");
-        if let Some(body) = body {
-            request = request
-                .header(CONTENT_TYPE, "application/json")
-                .body(serde_json::to_vec(body).unwrap_or_default());
+        let mut renewed = false;
+        loop {
+            let bearer = match &self.auth {
+                Authorization::OAuth(session) => Some(
+                    session
+                        .access_token(&self.clients)
+                        .await
+                        .map_err(|()| RequestError::NeedsLogin)?,
+                ),
+                Authorization::None | Authorization::Header => None,
+            };
+            let session = lock(&self.session).clone();
+            let mut request = self
+                .client
+                .request(method.clone(), self.url.clone())
+                .headers(self.headers.clone())
+                .header(ACCEPT, "application/json, text/event-stream");
+            if let Some(bearer) = &bearer {
+                // The token endpoint's answer was checked to fit.
+                let mut value = HeaderValue::from_str(&format!("Bearer {bearer}"))
+                    .map_err(|_| RequestError::NeedsLogin)?;
+                value.set_sensitive(true);
+                request = request.header(AUTHORIZATION, value);
+            }
+            if let Some(body) = body {
+                request = request
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(serde_json::to_vec(body).unwrap_or_default());
+            }
+            if let Some(session) = &session {
+                request = request.header(SESSION_HEADER, session.clone());
+            }
+            if let Some(version) = lock(&self.protocol_version).clone() {
+                request = request.header(VERSION_HEADER, version);
+            }
+            let response = request.send().await.map_err(|err| {
+                RequestError::Transport(format!("could not be reached: {}", describe(&err)))
+            })?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response);
+            }
+            if status == StatusCode::UNAUTHORIZED {
+                match (&self.auth, &bearer) {
+                    (Authorization::OAuth(session), Some(sent)) if !renewed => {
+                        session
+                            .refused(&self.clients, sent)
+                            .await
+                            .map_err(|()| RequestError::NeedsLogin)?;
+                        renewed = true;
+                        continue;
+                    }
+                    (Authorization::Header, _) => {
+                        return Err(RequestError::Transport(
+                            "refused the Authorization header of its [mcp.servers] table (HTTP 401)"
+                                .into(),
+                        ));
+                    }
+                    _ => return Err(RequestError::NeedsLogin),
+                }
+            }
+            if status == StatusCode::NOT_FOUND && session.is_some() {
+                // The next initialize starts a new session.
+                lock(&self.session).take();
+                lock(&self.protocol_version).take();
+                return Err(RequestError::SessionEnded);
+            }
+            // The server may write the token it was sent into its error.
+            let mut quoted = quoted_error(response).await;
+            if let Some(bearer) = &bearer {
+                quoted = quoted.replace(bearer.as_str(), "[redacted]");
+            }
+            return Err(RequestError::Transport(format!(
+                "answered HTTP {status}{quoted}"
+            )));
         }
-        if let Some(session) = &session {
-            request = request.header(SESSION_HEADER, session.clone());
-        }
-        if let Some(version) = lock(&self.protocol_version).clone() {
-            request = request.header(VERSION_HEADER, version);
-        }
-        let response = request.send().await.map_err(|err| {
-            RequestError::Transport(format!("could not be reached: {}", describe(&err)))
-        })?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(response);
-        }
-        if status == StatusCode::NOT_FOUND && session.is_some() {
-            // The next initialize starts a new session.
-            lock(&self.session).take();
-            lock(&self.protocol_version).take();
-            return Err(RequestError::SessionEnded);
-        }
-        Err(RequestError::Transport(match status {
-            StatusCode::UNAUTHORIZED => "needs authorization (HTTP 401); Socium sends only the headers of its [mcp.servers] table and does not support OAuth".to_string(),
-            _ => format!("answered HTTP {status}{}", quoted_error(response).await),
-        }))
     }
 
     /// Posts a notification or response, which the server accepts with
@@ -391,6 +555,43 @@ fn is_response_to(message: &Value, id: u64) -> bool {
     message.get("method").is_none() && message["id"].as_u64() == Some(id)
 }
 
+/// Whether `url` names this machine or a private network by its host:
+/// `localhost` or an address [`is_internal_address`] refuses.
+pub(super) fn is_internal(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    match host.parse::<std::net::IpAddr>() {
+        Ok(address) => is_internal_address(address),
+        Err(_) => host == "localhost" || host.ends_with(".localhost"),
+    }
+}
+
+/// A loopback, private, link-local, shared, broadcast, or unspecified
+/// address, IPv4 mapped into IPv6 included.
+pub(super) fn is_internal_address(address: std::net::IpAddr) -> bool {
+    let v4 = |address: std::net::Ipv4Addr| {
+        address.is_loopback()
+            || address.is_private()
+            || address.is_link_local()
+            || address.is_unspecified()
+            || address.is_broadcast()
+            // 100.64.0.0/10, shared address space.
+            || (address.octets()[0] == 100 && address.octets()[1] & 0xc0 == 64)
+    };
+    match address {
+        std::net::IpAddr::V4(address) => v4(address),
+        std::net::IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                || address.to_ipv4_mapped().is_some_and(v4)
+        }
+    }
+}
+
 /// Whether `url` names this machine, by name or by a loopback address.
 fn is_loopback(url: &Url) -> bool {
     match url.host_str() {
@@ -491,7 +692,7 @@ impl EventStream {
     }
 }
 
-async fn read_body(mut response: Response, limit: usize) -> Result<Vec<u8>, String> {
+pub(super) async fn read_body(mut response: Response, limit: usize) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|err| describe(&err))? {
         if body.len() + chunk.len() > limit {
@@ -522,7 +723,7 @@ async fn quoted_error(response: Response) -> String {
 }
 
 /// The error and its causes, which reqwest keeps apart.
-fn describe(err: &reqwest::Error) -> String {
+pub(super) fn describe(err: &reqwest::Error) -> String {
     let mut text = err.to_string();
     let mut source = std::error::Error::source(err);
     while let Some(cause) = source {
@@ -570,6 +771,79 @@ mod tests {
             assert!(events(&[first, second], 32).is_err(), "split at {split}");
         }
         assert_eq!(events(&[stream.as_bytes()], 64).unwrap().len(), 1);
+    }
+
+    /// A listener on loopback that counts the connections it gets.
+    fn internal_service() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let reached = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = reached.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        (port, reached)
+    }
+
+    fn run<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn a_discovered_name_that_resolves_to_this_machine_is_refused() {
+        let (port, reached) = internal_service();
+        let clients = HttpClients::with_lookup(std::sync::Arc::new(move |_: &str, _| {
+            Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))])
+        }));
+        let url = Url::parse(&format!("http://auth.example:{port}/token")).unwrap();
+
+        let err = run(clients.for_discovered(&url)).err().unwrap();
+
+        assert!(err.contains("auth.example"), "{err}");
+        assert!(err.contains("127.0.0.1"), "{err}");
+        assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // A server that is itself on this machine may name such places.
+        let local = clients.serving(&Url::parse("http://127.0.0.1:8/mcp").unwrap());
+        assert!(run(local.for_discovered(&url)).is_ok());
+    }
+
+    #[test]
+    fn a_second_lookup_cannot_turn_a_checked_name_into_this_machine() {
+        let (port, reached) = internal_service();
+        let lookups = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = lookups.clone();
+        // First a public address (TEST-NET-1, which goes nowhere), then
+        // loopback.
+        let clients = HttpClients::with_lookup(std::sync::Arc::new(move |_: &str, _| {
+            let first = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            let address = if first {
+                [192, 0, 2, 1]
+            } else {
+                [127, 0, 0, 1]
+            };
+            Ok(vec![std::net::SocketAddr::from((address, port))])
+        }));
+        let url = Url::parse(&format!("http://auth.example:{port}/token")).unwrap();
+
+        let sent = run(async {
+            let client = clients.for_discovered(&url).await.unwrap();
+            client
+                .get(url.clone())
+                .timeout(Duration::from_millis(500))
+                .send()
+                .await
+        });
+
+        assert!(sent.is_err());
+        assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

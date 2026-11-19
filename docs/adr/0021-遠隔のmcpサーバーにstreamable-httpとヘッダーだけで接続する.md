@@ -6,6 +6,8 @@ date: 2026-11-19
 links:
 - target: 20
   kind: amends
+- target: 22
+  kind: amendedby
 ---
 
 # 遠隔のMCPサーバーにStreamable HTTPとヘッダーだけで接続する
@@ -49,7 +51,7 @@ Chosen option: 「Streamable HTTP だけを、設定したヘッダーで使う�
 * Good, because トークンは環境変数から入り、設定ファイルにも画面にも記録にも残らない。
 * Good, because 鍵を送ってよい URL の規則がプロバイダーと一つになる。
 * Bad, because 遠隔のサーバーは、モデルが渡す tool の引数 (ファイルの中身を含みうる) と設定したヘッダーを受け取る。何をするかはサーバーの運営者次第で、プロバイダーと同じく信頼して登録するしかない。
-* Bad, because OAuth しか受け付けないサーバーには接続できない。
+* Bad, because OAuth しか受け付けないサーバーには接続できない (ADR 22 で `socium mcp login` を加えた)。
 * Bad, because セッションが切れると、設定を読み直すか再起動するまでそのサーバーの tool は失敗する。
 * Neutral, because 遠隔のサーバー一つにつきスレッドが一つ増える。
 
