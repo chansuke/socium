@@ -9,7 +9,7 @@
 //! code that runs and provider keys never reach it.
 
 use crate::TaskControl;
-use crate::settings::McpServerSettings;
+use crate::settings::{McpServerSettings, McpTransportSettings};
 use crate::tools::ToolDefinition;
 use crate::tools::error::ToolError;
 use serde_json::{Value, json};
@@ -126,8 +126,11 @@ struct Secrets(Vec<String>);
 
 impl Secrets {
     fn of(settings: &McpServerSettings) -> Self {
-        let mut values = settings
-            .env
+        let given = match &settings.transport {
+            McpTransportSettings::Stdio { env, .. } => env,
+            McpTransportSettings::Http { headers, .. } => headers,
+        };
+        let mut values = given
             .values()
             .filter(|value| value.chars().count() >= MIN_SECRET_CHARS)
             .cloned()
@@ -271,11 +274,17 @@ impl McpServer {
         workspace_root: &Path,
         host_env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
-        let mut command = Command::new(&settings.command[0]);
+        let McpTransportSettings::Stdio { command: argv, env } = &settings.transport else {
+            return Err(format!(
+                "MCP server {} was not started: remote servers are not supported yet.",
+                settings.name
+            ));
+        };
+        let mut command = Command::new(&argv[0]);
         // Not the workspace: a launcher such as `python3 -m` or `npx` would
         // load the workspace's modules and packages first.
         command
-            .args(&settings.command[1..])
+            .args(&argv[1..])
             .current_dir("/")
             .env_clear()
             .stdin(Stdio::piped())
@@ -290,7 +299,7 @@ impl McpServer {
                 command.env(variable, value);
             }
         }
-        command.envs(&settings.env);
+        command.envs(env);
         // Its own process group, so a launcher such as npx or uvx goes down
         // with the server it started.
         #[cfg(unix)]
@@ -298,7 +307,7 @@ impl McpServer {
         let mut child = command.spawn().map_err(|err| {
             format!(
                 "MCP server {} was not started: `{}` could not run: {err}.",
-                settings.name, settings.command[0]
+                settings.name, argv[0]
             )
         })?;
         let (Some(stdin), Some(stdout), Some(stderr)) =
@@ -963,8 +972,10 @@ pub(crate) mod tests {
         }
         McpServerSettings {
             name: name.into(),
-            command,
-            env: BTreeMap::from([("FAKE_CONFIGURED".to_string(), "yes".to_string())]),
+            transport: McpTransportSettings::Stdio {
+                command,
+                env: BTreeMap::from([("FAKE_CONFIGURED".to_string(), "yes".to_string())]),
+            },
             allow: allow.iter().map(|tool| tool.to_string()).collect(),
             tool_timeout: Duration::from_secs(600),
         }
@@ -1133,7 +1144,10 @@ pub(crate) mod tests {
     fn servers_that_fail_to_start_are_skipped_with_a_warning() {
         let root = tempfile::tempdir().unwrap();
         let missing = McpServerSettings {
-            command: vec!["/nonexistent/mcp-server".into()],
+            transport: McpTransportSettings::Stdio {
+                command: vec!["/nonexistent/mcp-server".into()],
+                env: BTreeMap::new(),
+            },
             ..fake_settings("missing", "", &[])
         };
         let (registry, warnings) = connect_in(
@@ -1195,6 +1209,15 @@ pub(crate) mod tests {
         McpRegistry::connect(servers, root, env, timeout, &TaskControl::default())
     }
 
+    fn stdio(
+        settings: &mut McpServerSettings,
+    ) -> (&mut Vec<String>, &mut BTreeMap<String, String>) {
+        match &mut settings.transport {
+            McpTransportSettings::Stdio { command, env } => (command, env),
+            McpTransportSettings::Http { .. } => panic!("not a stdio server"),
+        }
+    }
+
     fn cancel_after(delay: Duration) -> TaskControl {
         let control = TaskControl::default();
         let canceller = control.clone();
@@ -1220,7 +1243,7 @@ pub(crate) mod tests {
             .find(|path| path.is_file())
             .unwrap();
         let mut settings = fake_settings("fake", "", &[]);
-        settings.command[0] = python.display().to_string();
+        stdio(&mut settings).0[0] = python.display().to_string();
         let (registry, warnings) = connect_in(root.path(), &[settings], &env, STARTUP_TIMEOUT);
         assert!(
             registry.target("mcp__fake__where").is_some(),
@@ -1244,10 +1267,8 @@ pub(crate) mod tests {
             ),
         )
         .unwrap();
-        let settings = McpServerSettings {
-            command: vec!["python3".into(), "-m".into(), "socium_planted".into()],
-            ..fake_settings("planted", "", &[])
-        };
+        let mut settings = fake_settings("planted", "", &[]);
+        *stdio(&mut settings).0 = vec!["python3".into(), "-m".into(), "socium_planted".into()];
 
         let (registry, warnings) =
             connect_in(root.path(), &[settings], &host_env, Duration::from_secs(5));
@@ -1421,8 +1442,8 @@ pub(crate) mod tests {
     fn values_a_server_was_given_are_blanked_out_of_warnings_and_errors() {
         let secret = |name: &str, mode: &str| {
             let mut settings = fake_settings(name, mode, &[]);
-            settings
-                .env
+            stdio(&mut settings)
+                .1
                 .insert("FAKE_SECRET".into(), "s3cret-value-123".into());
             settings
         };
@@ -1446,8 +1467,8 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let log = root.path().join("methods");
         let mut settings = fake_settings("hang", "--hang", &[]);
-        settings
-            .env
+        stdio(&mut settings)
+            .1
             .insert("FAKE_LOG".into(), log.display().to_string());
 
         let (_, warnings) = connect_in(root.path(), &[settings], &host_env, Duration::from_secs(1));
