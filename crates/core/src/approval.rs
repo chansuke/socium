@@ -306,7 +306,7 @@ fn edited_paths(name: &str, input: &Value, root: &Path) -> Vec<(String, String)>
 /// caught wherever it points.
 fn read_path(name: &str, input: &Value, root: &Path) -> Option<(String, String)> {
     let path = match name {
-        "read_file" | "search_text" | "git_diff" => input["path"].as_str()?,
+        "read_file" | "search_text" | "find_symbol" | "git_diff" => input["path"].as_str()?,
         crate::constants::TEXT_EDITOR_TOOL_NAME if input["command"] == "view" => {
             input["path"].as_str()?
         }
@@ -657,6 +657,7 @@ mod tests {
         for (tool, input) in [
             ("search_text", json!({"pattern": "TOKEN", "path": ".env"})),
             ("git_diff", json!({"path": ".env"})),
+            ("find_symbol", json!({"symbol": "KEY", "path": ".env.rs"})),
         ] {
             assert!(
                 matches!(decide(root.path(), &auto, tool, input), Gate::Ask(_)),

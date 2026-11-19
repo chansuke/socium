@@ -52,7 +52,12 @@ impl Tool for FindSymbolTool {
         input: &Value,
         _on_progress: &mut dyn FnMut(AgentProgress),
     ) -> Result<String, ToolError> {
-        find_symbol_controlled(ctx.workspace_root, input, ctx.control)
+        find_symbol_controlled(
+            ctx.workspace_root,
+            input,
+            ctx.control,
+            &ctx.settings.approval.sensitive,
+        )
     }
 }
 
@@ -89,12 +94,18 @@ pub(crate) fn find_symbol_in_workspace(
     workspace_root: &Path,
     input: &Value,
 ) -> Result<String, ToolError> {
-    find_symbol_controlled(workspace_root, input, &crate::TaskControl::default())
+    find_symbol_controlled(
+        workspace_root,
+        input,
+        &crate::TaskControl::default(),
+        &crate::settings::Settings::default().approval.sensitive,
+    )
 }
 fn find_symbol_controlled(
     workspace_root: &Path,
     input: &Value,
     control: &crate::TaskControl,
+    sensitive: &crate::settings::PathPatterns,
 ) -> Result<String, ToolError> {
     let FindSymbolInput {
         symbol,
@@ -120,12 +131,25 @@ fn find_symbol_controlled(
         status_code,
         ..
     } = execution;
+    let named = crate::approval::relative_target(workspace_root, path).unwrap_or_default();
+    let mut withheld = Vec::new();
     let matches = matches
         .into_iter()
         .filter(|entry| looks_like_rust_symbol_declaration(&entry.text, symbol))
+        .filter(|entry| {
+            let keep = !crate::approval::withholds(sensitive, &entry.path, &named);
+            if !keep && !withheld.contains(&entry.path) {
+                withheld.push(entry.path.clone());
+            }
+            keep
+        })
         .collect::<Vec<_>>();
     let mut formatted =
         format_search_results("Symbol", symbol, path, Some("*.rs"), max_results, matches);
+    if !withheld.is_empty() {
+        formatted.push('\n');
+        formatted.push_str(&crate::approval::withheld_note(&withheld));
+    }
 
     if let Some(note) = note {
         formatted.push('\n');
@@ -192,6 +216,27 @@ mod tests {
     use crate::test_support::make_temp_dir;
     use serde_json::json;
     use std::fs;
+
+    #[test]
+    fn a_wide_symbol_search_leaves_out_files_that_may_hold_credentials() {
+        let workspace = make_temp_dir("symbol_secrets");
+        fs::write(
+            workspace.path().join(".env.rs"),
+            "const API_KEY: &str = \"sk-secret\";\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("lib.rs"),
+            "const API_KEY: &str = \"\";\n",
+        )
+        .unwrap();
+        let output =
+            find_symbol_in_workspace(workspace.path(), &json!({"symbol": "API_KEY", "path": "."}))
+                .unwrap();
+        assert!(output.contains("lib.rs:1"), "{output}");
+        assert!(!output.contains("sk-secret"), "{output}");
+        assert!(output.contains(".env.rs"), "{output}");
+    }
 
     #[test]
     fn find_symbol_returns_rust_declaration_matches() {
