@@ -8,6 +8,9 @@ mod approval;
 mod control;
 mod execution;
 mod instructions;
+// Wired into the turn loop in the next change.
+#[allow(dead_code)]
+mod mcp;
 mod models;
 pub mod plan;
 mod process;
