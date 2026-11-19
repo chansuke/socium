@@ -222,7 +222,10 @@ allow = ["get_issue"]
   description (cut at 2048 characters) and input schema. A server name is 1 to
   32 letters, digits, `_`, or `-`, without `__` and not ending in `_`. A tool
   whose full name would exceed 64 characters or contain other characters, or
-  whose input schema is larger than 64 KiB, is not offered, with a warning.
+  whose input schema is larger than 64 KiB, is not offered, with a warning. A
+  server offers at most 64 tools and 128 KiB of descriptions and schemas, and
+  all servers together 100 tools and 256 KiB; the tools beyond that, in the
+  order the server lists them, are left out with one warning per server.
 - A tool call asks for approval, since nothing confines what the server does;
   you can allow that one tool for the rest of the session. Tools listed in
   `allow` (their names on the server) run without asking. `socium -p` refuses a

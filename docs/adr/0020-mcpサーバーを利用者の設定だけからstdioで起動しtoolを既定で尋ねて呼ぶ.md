@@ -42,7 +42,7 @@ Chosen option: 「サーバーをホストで動かし、設定を `config.toml`
 * tool は `mcp__<server>__<tool>` の名前でモデルに渡す。64 文字を超える名前と、`[A-Za-z0-9_-]` 以外を含む名前は警告して渡さない。説明と `inputSchema` はサーバーのものを使う。
 * tool の呼び出しは組み込み tool と同じ経路 (`run_tool_call_checkpointed`) を通す。承認、`tool_started` の記録、中断はそのまま適用される。中断したとき、または `tool_timeout_secs` を過ぎたときは `notifications/cancelled` を送る。期限切れは「実行されたかは分からない」と伝え、自動では再送しない。`initialize` は仕様に従って取り消さず、サーバーを止める。引数は JSON の object に限る。結果は `text` を連結し、画像などは 1 行の置き換えにし、`structuredContent` しか無ければその JSON を返す。`isError` は tool のエラーにする。`result` も `error` も無い応答と、`content` の無い結果は成功として扱わず、実行されたかは分からないと伝える。
 * サーバーの stderr は、起動に失敗したときの利用者向けの警告にだけ使い、モデルが読む tool のエラーには入れない。警告とエラーでは、`env` で渡した 8 文字以上の値を `[redacted]` に置き換える。サーバーが tool の結果に値を書き戻すことまでは防げない。
-* 一つのサーバーがすべての要求を埋めないよう、tool の説明は 2048 文字で切り、64 KiB を超える `inputSchema` の tool は警告して渡さない。stderr は 1 行あたり決まった量しか読み込まない。
+* 一つのサーバーがすべての要求を埋めないよう、tool の説明は 2048 文字で切り、64 KiB を超える `inputSchema` の tool は警告して渡さない。一つのサーバーが渡せるのは 64 個、説明と schema を合わせて 128 KiB まで、すべてのサーバーを合わせて 100 個、256 KiB までとし、超えた分は一覧の順に後ろから渡さず、サーバーごとに一つの警告で知らせる。OpenAI は一つの要求の tool を 128 個までとし、組み込みの tool もそこに入るため。stderr は 1 行あたり決まった量しか読み込まない。
 * 承認は ADR 13 に `Grant::McpTool` を足す。`allow` にある tool と、このセッションで許可した tool は尋ねずに実行する。それ以外は「MCP tools run in the <server> server on the host, outside Socium's sandbox.」を理由に尋ね、その tool だけをセッション中許可する選択肢を出す。答える人がいない実行では拒否し、`allow` に足す方法を伝える。
 * MCP の tool はメインのエージェントだけに渡す。サブエージェントには渡さない。
 * 今回は扱わない: resources、prompts、sampling、roots、HTTP などの遠隔接続、OAuth、`notifications/tools/list_changed`、サブエージェントでの利用。
@@ -60,7 +60,7 @@ Chosen option: 「サーバーをホストで動かし、設定を `config.toml`
 
 ### Confirmation
 
-`settings.rs` のテストで、`[mcp.servers]` の読み取り、既定値、不正な名前 (末尾の `_` を含む)、相対パスの `command`、`tool_timeout_secs`、`${VAR}` の展開と未設定の変数、`enabled = false` を確かめる。`mcp.rs` のテストで、Python の偽のサーバー (`crates/core/tests/fixtures/fake_mcp_server.py`) を子プロセスとして起動し、次を確かめる。渡す tool の名前と schema、結果の変換、`isError`、バッチの応答、中断がすぐ戻りサーバーに伝わること、期限を過ぎた呼び出しが終わること、不正な応答と object でない引数を成功にしないこと、知らない版と tools の無いサーバーの扱い、`initialize` を取り消さないこと。さらに、作業ディレクトリが `/` で PATH にワークスペースが入らないこと、ワークスペースに置いたモジュールが動かないこと、stdin を読まないサーバーでも中断と終了が止まらないこと、stdin を閉じた後にサーバーが終了処理を済ませられること、起動の中止がすぐ終わること、呼び出し中に終了したサーバーのエラーに stderr が付かないこと、`env` の値が警告とエラーで伏せられること、長い説明と巨大な schema の扱い、改行の無い stderr を決まった量しか持たないこと、起動に失敗したサーバーを飛ばすこと、registry を捨てると子プロセスが消えること、子プロセスが親の API キーを見ないことを確かめる。`approval.rs` と `tools/mod.rs` のテストで、既定で尋ねること、`allow` の tool は尋ねないこと、セッション中の許可がその tool だけを覆うこと、答える人がいない実行の案内を確かめる。`lib.rs` のテストで、モデルが `mcp__fake__echo` を呼び、その結果が次の要求に入ることを、サブエージェントのテストで worker に MCP の tool が渡らないことを確かめる。
+`settings.rs` のテストで、`[mcp.servers]` の読み取り、既定値、不正な名前 (末尾の `_` を含む)、相対パスの `command`、`tool_timeout_secs`、`${VAR}` の展開と未設定の変数、`enabled = false` を確かめる。`mcp.rs` のテストで、Python の偽のサーバー (`crates/core/tests/fixtures/fake_mcp_server.py`) を子プロセスとして起動し、次を確かめる。渡す tool の名前と schema、結果の変換、`isError`、バッチの応答、中断がすぐ戻りサーバーに伝わること、期限を過ぎた呼び出しが終わること、不正な応答と object でない引数を成功にしないこと、知らない版と tools の無いサーバーの扱い、`initialize` を取り消さないこと。さらに、作業ディレクトリが `/` で PATH にワークスペースが入らないこと、ワークスペースに置いたモジュールが動かないこと、stdin を読まないサーバーでも中断と終了が止まらないこと、stdin を閉じた後にサーバーが終了処理を済ませられること、起動の中止がすぐ終わること、呼び出し中に終了したサーバーのエラーに stderr が付かないこと、`env` の値が警告とエラーで伏せられること、長い説明と巨大な schema の扱い、サーバーごとと全体の tool の数と大きさの上限、改行の無い stderr を決まった量しか持たないこと、起動に失敗したサーバーを飛ばすこと、registry を捨てると子プロセスが消えること、子プロセスが親の API キーを見ないことを確かめる。`approval.rs` と `tools/mod.rs` のテストで、既定で尋ねること、`allow` の tool は尋ねないこと、セッション中の許可がその tool だけを覆うこと、答える人がいない実行の案内を確かめる。`lib.rs` のテストで、モデルが `mcp__fake__echo` を呼び、その結果が次の要求に入ることを、サブエージェントのテストで worker に MCP の tool が渡らないことを確かめる。
 
 ## Pros and Cons of the Options
 
