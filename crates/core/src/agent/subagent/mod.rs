@@ -2194,6 +2194,103 @@ mod tests {
         }
     }
 
+    /// Answers the main agent from a script and each subagent request
+    /// after a pause, counting how many subagent requests were in flight
+    /// at once.
+    struct OverlapProvider {
+        main: ScriptedProvider,
+        active: std::sync::atomic::AtomicUsize,
+        most: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::providers::Provider for OverlapProvider {
+        fn kind(&self) -> crate::providers::ProviderKind {
+            crate::providers::ProviderKind::Anthropic
+        }
+
+        fn capabilities(&self) -> crate::providers::ProviderCapabilities {
+            crate::providers::ProviderCapabilities {
+                supports_tools: true,
+            }
+        }
+
+        async fn send_message(
+            &self,
+            client: &reqwest::Client,
+            request: &crate::agent::types::AgentMessageRequest<'_>,
+            on_delta: &mut (dyn FnMut(crate::providers::ProviderEvent) + Send),
+        ) -> Result<ProviderResponse, ProviderError> {
+            use std::sync::atomic::Ordering;
+            let value = serde_json::to_value(request)?;
+            if value["system"] == DEFAULT_SYSTEM_PROMPT {
+                return self.main.send_message(client, request, on_delta).await;
+            }
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(text_provider_response("report", None))
+        }
+    }
+
+    /// The most subagents of `tools` that ran at once when the main agent
+    /// started two of them in one response.
+    async fn most_at_once(name: &str, tools: &[&str]) -> usize {
+        let workspace = make_temp_dir(name);
+        let call = |id: &str| {
+            (
+                id.to_string(),
+                json!({"description": "Look", "prompt": id, "agent_type": "echoer"}),
+            )
+        };
+        let batch = [call("agent-a"), call("agent-b")];
+        let most = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = OverlapProvider {
+            main: ScriptedProvider::new(vec![
+                calls(
+                    &batch
+                        .iter()
+                        .map(|(id, input)| (id.as_str(), "agent", input.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+                text("Both done."),
+            ]),
+            active: std::sync::atomic::AtomicUsize::new(0),
+            most: most.clone(),
+        };
+        let mut service = AgentService::with_provider(
+            workspace.path().into(),
+            Box::new(provider),
+            "test".into(),
+            1000,
+            reqwest::Client::new(),
+        );
+        with_fake_mcp(&mut service, &[], vec![user_type("echoer", tools)]);
+
+        let reply = service.submit("Look at both".into()).await.unwrap();
+
+        assert_eq!(reply.text, "Both done.");
+        most.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn a_type_with_an_mcp_tool_runs_one_at_a_time() {
+        // A read-only type overlaps, so the count would show it.
+        assert_eq!(
+            most_at_once("subagent_overlap_read", &["read_file"]).await,
+            2
+        );
+        assert_eq!(
+            most_at_once("subagent_overlap_mcp", &["read_file", "mcp__fake__echo"]).await,
+            1
+        );
+        assert_eq!(
+            most_at_once("subagent_overlap_server", &["mcp__fake__*"]).await,
+            1
+        );
+    }
+
     /// The tool entries a turn shows live, then the ones a restarted
     /// session rebuilds from the saved conversation.
     async fn live_and_restored_tool_entries(

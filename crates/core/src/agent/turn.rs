@@ -716,7 +716,8 @@ where
 /// How many calls from the start of `calls` can run at once: consecutive
 /// new subagents whose types cannot change the workspace, so they never
 /// ask for approval or edit the same file, at most
-/// `MAX_CONCURRENT_SUBAGENTS` of them. A resumed subagent runs alone.
+/// `MAX_CONCURRENT_SUBAGENTS` of them; a type with any MCP tool is not one
+/// of them. A resumed subagent runs alone.
 fn concurrent_batch_len(ctx: &TurnContext<'_>, calls: &[(String, String, Value)]) -> usize {
     calls
         .iter()
