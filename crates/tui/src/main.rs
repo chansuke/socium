@@ -42,6 +42,23 @@ fn mcp(command: McpCommand) -> i32 {
     }
 }
 
+/// What the desktop's opener and the browser it starts need from
+/// Socium's environment; the rest, provider keys included, stays out.
+const DESKTOP_VARIABLES: &[&str] = &[
+    "HOME",
+    "USER",
+    "LANG",
+    "BROWSER",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_SESSION_TYPE",
+    "XDG_DATA_DIRS",
+    "XDG_CONFIG_DIRS",
+    "DBUS_SESSION_BUS_ADDRESS",
+];
+
 /// Shows the authorization URL and tries the desktop's opener; a missing
 /// opener leaves the URL to copy.
 fn open_in_browser(server: &str, url: &str) {
@@ -53,15 +70,47 @@ fn open_in_browser(server: &str, url: &str) {
     } else {
         "xdg-open"
     };
-    if let Ok(mut child) = std::process::Command::new(opener)
+    let workspace = env::current_dir().unwrap_or_default();
+    let path = trusted_path(&env::var("PATH").unwrap_or_default(), &workspace);
+    // Found on a PATH without the workspace, so the project cannot provide
+    // the program that runs with the user's desktop session.
+    let Some(program) = env::split_paths(&path)
+        .map(|dir| dir.join(opener))
+        .find(|candidate| candidate.is_file())
+    else {
+        return;
+    };
+    let mut command = std::process::Command::new(program);
+    command
         .arg(url)
+        .current_dir("/")
+        .env_clear()
+        .env("PATH", &path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::null());
+    for variable in DESKTOP_VARIABLES {
+        if let Ok(value) = env::var(variable) {
+            command.env(variable, value);
+        }
+    }
+    if let Ok(mut child) = command.spawn() {
         std::thread::spawn(move || child.wait());
     }
+}
+
+/// `path` without relative entries and entries in `workspace`.
+fn trusted_path(path: &str, workspace: &Path) -> String {
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let kept = env::split_paths(path).filter(|entry| {
+        let resolved = entry.canonicalize().unwrap_or_else(|_| entry.clone());
+        entry.is_absolute() && !resolved.starts_with(&workspace) && !entry.starts_with(&workspace)
+    });
+    env::join_paths(kept)
+        .map(|joined| joined.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 #[tokio::main(worker_threads = 1)]
@@ -135,4 +184,19 @@ async fn main() -> Result<()> {
         println!("Resume this conversation with: {program} -r {id}");
     }
     app_result.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_opener_is_looked_up_on_a_path_without_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let bin = workspace.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let path = format!(".:bin:{}:/usr/bin:/bin", bin.display());
+
+        assert_eq!(trusted_path(&path, workspace.path()), "/usr/bin:/bin");
+    }
 }
