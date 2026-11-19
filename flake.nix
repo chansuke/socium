@@ -109,7 +109,7 @@
               cargoTestExtraArgs = testProfile;
               nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
               nativeCheckInputs = [
-                pkgs.git
+                pkgs.gitMinimal
                 pkgs.ripgrep
               ]
               ++ lib.optionals pkgs.stdenv.isLinux [
@@ -125,7 +125,9 @@
                   --prefix PATH : "${
                     lib.makeBinPath (
                       [
-                        pkgs.git
+                        # Without Perl and Python, which take up most of
+                        # git's closure and nothing here runs.
+                        pkgs.gitMinimal
                         pkgs.ripgrep
                       ]
                       ++ lib.optionals pkgs.stdenv.isLinux [ (sandboxBackend pkgs) ]
