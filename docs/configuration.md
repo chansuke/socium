@@ -191,10 +191,12 @@ API (this costs money), run
 
 ## MCP servers
 
-Socium can start MCP (Model Context Protocol) servers and offer their tools to
-the model. Only local servers over stdio are supported, and only their tools:
-no resources, prompts, sampling, remote (HTTP) servers, or OAuth. Each server
-is a table under `[mcp.servers]` in `config.toml`; a workspace cannot add one.
+Socium can start MCP (Model Context Protocol) servers, or connect to remote
+ones, and offer their tools to the model. Only tools are used: no resources,
+prompts, sampling, or OAuth. Each server is a table under `[mcp.servers]` in
+`config.toml`; a workspace cannot add one. A table has exactly one of
+`command` (a local server over stdio) or `url` (a remote server over
+Streamable HTTP).
 
 ```toml
 [mcp.servers.github]
@@ -202,6 +204,11 @@ command = ["github-mcp-server", "stdio"]
 env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }
 allow = ["get_issue"]
 # enabled = false
+
+[mcp.servers.deepwiki]
+url = "https://mcp.deepwiki.com/mcp"
+# headers = { Authorization = "Bearer ${DEEPWIKI_TOKEN}" }
+allow = ["read_wiki_structure"]
 ```
 
 - `command` is the program, an absolute path or a name found on PATH, and its
@@ -226,24 +233,40 @@ allow = ["get_issue"]
   server offers at most 64 tools and 128 KiB of descriptions and schemas, and
   all servers together 100 tools and 256 KiB; the tools beyond that, in the
   order the server lists them, are left out with one warning per server.
-- A tool call asks for approval, since nothing confines what the server does;
+- `url` is the server's MCP endpoint, used as written. It must use https;
+  plain http is accepted only for localhost and loopback addresses. It may not
+  contain credentials, a query, or a fragment. `headers` are sent with every
+  request, with `${NAME}` expanded as in `env`; put tokens there, read from
+  your environment rather than written in the file. Header values are never
+  shown: startup lists only the URL and the header names. `env` does not
+  apply to a `url` server, nor `headers` to a `command` server.
+- A remote server receives every argument the model passes to its tools, and
+  what it does with them is up to its operator, as with a model provider.
+  Socium speaks the Streamable HTTP transport of MCP 2025-06-18 only: no
+  older HTTP+SSE servers, no OAuth (a 401 is reported as such), and no
+  redirects. When the server ends the session (HTTP 404), its tools fail until
+  you reload the settings or restart Socium. On exit Socium ends the session
+  with a DELETE.
+- A tool call asks for approval, since nothing confines what the server does
+  (the request says whether it runs on the host or at the server's address);
   you can allow that one tool for the rest of the session. Tools listed in
   `allow` (their names on the server) run without asking. `socium -p` refuses a
   call that needs approval and tells the model to add the tool to `allow`.
 - Servers start in parallel while the interface opens, and the first turn waits
   for them, at most 30 seconds each; you can cancel the wait. A server must
   answer with protocol revision 2025-06-18, 2025-03-26, or 2024-11-05. A server
-  that fails to start is skipped with a warning that ends with its last
-  standard error lines. Its standard error is never sent to the model, and
+  that fails to start is skipped with a warning; a local one's ends with its
+  last standard error lines. Its standard error is never sent to the model, and
   `env` values of 8 or more characters are shown as `[redacted]` in warnings
   and errors. A server that writes a value into a tool result is not filtered.
-- When Socium exits it closes each server's standard input, waits a second,
+- When Socium exits it closes each local server's standard input, waits a second,
   sends the server's process group SIGTERM, waits another second, and then
   sends SIGKILL.
 - Subagents do not get MCP tools.
 
 The design and what is deferred are in
-[ADR 20](adr/0020-mcpサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ.md).
+[ADR 20](adr/0020-mcpサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ.md)
+and, for remote servers, [ADR 21](adr/0021-遠隔のmcpサーバーにstreamable-httpとヘッダーだけで接続する.md).
 
 ## Project instructions
 

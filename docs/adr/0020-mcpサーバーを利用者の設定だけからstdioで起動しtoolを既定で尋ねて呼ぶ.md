@@ -6,6 +6,8 @@ date: 2026-11-19
 links:
   - target: 13
     kind: amends
+  - target: 21
+    kind: amendedby
 ---
 
 # MCPサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ

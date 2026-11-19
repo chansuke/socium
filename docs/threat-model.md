@@ -12,9 +12,9 @@ What Socium protects, from whom, and what it leaves to you. The
   workspace that contains them, so neither the model's file tools nor its
   commands can change them.
 - **The host**: the kernel, the Socium binary, and the bubblewrap it runs.
-- **The MCP servers you configure** in `config.toml`. They run on the host,
-  outside the sandbox, with your network and files. A workspace cannot add
-  one.
+- **The MCP servers you configure** in `config.toml`. A local one runs on
+  the host, outside the sandbox, with your network and files. A workspace
+  cannot add one.
 
 ## What is not trusted
 
@@ -28,6 +28,10 @@ What Socium protects, from whom, and what it leaves to you. The
 - **The model provider** sees everything sent to it: your prompts and every
   file, diff, and command output a tool returns. Register only endpoints you
   would show that content to.
+- **A remote MCP server** (`url`) sees, like a model provider, everything
+  sent to it: the arguments of each tool call the model makes, which can hold
+  file contents, plus the headers you configured, usually a token. Register
+  only servers you would show that content to.
 - **What MCP tools return.** A server's output goes to the model as it is and
   can carry planted instructions, like a file or command output.
 
@@ -36,7 +40,8 @@ What Socium protects, from whom, and what it leaves to you. The
 | Asset | Threat | Control |
 |---|---|---|
 | Host home and credentials (`~/.ssh`, cloud and Git credentials, keyrings) | A command reads them and the model sends them on | Commands run in bubblewrap with a private HOME and only the workspace, system runtimes, and the directories you list in `sandbox.read_only`. The home directory itself cannot be listed. |
-| Provider API keys | A command or the model reads them | Keys stay in the parent process. Children get a fixed environment, never inherited variables; an MCP server gets only the variables its `env` names. |
+| Provider API keys | A command or the model reads them | Keys stay in the parent process. Children get a fixed environment, never inherited variables; a local MCP server gets only the variables its `env` names, and a remote one only the headers in its table. |
+| Tokens for remote MCP servers | They leak into logs, the activity record, or the model's context | Header values come from your environment through `${NAME}`, are marked sensitive in the HTTP client, and appear in no warning, error, startup notice, activity event, or prompt. They travel only over https (plain http only to loopback), and redirects are not followed. |
 | The network | A command exfiltrates data or fetches code | Network namespace and seccomp deny all sockets except connected stream and seqpacket pairs, which reach only their own peer. Datagram pairs, which could reach host pathname sockets, are denied. |
 | The host itself | An edit makes the host run code later: direnv loads `.envrc`, rust-analyzer runs `build.rs` and the build scripts and proc macros of the crates `Cargo.toml` and `Cargo.lock` pick, CI and hook managers run their files | Edits to these files always ask for approval, with the diff (`approval.protected`). Commands nobody reviewed run with them read-only. |
 | Secrets in the workspace (`.env`, keys) | The model reads them and they reach the provider | Reads by file tools, and searches and diffs that name them, always ask (`approval.sensitive`). Wider searches and diffs leave them out and say which. Commands nobody reviewed see them as empty files. An approved command can still read them. |
@@ -78,8 +83,9 @@ workspace you accept, such as `cargo test`.
 - Hardlinks into the workspace, a compromised kernel, hostile processes running
   as your user, and resource exhaustion. This is not a VM.
 - What the provider does with the data it receives.
-- What an MCP server does on the host. Socium decides only whether a tool call
-  is sent to it, not what the server does with it. A server starts in `/` and
-  finds its program on a PATH without the workspace, but Socium cannot stop a
-  server you configured from reading the workspace or a value you gave it, or
-  from writing that value into a tool result.
+- What an MCP server does, on the host or at its remote address. Socium
+  decides only whether a tool call is sent to it, not what the server does
+  with it. A local server starts in `/` and finds its program on a PATH
+  without the workspace, but Socium cannot stop a server you configured from
+  reading the workspace or a value you gave it, or from writing that value
+  into a tool result.
