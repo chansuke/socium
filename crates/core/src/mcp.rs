@@ -1,19 +1,22 @@
-//! A client for MCP servers the user configured in `config.toml` (ADR 20):
-//! each server runs on the host as a child process that speaks
-//! newline-delimited JSON-RPC on stdin and stdout, and its tools are offered
-//! to the main agent as `mcp__<server>__<tool>`.
+//! A client for MCP servers the user configured in `config.toml` (ADR 20,
+//! ADR 21): a server with `command` runs on the host as a child process
+//! that speaks newline-delimited JSON-RPC on stdin and stdout, and one with
+//! `url` is reached over Streamable HTTP ([`http`]). Their tools are
+//! offered to the main agent as `mcp__<server>__<tool>`.
 //!
-//! Only tools are used. A server starts in `/`, finds its program on a PATH
+//! Only tools are used. A child starts in `/`, finds its program on a PATH
 //! without the workspace in it, and gets a fixed environment (PATH, HOME,
 //! USER, LANG and what its table sets), so the workspace cannot choose the
 //! code that runs and provider keys never reach it.
 
+mod http;
+
 use crate::TaskControl;
-use crate::settings::McpServerSettings;
+use crate::settings::{McpServerSettings, McpTransportSettings};
 use crate::tools::ToolDefinition;
 use crate::tools::error::ToolError;
 use serde_json::{Value, json};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -55,14 +58,14 @@ const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 /// Pages of `tools/list` read before giving up on a server that never
 /// stops paginating.
 const MAX_TOOL_PAGES: usize = 100;
-/// Messages waiting for the server to read its input; a sender waits while
-/// the queue is full.
+/// Messages waiting for a child to read its input. A server with this many
+/// unread is not reading, and further messages fail at once.
 const OUTBOX_MESSAGES: usize = 64;
-/// How long a stopping server gets after its input closes, and again after
+/// How long a stopping child gets after its input closes, and again after
 /// SIGTERM, before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(1);
-/// Variable values shorter than this are not treated as secrets, so a value
-/// such as `1` does not blank out every digit of a warning.
+/// Values shorter than this are not treated as secrets, so a value such as
+/// `1` does not blank out every digit of a warning.
 const MIN_SECRET_CHARS: usize = 8;
 /// How often a waiting call checks for cancellation.
 const POLL: Duration = Duration::from_millis(50);
@@ -72,27 +75,94 @@ pub(crate) fn is_mcp_tool(name: &str) -> bool {
     name.starts_with(PREFIX)
 }
 
-type Waiters = Arc<Mutex<Option<HashMap<u64, mpsc::Sender<Value>>>>>;
-/// Lines for the writer thread; `None` once the server's input is closed.
+/// What a waiting request receives: the JSON-RPC response with its ID.
+type Reply = Result<Value, RequestError>;
+type Waiters = Arc<Mutex<Option<HashMap<u64, mpsc::Sender<Reply>>>>>;
+/// Lines for a child's writer thread; `None` once its input is closed.
 type Outbox = Arc<Mutex<Option<mpsc::SyncSender<Vec<u8>>>>>;
 
-/// One running server. It is stopped when this is dropped.
+/// One connected server: the handshake, tool listing, calls and result
+/// conversion are the same for every transport; only sending and
+/// receiving differ.
 pub(crate) struct McpServer {
     name: String,
-    child: Mutex<Child>,
-    outbox: Outbox,
-    /// Callers waiting for a response, by request ID; `None` once the
-    /// server's output closed.
-    waiters: Waiters,
+    transport: Transport,
     next_id: AtomicU64,
-    stderr: Arc<Mutex<VecDeque<String>>>,
     secrets: Secrets,
     call_timeout: Duration,
 }
 
+enum Transport {
+    Stdio(StdioTransport),
+    Http(http::HttpTransport),
+}
+
+impl Transport {
+    /// Sends the request `message` with ID `id`; its response arrives on
+    /// the returned channel.
+    fn send(&self, id: u64, message: &Value) -> Result<mpsc::Receiver<Reply>, RequestError> {
+        match self {
+            Self::Stdio(stdio) => stdio.send(id, message),
+            Self::Http(http) => http.send(id, message),
+        }
+    }
+
+    /// Stops waiting for the response to `id`.
+    fn forget(&self, id: u64) {
+        match self {
+            Self::Stdio(stdio) => stdio.forget(id),
+            Self::Http(http) => http.forget(id),
+        }
+    }
+
+    /// Sends a notification. With a deadline, waits until the server took
+    /// it, where the transport can tell.
+    fn notify(&self, message: &Value, deadline: Option<Instant>) -> Result<(), RequestError> {
+        match self {
+            Self::Stdio(stdio) => stdio.queue(message),
+            Self::Http(http) => http.notify(message, deadline),
+        }
+    }
+
+    /// Where a remote server is, as `scheme://host[:port]`; `None` for a
+    /// child process.
+    fn origin(&self) -> Option<&str> {
+        match self {
+            Self::Stdio(_) => None,
+            Self::Http(http) => Some(http.origin()),
+        }
+    }
+
+    /// `" (exit status: 3)"` when a child has exited, else nothing.
+    fn exit_status(&self) -> String {
+        match self {
+            Self::Stdio(stdio) => stdio.exit_status(),
+            Self::Http(_) => String::new(),
+        }
+    }
+
+    /// The last lines a child wrote to standard error, as a paragraph to
+    /// append to a warning, or nothing.
+    fn stderr_tail(&self) -> String {
+        match self {
+            Self::Stdio(stdio) => stdio.stderr_tail(),
+            Self::Http(_) => String::new(),
+        }
+    }
+
+    /// Starts stopping: a child's input closes, which tells it to exit. A
+    /// remote session ends when its transport is dropped.
+    fn close(&self) {
+        match self {
+            Self::Stdio(stdio) => stdio.close_input(),
+            Self::Http(_) => {}
+        }
+    }
+}
+
 #[derive(Debug)]
 enum RequestError {
-    /// The server exited or closed its output.
+    /// The server exited, closed its output, or stopped reading its input.
     Gone,
     Cancelled,
     TimedOut,
@@ -100,6 +170,11 @@ enum RequestError {
     Refused(String),
     /// A response that is neither a result nor an error.
     Malformed,
+    /// The HTTP exchange failed, as a phrase that follows "it".
+    Transport(String),
+    /// A remote server answered 404 to the session: it no longer knows it,
+    /// so the request was not run.
+    SessionEnded,
 }
 
 /// When a request stops waiting for its response.
@@ -126,14 +201,22 @@ struct Secrets(Vec<String>);
 
 impl Secrets {
     fn of(settings: &McpServerSettings) -> Self {
-        let mut values = settings
-            .env
+        let given = match &settings.transport {
+            McpTransportSettings::Stdio { env, .. } => env,
+            McpTransportSettings::Http { headers, .. } => headers,
+        };
+        // A header such as `Bearer <token>` is also caught when the server
+        // repeats the token alone.
+        let mut values = given
             .values()
+            .flat_map(|value| [Some(value.as_str()), value.split_whitespace().last()])
+            .flatten()
             .filter(|value| value.chars().count() >= MIN_SECRET_CHARS)
-            .cloned()
+            .map(str::to_string)
             .collect::<Vec<_>>();
         // Longest first, so a value that contains another is replaced whole.
-        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        values.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        values.dedup();
         Self(values)
     }
 
@@ -152,9 +235,9 @@ struct RemoteTool {
 }
 
 impl McpServer {
-    /// Starts the server, performs the handshake, and lists its tools,
+    /// Connects to the server, performs the handshake, and lists its tools,
     /// within `timeout` and until `stop` is cancelled. `Err` is a warning
-    /// for the user, with the end of the server's standard error.
+    /// for the user, with the end of a child's standard error.
     fn connect(
         settings: &McpServerSettings,
         workspace_root: &Path,
@@ -166,54 +249,24 @@ impl McpServer {
             deadline: Instant::now() + timeout,
             control: stop,
         };
-        let server = Self::spawn(settings, workspace_root, host_env)?;
-        let failed = |server: &Self, what: &str, err: RequestError| {
-            let reason = match err {
-                RequestError::TimedOut => {
-                    format!("did not {what} within {} seconds", timeout.as_secs())
-                }
-                RequestError::Refused(message) => format!("refused to {what}: {message}"),
-                RequestError::Malformed => format!("sent a malformed answer when asked to {what}"),
-                RequestError::Gone | RequestError::Cancelled => {
-                    format!("stopped before it could {what}{}", server.exit_status())
-                }
-            };
-            server.secrets.redact(&format!(
-                "MCP server {} was not started: it {reason}.{}",
-                server.name,
-                server.stderr_tail()
-            ))
+        let transport = match &settings.transport {
+            McpTransportSettings::Stdio { command, env } => Transport::Stdio(
+                StdioTransport::spawn(&settings.name, command, env, workspace_root, host_env)?,
+            ),
+            McpTransportSettings::Http { url, headers } => {
+                Transport::Http(http::HttpTransport::start(&settings.name, url, headers)?)
+            }
         };
-        let refuse = |server: &Self, problem: String| {
-            server.secrets.redact(&format!(
-                "MCP server {} was not started: {problem}.",
-                server.name
-            ))
+        let server = Self {
+            name: settings.name.clone(),
+            transport,
+            next_id: AtomicU64::new(1),
+            secrets: Secrets::of(settings),
+            call_timeout: settings.tool_timeout,
         };
-        let initialized = server
-            .request(
-                "initialize",
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {"name": "socium", "version": env!("CARGO_PKG_VERSION")},
-                }),
-                &wait,
-            )
-            .map_err(|err| failed(&server, "initialize", err))?;
-        let version = initialized["protocolVersion"].as_str().unwrap_or_default();
-        if !PROTOCOL_VERSIONS.contains(&version) {
-            return Err(refuse(
-                &server,
-                format!(
-                    "it answered with protocol version `{version}`, and Socium speaks {}",
-                    PROTOCOL_VERSIONS.join(", ")
-                ),
-            ));
-        }
-        server
-            .notify("notifications/initialized", None, &wait)
-            .map_err(|err| failed(&server, "initialize", err))?;
+        let failed =
+            |server: &Self, what: &str, err: RequestError| server.not_started(what, err, timeout);
+        let initialized = server.handshake(&wait, timeout)?;
         let mut tools = Vec::new();
         // A server that does not offer tools has none to list.
         if !initialized["capabilities"]["tools"].is_object() {
@@ -229,7 +282,7 @@ impl McpServer {
                 .request("tools/list", params, &wait)
                 .map_err(|err| failed(&server, "list its tools", err))?;
             let Some(listed) = page["tools"].as_array() else {
-                return Err(refuse(&server, "its tool list is not an array".into()));
+                return Err(server.refused("its tool list is not an array"));
             };
             for tool in listed {
                 let Some(name) = tool["name"].as_str() else {
@@ -260,114 +313,108 @@ impl McpServer {
                 _ => return Ok((server, tools)),
             }
         }
-        Err(refuse(
-            &server,
-            format!("its tool list has more than {MAX_TOOL_PAGES} pages"),
+        Err(server.refused(&format!(
+            "its tool list has more than {MAX_TOOL_PAGES} pages"
+        )))
+    }
+
+    /// `initialize` and `notifications/initialized`, after which the
+    /// server takes other requests. Returns the initialize result, or the
+    /// warning for the user.
+    fn handshake(&self, wait: &Wait<'_>, timeout: Duration) -> Result<Value, String> {
+        let initialized = self
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "socium", "version": env!("CARGO_PKG_VERSION")},
+                }),
+                wait,
+            )
+            .map_err(|err| self.not_started("initialize", err, timeout))?;
+        let answered = initialized["protocolVersion"].as_str().unwrap_or_default();
+        let Some(version) = PROTOCOL_VERSIONS
+            .iter()
+            .find(|version| **version == answered)
+        else {
+            return Err(self.refused(&format!(
+                "it answered with protocol version `{answered}`, and Socium speaks {}",
+                PROTOCOL_VERSIONS.join(", ")
+            )));
+        };
+        if let Transport::Http(http) = &self.transport {
+            http.negotiated(version);
+        }
+        self.notify("notifications/initialized", None, Some(wait.deadline))
+            .map_err(|err| self.not_started("initialize", err, timeout))?;
+        Ok(initialized)
+    }
+
+    /// The warning for a server that failed to `what`.
+    fn not_started(&self, what: &str, err: RequestError, timeout: Duration) -> String {
+        let reason = match err {
+            RequestError::TimedOut => {
+                format!("did not {what} within {} seconds", timeout.as_secs())
+            }
+            RequestError::Refused(message) => format!("refused to {what}: {message}"),
+            RequestError::Malformed => format!("sent a malformed answer when asked to {what}"),
+            RequestError::Transport(message) => message,
+            RequestError::SessionEnded => "ended the session it had just started".into(),
+            RequestError::Gone | RequestError::Cancelled => {
+                format!(
+                    "stopped before it could {what}{}",
+                    self.transport.exit_status()
+                )
+            }
+        };
+        let at = match self.transport.origin() {
+            Some(origin) => format!(" at {origin}"),
+            None => String::new(),
+        };
+        self.secrets.redact(&format!(
+            "MCP server {}{at} was not started: it {reason}.{}",
+            self.name,
+            self.transport.stderr_tail()
         ))
     }
 
-    fn spawn(
-        settings: &McpServerSettings,
-        workspace_root: &Path,
-        host_env: &dyn Fn(&str) -> Option<String>,
-    ) -> Result<Self, String> {
-        let mut command = Command::new(&settings.command[0]);
-        // Not the workspace: a launcher such as `python3 -m` or `npx` would
-        // load the workspace's modules and packages first.
-        command
-            .args(&settings.command[1..])
-            .current_dir("/")
-            .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for variable in INHERITED_VARIABLES {
-            let value = match *variable {
-                "PATH" => host_env(variable).map(|path| path_outside(&path, workspace_root)),
-                _ => host_env(variable),
-            };
-            if let Some(value) = value {
-                command.env(variable, value);
-            }
-        }
-        command.envs(&settings.env);
-        // Its own process group, so a launcher such as npx or uvx goes down
-        // with the server it started.
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut child = command.spawn().map_err(|err| {
-            format!(
-                "MCP server {} was not started: `{}` could not run: {err}.",
-                settings.name, settings.command[0]
-            )
-        })?;
-        let (Some(stdin), Some(stdout), Some(stderr)) =
-            (child.stdin.take(), child.stdout.take(), child.stderr.take())
-        else {
-            unreachable!("all three streams are piped");
-        };
-        let (sender, lines) = mpsc::sync_channel(OUTBOX_MESSAGES);
-        let server = Self {
-            name: settings.name.clone(),
-            child: Mutex::new(child),
-            outbox: Arc::new(Mutex::new(Some(sender))),
-            waiters: Arc::new(Mutex::new(Some(HashMap::new()))),
-            next_id: AtomicU64::new(1),
-            stderr: Arc::new(Mutex::new(VecDeque::new())),
-            secrets: Secrets::of(settings),
-            call_timeout: settings.tool_timeout,
-        };
-        std::thread::spawn(move || write_messages(stdin, &lines));
-        let (waiters, outbox) = (server.waiters.clone(), server.outbox.clone());
-        std::thread::spawn(move || read_messages(stdout, &waiters, &outbox));
-        let kept = server.stderr.clone();
-        std::thread::spawn(move || keep_stderr_tail(stderr, &kept));
-        Ok(server)
+    /// The warning for a server whose answers Socium cannot use.
+    fn refused(&self, problem: &str) -> String {
+        self.secrets.redact(&format!(
+            "MCP server {} was not started: {problem}.",
+            self.name
+        ))
     }
 
     fn request(&self, method: &str, params: Value, wait: &Wait<'_>) -> Result<Value, RequestError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, responses) = mpsc::channel();
-        match lock(&self.waiters).as_mut() {
-            Some(waiters) => waiters.insert(id, sender),
-            None => return Err(RequestError::Gone),
-        };
         let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let response = self.send(&message, Some(wait)).and_then(|()| {
-            loop {
-                match responses.recv_timeout(POLL) {
-                    Ok(response) => break Ok(response),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break Err(RequestError::Gone),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                }
-                if let Some(stop) = wait.stopped() {
-                    break Err(stop);
-                }
+        let responses = self.transport.send(id, &message)?;
+        let response = loop {
+            match responses.recv_timeout(POLL) {
+                Ok(reply) => break reply,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break Err(RequestError::Gone),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-        });
-        let response = match response {
-            Ok(response) => response,
-            Err(err) => {
-                self.forget(id);
+            if let Some(stop) = wait.stopped() {
+                self.transport.forget(id);
                 // A client must not cancel its initialize request; the
                 // server is stopped instead.
-                if matches!(err, RequestError::Cancelled | RequestError::TimedOut)
-                    && method != "initialize"
-                {
-                    let reason = match err {
+                if method != "initialize" {
+                    let reason = match stop {
                         RequestError::Cancelled => "The user cancelled the request.",
                         _ => "The request took too long.",
                     };
-                    let notice = json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/cancelled",
-                        "params": {"requestId": id, "reason": reason},
-                    });
-                    let _ = self.send(&notice, None);
+                    let _ = self.notify(
+                        "notifications/cancelled",
+                        Some(json!({"requestId": id, "reason": reason})),
+                        None,
+                    );
                 }
-                return Err(err);
+                break Err(stop);
             }
-        };
+        }?;
         match (response.get("result"), response.get("error")) {
             (Some(result), None) => Ok(result.clone()),
             (None, Some(error)) => Err(RequestError::Refused(
@@ -380,50 +427,17 @@ impl McpServer {
         }
     }
 
-    fn forget(&self, id: u64) {
-        if let Some(waiters) = lock(&self.waiters).as_mut() {
-            waiters.remove(&id);
-        }
-    }
-
     fn notify(
         &self,
         method: &str,
         params: Option<Value>,
-        wait: &Wait<'_>,
+        deadline: Option<Instant>,
     ) -> Result<(), RequestError> {
         let mut message = json!({"jsonrpc": "2.0", "method": method});
         if let Some(params) = params {
             message["params"] = params;
         }
-        self.send(&message, Some(wait))
-    }
-
-    /// Queues `message` for the server's input. While the queue is full it
-    /// waits until `wait` ends, or gives up at once without one.
-    fn send(&self, message: &Value, wait: Option<&Wait<'_>>) -> Result<(), RequestError> {
-        let mut line = message.to_string().into_bytes();
-        line.push(b'\n');
-        loop {
-            let queued = match lock(&self.outbox).as_ref() {
-                Some(outbox) => outbox.try_send(line),
-                None => return Err(RequestError::Gone),
-            };
-            match queued {
-                Ok(()) => return Ok(()),
-                Err(mpsc::TrySendError::Disconnected(_)) => return Err(RequestError::Gone),
-                Err(mpsc::TrySendError::Full(unsent)) => line = unsent,
-            }
-            match wait {
-                None => return Err(RequestError::Gone),
-                Some(wait) => {
-                    if let Some(stop) = wait.stopped() {
-                        return Err(stop);
-                    }
-                }
-            }
-            std::thread::sleep(POLL);
-        }
+        self.transport.notify(&message, deadline)
     }
 
     /// Runs `tool` with `arguments` until it answers, the server's
@@ -473,12 +487,33 @@ impl McpServer {
                         "The {} MCP server sent a malformed answer, {unknown}",
                         self.name
                     ),
-                    // Its standard error stays out: it is for the user, and
-                    // may hold what the server was given.
+                    RequestError::Transport(message) => {
+                        format!("The {} MCP server {message}", self.name)
+                    }
+                    // The spec has the client start a new session. The call
+                    // is not sent again: the model decides.
+                    RequestError::SessionEnded => {
+                        let wait = Wait {
+                            deadline: Instant::now() + STARTUP_TIMEOUT,
+                            control,
+                        };
+                        match self.handshake(&wait, STARTUP_TIMEOUT) {
+                            Ok(_) => format!(
+                                "The {} MCP server had ended its session (HTTP 404), so the call did not run; Socium started a new session, so call the tool again",
+                                self.name
+                            ),
+                            Err(_) => format!(
+                                "The {} MCP server ended its session (HTTP 404), so the call did not run, and a new session could not be started; reload the settings or restart Socium",
+                                self.name
+                            ),
+                        }
+                    }
+                    // A child's standard error stays out: it is for the
+                    // user, and may hold what the server was given.
                     RequestError::Gone => format!(
                         "The {} MCP server stopped before answering{}",
                         self.name,
-                        self.exit_status()
+                        self.transport.exit_status()
                     ),
                 }))
             })?;
@@ -494,8 +529,106 @@ impl McpServer {
         }
         Ok(text)
     }
+}
 
-    /// `" (exit status: 3)"` when the child has exited, else nothing.
+/// A server running as a child process that speaks newline-delimited
+/// JSON-RPC on stdin and stdout. It is stopped when this is dropped.
+struct StdioTransport {
+    child: Mutex<Child>,
+    outbox: Outbox,
+    /// Callers waiting for a response, by request ID; `None` once the
+    /// server's output closed.
+    waiters: Waiters,
+    stderr: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl StdioTransport {
+    fn spawn(
+        name: &str,
+        argv: &[String],
+        env: &BTreeMap<String, String>,
+        workspace_root: &Path,
+        host_env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        let mut command = Command::new(&argv[0]);
+        // Not the workspace: a launcher such as `python3 -m` or `npx` would
+        // load the workspace's modules and packages first.
+        command
+            .args(&argv[1..])
+            .current_dir("/")
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for variable in INHERITED_VARIABLES {
+            let value = match *variable {
+                "PATH" => host_env(variable).map(|path| path_outside(&path, workspace_root)),
+                _ => host_env(variable),
+            };
+            if let Some(value) = value {
+                command.env(variable, value);
+            }
+        }
+        command.envs(env);
+        // Its own process group, so a launcher such as npx or uvx goes down
+        // with the server it started.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().map_err(|err| {
+            format!(
+                "MCP server {name} was not started: `{}` could not run: {err}.",
+                argv[0]
+            )
+        })?;
+        let (Some(stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
+            unreachable!("all three streams are piped");
+        };
+        let (sender, lines) = mpsc::sync_channel(OUTBOX_MESSAGES);
+        let transport = Self {
+            child: Mutex::new(child),
+            outbox: Arc::new(Mutex::new(Some(sender))),
+            waiters: Arc::new(Mutex::new(Some(HashMap::new()))),
+            stderr: Arc::new(Mutex::new(VecDeque::new())),
+        };
+        std::thread::spawn(move || write_messages(stdin, &lines));
+        let (waiters, outbox) = (transport.waiters.clone(), transport.outbox.clone());
+        std::thread::spawn(move || read_messages(stdout, &waiters, &outbox));
+        let kept = transport.stderr.clone();
+        std::thread::spawn(move || keep_stderr_tail(stderr, &kept));
+        Ok(transport)
+    }
+
+    fn send(&self, id: u64, message: &Value) -> Result<mpsc::Receiver<Reply>, RequestError> {
+        let (sender, responses) = mpsc::channel();
+        match lock(&self.waiters).as_mut() {
+            Some(waiters) => waiters.insert(id, sender),
+            None => return Err(RequestError::Gone),
+        };
+        if let Err(err) = self.queue(message) {
+            self.forget(id);
+            return Err(err);
+        }
+        Ok(responses)
+    }
+
+    /// Hands `message` to the writer thread without waiting for it.
+    fn queue(&self, message: &Value) -> Result<(), RequestError> {
+        let mut line = message.to_string().into_bytes();
+        line.push(b'\n');
+        match lock(&self.outbox).as_ref() {
+            Some(outbox) => outbox.try_send(line).map_err(|_| RequestError::Gone),
+            None => Err(RequestError::Gone),
+        }
+    }
+
+    fn forget(&self, id: u64) {
+        if let Some(waiters) = lock(&self.waiters).as_mut() {
+            waiters.remove(&id);
+        }
+    }
+
     fn exit_status(&self) -> String {
         // The reader may see the pipe close a moment before the exit is
         // visible.
@@ -546,7 +679,7 @@ impl McpServer {
         lock(&self.child).try_wait().ok().flatten()
     }
 
-    /// Closes the server's input, which tells it to exit.
+    /// Closes the child's input, which tells it to exit.
     fn close_input(&self) {
         lock(&self.outbox).take();
     }
@@ -563,8 +696,6 @@ impl McpServer {
         false
     }
 
-    /// The last lines the server wrote to standard error, as a paragraph
-    /// to append to a warning, or nothing.
     fn stderr_tail(&self) -> String {
         // Lines written just before an exit may still be on their way.
         std::thread::sleep(Duration::from_millis(20));
@@ -579,8 +710,8 @@ impl McpServer {
     }
 }
 
-impl Drop for McpServer {
-    /// Closes the input and gives the server a moment to exit, then sends
+impl Drop for StdioTransport {
+    /// Closes the input and gives the child a moment to exit, then sends
     /// its group SIGTERM, then SIGKILL, which also ends what a launcher
     /// started.
     fn drop(&mut self) {
@@ -631,8 +762,8 @@ fn path_outside(path: &str, workspace_root: &Path) -> String {
         .join(":")
 }
 
-/// Writes queued lines to the server's input until the queue closes or the
-/// server stops reading. A blocked write holds no lock, so cancelling and
+/// Writes queued lines to a child's input until the queue closes or the
+/// child stops reading. A blocked write holds no lock, so cancelling and
 /// stopping still work.
 fn write_messages(mut stdin: ChildStdin, lines: &mpsc::Receiver<Vec<u8>>) {
     for line in lines {
@@ -702,7 +833,7 @@ fn route_message(message: serde_json::Map<String, Value>, waiters: &Waiters, out
                     .and_then(|waiters| waiters.remove(&id))
             });
             if let Some(waiter) = waiter {
-                let _ = waiter.send(Value::Object(message));
+                let _ = waiter.send(Ok(Value::Object(message)));
             }
         }
         (None, None) => {}
@@ -786,6 +917,8 @@ pub(crate) struct McpTarget<'a> {
     pub(crate) remote: &'a str,
     /// Whether the server's `allow` list names the tool.
     pub(crate) allowed: bool,
+    /// Where a remote server is; `None` for one on the host.
+    pub(crate) origin: Option<&'a str>,
 }
 
 struct Route {
@@ -921,6 +1054,7 @@ impl McpRegistry {
             server: &self.servers[route.server].name,
             remote: &route.remote,
             allowed: route.allowed,
+            origin: self.servers[route.server].transport.origin(),
         })
     }
 
@@ -941,7 +1075,7 @@ impl Drop for McpRegistry {
     /// than one grace period after another.
     fn drop(&mut self) {
         for server in &self.servers {
-            server.close_input();
+            server.transport.close();
         }
     }
 }
@@ -949,7 +1083,6 @@ impl Drop for McpRegistry {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     pub(crate) const FAKE_SERVER: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -963,8 +1096,10 @@ pub(crate) mod tests {
         }
         McpServerSettings {
             name: name.into(),
-            command,
-            env: BTreeMap::from([("FAKE_CONFIGURED".to_string(), "yes".to_string())]),
+            transport: McpTransportSettings::Stdio {
+                command,
+                env: BTreeMap::from([("FAKE_CONFIGURED".to_string(), "yes".to_string())]),
+            },
             allow: allow.iter().map(|tool| tool.to_string()).collect(),
             tool_timeout: Duration::from_secs(600),
         }
@@ -1018,6 +1153,8 @@ pub(crate) mod tests {
                 "mcp__fake__empty",
                 "mcp__fake__batch",
                 "mcp__fake__secret",
+                "mcp__fake__expire",
+                "mcp__fake__reflect",
             ]
         );
         assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -1133,7 +1270,10 @@ pub(crate) mod tests {
     fn servers_that_fail_to_start_are_skipped_with_a_warning() {
         let root = tempfile::tempdir().unwrap();
         let missing = McpServerSettings {
-            command: vec!["/nonexistent/mcp-server".into()],
+            transport: McpTransportSettings::Stdio {
+                command: vec!["/nonexistent/mcp-server".into()],
+                env: BTreeMap::new(),
+            },
             ..fake_settings("missing", "", &[])
         };
         let (registry, warnings) = connect_in(
@@ -1177,7 +1317,10 @@ pub(crate) mod tests {
     #[test]
     fn dropping_the_registry_ends_the_server() {
         let (registry, _) = connect_fake(&[fake_settings("fake", "", &[])]);
-        let pid = lock(&registry.servers[0].child).id();
+        let Transport::Stdio(stdio) = &registry.servers[0].transport else {
+            unreachable!("a child process");
+        };
+        let pid = lock(&stdio.child).id();
         assert!(Path::new(&format!("/proc/{pid}")).exists());
 
         drop(registry);
@@ -1193,6 +1336,15 @@ pub(crate) mod tests {
         timeout: Duration,
     ) -> (McpRegistry, Vec<String>) {
         McpRegistry::connect(servers, root, env, timeout, &TaskControl::default())
+    }
+
+    fn stdio(
+        settings: &mut McpServerSettings,
+    ) -> (&mut Vec<String>, &mut BTreeMap<String, String>) {
+        match &mut settings.transport {
+            McpTransportSettings::Stdio { command, env } => (command, env),
+            McpTransportSettings::Http { .. } => panic!("not a stdio server"),
+        }
     }
 
     fn cancel_after(delay: Duration) -> TaskControl {
@@ -1220,7 +1372,7 @@ pub(crate) mod tests {
             .find(|path| path.is_file())
             .unwrap();
         let mut settings = fake_settings("fake", "", &[]);
-        settings.command[0] = python.display().to_string();
+        stdio(&mut settings).0[0] = python.display().to_string();
         let (registry, warnings) = connect_in(root.path(), &[settings], &env, STARTUP_TIMEOUT);
         assert!(
             registry.target("mcp__fake__where").is_some(),
@@ -1244,10 +1396,8 @@ pub(crate) mod tests {
             ),
         )
         .unwrap();
-        let settings = McpServerSettings {
-            command: vec!["python3".into(), "-m".into(), "socium_planted".into()],
-            ..fake_settings("planted", "", &[])
-        };
+        let mut settings = fake_settings("planted", "", &[]);
+        *stdio(&mut settings).0 = vec!["python3".into(), "-m".into(), "socium_planted".into()];
 
         let (registry, warnings) =
             connect_in(root.path(), &[settings], &host_env, Duration::from_secs(5));
@@ -1260,7 +1410,10 @@ pub(crate) mod tests {
     #[test]
     fn a_server_that_stops_reading_does_not_hold_up_cancelling_or_stopping() {
         let (registry, _) = connect_fake(&[fake_settings("fake", "", &[])]);
-        let pid = lock(&registry.servers[0].child).id();
+        let Transport::Stdio(stdio) = &registry.servers[0].transport else {
+            unreachable!("a child process");
+        };
+        let pid = lock(&stdio.child).id();
         let deaf = registry
             .call(
                 "mcp__fake__deaf",
@@ -1421,8 +1574,8 @@ pub(crate) mod tests {
     fn values_a_server_was_given_are_blanked_out_of_warnings_and_errors() {
         let secret = |name: &str, mode: &str| {
             let mut settings = fake_settings(name, mode, &[]);
-            settings
-                .env
+            stdio(&mut settings)
+                .1
                 .insert("FAKE_SECRET".into(), "s3cret-value-123".into());
             settings
         };
@@ -1446,8 +1599,8 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let log = root.path().join("methods");
         let mut settings = fake_settings("hang", "--hang", &[]);
-        settings
-            .env
+        stdio(&mut settings)
+            .1
             .insert("FAKE_LOG".into(), log.display().to_string());
 
         let (_, warnings) = connect_in(root.path(), &[settings], &host_env, Duration::from_secs(1));
@@ -1507,5 +1660,304 @@ pub(crate) mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "x".repeat(STDERR_LINE_CHARS));
         assert_eq!(lines[1], "last words");
+    }
+
+    /// The fake server in its HTTP mode, stopped when dropped.
+    pub(crate) struct FakeHttpServer {
+        child: Child,
+        pub(crate) url: String,
+        log: std::path::PathBuf,
+        _dir: tempfile::TempDir,
+    }
+
+    impl FakeHttpServer {
+        pub(crate) fn start(options: &[&str]) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("requests.jsonl");
+            let mut child = Command::new("python3")
+                .arg(FAKE_SERVER)
+                .arg("--http")
+                .arg(format!("--log={}", log.display()))
+                .args(options)
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let port = line.trim().strip_prefix("PORT ").expect("a port");
+            Self {
+                child,
+                url: format!("http://127.0.0.1:{port}/mcp"),
+                log,
+                _dir: dir,
+            }
+        }
+
+        pub(crate) fn settings(
+            &self,
+            name: &str,
+            headers: &[(&str, &str)],
+            allow: &[&str],
+        ) -> McpServerSettings {
+            McpServerSettings {
+                name: name.into(),
+                transport: McpTransportSettings::Http {
+                    url: self.url.clone(),
+                    headers: headers
+                        .iter()
+                        .map(|(name, value)| (name.to_string(), value.to_string()))
+                        .collect(),
+                },
+                allow: allow.iter().map(|tool| tool.to_string()).collect(),
+                tool_timeout: Duration::from_secs(600),
+            }
+        }
+
+        /// One entry per HTTP request the server received.
+        fn requests(&self) -> Vec<Value> {
+            std::fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        }
+    }
+
+    impl Drop for FakeHttpServer {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    const STREAMS: [&[&str]; 3] = [&[], &["--sse"], &["--sse", "--cr"]];
+
+    #[test]
+    fn a_remote_server_answers_in_json_bodies_and_in_event_streams() {
+        for options in STREAMS {
+            let fake = FakeHttpServer::start(options);
+            let (registry, warnings) = connect_fake(&[fake.settings("fake", &[], &["echo"])]);
+
+            assert_eq!(warnings.len(), 1, "{options:?}: {warnings:?}");
+            assert!(warnings[0].contains("`bad.name`"), "{warnings:?}");
+            assert_eq!(registry.definitions().len(), 17, "{options:?}");
+            assert_eq!(
+                registry.definitions()[0].input_schema["required"],
+                json!(["text"])
+            );
+            assert_eq!(
+                call(&registry, "mcp__fake__echo", json!({"text": "hi"})),
+                Ok("echo: hi".into())
+            );
+            assert_eq!(
+                call(&registry, "mcp__fake__fail", json!({})),
+                Err("it broke".into())
+            );
+            assert_eq!(
+                call(&registry, "mcp__fake__image", Value::Null),
+                Ok("a chart\n[image content omitted]".into())
+            );
+            assert_eq!(
+                call(&registry, "mcp__fake__structured", json!({})),
+                Ok(r#"{"temperature":21}"#.into())
+            );
+            // A ping inside the call's event stream was answered.
+            let pings = if options.is_empty() { "[]" } else { "[{}]" };
+            assert_eq!(
+                call(&registry, "mcp__fake__pong", json!({})),
+                Ok(pings.into())
+            );
+
+            let requests = fake.requests();
+            assert_eq!(
+                (
+                    &requests[0]["rpc"],
+                    &requests[0]["session"],
+                    &requests[0]["version"]
+                ),
+                (&json!("initialize"), &Value::Null, &Value::Null)
+            );
+            assert_eq!(requests[1]["rpc"], "notifications/initialized");
+            for request in &requests[1..] {
+                assert_eq!(request["session"], "session-1", "{request}");
+                // The version the server chose, not the one Socium offered.
+                assert_eq!(request["version"], "2025-03-26", "{request}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancelled_remote_call_returns_promptly_and_the_server_is_told() {
+        for options in STREAMS {
+            let fake = FakeHttpServer::start(options);
+            let (registry, _) = connect_fake(&[fake.settings("fake", &[], &[])]);
+            let control = TaskControl::default();
+            let canceller = control.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                canceller.cancel();
+            });
+
+            let started = Instant::now();
+            let result = registry
+                .call("mcp__fake__slow", &json!({}), &control)
+                .unwrap();
+
+            assert!(started.elapsed() < Duration::from_secs(5), "{options:?}");
+            let err = result.unwrap_err().to_string();
+            assert!(err.starts_with("Cancelled"), "{err}");
+            // The notification travels on its own; give it a moment.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let told = call(&registry, "mcp__fake__cancelled", json!({}));
+                if told == Ok("4".into()) || Instant::now() > deadline {
+                    assert_eq!(told, Ok("4".into()), "{options:?}");
+                    break;
+                }
+                std::thread::sleep(POLL);
+            }
+        }
+    }
+
+    #[test]
+    fn a_remote_server_that_needs_a_token_gets_it_only_from_the_headers() {
+        let fake = FakeHttpServer::start(&["--token=s3cret-token"]);
+        let unreachable = McpServerSettings {
+            transport: McpTransportSettings::Http {
+                url: "http://127.0.0.1:9/mcp".into(),
+                headers: BTreeMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer unused-s3cret".to_string(),
+                )]),
+            },
+            ..fake.settings("gone", &[], &[])
+        };
+
+        let (registry, warnings) = connect_fake(&[
+            fake.settings("anonymous", &[], &[]),
+            fake.settings("wrong", &[("Authorization", "Bearer wrong-s3cret")], &[]),
+            unreachable,
+            fake.settings("right", &[("Authorization", "Bearer s3cret-token")], &[]),
+        ]);
+
+        assert!(registry.target("mcp__right__echo").is_some());
+        assert!(registry.target("mcp__wrong__echo").is_none());
+        let warnings = warnings
+            .into_iter()
+            .filter(|warning| !warning.contains("bad.name"))
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        let origin = fake.url.trim_end_matches("/mcp");
+        assert!(
+            warnings[0].starts_with(&format!("MCP server anonymous at {origin} was not started: it needs authorization (HTTP 401)"))
+                && warnings[0].contains("does not support OAuth"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[1].contains("needs authorization"),
+            "{}",
+            warnings[1]
+        );
+        assert!(
+            warnings[2].starts_with(
+                "MCP server gone at http://127.0.0.1:9 was not started: it could not be reached"
+            ),
+            "{}",
+            warnings[2]
+        );
+        assert_eq!(
+            call(&registry, "mcp__right__echo", json!({"text": "hi"})),
+            Ok("echo: hi".into())
+        );
+        call(&registry, "mcp__right__expire", json!({})).unwrap();
+        let expired = call(&registry, "mcp__right__echo", json!({"text": "hi"})).unwrap_err();
+        for text in warnings.iter().chain([&expired]) {
+            assert!(!text.contains("s3cret"), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_expired_remote_session_is_renewed_without_sending_the_call_again() {
+        let fake = FakeHttpServer::start(&["--sse"]);
+        let (registry, _) = connect_fake(&[fake.settings("fake", &[], &[])]);
+
+        call(&registry, "mcp__fake__expire", json!({})).unwrap();
+        let err = call(&registry, "mcp__fake__echo", json!({"text": "x"})).unwrap_err();
+
+        assert!(err.contains("had ended its session (HTTP 404)"), "{err}");
+        assert!(err.contains("call the tool again"), "{err}");
+        let requests = fake.requests();
+        let echoes = |requests: &[Value]| {
+            requests
+                .iter()
+                .filter(|request| request["rpc"] == "tools/call")
+                .count()
+        };
+        let after = requests
+            .iter()
+            .rposition(|request| request["rpc"] == "initialize")
+            .unwrap();
+        assert!(after > 2, "a second initialize: {requests:?}");
+        assert_eq!(requests[after]["session"], Value::Null);
+        assert_eq!(requests[after]["version"], Value::Null);
+        // The expire call and the echo the server refused; none after.
+        assert_eq!(echoes(&requests[after..]), 0);
+        assert_eq!(
+            call(&registry, "mcp__fake__echo", json!({"text": "x"})),
+            Ok("echo: x".into())
+        );
+    }
+
+    #[test]
+    fn a_header_token_is_blanked_out_with_or_without_its_scheme() {
+        let fake = FakeHttpServer::start(&[]);
+        let settings = fake.settings("fake", &[("Authorization", "Bearer s3cret-token")], &[]);
+
+        let secrets = Secrets::of(&settings);
+
+        assert_eq!(
+            secrets.redact("got Bearer s3cret-token, then s3cret-token"),
+            "got [redacted], then [redacted]"
+        );
+    }
+
+    #[test]
+    fn a_remote_server_that_repeats_its_token_has_it_blanked_out() {
+        let fake = FakeHttpServer::start(&["--token=s3cret-token"]);
+        let (registry, _) = connect_fake(&[fake.settings(
+            "fake",
+            &[("Authorization", "Bearer s3cret-token")],
+            &[],
+        )]);
+
+        let err = call(&registry, "mcp__fake__reflect", json!({})).unwrap_err();
+
+        assert_eq!(
+            err,
+            "The fake MCP server answered HTTP 400 Bad Request: rejected [redacted]"
+        );
+    }
+
+    #[test]
+    fn dropping_the_registry_ends_the_remote_session() {
+        let fake = FakeHttpServer::start(&[]);
+        let (registry, _) = connect_fake(&[fake.settings("fake", &[], &[])]);
+        let origin = fake.url.trim_end_matches("/mcp");
+        assert_eq!(
+            registry.target("mcp__fake__echo").unwrap().origin,
+            Some(origin)
+        );
+
+        drop(registry);
+
+        let requests = fake.requests();
+        let last = requests.last().unwrap();
+        assert_eq!(
+            (&last["http"], &last["session"]),
+            (&json!("DELETE"), &json!("session-1"))
+        );
     }
 }

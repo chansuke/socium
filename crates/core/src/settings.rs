@@ -84,8 +84,8 @@ pub struct Settings {
     /// The `web_search` tool, which sends the model's queries to DeepSeek's
     /// paid Search API; `None` unless the user turned it on.
     pub(crate) web_search: Option<WebSearchSettings>,
-    /// `[mcp.servers.<name>]`: MCP servers Socium starts on the host, in
-    /// name order, the disabled ones left out.
+    /// `[mcp.servers.<name>]`: MCP servers Socium starts on the host or
+    /// connects to, in name order, the disabled ones left out.
     pub(crate) mcp_servers: Vec<McpServerSettings>,
     /// Where the settings came from, shown in errors and `/help`.
     pub(crate) source: Option<PathBuf>,
@@ -98,18 +98,13 @@ pub(crate) struct WebSearchSettings {
     pub(crate) base_url: String,
 }
 
-/// One `[mcp.servers.<name>]` table (ADR 20).
+/// One `[mcp.servers.<name>]` table (ADR 20, ADR 21).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct McpServerSettings {
     /// Matches `[A-Za-z0-9_-]{1,32}` without `__` and not ending in `_`, so
     /// `mcp__<name>__<tool>` names one server.
     pub(crate) name: String,
-    /// The program, an absolute path or a name looked up on PATH, and its
-    /// arguments, run with `/` as the directory.
-    pub(crate) command: Vec<String>,
-    /// Variables set for the server on top of PATH, HOME, USER and LANG,
-    /// `${NAME}` already expanded from Socium's environment.
-    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) transport: McpTransportSettings,
     /// Remote tool names that run without asking.
     pub(crate) allow: Vec<String>,
     /// How long a tool call may take before it is given up.
@@ -118,6 +113,55 @@ pub(crate) struct McpServerSettings {
 
 /// How long an MCP tool call may take unless `tool_timeout_secs` says.
 const DEFAULT_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How Socium reaches an MCP server.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum McpTransportSettings {
+    /// `command`: a child process that speaks JSON-RPC on stdin and stdout.
+    Stdio {
+        /// The program, an absolute path or a name looked up on PATH, and
+        /// its arguments, run with `/` as the directory.
+        command: Vec<String>,
+        /// Variables set for the server on top of PATH, HOME, USER and
+        /// LANG, `${NAME}` already expanded from Socium's environment.
+        env: BTreeMap<String, String>,
+    },
+    /// `url`: a remote server over Streamable HTTP.
+    Http {
+        /// https, or plain http on loopback.
+        url: String,
+        /// Sent with every request, `${NAME}` already expanded. The values
+        /// are often secrets, so they are never shown.
+        headers: BTreeMap<String, String>,
+    },
+}
+
+impl std::fmt::Debug for McpTransportSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdio { command, env } => f
+                .debug_struct("Stdio")
+                .field("command", command)
+                .field("env", env)
+                .finish(),
+            Self::Http { url, headers } => f
+                .debug_struct("Http")
+                .field("url", url)
+                .field("headers", &headers.keys().collect::<Vec<_>>())
+                .finish(),
+        }
+    }
+}
+
+/// Headers the HTTP transport sets itself.
+const RESERVED_MCP_HEADERS: &[&str] = &[
+    "accept",
+    "content-type",
+    "content-length",
+    "host",
+    "mcp-session-id",
+    "mcp-protocol-version",
+];
 
 /// Longest server name, so `mcp__<server>__<tool>` leaves room for the tool
 /// within the 64 characters providers accept.
@@ -336,9 +380,10 @@ struct RawMcp {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMcpServer {
-    command: Vec<String>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
+    command: Option<Vec<String>>,
+    env: Option<BTreeMap<String, String>>,
+    url: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
     #[serde(default)]
     allow: Vec<String>,
     tool_timeout_secs: Option<u64>,
@@ -519,7 +564,7 @@ impl Settings {
         home: Option<&str>,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<(Self, Vec<String>), String> {
-        let raw: RawFile = toml::from_str(text).map_err(|err| err.to_string())?;
+        let raw: RawFile = toml::from_str(text).map_err(|err| toml_error(text, &err))?;
         let mut warnings = Vec::new();
         let expand = |value: &str| -> Result<PathBuf, String> {
             let path = match value.strip_prefix("~/") {
@@ -684,10 +729,20 @@ impl Settings {
                 .push("approval.commands = \"auto\": sandboxed commands run without asking".into());
         }
         for server in &self.mcp_servers {
-            lines.push(format!(
-                "MCP server {} runs on the host, outside the sandbox: {}",
-                server.name, server.command[0]
-            ));
+            lines.push(match &server.transport {
+                McpTransportSettings::Stdio { command, .. } => format!(
+                    "MCP server {} runs on the host, outside the sandbox: {}",
+                    server.name, command[0]
+                ),
+                McpTransportSettings::Http { url, headers } if headers.is_empty() => {
+                    format!("MCP server {} is remote: {url}", server.name)
+                }
+                McpTransportSettings::Http { url, headers } => format!(
+                    "MCP server {} is remote: {url} (headers: {})",
+                    server.name,
+                    headers.keys().cloned().collect::<Vec<_>>().join(", ")
+                ),
+            });
         }
         lines
     }
@@ -713,16 +768,6 @@ fn mcp_server(
             "mcp.servers.{name}: a server name must be 1 to {MAX_MCP_SERVER_NAME} letters, digits, '_' or '-', without '__' and not ending in '_'"
         ));
     }
-    let Some(program) = raw.command.first().filter(|program| !program.is_empty()) else {
-        return Err(format!(
-            "mcp.servers.{name}.command must name a program and its arguments"
-        ));
-    };
-    if program.contains('/') && !Path::new(program).is_absolute() {
-        return Err(format!(
-            "mcp.servers.{name}.command: '{program}' must be an absolute path or a program name found on PATH"
-        ));
-    }
     if raw.tool_timeout_secs == Some(0) {
         return Err(format!(
             "mcp.servers.{name}.tool_timeout_secs must be at least 1"
@@ -733,42 +778,177 @@ fn mcp_server(
             "mcp.servers.{name}.allow: '{tool}' is not a tool name"
         ));
     }
-    if !raw.enabled {
-        return Ok(None);
-    }
-    let mut variables = BTreeMap::new();
-    for (variable, value) in raw.env {
-        if variable.is_empty() || variable.contains(['=', '\0']) {
-            return Err(format!(
-                "mcp.servers.{name}.env: '{variable}' is not a variable name"
-            ));
-        }
-        match expand_variables(&value, env) {
-            Ok(expanded) => {
-                variables.insert(variable, expanded);
-            }
-            Err(Expansion::Missing(missing)) => {
-                warnings.push(format!(
-                    "mcp.servers.{name}.env.{variable}: ${{{missing}}} is not set, so the {name} server is not started"
+    let transport = match (raw.command, raw.url) {
+        (Some(command), None) => {
+            if raw.headers.is_some() {
+                return Err(format!(
+                    "mcp.servers.{name}.headers applies only to a server with url; a command server takes env"
                 ));
+            }
+            let Some(program) = command.first().filter(|program| !program.is_empty()) else {
+                return Err(format!(
+                    "mcp.servers.{name}.command must name a program and its arguments"
+                ));
+            };
+            if program.contains('/') && !Path::new(program).is_absolute() {
+                return Err(format!(
+                    "mcp.servers.{name}.command: '{program}' must be an absolute path or a program name found on PATH"
+                ));
+            }
+            let raw_env = raw.env.unwrap_or_default();
+            if let Some(variable) = raw_env
+                .keys()
+                .find(|variable| variable.is_empty() || variable.contains(['=', '\0']))
+            {
+                return Err(format!(
+                    "mcp.servers.{name}.env: '{variable}' is not a variable name"
+                ));
+            }
+            if !raw.enabled {
                 return Ok(None);
             }
-            Err(Expansion::Malformed) => {
+            let Some(env) = expand_table(&name, "env", raw_env, env, warnings)? else {
+                return Ok(None);
+            };
+            McpTransportSettings::Stdio { command, env }
+        }
+        (None, Some(url)) => {
+            if raw.env.is_some() {
                 return Err(format!(
-                    "mcp.servers.{name}.env.{variable}: '${{' must be followed by a variable name and '}}'"
+                    "mcp.servers.{name}.env applies only to a server with command; a url server takes headers"
                 ));
             }
+            crate::models::check_endpoint_url("url", &url)
+                .map_err(|err| format!("mcp.servers.{name}.{err}"))?;
+            let raw_headers = raw.headers.unwrap_or_default();
+            for header in raw_headers.keys() {
+                if reqwest::header::HeaderName::from_bytes(header.as_bytes()).is_err() {
+                    return Err(format!(
+                        "mcp.servers.{name}.headers: '{header}' is not a header name"
+                    ));
+                }
+                if RESERVED_MCP_HEADERS.contains(&header.to_ascii_lowercase().as_str()) {
+                    return Err(format!(
+                        "mcp.servers.{name}.headers: Socium sets '{header}' itself"
+                    ));
+                }
+            }
+            if !raw.enabled {
+                return Ok(None);
+            }
+            let Some(headers) = expand_table(&name, "headers", raw_headers, env, warnings)? else {
+                return Ok(None);
+            };
+            // Never repeat the value: it is usually a token.
+            if let Some(header) = headers
+                .iter()
+                .find(|(_, value)| reqwest::header::HeaderValue::from_str(value).is_err())
+                .map(|(header, _)| header)
+            {
+                return Err(format!(
+                    "mcp.servers.{name}.headers.{header}: the value is not a valid header value once its variables are expanded"
+                ));
+            }
+            McpTransportSettings::Http { url, headers }
         }
-    }
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(format!(
+                "mcp.servers.{name} needs exactly one of command (a program to start) or url (a remote server)"
+            ));
+        }
+    };
     Ok(Some(McpServerSettings {
         name,
-        command: raw.command,
-        env: variables,
+        transport,
         allow: raw.allow,
         tool_timeout: raw
             .tool_timeout_secs
             .map_or(DEFAULT_MCP_TOOL_TIMEOUT, Duration::from_secs),
     }))
+}
+
+/// `table` (`env` or `headers`) with each `${NAME}` expanded, or `None`
+/// when a variable is not set (with a warning).
+fn expand_table(
+    name: &str,
+    table: &str,
+    raw: BTreeMap<String, String>,
+    env: &dyn Fn(&str) -> Option<String>,
+    warnings: &mut Vec<String>,
+) -> Result<Option<BTreeMap<String, String>>, String> {
+    let mut expanded = BTreeMap::new();
+    for (key, value) in raw {
+        match expand_variables(&value, env) {
+            Ok(value) => {
+                expanded.insert(key, value);
+            }
+            Err(Expansion::Missing(missing)) => {
+                warnings.push(format!(
+                    "mcp.servers.{name}.{table}.{key}: ${{{missing}}} is not set, so the {name} server is not started"
+                ));
+                return Ok(None);
+            }
+            Err(Expansion::Malformed) => {
+                return Err(format!(
+                    "mcp.servers.{name}.{table}.{key}: '${{' must be followed by a variable name and '}}'"
+                ));
+            }
+        }
+    }
+    Ok(Some(expanded))
+}
+
+/// A TOML error by its place, with what it quotes of the file blanked
+/// out: the full error repeats the line, and a line may hold a token
+/// written in the file.
+fn toml_error(text: &str, err: &toml::de::Error) -> String {
+    let place = err
+        .span()
+        .and_then(|span| text.get(..span.start))
+        .map(|before| {
+            let line = before.matches('\n').count() + 1;
+            let start = before.rsplit('\n').next().unwrap_or("");
+            let column = start.chars().count() + 1;
+            // The key before the value names the setting; keys are not
+            // secrets, values may be.
+            let key = start
+                .rsplit_once('=')
+                .map(|(key, _)| key)
+                .and_then(|key| key.rsplit(['{', ',']).next())
+                .map(|key| key.trim().trim_matches('"'))
+                .filter(|key| {
+                    !key.is_empty()
+                        && key
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                });
+            match key {
+                Some(key) => format!("line {line}, column {column} ({key}): "),
+                None => format!("line {line}, column {column}: "),
+            }
+        })
+        .unwrap_or_default();
+    // A type error quotes the value it found, as `string "..."`.
+    let mut message = String::new();
+    let mut quoted = false;
+    for c in err.message().trim().chars() {
+        match c {
+            '"' if quoted => {
+                message.push_str("…\"");
+                quoted = false;
+            }
+            '"' => {
+                message.push('"');
+                quoted = true;
+            }
+            _ if quoted => {}
+            c => message.push(c),
+        }
+    }
+    if quoted {
+        message.push('…');
+    }
+    format!("{place}{message}")
 }
 
 enum Expansion {
@@ -912,18 +1092,22 @@ enabled = false
             [
                 McpServerSettings {
                     name: "github".into(),
-                    command: vec!["github-mcp-server".into(), "stdio".into()],
-                    env: BTreeMap::from([
-                        ("GITHUB_PERSONAL_ACCESS_TOKEN".into(), "ghp_x".into()),
-                        ("MODE".into(), "read-$only".into()),
-                    ]),
+                    transport: McpTransportSettings::Stdio {
+                        command: vec!["github-mcp-server".into(), "stdio".into()],
+                        env: BTreeMap::from([
+                            ("GITHUB_PERSONAL_ACCESS_TOKEN".into(), "ghp_x".into()),
+                            ("MODE".into(), "read-$only".into()),
+                        ]),
+                    },
                     allow: vec!["get_issue".into()],
                     tool_timeout: Duration::from_secs(600),
                 },
                 McpServerSettings {
                     name: "time".into(),
-                    command: vec!["/usr/local/bin/uvx".into(), "mcp-server-time".into()],
-                    env: BTreeMap::new(),
+                    transport: McpTransportSettings::Stdio {
+                        command: vec!["/usr/local/bin/uvx".into(), "mcp-server-time".into()],
+                        env: BTreeMap::new(),
+                    },
                     allow: Vec::new(),
                     tool_timeout: Duration::from_secs(30),
                 },
@@ -961,6 +1145,87 @@ enabled = false
     }
 
     #[test]
+    fn a_remote_mcp_server_has_a_url_and_headers_whose_values_stay_hidden() {
+        let text = r#"
+[mcp.servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+headers = { Authorization = "Bearer ${GITHUB_TOKEN}", X-Toolsets = "repos" }
+allow = ["get_issue"]
+
+[mcp.servers.local]
+url = "http://127.0.0.1:8931/mcp"
+"#;
+        let env = |name: &str| (name == "GITHUB_TOKEN").then(|| "ghp_secret".to_string());
+        let (settings, warnings) = Settings::parse(text, None, &env).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            settings.mcp_servers[0].transport,
+            McpTransportSettings::Http {
+                // Kept as written: the trailing slash is part of the endpoint.
+                url: "https://api.githubcopilot.com/mcp/".into(),
+                headers: BTreeMap::from([
+                    ("Authorization".into(), "Bearer ghp_secret".into()),
+                    ("X-Toolsets".into(), "repos".into()),
+                ]),
+            }
+        );
+        assert_eq!(settings.mcp_servers[0].allow, ["get_issue"]);
+        assert_eq!(
+            settings.summary(),
+            [
+                "MCP server github is remote: https://api.githubcopilot.com/mcp/ (headers: Authorization, X-Toolsets)",
+                "MCP server local is remote: http://127.0.0.1:8931/mcp",
+            ]
+        );
+        let shown = format!("{settings:?}");
+        assert!(shown.contains("Authorization"), "{shown}");
+        assert!(!shown.contains("ghp_secret"), "{shown}");
+    }
+
+    #[test]
+    fn a_remote_mcp_server_whose_header_variable_is_unset_is_skipped_with_a_warning() {
+        let text = "[mcp.servers.github]\nurl = \"https://a.example/mcp\"\nheaders = { Authorization = \"Bearer ${GITHUB_TOKEN}\" }";
+        let (settings, warnings) = Settings::from_toml(text, None).unwrap();
+        assert!(settings.mcp_servers.is_empty());
+        assert_eq!(
+            warnings,
+            [
+                "mcp.servers.github.headers.Authorization: ${GITHUB_TOKEN} is not set, so the github server is not started"
+            ]
+        );
+        // A value that is no header value is an error that does not repeat it.
+        let env = |_: &str| Some("secret\nX-Injected: 1".to_string());
+        let err = Settings::parse(text, None, &env).unwrap_err();
+        assert!(
+            err.contains(
+                "mcp.servers.github.headers.Authorization: the value is not a valid header value"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("secret"), "{err}");
+        let disabled = format!("{text}\nenabled = false");
+        assert!(Settings::from_toml(&disabled, None).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_config_is_reported_by_place_without_repeating_its_values() {
+        for (text, place) in [
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = { Authorization = \"Bearer s3cret-literal }\n",
+                "line 3, column 53 (Authorization): ",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = \"Authorization: Bearer s3cret-literal\"\n",
+                "line 3, column 11 (headers): ",
+            ),
+        ] {
+            let err = Settings::from_toml(text, None).unwrap_err();
+            assert!(!err.contains("s3cret"), "{err}");
+            assert!(err.starts_with(place), "{err}");
+        }
+    }
+
+    #[test]
     fn malformed_mcp_servers_are_errors() {
         for (text, expected) in [
             (
@@ -985,7 +1250,52 @@ enabled = false
                 "[mcp.servers.x]\ncommand = [\"x\"]\ntool_timeout_secs = 0",
                 "mcp.servers.x.tool_timeout_secs",
             ),
-            ("[mcp.servers.x]\nenv = {}", "missing field `command`"),
+            ("[mcp.servers.x]\nenv = {}", "needs exactly one of command"),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\nurl = \"https://a.example/mcp\"",
+                "needs exactly one of command",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nenv = {}",
+                "mcp.servers.x.env applies only to a server with command",
+            ),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\nheaders = { A = \"b\" }",
+                "mcp.servers.x.headers applies only to a server with url",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"http://a.example/mcp\"",
+                "mcp.servers.x.url must use https (http only for localhost)",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"ftp://127.0.0.1/mcp\"",
+                "mcp.servers.x.url must use https",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp?key=1\"",
+                "mcp.servers.x.url must not contain a query",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://u:p@a.example/mcp\"",
+                "mcp.servers.x.url must not contain credentials",
+            ),
+            ("[mcp.servers.x]\nurl = \"not a url\"", "invalid url"),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = { \"a b\" = \"c\" }",
+                "mcp.servers.x.headers: 'a b' is not a header name",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = { Mcp-Session-Id = \"c\" }",
+                "Socium sets 'Mcp-Session-Id' itself",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = { A = \"${B\" }",
+                "mcp.servers.x.headers.A",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheader = {}",
+                "unknown field",
+            ),
             (
                 "[mcp.servers.x]\ncommand = [\"x\"]\nalow = []",
                 "unknown field",

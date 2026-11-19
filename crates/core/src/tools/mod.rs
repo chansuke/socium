@@ -257,7 +257,7 @@ where
             }
             crate::approval::Gate::Ask(ask) => {
                 let permissions = match (name, &mcp_target) {
-                    (_, Some(target)) => crate::approval::mcp_permissions(target.server),
+                    (_, Some(target)) => crate::approval::mcp_permissions(target),
                     ("git_commit", None) => {
                         "Linux sandbox: workspace and Git metadata writable; agent state hidden; network denied".into()
                     }

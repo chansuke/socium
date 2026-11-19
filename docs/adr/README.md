@@ -18,3 +18,4 @@
 * [18. エージェントの計画を会話の履歴から導きActivity欄の第二の表示に示す](0018-エージェントの計画を会話の履歴から導きactivity欄の第二の表示に示す.md)
 * [19. socium -pの既定を返答の本文にしstdinと出力形式の選択をclaude -pに揃える](0019-socium-pの既定を返答の本文にしstdinと出力形式の選択をclaude-pに揃える.md)
 * [20. MCPサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ](0020-mcpサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ.md)
+* [21. 遠隔のMCPサーバーにStreamable HTTPとヘッダーだけで接続する](0021-遠隔のmcpサーバーにstreamable-httpとヘッダーだけで接続する.md)

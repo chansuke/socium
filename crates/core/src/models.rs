@@ -473,7 +473,19 @@ fn check_key_variable(variable: &str) -> Result<(), String> {
 /// The normalized URL and whether it is on this machine. Keys travel to
 /// this URL, so plain HTTP is allowed only on loopback.
 pub(crate) fn parse_base_url(raw: &str) -> Result<(String, bool), String> {
-    let url = reqwest::Url::parse(raw).map_err(|err| format!("invalid base_url '{raw}': {err}"))?;
+    let (url, loopback) = check_endpoint_url("base_url", raw)?;
+    Ok((url.as_str().trim_end_matches('/').to_string(), loopback))
+}
+
+/// `raw`, the value of `field`, as a URL that secrets may travel to: https,
+/// or plain HTTP on loopback, with no credentials, query or fragment. Also
+/// whether it is on this machine.
+pub(crate) fn check_endpoint_url(field: &str, raw: &str) -> Result<(reqwest::Url, bool), String> {
+    let url = reqwest::Url::parse(raw).map_err(|err| format!("invalid {field} '{raw}': {err}"))?;
+    // Before any message that repeats the URL.
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!("{field} must not contain credentials"));
+    }
     let loopback = url.host_str().is_some_and(|host| {
         host == "localhost"
             || host
@@ -487,17 +499,14 @@ pub(crate) fn parse_base_url(raw: &str) -> Result<(String, bool), String> {
         "http" if loopback => {}
         _ => {
             return Err(format!(
-                "base_url must use https (http only for localhost); got '{raw}'"
+                "{field} must use https (http only for localhost); got '{raw}'"
             ));
         }
     }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("base_url must not contain credentials".into());
-    }
     if url.query().is_some() || url.fragment().is_some() {
-        return Err("base_url must not contain a query or fragment".into());
+        return Err(format!("{field} must not contain a query or fragment"));
     }
-    Ok((url.as_str().trim_end_matches('/').to_string(), loopback))
+    Ok((url, loopback))
 }
 
 fn parse_model(raw: RawModel) -> Result<ModelConfig, String> {

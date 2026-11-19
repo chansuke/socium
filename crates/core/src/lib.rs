@@ -2299,6 +2299,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_agent_loop_calls_a_tool_of_a_remote_mcp_server_with_its_token() {
+        let workspace = make_temp_dir("mcp_http");
+        let fake = crate::mcp::tests::FakeHttpServer::start(&["--sse", "--token=s3cret-token"]);
+        let provider = ScriptedProvider::new(vec![
+            Ok(crate::providers::ProviderResponse {
+                message: crate::agent::types::AgentMessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "m1".into(),
+                        name: "mcp__remote__echo".into(),
+                        input: json!({"text": "from the model"}),
+                    }],
+                    ..Default::default()
+                },
+                streamed_text: false,
+                usage: None,
+            }),
+            Ok(text_provider_response("The server echoed it.", None)),
+        ]);
+        let requests = provider.recorded_requests.clone();
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.env =
+            std::sync::Arc::new(|name| (name == "FAKE_TOKEN").then(|| "s3cret-token".to_string()));
+        let (settings, _) = crate::Settings::parse(
+            &format!(
+                "[mcp.servers.remote]\nurl = \"{}\"\nheaders = {{ Authorization = \"Bearer ${{FAKE_TOKEN}}\" }}\nallow = [\"echo\"]",
+                fake.url
+            ),
+            None,
+            &|name| (name == "FAKE_TOKEN").then(|| "s3cret-token".to_string()),
+        )
+        .unwrap();
+        service.install_settings(settings);
+        let mut events = Vec::new();
+
+        service
+            .submit_with_progress("echo something".into(), |event| {
+                events.push(format!("{event:?}"));
+            })
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        let result = &requests[1]["messages"][2]["content"][0];
+        assert_eq!(result["content"], "echo: from the model");
+        assert!(result.get("is_error").is_none(), "{result}");
+        // The token reaches the server and nothing else.
+        for text in events
+            .iter()
+            .chain([&requests[0].to_string(), &requests[1].to_string()])
+        {
+            assert!(!text.contains("s3cret"), "{text}");
+        }
+    }
+
+    #[tokio::test]
     async fn words_added_mid_turn_reach_the_next_request_after_the_tools_finish() {
         let workspace = make_temp_dir("steering");
         let provider = ScriptedProvider::new(vec![
