@@ -88,3 +88,35 @@ GitHub設定の読取りではリポジトリはprivate、mainのbranch protecti
 
 - リポジトリの説明 (今は "A tiny coding agent for personal use") と topics。
 - Code of Conduct を置くか、Discussions を開くか。
+
+## 2026-11-19 の再確認
+
+基準: main `d4d785d` (書き換え前)。Codex の `gpt-5.6-sol` に公開してよい品質かをレビューさせ、指摘を裏取りしてからチケットごとに直した。各修正も Sol にレビューさせ、指摘を直すか、直さない理由をチケットに書いた。
+
+| チケット | PR | 内容 |
+|---|---|---|
+| [SOC-043](tickets/SOC-043-protect-cargo-manifests.md) | #101 | `Cargo.toml` と `Cargo.lock` の編集に承認を求める |
+| [SOC-044](tickets/SOC-044-sensitive-credential-files.md) | #97 | `auth.json` などの認証情報ファイルを読むときに承認を求める |
+| [SOC-045](tickets/SOC-045-subagent-concurrency-cap.md) | #96 | 同時に動くサブエージェントを 4 つまでにする |
+| [SOC-046](tickets/SOC-046-responses-unfinished-calls.md) | #103 | Responses API で終わっていない tool 呼び出しを実行しない |
+| [SOC-047](tickets/SOC-047-version-flag.md) | #99 | `socium --version` |
+| [SOC-048](tickets/SOC-048-approval-wording.md) | #102 | README の承認の説明を実装に合わせる |
+| [SOC-049](tickets/SOC-049-commit-metadata-guard.md) | #104 | セッション URL と個人のアドレスをコミットに入れない |
+| [SOC-050](tickets/SOC-050-third-party-notices.md) | #105 | パッケージに依存 crate のライセンス表示を入れる |
+
+直さなかったもの: web search の承認と回数の上限 (ユーザーが有効にする機能で、送り先は設定に書いてある)、ワークスペース内の proc-macro crate のソースの編集 (承認を求めるかは決めていない。[脅威モデル](threat-model.md)の「守らないもの」に書いた)。
+
+### 履歴
+
+2026-11-15 の書き換えの翌日に、セッション URL 入りのコミット 16 件と、作者が個人のアドレスのコミット 2 件が main に入っていた。2026-11-19 に main と開いている 7 ブランチ (`mcp-*`、`sandbox-env-setenv`) を書き換えた。
+
+- メッセージからセッション URL の行を消し、個人のアドレスを noreply にした。対象は 8f1bb83 以降のコミットだけで、それより前のコミットとタグ `v0.1.0` のハッシュは変わらない。
+- 各ブランチの最後のコミットの tree とコミット数は書き換える前と同じ。開いている PR のコミット数も変わらない。
+- PR #50〜#55 の本文からセッション URL の行を消した。
+- 同じものがまた入らないよう、commit-msg フックと Commit metadata ワークフローを足した (SOC-049)。
+
+### 公開する前に残っていること
+
+- **GitHub Support への依頼:** 古いコミットは、PR #48、#50〜#89、#95〜#105 の `refs/pull/*` から辿れる。読み取り専用で、消すには Support に頼む ([Removing sensitive data from a repository](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository))。PR #50〜#55 の本文の編集履歴にも古い本文が残る。編集履歴の版は所有者が PR のページから消せる。
+- **CI:** 課金の問題で Actions のジョブが始まらない。公開する commit で CI、Security、Commit metadata を通す。
+- **公開したらすぐに設定すること:** rebase merge だけを許す (merge と squash のコミットは PR のタイトルと本文から作られ、検査を通らない)。main に ruleset を置き、PR を必須にし、`Format, Lint and Test`、`Secrets and dependencies`、`Validate PR title`、`Check commit metadata` を必須の check にし、force push と削除を禁止する。private vulnerability reporting を有効にする。
