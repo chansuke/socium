@@ -63,6 +63,17 @@ pub(crate) fn resolve_workspace_path(
         .canonicalize()
         .map_err(|e| format!("Failed to resolve path '{}': {e}", requested_path))?;
     ensure_inside_workspace(&canonical, &workspace_canonical, requested_path)?;
+    // What a file tool reads reaches the model: Git config can hold
+    // credentials and Socium's state holds whole past sessions.
+    if in_state_dir(&workspace_canonical, &canonical)
+        && !in_scratch_dir(&workspace_canonical, &canonical)
+        && !in_outputs_dir(&workspace_canonical, &canonical)
+    {
+        return Err(format!(
+            "'{requested_path}' is Git metadata or Socium session state, which file tools do not read; use the git tools"
+        )
+        .into());
+    }
     Ok(canonical)
 }
 
@@ -135,17 +146,30 @@ pub(crate) fn resolve_workspace_mutation_path(
         return Ok(resolved);
     }
     if matches!(relative.components().next(), Some(Component::Normal(name)) if name == ".git" || name == ".socium")
-        || [".git", ".socium"].iter().any(|name| {
-            root.join(name)
-                .canonicalize()
-                .is_ok_and(|metadata| resolved.starts_with(metadata))
-        })
+        || in_state_dir(&root, &resolved)
     {
         return Err(
             "Git metadata and Socium session state cannot be modified by file tools".into(),
         );
     }
     Ok(resolved)
+}
+
+/// Inside `.git` or `.socium`, or what either really is. `resolved` is
+/// canonical.
+fn in_state_dir(root: &Path, resolved: &Path) -> bool {
+    [".git", ".socium"].iter().any(|name| {
+        resolved.starts_with(root.join(name))
+            || root
+                .join(name)
+                .canonicalize()
+                .is_ok_and(|metadata| resolved.starts_with(metadata))
+    })
+}
+
+/// A file in `.socium/outputs`, where commands' saved output is read back.
+fn in_outputs_dir(root: &Path, resolved: &Path) -> bool {
+    resolved.parent() == Some(&root.join(".socium/outputs"))
 }
 
 /// Inside `.socium/scratch`, reached without symlinks. `resolved` is
@@ -345,6 +369,41 @@ mod tests {
                 resolve_workspace_mutation_path(root, path).is_err(),
                 "{path}"
             );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_tools_cannot_read_git_or_session_state() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = make_temp_dir("state_reads");
+        let root = workspace.path();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/config"), "[remote]").unwrap();
+        crate::agent::state::workspace_state_path(root, "conversation.json").unwrap();
+        fs::write(root.join(".socium/conversation.json"), "private").unwrap();
+        fs::create_dir_all(root.join(".socium/outputs")).unwrap();
+        fs::write(root.join(".socium/outputs/1-2-0.stdout"), "out").unwrap();
+        crate::scratch_dir(root).unwrap();
+        fs::write(root.join(".socium/scratch/probe.py"), "x").unwrap();
+        symlink(".git/config", root.join("config-link")).unwrap();
+        symlink(".socium", root.join("state-link")).unwrap();
+
+        for path in [
+            ".git",
+            ".git/config",
+            ".socium",
+            ".socium/conversation.json",
+            ".socium/outputs/../conversation.json",
+            "config-link",
+            "state-link/conversation.json",
+        ] {
+            assert!(resolve_workspace_path(root, path).is_err(), "{path}");
+        }
+        // Saved command output and the scratch directory are the model's.
+        for path in [".socium/outputs/1-2-0.stdout", ".socium/scratch/probe.py"] {
+            assert!(resolve_workspace_path(root, path).is_ok(), "{path}");
         }
     }
 
