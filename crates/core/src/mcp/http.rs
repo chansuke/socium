@@ -19,6 +19,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName
 use reqwest::{Method, Response, StatusCode, Url};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -98,20 +99,97 @@ struct Connection {
 pub(super) struct HttpClients {
     direct: reqwest::Client,
     proxied: reqwest::Client,
+    /// How names are resolved; `None` is the system's resolver.
+    lookup: Option<Lookup>,
+    /// Whether URLs that discovery found may point at this machine or a
+    /// private network: only when the configured server is there too.
+    allow_internal: bool,
+}
+
+/// Resolves a host and port, as tests script it.
+type Lookup = Arc<dyn Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>> + Send + Sync>;
+
+fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
+        .user_agent(concat!("socium/", env!("CARGO_PKG_VERSION")))
 }
 
 impl HttpClients {
     pub(super) fn new() -> reqwest::Result<Self> {
-        let builder = || {
-            reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(CONNECT_TIMEOUT)
-                .user_agent(concat!("socium/", env!("CARGO_PKG_VERSION")))
-        };
         Ok(Self {
-            direct: builder().no_proxy().build()?,
-            proxied: builder().build()?,
+            direct: client_builder().no_proxy().build()?,
+            proxied: client_builder().build()?,
+            lookup: None,
+            allow_internal: false,
         })
+    }
+
+    /// These clients for the MCP server at `server`.
+    pub(super) fn serving(mut self, server: &Url) -> Self {
+        self.allow_internal = is_internal(server);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_lookup(lookup: Lookup) -> Self {
+        Self {
+            lookup: Some(lookup),
+            ..Self::new().unwrap()
+        }
+    }
+
+    /// The client for a URL that discovery found rather than the user.
+    /// Unless the configured server is on this machine or a private
+    /// network itself, its host must name no such address: a name
+    /// is resolved once, refused if any answer is internal, and pinned to
+    /// those answers, so a second lookup cannot turn it into one. With a
+    /// proxy from the environment, the proxy resolves the name instead.
+    pub(super) async fn for_discovered(&self, url: &Url) -> Result<reqwest::Client, String> {
+        if self.allow_internal {
+            return Ok(self.to(url).clone());
+        }
+        if is_internal(url) {
+            return Err(format!(
+                "{url} points at this machine or a private network, and the server is not there"
+            ));
+        }
+        let Some(host) = url.host_str() else {
+            return Err(format!("{url} has no host"));
+        };
+        if host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok()
+        {
+            // An address, checked above.
+            return Ok(self.to(url).clone());
+        }
+        let port = url.port_or_known_default().unwrap_or(443);
+        let addresses = match &self.lookup {
+            Some(lookup) => lookup(host, port),
+            None => tokio::net::lookup_host((host, port))
+                .await
+                .map(|found| found.collect()),
+        }
+        .map_err(|err| format!("{host} could not be resolved: {err}"))?;
+        if addresses.is_empty() {
+            return Err(format!("{host} resolves to no address"));
+        }
+        if let Some(inside) = addresses
+            .iter()
+            .find(|address| is_internal_address(address.ip()))
+        {
+            return Err(format!(
+                "{host} resolves to {}, an address on this machine or a private network, and the server is not there",
+                inside.ip()
+            ));
+        }
+        client_builder()
+            .resolve_to_addrs(host, &addresses)
+            .build()
+            .map_err(|err| format!("its HTTP client could not be built: {err}"))
     }
 
     /// The client for requests to `url`.
@@ -145,7 +223,8 @@ impl HttpTransport {
             header_map.insert(header, value);
         }
         let clients = HttpClients::new()
-            .map_err(|err| not_started(format!("its HTTP client could not be built: {err}")))?;
+            .map_err(|err| not_started(format!("its HTTP client could not be built: {err}")))?
+            .serving(&url);
         let connection = Arc::new(Connection {
             client: clients.to(&url).clone(),
             clients,
@@ -476,6 +555,43 @@ fn is_response_to(message: &Value, id: u64) -> bool {
     message.get("method").is_none() && message["id"].as_u64() == Some(id)
 }
 
+/// Whether `url` names this machine or a private network by its host:
+/// `localhost` or an address [`is_internal_address`] refuses.
+pub(super) fn is_internal(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    match host.parse::<std::net::IpAddr>() {
+        Ok(address) => is_internal_address(address),
+        Err(_) => host == "localhost" || host.ends_with(".localhost"),
+    }
+}
+
+/// A loopback, private, link-local, shared, broadcast, or unspecified
+/// address, IPv4 mapped into IPv6 included.
+pub(super) fn is_internal_address(address: std::net::IpAddr) -> bool {
+    let v4 = |address: std::net::Ipv4Addr| {
+        address.is_loopback()
+            || address.is_private()
+            || address.is_link_local()
+            || address.is_unspecified()
+            || address.is_broadcast()
+            // 100.64.0.0/10, shared address space.
+            || (address.octets()[0] == 100 && address.octets()[1] & 0xc0 == 64)
+    };
+    match address {
+        std::net::IpAddr::V4(address) => v4(address),
+        std::net::IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                || address.to_ipv4_mapped().is_some_and(v4)
+        }
+    }
+}
+
 /// Whether `url` names this machine, by name or by a loopback address.
 fn is_loopback(url: &Url) -> bool {
     match url.host_str() {
@@ -655,6 +771,79 @@ mod tests {
             assert!(events(&[first, second], 32).is_err(), "split at {split}");
         }
         assert_eq!(events(&[stream.as_bytes()], 64).unwrap().len(), 1);
+    }
+
+    /// A listener on loopback that counts the connections it gets.
+    fn internal_service() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let reached = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = reached.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        (port, reached)
+    }
+
+    fn run<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn a_discovered_name_that_resolves_to_this_machine_is_refused() {
+        let (port, reached) = internal_service();
+        let clients = HttpClients::with_lookup(std::sync::Arc::new(move |_: &str, _| {
+            Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))])
+        }));
+        let url = Url::parse(&format!("http://auth.example:{port}/token")).unwrap();
+
+        let err = run(clients.for_discovered(&url)).err().unwrap();
+
+        assert!(err.contains("auth.example"), "{err}");
+        assert!(err.contains("127.0.0.1"), "{err}");
+        assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // A server that is itself on this machine may name such places.
+        let local = clients.serving(&Url::parse("http://127.0.0.1:8/mcp").unwrap());
+        assert!(run(local.for_discovered(&url)).is_ok());
+    }
+
+    #[test]
+    fn a_second_lookup_cannot_turn_a_checked_name_into_this_machine() {
+        let (port, reached) = internal_service();
+        let lookups = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = lookups.clone();
+        // First a public address (TEST-NET-1, which goes nowhere), then
+        // loopback.
+        let clients = HttpClients::with_lookup(std::sync::Arc::new(move |_: &str, _| {
+            let first = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            let address = if first {
+                [192, 0, 2, 1]
+            } else {
+                [127, 0, 0, 1]
+            };
+            Ok(vec![std::net::SocketAddr::from((address, port))])
+        }));
+        let url = Url::parse(&format!("http://auth.example:{port}/token")).unwrap();
+
+        let sent = run(async {
+            let client = clients.for_discovered(&url).await.unwrap();
+            client
+                .get(url.clone())
+                .timeout(Duration::from_millis(500))
+                .send()
+                .await
+        });
+
+        assert!(sent.is_err());
+        assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

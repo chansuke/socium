@@ -14,7 +14,7 @@
 //! or a private network only when the configured `url` does too, so a
 //! remote server cannot make the login reach a service inside it.
 
-use super::http::{HttpClients, describe, read_body};
+use super::http::{HttpClients, describe, is_internal, read_body};
 use super::token_store::{ClientAuth, StoredToken, TokenStore, now_seconds};
 use crate::settings::{McpOAuthSettings, McpServerSettings, McpTransportSettings, Settings};
 use base64::Engine;
@@ -154,8 +154,10 @@ async fn authorize(
     browser: &(dyn Fn(&str) + Sync),
     timeout: Duration,
 ) -> Result<(), String> {
-    let clients =
-        HttpClients::new().map_err(|err| format!("its HTTP client could not be built: {err}"))?;
+    let server = Url::parse(url).map_err(|err| format!("its url is invalid: {err}"))?;
+    let clients = HttpClients::new()
+        .map_err(|err| format!("its HTTP client could not be built: {err}"))?
+        .serving(&server);
     let found = discover(&clients, url, config.issuer.as_deref()).await?;
     let port = config.callback_port.unwrap_or(0);
     let listener = TcpListener::bind(("127.0.0.1", port))
@@ -614,7 +616,9 @@ pub(super) async fn token_request(
     oauth_client: &OAuthClient,
 ) -> Result<Issued, String> {
     let mut request = clients
-        .to(endpoint)
+        .for_discovered(endpoint)
+        .await
+        .map_err(|why| format!("the token endpoint was refused: {why}"))?
         .post(endpoint.clone())
         .header(ACCEPT, "application/json")
         .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -720,6 +724,7 @@ pub(super) async fn discover(
 ) -> Result<Discovery, String> {
     let server = Url::parse(url).map_err(|err| format!("its url is invalid: {err}"))?;
     let local = is_internal(&server);
+    let clients = &clients.clone().serving(&server);
     // A URL the server or its metadata names, checked like a configured one
     // and kept off this machine and private networks unless `url` is there.
     let named = |field: &str, raw: &str| -> Result<Url, String> {
@@ -771,7 +776,7 @@ pub(super) async fn discover(
     candidates.extend(protected_resource_urls(&server));
     let mut found = None;
     for candidate in &candidates {
-        if let Some(document) = get_json(clients, candidate).await
+        if let Some(document) = get_json(clients, candidate, &server).await?
             && document["authorization_servers"]
                 .as_array()
                 .is_some_and(|servers| !servers.is_empty())
@@ -819,7 +824,7 @@ pub(super) async fn discover(
         .map_err(|err| format!("the server's metadata names an {err}"))?;
     let mut server_metadata = None;
     for candidate in authorization_server_urls(&issuer_url) {
-        if let Some(document) = get_json(clients, &candidate).await {
+        if let Some(document) = get_json(clients, &candidate, &server).await? {
             server_metadata = Some(document);
             break;
         }
@@ -872,40 +877,6 @@ pub(super) async fn discover(
     })
 }
 
-/// Whether `url` names this machine or a private network by its host:
-/// `localhost` or a loopback, private, link-local, or unspecified address.
-/// A name that resolves to one is not caught.
-fn is_internal(url: &Url) -> bool {
-    use std::net::IpAddr;
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
-        return true;
-    }
-    let v4 = |address: std::net::Ipv4Addr| {
-        address.is_loopback()
-            || address.is_private()
-            || address.is_link_local()
-            || address.is_unspecified()
-            || address.is_broadcast()
-            // 100.64.0.0/10, shared address space.
-            || (address.octets()[0] == 100 && address.octets()[1] & 0xc0 == 64)
-    };
-    match host.parse::<IpAddr>() {
-        Ok(IpAddr::V4(address)) => v4(address),
-        Ok(IpAddr::V6(address)) => {
-            address.is_loopback()
-                || address.is_unspecified()
-                || address.is_unique_local()
-                || address.is_unicast_link_local()
-                || address.to_ipv4_mapped().is_some_and(v4)
-        }
-        Err(_) => false,
-    }
-}
-
 /// A client of the authorization server: registered by the login, or
 /// configured in `oauth`.
 #[derive(Clone, PartialEq, Eq)]
@@ -933,7 +904,9 @@ pub(super) async fn register(
     redirect_uri: &str,
 ) -> Result<OAuthClient, String> {
     let response = clients
-        .to(endpoint)
+        .for_discovered(endpoint)
+        .await
+        .map_err(|why| format!("the registration endpoint was refused: {why}"))?
         .post(endpoint.clone())
         .header(ACCEPT, "application/json")
         .json(&json!({
@@ -1168,22 +1141,32 @@ fn covers(resource: &Url, server: &Url) -> bool {
 }
 
 /// A JSON object served at `url` with 200, or `None` for anything else.
-async fn get_json(clients: &HttpClients, url: &Url) -> Option<Value> {
-    let response = clients
-        .to(url)
+/// `Err` says why a `url` that discovery found may not be reached; one on
+/// the configured `server`'s own host may.
+async fn get_json(clients: &HttpClients, url: &Url, server: &Url) -> Result<Option<Value>, String> {
+    let client = if url.host_str() == server.host_str() && url.port() == server.port() {
+        clients.to(url).clone()
+    } else {
+        clients.for_discovered(url).await?
+    };
+    let Ok(response) = client
         .get(url.clone())
         .header(ACCEPT, "application/json")
         .timeout(REQUEST_TIMEOUT)
         .send()
         .await
-        .ok()?;
+    else {
+        return Ok(None);
+    };
     if response.status() != StatusCode::OK {
-        return None;
+        return Ok(None);
     }
-    let body = read_body(response, MAX_DOCUMENT_BYTES).await.ok()?;
-    serde_json::from_slice::<Value>(&body)
+    let Ok(body) = read_body(response, MAX_DOCUMENT_BYTES).await else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_slice::<Value>(&body)
         .ok()
-        .filter(Value::is_object)
+        .filter(Value::is_object))
 }
 
 /// An array of strings, or `None` when the field is not one.
@@ -1213,7 +1196,9 @@ pub(crate) mod tests {
 
     fn discovered(options: &[&str]) -> (FakeHttpServer, Result<Discovery, String>) {
         let fake = FakeHttpServer::start(options);
-        let client = HttpClients::new().unwrap();
+        let client = HttpClients::new()
+            .unwrap()
+            .serving(&Url::parse(&fake.url).unwrap());
         let found = block_on(discover(&client, &fake.url, None));
         (fake, found)
     }
@@ -1291,7 +1276,9 @@ pub(crate) mod tests {
     #[test]
     fn socium_registers_as_a_public_client_with_its_redirect_uri() {
         let (fake, found) = discovered(&["--oauth"]);
-        let client = HttpClients::new().unwrap();
+        let client = HttpClients::new()
+            .unwrap()
+            .serving(&Url::parse(&fake.url).unwrap());
         let endpoint = found.unwrap().registration_endpoint.unwrap();
 
         let registered = block_on(register(
@@ -1343,7 +1330,9 @@ pub(crate) mod tests {
         assert!(err.contains("does not list PKCE with S256"), "{err}");
 
         let fake = FakeHttpServer::start(&["--oauth"]);
-        let clients = HttpClients::new().unwrap();
+        let clients = HttpClients::new()
+            .unwrap()
+            .serving(&Url::parse(&fake.url).unwrap());
         let err = block_on(discover(
             &clients,
             &fake.url,
@@ -1395,7 +1384,9 @@ pub(crate) mod tests {
     #[test]
     fn a_registered_client_proves_itself_the_way_the_server_said() {
         let (_fake, found) = discovered(&["--oauth", "--registration-auth=client_secret_post"]);
-        let clients = HttpClients::new().unwrap();
+        let clients = HttpClients::new()
+            .unwrap()
+            .serving(&Url::parse("http://127.0.0.1/mcp").unwrap());
         let endpoint = found.unwrap().registration_endpoint.unwrap();
         let registered =
             block_on(register(&clients, &endpoint, "http://127.0.0.1:1/callback")).unwrap();
@@ -1981,7 +1972,9 @@ pub(crate) mod tests {
     fn a_renewed_token_that_cannot_be_saved_is_kept_reported_and_saved_later() {
         let (fake, _home, store) = logged_in(&["--oauth", "--expires=30"]);
         let old = age(&store, &fake, 20);
-        let clients = HttpClients::new().unwrap();
+        let clients = HttpClients::new()
+            .unwrap()
+            .serving(&Url::parse(&fake.url).unwrap());
         let on_disk = || store.load("fake", &fake.url).unwrap().unwrap();
 
         // Saved on the next use.
@@ -2032,7 +2025,9 @@ pub(crate) mod tests {
             token,
             super::super::Notices::default(),
         ));
-        let clients = HttpClients::new().unwrap();
+        let clients = HttpClients::new()
+            .unwrap()
+            .serving(&Url::parse(&fake.url).unwrap());
 
         assert!(block_on(session.access_token(&clients)).is_err());
 
@@ -2044,7 +2039,9 @@ pub(crate) mod tests {
     fn a_token_another_socium_renewed_is_taken_instead_of_renewing_again() {
         let (fake, _home, store) = logged_in(&["--oauth", "--expires=30"]);
         let old = age(&store, &fake, 20);
-        let clients = HttpClients::new().unwrap();
+        let clients = HttpClients::new()
+            .unwrap()
+            .serving(&Url::parse(&fake.url).unwrap());
         // The other Socium renews first and uses up the refresh token.
         let newer = block_on(refresh(&clients, &old, None)).unwrap();
         store.save("fake", &newer).unwrap();
@@ -2073,7 +2070,9 @@ pub(crate) mod tests {
             old.clone(),
             super::super::Notices::default(),
         ));
-        let clients = HttpClients::new().unwrap();
+        let clients = HttpClients::new()
+            .unwrap()
+            .serving(&Url::parse(&fake.url).unwrap());
 
         block_on(async {
             let waited =
