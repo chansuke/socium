@@ -74,6 +74,19 @@ struct Connection {
     answers: Arc<tokio::sync::Semaphore>,
 }
 
+/// The client for an MCP server and its authorization server. It follows
+/// no redirect, since one would carry a token or a code to another address.
+pub(super) fn http_client() -> reqwest::Result<reqwest::Client> {
+    client_builder().build()
+}
+
+fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
+        .user_agent(concat!("socium/", env!("CARGO_PKG_VERSION")))
+}
+
 impl HttpTransport {
     pub(super) fn start(
         name: &str,
@@ -93,19 +106,14 @@ impl HttpTransport {
             value.set_sensitive(true);
             header_map.insert(header, value);
         }
-        let mut client = reqwest::Client::builder()
-            // A redirect would carry the headers to another address.
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(CONNECT_TIMEOUT)
-            .user_agent(concat!("socium/", env!("CARGO_PKG_VERSION")));
         // Plain http is allowed only to loopback, where a proxy from the
         // environment would see the headers in the clear.
-        if is_loopback(&url) {
-            client = client.no_proxy();
+        let client = if is_loopback(&url) {
+            client_builder().no_proxy().build()
+        } else {
+            http_client()
         }
-        let client = client
-            .build()
-            .map_err(|err| not_started(format!("its HTTP client could not be built: {err}")))?;
+        .map_err(|err| not_started(format!("its HTTP client could not be built: {err}")))?;
         let connection = Arc::new(Connection {
             client,
             origin: url.origin().ascii_serialization(),
@@ -491,7 +499,7 @@ impl EventStream {
     }
 }
 
-async fn read_body(mut response: Response, limit: usize) -> Result<Vec<u8>, String> {
+pub(super) async fn read_body(mut response: Response, limit: usize) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|err| describe(&err))? {
         if body.len() + chunk.len() > limit {
@@ -522,7 +530,7 @@ async fn quoted_error(response: Response) -> String {
 }
 
 /// The error and its causes, which reqwest keeps apart.
-fn describe(err: &reqwest::Error) -> String {
+pub(super) fn describe(err: &reqwest::Error) -> String {
     let mut text = err.to_string();
     let mut source = std::error::Error::source(err);
     while let Some(cause) = source {

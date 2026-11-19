@@ -10,6 +10,11 @@
 //! code that runs and provider keys never reach it.
 
 mod http;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the login uses it in the next steps")
+)]
+mod oauth;
 #[expect(
     dead_code,
     reason = "the login and the transport use it in the next steps"
@@ -1722,7 +1727,7 @@ pub(crate) mod tests {
         }
 
         /// One entry per HTTP request the server received.
-        fn requests(&self) -> Vec<Value> {
+        pub(crate) fn requests(&self) -> Vec<Value> {
             std::fs::read_to_string(&self.log)
                 .unwrap_or_default()
                 .lines()

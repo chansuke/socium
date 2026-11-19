@@ -24,6 +24,21 @@ its lines with CR alone. Over HTTP, `reflect` answers HTTP 400 with the
 Authorization header in its error. `--token=T` requires `Authorization: Bearer
 T`. `--log=PATH` appends one JSON line per HTTP request: the HTTP method,
 the JSON-RPC method, and the session and protocol version headers.
+
+`--oauth` makes the same process the MCP server's OAuth authorization
+server too (issuer `/auth`): the MCP endpoint then takes only access tokens
+it issued, and answers 401 with `WWW-Authenticate`. The client finds the
+protected resource metadata from that header's `resource_metadata`
+(`--discovery=header`, the default) or at the well-known URL
+(`--discovery=well-known`), and the authorization server metadata at
+RFC 8414's URL (`--as-metadata=oauth`, the default) or OpenID Connect's
+(`--as-metadata=oidc`). `--no-registration` leaves out dynamic client
+registration; then only the client `pre-client` with the secret
+`pre-secret` exists. `--expires=N` sets the access token lifetime in
+seconds, `--refresh=fail` refuses every refresh, and `--scopes=a,b` lists
+`scopes_supported`. `/authorize` redirects at once, as if the user agreed;
+`/token` checks the PKCE verifier, the redirect URI and the resource. Each
+authorization request is logged with its path and parameters.
 """
 
 import json
@@ -237,8 +252,28 @@ def wait_for(predicate, seconds=30):
             state.wait(0.05)
 
 
+# The authorization server's state.
+clients = {}
+codes = {}
+access_tokens = {}
+refresh_tokens = {}
+counter = [0]
+
+
+def next_id(prefix):
+    with state:
+        counter[0] += 1
+        return "%s-%d" % (prefix, counter[0])
+
+
 def serve_http():
+    import base64
+    import hashlib
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlencode, urlsplit
+
+    if "no-registration" in OPTIONS:
+        clients["pre-client"] = {"secret": "pre-secret", "redirect_uris": None}
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -258,35 +293,171 @@ def serve_http():
             self.wfile.write(data)
 
         def authorized(self):
+            given = self.headers.get("Authorization", "")
+            if "oauth" in OPTIONS:
+                token = given[len("Bearer "):] if given.startswith("Bearer ") else None
+                with state:
+                    expires = access_tokens.get(token)
+                return expires is not None and expires > time.time()
             token = OPTIONS.get("token")
-            return not token or self.headers.get("Authorization") == "Bearer " + token
+            return not token or given == "Bearer " + token
+
+        def unauthorized(self):
+            if "oauth" not in OPTIONS:
+                return self.reply(401)
+            if OPTIONS.get("discovery", "header") == "header":
+                challenge = 'Bearer error="invalid_token", resource_metadata="%s/meta/resource"' % self.origin()
+            else:
+                challenge = 'Bearer realm="mcp"'
+            self.reply(401, None, [("WWW-Authenticate", challenge)])
+
+        def origin(self):
+            return "http://127.0.0.1:%d" % self.server.server_address[1]
 
         def do_GET(self):
-            self.reply(405)
+            url = urlsplit(self.path)
+            params = {key: values[0] for key, values in parse_qs(url.query).items()}
+            if "oauth" not in OPTIONS:
+                return self.reply(405)
+            log({"http": "GET", "path": url.path, "params": params})
+            origin = self.origin()
+            discovery = OPTIONS.get("discovery", "header")
+            prm_path = "/meta/resource" if discovery == "header" else "/.well-known/oauth-protected-resource/mcp"
+            if url.path == prm_path:
+                metadata = {"resource": origin + "/mcp", "authorization_servers": [origin + "/auth"]}
+                if OPTIONS.get("scopes"):
+                    metadata["scopes_supported"] = OPTIONS["scopes"].split(",")
+                return self.reply(200, metadata)
+            as_path = {
+                "oauth": "/.well-known/oauth-authorization-server/auth",
+                "oidc": "/auth/.well-known/openid-configuration",
+            }[OPTIONS.get("as-metadata", "oauth")]
+            if url.path == as_path:
+                metadata = {
+                    "issuer": origin + "/auth",
+                    "authorization_endpoint": origin + "/auth/authorize",
+                    "token_endpoint": origin + "/auth/token",
+                    "response_types_supported": ["code"],
+                    "code_challenge_methods_supported": ["S256"],
+                }
+                if "no-registration" not in OPTIONS:
+                    metadata["registration_endpoint"] = origin + "/auth/register"
+                return self.reply(200, metadata)
+            if url.path == "/auth/authorize":
+                return self.authorize(params)
+            self.reply(404)
+
+        def authorize(self, params):
+            with state:
+                client = clients.get(params.get("client_id"))
+            redirect = params.get("redirect_uri")
+            problems = []
+            if client is None:
+                problems.append("unknown client")
+            elif client["redirect_uris"] is not None and redirect not in client["redirect_uris"]:
+                problems.append("unregistered redirect_uri")
+            if params.get("response_type") != "code":
+                problems.append("response_type")
+            if params.get("code_challenge_method") != "S256" or not params.get("code_challenge"):
+                problems.append("PKCE")
+            if params.get("resource") != self.origin() + "/mcp":
+                problems.append("resource")
+            if problems or not redirect:
+                return self.reply(400, {"error": "invalid_request", "error_description": ", ".join(problems)})
+            code = next_id("code")
+            with state:
+                codes[code] = {
+                    "client_id": params["client_id"],
+                    "redirect_uri": redirect,
+                    "challenge": params["code_challenge"],
+                    "resource": params["resource"],
+                }
+            query = {"code": code}
+            if "state" in params:
+                query["state"] = params["state"]
+            self.reply(302, None, [("Location", redirect + "?" + urlencode(query))])
+
+        def authenticate(self, form):
+            """The client of a token request, or None."""
+            client_id, secret = form.get("client_id"), form.get("client_secret")
+            basic = self.headers.get("Authorization", "")
+            if basic.startswith("Basic "):
+                client_id, _, secret = base64.b64decode(basic[6:]).decode().partition(":")
+            with state:
+                client = clients.get(client_id)
+            if client is None or client["secret"] != secret:
+                return None
+            return client_id
+
+        def token(self, form):
+            client_id = self.authenticate(form)
+            if client_id is None:
+                return self.reply(401, {"error": "invalid_client"})
+            if form.get("resource") != self.origin() + "/mcp":
+                return self.reply(400, {"error": "invalid_target"})
+            grant = form.get("grant_type")
+            if grant == "authorization_code":
+                with state:
+                    code = codes.pop(form.get("code"), None)
+                if code is None or code["client_id"] != client_id or code["redirect_uri"] != form.get("redirect_uri"):
+                    return self.reply(400, {"error": "invalid_grant"})
+                verifier = form.get("code_verifier", "")
+                challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+                if challenge != code["challenge"]:
+                    return self.reply(400, {"error": "invalid_grant", "error_description": "PKCE verification failed"})
+            elif grant == "refresh_token":
+                with state:
+                    owner = refresh_tokens.pop(form.get("refresh_token"), None)
+                if OPTIONS.get("refresh") == "fail" or owner != client_id:
+                    return self.reply(400, {"error": "invalid_grant"})
+            else:
+                return self.reply(400, {"error": "unsupported_grant_type"})
+            lifetime = int(OPTIONS.get("expires", "3600"))
+            access, refresh = next_id("access"), next_id("refresh")
+            with state:
+                access_tokens[access] = time.time() + lifetime
+                refresh_tokens[refresh] = client_id
+            self.reply(200, {"access_token": access, "token_type": "Bearer", "expires_in": lifetime, "refresh_token": refresh})
+
+        def register(self, body):
+            client_id = next_id("client")
+            with state:
+                clients[client_id] = {"secret": None, "redirect_uris": body.get("redirect_uris")}
+            self.reply(201, {"client_id": client_id, "redirect_uris": body.get("redirect_uris"), "token_endpoint_auth_method": "none"})
 
         def do_DELETE(self):
             session = self.headers.get("Mcp-Session-Id")
             log({"http": "DELETE", "session": session})
             if not self.authorized():
-                return self.reply(401)
+                return self.unauthorized()
             with state:
                 sessions.discard(session)
             self.reply(200)
 
         def do_POST(self):
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if self.path.startswith("/auth/"):
+                if self.path == "/auth/token":
+                    form = {key: values[0] for key, values in parse_qs(body.decode()).items()}
+                    log({"http": "POST", "path": self.path, "params": form, "basic": self.headers.get("Authorization")})
+                    return self.token(form)
+                if self.path == "/auth/register" and "no-registration" not in OPTIONS:
+                    request = json.loads(body)
+                    log({"http": "POST", "path": self.path, "params": request})
+                    return self.register(request)
+                return self.reply(404)
             message = json.loads(body)
             method = message.get("method")
             session = self.headers.get("Mcp-Session-Id")
             version = self.headers.get("MCP-Protocol-Version")
-            log({"http": "POST", "rpc": method or "response", "session": session, "version": version})
+            log({"http": "POST", "rpc": method or "response", "session": session, "version": version, "auth": self.headers.get("Authorization")})
             accept = self.headers.get("Accept", "")
             if "application/json" not in accept or "text/event-stream" not in accept:
                 return self.reply(406)
             if self.headers.get("Content-Type") != "application/json":
                 return self.reply(415)
             if not self.authorized():
-                return self.reply(401)
+                return self.unauthorized()
             if method == "initialize":
                 with state:
                     new = "session-%d" % (len(sessions) + 1)
