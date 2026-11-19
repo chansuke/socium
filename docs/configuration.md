@@ -301,12 +301,17 @@ url = "https://mcp.linear.app/mcp"
 - When Socium exits it closes each local server's standard input, waits a second,
   sends the server's process group SIGTERM, waits another second, and then
   sends SIGKILL.
-- Subagents do not get MCP tools.
+- The `worker` subagent gets every MCP tool; `explorer` and other read-only
+  types get none. A user-defined type gets the ones its `tools` names (see
+  [Subagent types](#subagent-types)). A subagent's call asks for approval as
+  the main agent's does, naming the subagent, and allowing a tool for the
+  session covers both.
 
 The design and what is deferred are in
-[ADR 20](adr/0020-mcpサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ.md)
-and, for remote servers, [ADR 21](adr/0021-遠隔のmcpサーバーにstreamable-httpとヘッダーだけで接続する.md)
-and [ADR 22](adr/0022-遠隔のmcpサーバーをcliのoauthログインで認可しトークンを利用者の状態に保つ.md) (OAuth).
+[ADR 20](adr/0020-mcpサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ.md),
+for remote servers [ADR 21](adr/0021-遠隔のmcpサーバーにstreamable-httpとヘッダーだけで接続する.md),
+for OAuth [ADR 22](adr/0022-遠隔のmcpサーバーをcliのoauthログインで認可しトークンを利用者の状態に保つ.md),
+and for subagents [ADR 23](adr/0023-サブエージェントに種類のtoolsで認めたmcpのtoolを渡す.md).
 
 ## Project instructions
 
@@ -331,3 +336,12 @@ only its final message), so write only what the role does. Start from
 a file with a mistake, or whose model cannot start, is skipped with a
 warning. Definitions in the project directory are not read. See
 [ADR 9](adr/0009-利用者定義のサブエージェントを設定ディレクトリのmarkdownで定める.md).
+
+`tools` may name MCP tools: `mcp__<server>__<tool>` for one tool, or
+`mcp__<server>__*` for every tool of a server. Servers connect after the
+definitions are read, so only the form of these names is checked at startup.
+A named MCP tool that no server offers when the subagent runs is left out
+without a warning, and the subagent runs with the rest. A type with any MCP
+tool runs one call at a time, never alongside other subagents, since an MCP
+tool may change anything. See
+[ADR 23](adr/0023-サブエージェントに種類のtoolsで認めたmcpのtoolを渡す.md).
