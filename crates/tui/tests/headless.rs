@@ -323,6 +323,20 @@ fn by_default_stdout_holds_only_the_reply_text() {
 }
 
 #[test]
+fn terminal_control_characters_in_the_reply_are_not_printed() {
+    // OSC 52 would write to the clipboard of the terminal that shows it.
+    let reply = "a\u{1b}]52;c;ZXZpbA==\u{7}b\tc\u{9b}31md\r\ne";
+    let (port, _) = serve(vec![text_reply(reply)]);
+    let fixture = fixture(port);
+    let output = command(&fixture, &["-p", "say hello"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "a]52;c;ZXZpbA==b\tc31md\ne\n"
+    );
+}
+
+#[test]
 fn piped_stdin_comes_before_the_prompt_after_a_blank_line() {
     let (port, bodies) = serve(vec![text_reply("summary")]);
     let fixture = fixture(port);
