@@ -564,7 +564,7 @@ impl Settings {
         home: Option<&str>,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<(Self, Vec<String>), String> {
-        let raw: RawFile = toml::from_str(text).map_err(|err| err.to_string())?;
+        let raw: RawFile = toml::from_str(text).map_err(|err| toml_error(text, &err))?;
         let mut warnings = Vec::new();
         let expand = |value: &str| -> Result<PathBuf, String> {
             let path = match value.strip_prefix("~/") {
@@ -898,6 +898,59 @@ fn expand_table(
     Ok(Some(expanded))
 }
 
+/// A TOML error by its place, with what it quotes of the file blanked
+/// out: the full error repeats the line, and a line may hold a token
+/// written in the file.
+fn toml_error(text: &str, err: &toml::de::Error) -> String {
+    let place = err
+        .span()
+        .and_then(|span| text.get(..span.start))
+        .map(|before| {
+            let line = before.matches('\n').count() + 1;
+            let start = before.rsplit('\n').next().unwrap_or("");
+            let column = start.chars().count() + 1;
+            // The key before the value names the setting; keys are not
+            // secrets, values may be.
+            let key = start
+                .rsplit_once('=')
+                .map(|(key, _)| key)
+                .and_then(|key| key.rsplit(['{', ',']).next())
+                .map(|key| key.trim().trim_matches('"'))
+                .filter(|key| {
+                    !key.is_empty()
+                        && key
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                });
+            match key {
+                Some(key) => format!("line {line}, column {column} ({key}): "),
+                None => format!("line {line}, column {column}: "),
+            }
+        })
+        .unwrap_or_default();
+    // A type error quotes the value it found, as `string "..."`.
+    let mut message = String::new();
+    let mut quoted = false;
+    for c in err.message().trim().chars() {
+        match c {
+            '"' if quoted => {
+                message.push_str("…\"");
+                quoted = false;
+            }
+            '"' => {
+                message.push('"');
+                quoted = true;
+            }
+            _ if quoted => {}
+            c => message.push(c),
+        }
+    }
+    if quoted {
+        message.push('…');
+    }
+    format!("{place}{message}")
+}
+
 enum Expansion {
     Missing(String),
     Malformed,
@@ -1152,6 +1205,24 @@ url = "http://127.0.0.1:8931/mcp"
         assert!(!err.contains("secret"), "{err}");
         let disabled = format!("{text}\nenabled = false");
         assert!(Settings::from_toml(&disabled, None).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_config_is_reported_by_place_without_repeating_its_values() {
+        for (text, place) in [
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = { Authorization = \"Bearer s3cret-literal }\n",
+                "line 3, column 53 (Authorization): ",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = \"Authorization: Bearer s3cret-literal\"\n",
+                "line 3, column 11 (headers): ",
+            ),
+        ] {
+            let err = Settings::from_toml(text, None).unwrap_err();
+            assert!(!err.contains("s3cret"), "{err}");
+            assert!(err.starts_with(place), "{err}");
+        }
     }
 
     #[test]
