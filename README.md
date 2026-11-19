@@ -101,4 +101,5 @@ source files. Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for running from a checkout and the
-checks CI runs. Licensed under [MIT](LICENSE).
+checks CI runs. Licensed under [MIT](LICENSE). The Nix package carries the
+license texts of the crates it is built from in `share/doc/socium`.
