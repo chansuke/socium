@@ -100,12 +100,15 @@
           cargoArtifacts = craneLib.buildDepsOnly (
             commonArgs // { cargoTestExtraArgs = "--no-run ${testProfile}"; }
           );
+          # Every crate's source, which also holds the license texts that
+          # copies of the binary must carry.
+          cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
         in
         {
           default = craneLib.buildPackage (
             commonArgs
             // {
-              inherit cargoArtifacts;
+              inherit cargoArtifacts cargoVendorDir;
               cargoTestExtraArgs = testProfile;
               nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
               nativeCheckInputs = [
@@ -119,6 +122,17 @@
                 pkgs.python3
                 pkgs.nodejs
               ];
+
+              # Socium's license, then each vendored crate's license texts.
+              postInstall = ''
+                doc="$out/share/doc/socium"
+                mkdir -p "$doc"
+                cp ${./LICENSE} "$doc/LICENSE"
+                ${pkgs.python3}/bin/python3 -I ${./nix}/test_third_party_licenses.py
+                ${pkgs.python3}/bin/python3 -I ${./nix}/third-party-licenses.py \
+                  ${cargoVendorDir} ${pkgs.spdx-license-list-data.text}/text \
+                  > "$doc/THIRD-PARTY-LICENSES"
+              '';
 
               postFixup = ''
                 wrapProgram "$out/bin/socium" \
