@@ -39,6 +39,13 @@ const MAX_TOOL_NAME: usize = 64;
 /// larger is left out, so one server cannot fill every request.
 const MAX_DESCRIPTION_CHARS: usize = 2048;
 const MAX_SCHEMA_BYTES: usize = 64 * 1024;
+/// How many tools one server, and all servers together, may offer, and how
+/// many bytes of descriptions and input schemas: providers refuse requests
+/// with too many tools (OpenAI at 128), and every request carries them all.
+const MAX_TOOLS_PER_SERVER: usize = 64;
+const MAX_MCP_TOOLS: usize = 100;
+const MAX_SERVER_DEFINITION_BYTES: usize = 128 * 1024;
+const MAX_MCP_DEFINITION_BYTES: usize = 256 * 1024;
 /// Lines of a server's standard error kept for warnings, and the longest
 /// kept line.
 const STDERR_LINES: usize = 20;
@@ -826,6 +833,7 @@ impl McpRegistry {
         });
         let mut registry = Self::default();
         let mut warnings = Vec::new();
+        let mut all_bytes = 0;
         for (settings, result) in servers.iter().zip(connected) {
             let (server, tools) = match result {
                 Ok(connected) => connected,
@@ -835,6 +843,7 @@ impl McpRegistry {
                 }
             };
             let index = registry.servers.len();
+            let (mut offered, mut bytes, mut left_out) = (0, 0, 0);
             for tool in tools {
                 let exposed = format!("{PREFIX}{}__{}", settings.name, tool.name);
                 let valid = exposed.len() <= MAX_TOOL_NAME
@@ -864,6 +873,16 @@ impl McpRegistry {
                     ));
                     continue;
                 }
+                let size = tool.description.len() + tool.input_schema.to_string().len();
+                if offered == MAX_TOOLS_PER_SERVER
+                    || registry.definitions.len() == MAX_MCP_TOOLS
+                    || bytes + size > MAX_SERVER_DEFINITION_BYTES
+                    || all_bytes + size > MAX_MCP_DEFINITION_BYTES
+                {
+                    left_out += 1;
+                    continue;
+                }
+                (offered, bytes, all_bytes) = (offered + 1, bytes + size, all_bytes + size);
                 registry.definitions.push(ToolDefinition {
                     name: exposed.clone(),
                     description: tool.description,
@@ -877,6 +896,14 @@ impl McpRegistry {
                         remote: tool.name,
                     },
                 );
+            }
+            if left_out > 0 {
+                warnings.push(format!(
+                    "MCP server {}: {left_out} tools are not offered, since a server may offer at most {MAX_TOOLS_PER_SERVER} tools and {} KiB of descriptions and schemas, and all servers together {MAX_MCP_TOOLS} tools and {} KiB",
+                    settings.name,
+                    MAX_SERVER_DEFINITION_BYTES / 1024,
+                    MAX_MCP_DEFINITION_BYTES / 1024
+                ));
             }
             registry.servers.push(server);
         }
@@ -1339,6 +1366,53 @@ pub(crate) mod tests {
             warnings
                 .iter()
                 .any(|warning| warning.contains("`huge`") && warning.contains("64 KiB")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_server_offers_at_most_its_share_of_tools_and_all_servers_together_a_total() {
+        let (registry, warnings) = connect_fake(&[
+            fake_settings("a", "--many", &[]),
+            fake_settings("b", "--many", &[]),
+        ]);
+
+        let offered = |server: &str| {
+            registry
+                .definitions()
+                .iter()
+                .filter(|tool| tool.name.starts_with(&format!("mcp__{server}__")))
+                .count()
+        };
+        assert_eq!(offered("a"), MAX_TOOLS_PER_SERVER);
+        assert_eq!(offered("b"), MAX_MCP_TOOLS - MAX_TOOLS_PER_SERVER);
+        for server in ["a", "b"] {
+            assert!(
+                warnings.iter().any(|warning| warning
+                    .starts_with(&format!("MCP server {server}: "))
+                    && warning.contains("tools are not offered")),
+                "{warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_server_whose_schemas_are_too_large_together_offers_only_what_fits() {
+        let (registry, warnings) = connect_fake(&[fake_settings("heavy", "--heavy", &[])]);
+
+        let size = registry
+            .definitions()
+            .iter()
+            .map(|tool| tool.description.len() + tool.input_schema.to_string().len())
+            .sum::<usize>();
+        assert!(size <= MAX_SERVER_DEFINITION_BYTES, "{size}");
+        assert!(registry.target("mcp__heavy__echo").is_some());
+        assert!(registry.target("mcp__heavy__h0").is_some());
+        assert!(registry.target("mcp__heavy__h3").is_none());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("tools are not offered")),
             "{warnings:?}"
         );
     }

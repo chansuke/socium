@@ -3,7 +3,8 @@
 `--crash` exits during startup and `--hang` never answers `initialize`.
 `--version=V` answers `initialize` with revision V, `--no-tools` offers no
 tools capability, `--big` adds a tool with a long description and one with
-a huge schema, and `--on-eof=PATH` writes PATH when its input closes. With
+a huge schema, `--many` adds 80 small tools, `--heavy` adds four with
+schemas of about 50 KB, and `--on-eof=PATH` writes PATH when its input closes. With
 `FAKE_LOG` set it appends each method it receives to that file.
 Otherwise it lists its tools over two pages and answers `tools/call`:
 `echo`, `fail` (isError), `image`, `structured`, `slow` (never answers,
@@ -54,6 +55,13 @@ PAGES = [
         {"name": "secret", "description": "Repeats FAKE_SECRET in an error."},
     ],
 ]
+if MODE == "--many":
+    PAGES[1].extend({"name": "t%d" % n, "description": "Tool %d." % n} for n in range(80))
+if MODE == "--heavy":
+    PAGES[1].extend(
+        {"name": "h%d" % n, "description": "Heavy.", "inputSchema": {"type": "object", "description": "x" * 50000}}
+        for n in range(4)
+    )
 if MODE == "--big":
     PAGES[1].append({"name": "wordy", "description": "w" * 3000})
     PAGES[1].append({
