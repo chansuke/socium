@@ -878,6 +878,8 @@ pub(crate) struct McpTarget<'a> {
     pub(crate) remote: &'a str,
     /// Whether the server's `allow` list names the tool.
     pub(crate) allowed: bool,
+    /// Where a remote server is; `None` for one on the host.
+    pub(crate) origin: Option<&'a str>,
 }
 
 struct Route {
@@ -1013,6 +1015,7 @@ impl McpRegistry {
             server: &self.servers[route.server].name,
             remote: &route.remote,
             allowed: route.allowed,
+            origin: self.servers[route.server].transport.origin(),
         })
     }
 
@@ -1854,6 +1857,11 @@ pub(crate) mod tests {
     fn dropping_the_registry_ends_the_remote_session() {
         let fake = FakeHttpServer::start(&[]);
         let (registry, _) = connect_fake(&[fake.settings("fake", &[], &[])]);
+        let origin = fake.url.trim_end_matches("/mcp");
+        assert_eq!(
+            registry.target("mcp__fake__echo").unwrap().origin,
+            Some(origin)
+        );
 
         drop(registry);
 

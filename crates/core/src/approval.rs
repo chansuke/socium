@@ -216,15 +216,25 @@ pub(crate) fn mcp_gate(
         return Gate::Run(None);
     }
     Gate::Ask(Ask {
-        reason: mcp_permissions(target.server),
+        reason: mcp_permissions(target),
         review: None,
         grant: Some(grant),
     })
 }
 
-/// What an MCP tool may do, as its approval request says.
-pub(crate) fn mcp_permissions(server: &str) -> String {
-    format!("MCP tools run in the {server} server on the host, outside Socium's sandbox.")
+/// What an MCP tool may do, as its approval request says: where it runs.
+pub(crate) fn mcp_permissions(target: &crate::mcp::McpTarget<'_>) -> String {
+    let server = target.server;
+    match target.origin {
+        None => {
+            format!("MCP tools run in the {server} server on the host, outside Socium's sandbox.")
+        }
+        Some(origin) => {
+            format!(
+                "MCP tools run in the {server} server at {origin}; Socium does not control what it does."
+            )
+        }
+    }
 }
 
 /// Whether a session grant covers `wanted`.
@@ -557,6 +567,7 @@ mod tests {
             server: "github",
             remote: "get_issue",
             allowed,
+            origin: None,
         };
         let Gate::Ask(ask) = mcp_gate("mcp__github__get_issue", &target(false), &|_| false) else {
             panic!("an MCP tool must ask by default");
@@ -585,6 +596,17 @@ mod tests {
             &grants,
             &Grant::Command(vec!["mcp__github__get_issue".into()])
         ));
+        let remote = crate::mcp::McpTarget {
+            origin: Some("https://api.githubcopilot.com"),
+            ..target(false)
+        };
+        let Gate::Ask(ask) = mcp_gate("mcp__github__get_issue", &remote, &|_| false) else {
+            panic!("a remote MCP tool must ask by default");
+        };
+        assert_eq!(
+            ask.reason,
+            "MCP tools run in the github server at https://api.githubcopilot.com; Socium does not control what it does."
+        );
     }
 
     #[test]
