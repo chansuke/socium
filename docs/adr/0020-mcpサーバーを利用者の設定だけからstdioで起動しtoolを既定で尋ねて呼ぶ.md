@@ -12,7 +12,7 @@ links:
 
 ## Context and Problem Statement
 
-Claude Code と OpenCode は MCP (Model Context Protocol) のクライアントを持ち、利用者が登録したサーバーの tool をモデルに渡す。GitHub の issue、社内の API、データベースのように、socium の組み込み tool では届かない対象をモデルが扱えるようになる。socium にはこの口が無かった (改善計画の PLAN-11)。
+Claude Code と OpenCode は MCP (Model Context Protocol) のクライアントを持ち、利用者が登録したサーバーの tool をモデルに渡す。GitHub の issue、社内の API、データベースのように、socium の組み込み tool では届かない対象をモデルが扱えるようになる。socium にはこの口が無かった。
 
 MCP サーバーの多くはネットワークとホストの認証情報を必要とする。socium のサンドボックスはネットワークを止め、ホームディレクトリを隠すので、サーバーをサンドボックスの中では動かせない。サーバーをどこで動かし、誰がそれを決め、モデルがその tool を呼ぶときに何を確かめるかを決める。最初の版は、使える最小の範囲に絞る。
 
