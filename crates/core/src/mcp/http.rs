@@ -209,7 +209,8 @@ impl HttpTransport {
         headers: &BTreeMap<String, String>,
         auth: Authorization,
     ) -> Result<Self, String> {
-        let not_started = |why: String| format!("MCP server {name} was not started: {why}.");
+        // A sentence that says why it was not started.
+        let not_started = |why: String| format!("{why}.");
         let url =
             Url::parse(url).map_err(|err| not_started(format!("its url is invalid: {err}")))?;
         let mut header_map = HeaderMap::new();
