@@ -13,7 +13,7 @@ use crate::settings::{McpServerSettings, McpTransportSettings};
 use crate::tools::ToolDefinition;
 use crate::tools::error::ToolError;
 use serde_json::{Value, json};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -55,14 +55,14 @@ const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 /// Pages of `tools/list` read before giving up on a server that never
 /// stops paginating.
 const MAX_TOOL_PAGES: usize = 100;
-/// Messages waiting for the server to read its input; a sender waits while
-/// the queue is full.
+/// Messages waiting for a child to read its input. A server with this many
+/// unread is not reading, and further messages fail at once.
 const OUTBOX_MESSAGES: usize = 64;
-/// How long a stopping server gets after its input closes, and again after
+/// How long a stopping child gets after its input closes, and again after
 /// SIGTERM, before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(1);
-/// Variable values shorter than this are not treated as secrets, so a value
-/// such as `1` does not blank out every digit of a warning.
+/// Values shorter than this are not treated as secrets, so a value such as
+/// `1` does not blank out every digit of a warning.
 const MIN_SECRET_CHARS: usize = 8;
 /// How often a waiting call checks for cancellation.
 const POLL: Duration = Duration::from_millis(50);
@@ -72,27 +72,77 @@ pub(crate) fn is_mcp_tool(name: &str) -> bool {
     name.starts_with(PREFIX)
 }
 
-type Waiters = Arc<Mutex<Option<HashMap<u64, mpsc::Sender<Value>>>>>;
-/// Lines for the writer thread; `None` once the server's input is closed.
+/// What a waiting request receives: the JSON-RPC response with its ID.
+type Reply = Result<Value, RequestError>;
+type Waiters = Arc<Mutex<Option<HashMap<u64, mpsc::Sender<Reply>>>>>;
+/// Lines for a child's writer thread; `None` once its input is closed.
 type Outbox = Arc<Mutex<Option<mpsc::SyncSender<Vec<u8>>>>>;
 
-/// One running server. It is stopped when this is dropped.
+/// One connected server: the handshake, tool listing, calls and result
+/// conversion are the same for every transport; only sending and
+/// receiving differ.
 pub(crate) struct McpServer {
     name: String,
-    child: Mutex<Child>,
-    outbox: Outbox,
-    /// Callers waiting for a response, by request ID; `None` once the
-    /// server's output closed.
-    waiters: Waiters,
+    transport: Transport,
     next_id: AtomicU64,
-    stderr: Arc<Mutex<VecDeque<String>>>,
     secrets: Secrets,
     call_timeout: Duration,
 }
 
+enum Transport {
+    Stdio(StdioTransport),
+}
+
+impl Transport {
+    /// Sends the request `message` with ID `id`; its response arrives on
+    /// the returned channel.
+    fn send(&self, id: u64, message: &Value) -> Result<mpsc::Receiver<Reply>, RequestError> {
+        match self {
+            Self::Stdio(stdio) => stdio.send(id, message),
+        }
+    }
+
+    /// Stops waiting for the response to `id`.
+    fn forget(&self, id: u64) {
+        match self {
+            Self::Stdio(stdio) => stdio.forget(id),
+        }
+    }
+
+    /// Sends a notification. With a deadline, waits until the server took
+    /// it, where the transport can tell.
+    fn notify(&self, message: &Value, _deadline: Option<Instant>) -> Result<(), RequestError> {
+        match self {
+            Self::Stdio(stdio) => stdio.queue(message),
+        }
+    }
+
+    /// `" (exit status: 3)"` when a child has exited, else nothing.
+    fn exit_status(&self) -> String {
+        match self {
+            Self::Stdio(stdio) => stdio.exit_status(),
+        }
+    }
+
+    /// The last lines a child wrote to standard error, as a paragraph to
+    /// append to a warning, or nothing.
+    fn stderr_tail(&self) -> String {
+        match self {
+            Self::Stdio(stdio) => stdio.stderr_tail(),
+        }
+    }
+
+    /// Starts stopping: a child's input closes, which tells it to exit.
+    fn close(&self) {
+        match self {
+            Self::Stdio(stdio) => stdio.close_input(),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum RequestError {
-    /// The server exited or closed its output.
+    /// The server exited, closed its output, or stopped reading its input.
     Gone,
     Cancelled,
     TimedOut,
@@ -155,9 +205,9 @@ struct RemoteTool {
 }
 
 impl McpServer {
-    /// Starts the server, performs the handshake, and lists its tools,
+    /// Connects to the server, performs the handshake, and lists its tools,
     /// within `timeout` and until `stop` is cancelled. `Err` is a warning
-    /// for the user, with the end of the server's standard error.
+    /// for the user, with the end of a child's standard error.
     fn connect(
         settings: &McpServerSettings,
         workspace_root: &Path,
@@ -169,7 +219,24 @@ impl McpServer {
             deadline: Instant::now() + timeout,
             control: stop,
         };
-        let server = Self::spawn(settings, workspace_root, host_env)?;
+        let transport = match &settings.transport {
+            McpTransportSettings::Stdio { command, env } => Transport::Stdio(
+                StdioTransport::spawn(&settings.name, command, env, workspace_root, host_env)?,
+            ),
+            McpTransportSettings::Http { .. } => {
+                return Err(format!(
+                    "MCP server {} was not started: remote servers are not supported yet.",
+                    settings.name
+                ));
+            }
+        };
+        let server = Self {
+            name: settings.name.clone(),
+            transport,
+            next_id: AtomicU64::new(1),
+            secrets: Secrets::of(settings),
+            call_timeout: settings.tool_timeout,
+        };
         let failed = |server: &Self, what: &str, err: RequestError| {
             let reason = match err {
                 RequestError::TimedOut => {
@@ -178,13 +245,16 @@ impl McpServer {
                 RequestError::Refused(message) => format!("refused to {what}: {message}"),
                 RequestError::Malformed => format!("sent a malformed answer when asked to {what}"),
                 RequestError::Gone | RequestError::Cancelled => {
-                    format!("stopped before it could {what}{}", server.exit_status())
+                    format!(
+                        "stopped before it could {what}{}",
+                        server.transport.exit_status()
+                    )
                 }
             };
             server.secrets.redact(&format!(
                 "MCP server {} was not started: it {reason}.{}",
                 server.name,
-                server.stderr_tail()
+                server.transport.stderr_tail()
             ))
         };
         let refuse = |server: &Self, problem: String| {
@@ -215,7 +285,7 @@ impl McpServer {
             ));
         }
         server
-            .notify("notifications/initialized", None, &wait)
+            .notify("notifications/initialized", None, Some(wait.deadline))
             .map_err(|err| failed(&server, "initialize", err))?;
         let mut tools = Vec::new();
         // A server that does not offer tools has none to list.
@@ -269,114 +339,34 @@ impl McpServer {
         ))
     }
 
-    fn spawn(
-        settings: &McpServerSettings,
-        workspace_root: &Path,
-        host_env: &dyn Fn(&str) -> Option<String>,
-    ) -> Result<Self, String> {
-        let McpTransportSettings::Stdio { command: argv, env } = &settings.transport else {
-            return Err(format!(
-                "MCP server {} was not started: remote servers are not supported yet.",
-                settings.name
-            ));
-        };
-        let mut command = Command::new(&argv[0]);
-        // Not the workspace: a launcher such as `python3 -m` or `npx` would
-        // load the workspace's modules and packages first.
-        command
-            .args(&argv[1..])
-            .current_dir("/")
-            .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for variable in INHERITED_VARIABLES {
-            let value = match *variable {
-                "PATH" => host_env(variable).map(|path| path_outside(&path, workspace_root)),
-                _ => host_env(variable),
-            };
-            if let Some(value) = value {
-                command.env(variable, value);
-            }
-        }
-        command.envs(env);
-        // Its own process group, so a launcher such as npx or uvx goes down
-        // with the server it started.
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut child = command.spawn().map_err(|err| {
-            format!(
-                "MCP server {} was not started: `{}` could not run: {err}.",
-                settings.name, argv[0]
-            )
-        })?;
-        let (Some(stdin), Some(stdout), Some(stderr)) =
-            (child.stdin.take(), child.stdout.take(), child.stderr.take())
-        else {
-            unreachable!("all three streams are piped");
-        };
-        let (sender, lines) = mpsc::sync_channel(OUTBOX_MESSAGES);
-        let server = Self {
-            name: settings.name.clone(),
-            child: Mutex::new(child),
-            outbox: Arc::new(Mutex::new(Some(sender))),
-            waiters: Arc::new(Mutex::new(Some(HashMap::new()))),
-            next_id: AtomicU64::new(1),
-            stderr: Arc::new(Mutex::new(VecDeque::new())),
-            secrets: Secrets::of(settings),
-            call_timeout: settings.tool_timeout,
-        };
-        std::thread::spawn(move || write_messages(stdin, &lines));
-        let (waiters, outbox) = (server.waiters.clone(), server.outbox.clone());
-        std::thread::spawn(move || read_messages(stdout, &waiters, &outbox));
-        let kept = server.stderr.clone();
-        std::thread::spawn(move || keep_stderr_tail(stderr, &kept));
-        Ok(server)
-    }
-
     fn request(&self, method: &str, params: Value, wait: &Wait<'_>) -> Result<Value, RequestError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, responses) = mpsc::channel();
-        match lock(&self.waiters).as_mut() {
-            Some(waiters) => waiters.insert(id, sender),
-            None => return Err(RequestError::Gone),
-        };
         let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let response = self.send(&message, Some(wait)).and_then(|()| {
-            loop {
-                match responses.recv_timeout(POLL) {
-                    Ok(response) => break Ok(response),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break Err(RequestError::Gone),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                }
-                if let Some(stop) = wait.stopped() {
-                    break Err(stop);
-                }
+        let responses = self.transport.send(id, &message)?;
+        let response = loop {
+            match responses.recv_timeout(POLL) {
+                Ok(reply) => break reply,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break Err(RequestError::Gone),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-        });
-        let response = match response {
-            Ok(response) => response,
-            Err(err) => {
-                self.forget(id);
+            if let Some(stop) = wait.stopped() {
+                self.transport.forget(id);
                 // A client must not cancel its initialize request; the
                 // server is stopped instead.
-                if matches!(err, RequestError::Cancelled | RequestError::TimedOut)
-                    && method != "initialize"
-                {
-                    let reason = match err {
+                if method != "initialize" {
+                    let reason = match stop {
                         RequestError::Cancelled => "The user cancelled the request.",
                         _ => "The request took too long.",
                     };
-                    let notice = json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/cancelled",
-                        "params": {"requestId": id, "reason": reason},
-                    });
-                    let _ = self.send(&notice, None);
+                    let _ = self.notify(
+                        "notifications/cancelled",
+                        Some(json!({"requestId": id, "reason": reason})),
+                        None,
+                    );
                 }
-                return Err(err);
+                break Err(stop);
             }
-        };
+        }?;
         match (response.get("result"), response.get("error")) {
             (Some(result), None) => Ok(result.clone()),
             (None, Some(error)) => Err(RequestError::Refused(
@@ -389,50 +379,17 @@ impl McpServer {
         }
     }
 
-    fn forget(&self, id: u64) {
-        if let Some(waiters) = lock(&self.waiters).as_mut() {
-            waiters.remove(&id);
-        }
-    }
-
     fn notify(
         &self,
         method: &str,
         params: Option<Value>,
-        wait: &Wait<'_>,
+        deadline: Option<Instant>,
     ) -> Result<(), RequestError> {
         let mut message = json!({"jsonrpc": "2.0", "method": method});
         if let Some(params) = params {
             message["params"] = params;
         }
-        self.send(&message, Some(wait))
-    }
-
-    /// Queues `message` for the server's input. While the queue is full it
-    /// waits until `wait` ends, or gives up at once without one.
-    fn send(&self, message: &Value, wait: Option<&Wait<'_>>) -> Result<(), RequestError> {
-        let mut line = message.to_string().into_bytes();
-        line.push(b'\n');
-        loop {
-            let queued = match lock(&self.outbox).as_ref() {
-                Some(outbox) => outbox.try_send(line),
-                None => return Err(RequestError::Gone),
-            };
-            match queued {
-                Ok(()) => return Ok(()),
-                Err(mpsc::TrySendError::Disconnected(_)) => return Err(RequestError::Gone),
-                Err(mpsc::TrySendError::Full(unsent)) => line = unsent,
-            }
-            match wait {
-                None => return Err(RequestError::Gone),
-                Some(wait) => {
-                    if let Some(stop) = wait.stopped() {
-                        return Err(stop);
-                    }
-                }
-            }
-            std::thread::sleep(POLL);
-        }
+        self.transport.notify(&message, deadline)
     }
 
     /// Runs `tool` with `arguments` until it answers, the server's
@@ -482,12 +439,12 @@ impl McpServer {
                         "The {} MCP server sent a malformed answer, {unknown}",
                         self.name
                     ),
-                    // Its standard error stays out: it is for the user, and
-                    // may hold what the server was given.
+                    // A child's standard error stays out: it is for the
+                    // user, and may hold what the server was given.
                     RequestError::Gone => format!(
                         "The {} MCP server stopped before answering{}",
                         self.name,
-                        self.exit_status()
+                        self.transport.exit_status()
                     ),
                 }))
             })?;
@@ -503,8 +460,106 @@ impl McpServer {
         }
         Ok(text)
     }
+}
 
-    /// `" (exit status: 3)"` when the child has exited, else nothing.
+/// A server running as a child process that speaks newline-delimited
+/// JSON-RPC on stdin and stdout. It is stopped when this is dropped.
+struct StdioTransport {
+    child: Mutex<Child>,
+    outbox: Outbox,
+    /// Callers waiting for a response, by request ID; `None` once the
+    /// server's output closed.
+    waiters: Waiters,
+    stderr: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl StdioTransport {
+    fn spawn(
+        name: &str,
+        argv: &[String],
+        env: &BTreeMap<String, String>,
+        workspace_root: &Path,
+        host_env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        let mut command = Command::new(&argv[0]);
+        // Not the workspace: a launcher such as `python3 -m` or `npx` would
+        // load the workspace's modules and packages first.
+        command
+            .args(&argv[1..])
+            .current_dir("/")
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for variable in INHERITED_VARIABLES {
+            let value = match *variable {
+                "PATH" => host_env(variable).map(|path| path_outside(&path, workspace_root)),
+                _ => host_env(variable),
+            };
+            if let Some(value) = value {
+                command.env(variable, value);
+            }
+        }
+        command.envs(env);
+        // Its own process group, so a launcher such as npx or uvx goes down
+        // with the server it started.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().map_err(|err| {
+            format!(
+                "MCP server {name} was not started: `{}` could not run: {err}.",
+                argv[0]
+            )
+        })?;
+        let (Some(stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
+            unreachable!("all three streams are piped");
+        };
+        let (sender, lines) = mpsc::sync_channel(OUTBOX_MESSAGES);
+        let transport = Self {
+            child: Mutex::new(child),
+            outbox: Arc::new(Mutex::new(Some(sender))),
+            waiters: Arc::new(Mutex::new(Some(HashMap::new()))),
+            stderr: Arc::new(Mutex::new(VecDeque::new())),
+        };
+        std::thread::spawn(move || write_messages(stdin, &lines));
+        let (waiters, outbox) = (transport.waiters.clone(), transport.outbox.clone());
+        std::thread::spawn(move || read_messages(stdout, &waiters, &outbox));
+        let kept = transport.stderr.clone();
+        std::thread::spawn(move || keep_stderr_tail(stderr, &kept));
+        Ok(transport)
+    }
+
+    fn send(&self, id: u64, message: &Value) -> Result<mpsc::Receiver<Reply>, RequestError> {
+        let (sender, responses) = mpsc::channel();
+        match lock(&self.waiters).as_mut() {
+            Some(waiters) => waiters.insert(id, sender),
+            None => return Err(RequestError::Gone),
+        };
+        if let Err(err) = self.queue(message) {
+            self.forget(id);
+            return Err(err);
+        }
+        Ok(responses)
+    }
+
+    /// Hands `message` to the writer thread without waiting for it.
+    fn queue(&self, message: &Value) -> Result<(), RequestError> {
+        let mut line = message.to_string().into_bytes();
+        line.push(b'\n');
+        match lock(&self.outbox).as_ref() {
+            Some(outbox) => outbox.try_send(line).map_err(|_| RequestError::Gone),
+            None => Err(RequestError::Gone),
+        }
+    }
+
+    fn forget(&self, id: u64) {
+        if let Some(waiters) = lock(&self.waiters).as_mut() {
+            waiters.remove(&id);
+        }
+    }
+
     fn exit_status(&self) -> String {
         // The reader may see the pipe close a moment before the exit is
         // visible.
@@ -555,7 +610,7 @@ impl McpServer {
         lock(&self.child).try_wait().ok().flatten()
     }
 
-    /// Closes the server's input, which tells it to exit.
+    /// Closes the child's input, which tells it to exit.
     fn close_input(&self) {
         lock(&self.outbox).take();
     }
@@ -572,8 +627,6 @@ impl McpServer {
         false
     }
 
-    /// The last lines the server wrote to standard error, as a paragraph
-    /// to append to a warning, or nothing.
     fn stderr_tail(&self) -> String {
         // Lines written just before an exit may still be on their way.
         std::thread::sleep(Duration::from_millis(20));
@@ -588,8 +641,8 @@ impl McpServer {
     }
 }
 
-impl Drop for McpServer {
-    /// Closes the input and gives the server a moment to exit, then sends
+impl Drop for StdioTransport {
+    /// Closes the input and gives the child a moment to exit, then sends
     /// its group SIGTERM, then SIGKILL, which also ends what a launcher
     /// started.
     fn drop(&mut self) {
@@ -640,8 +693,8 @@ fn path_outside(path: &str, workspace_root: &Path) -> String {
         .join(":")
 }
 
-/// Writes queued lines to the server's input until the queue closes or the
-/// server stops reading. A blocked write holds no lock, so cancelling and
+/// Writes queued lines to a child's input until the queue closes or the
+/// child stops reading. A blocked write holds no lock, so cancelling and
 /// stopping still work.
 fn write_messages(mut stdin: ChildStdin, lines: &mpsc::Receiver<Vec<u8>>) {
     for line in lines {
@@ -711,7 +764,7 @@ fn route_message(message: serde_json::Map<String, Value>, waiters: &Waiters, out
                     .and_then(|waiters| waiters.remove(&id))
             });
             if let Some(waiter) = waiter {
-                let _ = waiter.send(Value::Object(message));
+                let _ = waiter.send(Ok(Value::Object(message)));
             }
         }
         (None, None) => {}
@@ -950,7 +1003,7 @@ impl Drop for McpRegistry {
     /// than one grace period after another.
     fn drop(&mut self) {
         for server in &self.servers {
-            server.close_input();
+            server.transport.close();
         }
     }
 }
@@ -958,7 +1011,6 @@ impl Drop for McpRegistry {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     pub(crate) const FAKE_SERVER: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1191,7 +1243,8 @@ pub(crate) mod tests {
     #[test]
     fn dropping_the_registry_ends_the_server() {
         let (registry, _) = connect_fake(&[fake_settings("fake", "", &[])]);
-        let pid = lock(&registry.servers[0].child).id();
+        let Transport::Stdio(stdio) = &registry.servers[0].transport;
+        let pid = lock(&stdio.child).id();
         assert!(Path::new(&format!("/proc/{pid}")).exists());
 
         drop(registry);
@@ -1281,7 +1334,8 @@ pub(crate) mod tests {
     #[test]
     fn a_server_that_stops_reading_does_not_hold_up_cancelling_or_stopping() {
         let (registry, _) = connect_fake(&[fake_settings("fake", "", &[])]);
-        let pid = lock(&registry.servers[0].child).id();
+        let Transport::Stdio(stdio) = &registry.servers[0].transport;
+        let pid = lock(&stdio.child).id();
         let deaf = registry
             .call(
                 "mcp__fake__deaf",
