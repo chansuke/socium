@@ -65,3 +65,16 @@ deny = [
 # API with the key in DEEPSEEK_API_KEY; each search with results is billed.
 # Off unless set to true.
 enabled = false
+
+# MCP servers whose tools the model may call, each started over stdio when
+# Socium starts. A server runs on the host, outside the sandbox, with the
+# workspace as its directory; configure only servers you trust. It gets PATH,
+# HOME, USER, LANG and its `env`, where ${NAME} is read from Socium's
+# environment (an unset variable keeps the server from starting). Tool calls
+# ask unless the tool is listed in `allow`. Tools reach the model as
+# mcp__<server>__<tool>.
+# [mcp.servers.github]
+# command = ["github-mcp-server", "stdio"]
+# env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }
+# allow = ["get_issue"]
+# enabled = true

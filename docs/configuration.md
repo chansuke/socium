@@ -189,6 +189,46 @@ key, the tool is not offered and startup says why. To try it against the real
 API (this costs money), run
 `nix develop -c cargo test -p socium-core live_web_search -- --ignored`.
 
+## MCP servers
+
+Socium can start MCP (Model Context Protocol) servers and offer their tools to
+the model. Only local servers over stdio are supported, and only their tools:
+no resources, prompts, sampling, remote (HTTP) servers, or OAuth. Each server
+is a table under `[mcp.servers]` in `config.toml`; a workspace cannot add one.
+
+```toml
+[mcp.servers.github]
+command = ["github-mcp-server", "stdio"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }
+allow = ["get_issue"]
+# enabled = false
+```
+
+- `command` is the program and its arguments. It runs on the host, outside the
+  sandbox, with the workspace as its directory, so it has your network and
+  your files. Configure only servers you trust.
+- The server gets PATH, HOME, USER, and LANG from Socium's environment, plus
+  `env`; nothing else, so provider API keys never reach it. `${NAME}` in an
+  `env` value is replaced by that variable from Socium's environment. When it
+  is not set, the server is not started and startup says why.
+- The model sees each tool as `mcp__<server>__<tool>`, with the server's
+  description and input schema. A server name is 1 to 32 letters, digits, `_`,
+  or `-`, without `__`. A tool whose full name would exceed 64 characters or
+  contain other characters is not offered, with a warning.
+- A tool call asks for approval, since nothing confines what the server does;
+  you can allow that one tool for the rest of the session. Tools listed in
+  `allow` (their names on the server) run without asking. `socium -p` refuses a
+  call that needs approval and tells the model to add the tool to `allow`.
+- Servers start in parallel while the interface opens, and the first turn waits
+  for them, at most 30 seconds each. A server that fails to start is skipped
+  with a warning that ends with its last standard error lines. When Socium
+  exits it kills the server's process group, and the server's standard input
+  closes in any case.
+- Subagents do not get MCP tools.
+
+The design and what is deferred are in
+[ADR 20](adr/0020-mcpサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ.md).
+
 ## Project instructions
 
 Socium reads `AGENTS.md` (or `CLAUDE.md`) in the workspace root into its
