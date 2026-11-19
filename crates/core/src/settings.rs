@@ -19,8 +19,10 @@ const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 const MAX_COMMAND_TIMEOUT_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Files a host tool runs or loads on its own, without the user starting a
-/// build: direnv, mise, nix-direnv, rust-analyzer (build scripts, Cargo
-/// config, toolchain files), editors, CI, and Git hook managers. A change to
+/// build: direnv, mise, nix-direnv, rust-analyzer (manifests and lock files,
+/// which pick the build scripts and proc macros it runs, Cargo config,
+/// toolchain files),
+/// editors, CI, and Git hook managers. A change to
 /// one can run code outside the sandbox later, so editing it needs approval.
 pub(crate) const DEFAULT_PROTECTED: &[&str] = &[
     ".envrc",
@@ -30,6 +32,8 @@ pub(crate) const DEFAULT_PROTECTED: &[&str] = &[
     "flake.nix",
     "shell.nix",
     "build.rs",
+    "Cargo.toml",
+    "Cargo.lock",
     "rust-toolchain",
     "rust-toolchain.toml",
     "**/.cargo/config",
@@ -755,7 +759,6 @@ mod tests {
         for path in [
             "docs/.github/workflows/x",
             "src/main.rs",
-            "Cargo.toml",
             ".github/CODEOWNERS",
         ] {
             assert!(!patterns.matches(path), "{path}");

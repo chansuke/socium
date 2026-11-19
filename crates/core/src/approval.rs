@@ -146,8 +146,10 @@ pub(crate) fn gate(
             let edits = edited_paths(name, input, root);
             let protected = edits
                 .iter()
-                .filter(|path| approval.protected.matches(path))
-                .cloned()
+                .filter(|(path, requested)| {
+                    approval.protected.matches(path) || approval.protected.matches(requested)
+                })
+                .map(|(path, _)| path.clone())
                 .collect::<Vec<_>>();
             if !protected.is_empty() && !granted(&Grant::Edit(protected.clone())) {
                 return Ok(Gate::Ask(Ask {
@@ -251,8 +253,9 @@ pub(crate) fn suggest_prefix(argv: &[String]) -> Option<Vec<String>> {
     Some(prefix)
 }
 
-/// Workspace paths (from the root, `/`-separated) a file tool would change.
-fn edited_paths(name: &str, input: &Value, root: &Path) -> Vec<String> {
+/// Workspace paths (from the root, `/`-separated) a file tool would change,
+/// each with the path as it was asked for (see `read_path`).
+fn edited_paths(name: &str, input: &Value, root: &Path) -> Vec<(String, String)> {
     let requested = match name {
         "apply_patch" => input["patch"]
             .as_str()
@@ -274,12 +277,13 @@ fn edited_paths(name: &str, input: &Value, root: &Path) -> Vec<String> {
     };
     requested
         .iter()
-        .filter_map(|path| relative_target(root, path))
+        .filter_map(|path| Some((relative_target(root, path)?, as_requested(root, path))))
         .collect()
 }
 
 /// The workspace path a read tool would read, and the path as it was
-/// asked for, so a link named like a secret is caught wherever it points.
+/// asked for, so a link named like a secret or a protected file is caught
+/// wherever it points.
 fn read_path(name: &str, input: &Value, root: &Path) -> Option<(String, String)> {
     let path = match name {
         "read_file" => input["path"].as_str()?,
@@ -288,13 +292,17 @@ fn read_path(name: &str, input: &Value, root: &Path) -> Option<(String, String)>
         }
         _ => return None,
     };
-    let requested = Path::new(path);
-    let requested = requested
+    Some((relative_target(root, path)?, as_requested(root, path)))
+}
+
+/// `requested` from the root as written, symlinks not followed.
+fn as_requested(root: &Path, requested: &str) -> String {
+    let requested = Path::new(requested);
+    requested
         .strip_prefix(root)
         .unwrap_or(requested)
         .to_string_lossy()
-        .replace('\\', "/");
-    Some((relative_target(root, path)?, requested))
+        .replace('\\', "/")
 }
 
 /// `requested` as it resolves inside the workspace, symlinks followed, so
@@ -588,6 +596,20 @@ mod tests {
         };
         assert!(matches!(edit("build.rs"), Gate::Ask(_)));
         assert!(matches!(edit(".github/workflows/ci.yaml"), Gate::Ask(_)));
+        // A new dependency, or a new path crate with a proc macro, runs in
+        // rust-analyzer on the host.
+        assert!(matches!(edit("Cargo.toml"), Gate::Ask(_)));
+        assert!(matches!(edit("crates/x/Cargo.toml"), Gate::Ask(_)));
+        // A lock can pin a git dependency to any commit, a fork's included.
+        assert!(matches!(edit("Cargo.lock"), Gate::Ask(_)));
+        // A link named like a protected file asks too, wherever it points.
+        std::fs::write(root.path().join("manifest.toml"), "[package]\n").unwrap();
+        std::os::unix::fs::symlink("manifest.toml", root.path().join("Cargo.toml")).unwrap();
+        let patch = "*** Begin Patch\n*** Update File: Cargo.toml\n@@\n-[package]\n+[workspace]\n*** End Patch";
+        assert!(matches!(
+            decide(root.path(), &auto, "apply_patch", json!({"patch": patch})),
+            Gate::Ask(_)
+        ));
         assert!(matches!(edit("src/lib.rs"), Gate::Run(None)));
         let patch =
             "*** Begin Patch\n*** Add File: crates/x/build.rs\n+fn main() {}\n*** End Patch";
@@ -656,6 +678,7 @@ mod tests {
             "backend/auth.json",
             ".github/workflows/ci.yaml",
             "build.rs",
+            "crates/x/Cargo.toml",
             "src/lib.rs",
         ] {
             let path = root.path().join(file);
@@ -680,7 +703,15 @@ mod tests {
         assert_eq!(hidden, [".env", "app/.env.local", "backend/auth.json"]);
         let mut frozen = names(&restrictions.frozen);
         frozen.sort();
-        assert_eq!(frozen, [".github/workflows", ".vscode", "build.rs"]);
+        assert_eq!(
+            frozen,
+            [
+                ".github/workflows",
+                ".vscode",
+                "build.rs",
+                "crates/x/Cargo.toml"
+            ]
+        );
     }
 
     mod properties {
