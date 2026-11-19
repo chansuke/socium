@@ -49,7 +49,9 @@ numbers and listed under the table.
 | `size_bytes` | the executable, not the Nix wrapper script |
 | `closure_bytes` | the Nix store path and everything it needs, as `nix path-info -S` reports |
 
-The request fields do not change between runs of the same binary.
+The request fields do not change between runs of the same binary, except
+that a command's saved output is named after its process ID. When the ID
+gains or loses a digit, `long-command-output` sends a few bytes more or less.
 `compare.py` shows any change in them. The time and memory fields vary, so
 `compare.py` calls head better or worse only when the ranges of the two sides
 do not overlap. Otherwise it shows `~`.
@@ -63,7 +65,8 @@ out its merge commit, so the parent is the base branch. The job fails only
 when a run fails. A change in size or time does not fail it.
 
 GitHub's runners are shared machines, so small time differences show as `~`.
-The request fields have no noise, and any change in them is real.
+The request fields have no other noise, so a change of more than a few
+bytes is real.
 
 ## Other agents
 
