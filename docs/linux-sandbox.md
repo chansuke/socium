@@ -105,8 +105,10 @@ The child environment is rebuilt with only:
   `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`.
 
 Variables from `[sandbox.env]` come last; PATH, HOME, TMPDIR and `GIT_*` cannot
-be set there. bwrap sets them in the command only, so a loader variable such as
-`LD_PRELOAD` does not reach bwrap itself, which runs on the host. There is no inherited credential denylist to become stale: unknown
+be set there. bwrap reads them from a descriptor and sets them in the command
+only, so a loader variable such as `LD_PRELOAD` does not reach bwrap itself,
+which runs on the host, and the values do not appear in its command line. There
+is no inherited credential denylist to become stale: unknown
 future secret variables are excluded as well. `git_commit` uses the repository's
 identity, or else your global `user.name` and `user.email`, which the host's Git
 reads outside any repository and passes in as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`.

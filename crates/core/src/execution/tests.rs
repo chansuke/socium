@@ -571,12 +571,20 @@ fn user_env_skips_the_host_side_launcher() {
         ),
         ("TOOL_SETTING".into(), "inside".into()),
     ];
-    let output = run_with(&policy, root.path(), &["sh", "-c", "echo $TOOL_SETTING"], 5);
+    let command = SandboxExecutor::command(&policy, &["true".into()], root.path()).unwrap();
+    assert!(command.get_envs().all(|(name, _)| name != "LD_DEBUG"));
+    assert!(command.get_args().all(|arg| arg != "inside"));
+    let output = run_with(
+        &policy,
+        root.path(),
+        &["sh", "-c", "echo \"got $LD_DEBUG $TOOL_SETTING\""],
+        5,
+    );
     let logs = fs::read_dir(host.path()).unwrap().count();
     assert_eq!(logs, 0, "the host-side bwrap read sandbox.env");
     // The child's own loader also logs, to its output since the host
-    // directory is out of its reach; only the variable's arrival matters.
-    assert!(String::from_utf8_lossy(&output.stdout).contains("inside\n"));
+    // directory is out of its reach; only the variables' arrival matters.
+    assert!(String::from_utf8_lossy(&output.stdout).contains("got files inside\n"));
     success(output);
 }
 
