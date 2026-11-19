@@ -17,10 +17,52 @@ mod transcript;
 mod view;
 
 use app::App;
-use cli::Launch;
+use cli::{Launch, McpCommand};
 use color_eyre::{Result, eyre::eyre};
 use socium_core::{AgentService, SessionStart};
 use std::{env, path::Path};
+
+/// Runs `socium mcp ...` and returns the exit status.
+fn mcp(command: McpCommand) -> i32 {
+    let result = match &command {
+        McpCommand::Login(server) => {
+            socium_core::mcp_login(server, &|url| open_in_browser(server, url))
+        }
+        McpCommand::Logout(server) => socium_core::mcp_logout(server),
+    };
+    match result {
+        Ok(message) => {
+            println!("{message}");
+            0
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            1
+        }
+    }
+}
+
+/// Shows the authorization URL and tries the desktop's opener; a missing
+/// opener leaves the URL to copy.
+fn open_in_browser(server: &str, url: &str) {
+    eprintln!(
+        "To log in to MCP server {server}, open this URL in a browser:\n\n  {url}\n\nWaiting for the browser to come back (up to 5 minutes)..."
+    );
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    if let Ok(mut child) = std::process::Command::new(opener)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        std::thread::spawn(move || child.wait());
+    }
+}
 
 #[tokio::main(worker_threads = 1)]
 async fn main() -> Result<()> {
@@ -53,6 +95,7 @@ async fn main() -> Result<()> {
     };
 
     let (start, pick_session) = match launch {
+        Launch::Mcp(command) => std::process::exit(mcp(command)),
         Launch::New | Launch::Help | Launch::Version => (SessionStart::New, false),
         Launch::Continue => (SessionStart::Continue, false),
         Launch::Resume(Some(id)) => (SessionStart::Resume(id), false),

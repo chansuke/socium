@@ -1,5 +1,5 @@
 //! Command-line flags: which session to open, and whether to run one
-//! prompt without the terminal UI.
+//! prompt without the terminal UI; or the `mcp` subcommand.
 
 /// The parsed command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -39,11 +39,23 @@ pub(crate) enum Launch {
     Resume(Option<String>),
     Help,
     Version,
+    /// `mcp login|logout SERVER`, which opens no session.
+    Mcp(McpCommand),
+}
+
+/// `socium mcp ...`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum McpCommand {
+    /// Log in to the remote server with OAuth and keep its token.
+    Login(String),
+    /// Forget the server's token.
+    Logout(String),
 }
 
 pub(crate) fn usage(program: &str) -> String {
     format!(
-        "Usage: {program} [-c | -r [ID]] [-p [PROMPT] [--output-format FMT]]\n\
+        "Usage: {program} [-c | -r [ID]] [-p [PROMPT] [--output-format FMT]]\n       \
+                {program} mcp login|logout SERVER\n\
          \n\
          Starts a new conversation in the current directory.\n\
          \n\
@@ -59,7 +71,13 @@ pub(crate) fn usage(program: &str) -> String {
                               final result), or stream-json (progress and result\n                     \
                               as JSON Lines)\n  \
            -h, --help         Show this help\n  \
-           -V, --version      Show the version"
+           -V, --version      Show the version\n\
+         \n\
+         Commands:\n  \
+           mcp login SERVER   Log in to the remote MCP server SERVER of config.toml\n                     \
+                              with OAuth in a browser, and keep its token for\n                     \
+                              later runs\n  \
+           mcp logout SERVER  Forget the stored token of SERVER"
     )
 }
 
@@ -73,6 +91,12 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, Stri
         });
     }
     let mut args = args.into_iter().peekable();
+    if args.next_if(|first| first == "mcp").is_some() {
+        return mcp(args.collect()).map(|launch| Args {
+            launch,
+            print: None,
+        });
+    }
     let mut launch = None;
     let mut print = false;
     let mut prompt = None;
@@ -135,6 +159,22 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, Stri
         launch,
         print: Some(Print { prompt, format }),
     })
+}
+
+/// `mcp login|logout SERVER`, or the help.
+fn mcp(args: Vec<String>) -> Result<Launch, String> {
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    match args[..] {
+        ["login", server] if !server.starts_with('-') => {
+            Ok(Launch::Mcp(McpCommand::Login(server.into())))
+        }
+        ["logout", server] if !server.starts_with('-') => {
+            Ok(Launch::Mcp(McpCommand::Logout(server.into())))
+        }
+        _ if args.iter().any(|arg| matches!(*arg, "-h" | "--help")) => Ok(Launch::Help),
+        ["login" | "logout"] => Err(format!("mcp {} needs a server name", args[0])),
+        _ => Err("mcp takes login SERVER or logout SERVER".to_string()),
+    }
 }
 
 fn output_format(value: &str) -> Result<OutputFormat, String> {
@@ -261,6 +301,40 @@ mod tests {
         );
         assert_eq!(parsed(&["--resume", "-h"]), Ok(Launch::Help));
         assert_eq!(parsed(&["-h", "-c"]), Ok(Launch::Help));
+    }
+
+    #[test]
+    fn mcp_logs_in_to_or_out_of_one_server() {
+        let mcp = |command| {
+            Ok(Args {
+                launch: Launch::Mcp(command),
+                print: None,
+            })
+        };
+        assert_eq!(
+            printed(&["mcp", "login", "github"]),
+            mcp(McpCommand::Login("github".into()))
+        );
+        assert_eq!(
+            printed(&["mcp", "logout", "github"]),
+            mcp(McpCommand::Logout("github".into()))
+        );
+        assert_eq!(parsed(&["mcp", "--help"]), Ok(Launch::Help));
+        assert_eq!(parsed(&["mcp", "login", "-h"]), Ok(Launch::Help));
+        assert_eq!(
+            parsed(&["mcp", "login"]),
+            Err("mcp login needs a server name".into())
+        );
+        for bad in [
+            &["mcp"][..],
+            &["mcp", "list"],
+            &["mcp", "login", "a", "b"],
+            &["mcp", "login", "-p"],
+        ] {
+            assert!(parsed(bad).is_err(), "{bad:?}");
+        }
+        // Only as the first argument.
+        assert!(parsed(&["-c", "mcp", "login", "x"]).is_err());
     }
 
     #[test]

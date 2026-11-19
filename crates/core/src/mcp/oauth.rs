@@ -11,7 +11,7 @@
 
 use super::http::{describe, http_client, read_body};
 use super::token_store::{ClientAuth, StoredToken, TokenStore, now_seconds};
-use crate::settings::{McpOAuthSettings, McpServerSettings, McpTransportSettings};
+use crate::settings::{McpOAuthSettings, McpServerSettings, McpTransportSettings, Settings};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE};
@@ -29,6 +29,64 @@ const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 /// connection may take to send it.
 const MAX_CALLBACK_BYTES: usize = 16 * 1024;
 const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `socium mcp login` waits for the browser to come back.
+pub(crate) const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// `socium mcp login <server>`: logs in to the server of that name in
+/// config.toml. `Ok` and `Err` are sentences for the user.
+pub(crate) fn login_configured(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    server: &str,
+    browser: &(dyn Fn(&str) + Sync),
+    timeout: Duration,
+) -> Result<String, String> {
+    let (settings, warnings) = Settings::load(lookup).map_err(|err| err.to_string())?;
+    let Some(found) = settings.mcp_servers.iter().find(|s| s.name == server) else {
+        let prefix = format!("mcp.servers.{server}.");
+        if let Some(warning) = warnings.iter().find(|w| w.starts_with(&prefix)) {
+            return Err(format!(
+                "Could not log in to MCP server {server}: {warning}."
+            ));
+        }
+        return Err(match &settings.source {
+            Some(path) => format!(
+                "No MCP server named {server} is configured in {}, or it is turned off.",
+                path.display()
+            ),
+            None => format!("No MCP server named {server} is configured: there is no config.toml."),
+        });
+    };
+    let store = TokenStore::from_env(lookup).ok_or_else(|| {
+        format!("Could not log in to MCP server {server}: neither XDG_STATE_HOME nor HOME is set, so there is nowhere to keep the token.")
+    })?;
+    login(found, &store, browser, timeout)?;
+    Ok(format!(
+        "Logged in to MCP server {server}. Socium keeps the token in {} and uses it from the next start.",
+        store.path(server).display()
+    ))
+}
+
+/// `socium mcp logout <server>`: forgets the server's token, whether or
+/// not config.toml still names it.
+pub(crate) fn logout_configured(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    server: &str,
+) -> Result<String, String> {
+    if !crate::settings::valid_mcp_server_name(server) {
+        return Err(format!("'{server}' is not an MCP server name."));
+    }
+    let store = TokenStore::from_env(lookup)
+        .ok_or("Neither XDG_STATE_HOME nor HOME is set, so there is no token store.")?;
+    let path = store.path(server);
+    match store.remove(server) {
+        Ok(true) => Ok(format!(
+            "Logged out of MCP server {server}: removed {}.",
+            path.display()
+        )),
+        Ok(false) => Ok(format!("MCP server {server} has no stored token.")),
+        Err(err) => Err(format!("Could not remove {}: {err}.", path.display())),
+    }
+}
 
 /// Logs in to the remote server of `settings` and stores its token.
 /// `browser` gets the authorization URL to open; it must not block. `Err`
@@ -1241,6 +1299,70 @@ pub(super) mod tests {
             params_of(&fake, "/auth/authorize")[0]["redirect_uri"],
             format!("http://127.0.0.1:{port}/callback")
         );
+    }
+
+    #[test]
+    fn login_and_logout_find_the_server_in_config_toml() {
+        let fake = FakeHttpServer::start(&["--oauth"]);
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[mcp.servers.fake]\nurl = \"{}\"\n[mcp.servers.gated]\nurl = \"https://a.example/mcp\"\noauth = {{ client_id = \"c\", client_secret = \"${{UNSET_SECRET}}\" }}\n[mcp.servers.local]\ncommand = [\"x\"]\n",
+                fake.url
+            ),
+        )
+        .unwrap();
+        let state = home.path().join("state");
+        let (config, state) = (
+            config.to_str().unwrap().to_string(),
+            state.to_str().unwrap().to_string(),
+        );
+        let lookup = move |name: &str| match name {
+            "SOCIUM_CONFIG_FILE" => Some(config.clone()),
+            "XDG_STATE_HOME" => Some(state.clone()),
+            _ => None,
+        };
+        let browser = Browser::new(|location| location);
+
+        let done = login_configured(
+            &lookup,
+            "fake",
+            &|url| browser.open(url),
+            Duration::from_secs(20),
+        )
+        .unwrap();
+
+        let path = home.path().join("state/socium/mcp-auth/fake.json");
+        assert_eq!(
+            done,
+            format!(
+                "Logged in to MCP server fake. Socium keeps the token in {} and uses it from the next start.",
+                path.display()
+            )
+        );
+        assert!(path.exists());
+        let err = login_configured(&lookup, "other", &|_| {}, Duration::from_secs(1)).unwrap_err();
+        assert!(
+            err.starts_with("No MCP server named other is configured in "),
+            "{err}"
+        );
+        let err = login_configured(&lookup, "gated", &|_| {}, Duration::from_secs(1)).unwrap_err();
+        assert!(err.contains("${UNSET_SECRET} is not set"), "{err}");
+        let err = login_configured(&lookup, "local", &|_| {}, Duration::from_secs(1)).unwrap_err();
+        assert!(err.contains("runs a command"), "{err}");
+
+        assert_eq!(
+            logout_configured(&lookup, "fake").unwrap(),
+            format!("Logged out of MCP server fake: removed {}.", path.display())
+        );
+        assert!(!path.exists());
+        assert_eq!(
+            logout_configured(&lookup, "fake").unwrap(),
+            "MCP server fake has no stored token."
+        );
+        assert!(logout_configured(&lookup, "../x").is_err());
     }
 
     #[test]

@@ -61,6 +61,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// `socium mcp login <server>` (ADR 22): logs in to a remote MCP server of
+/// config.toml with OAuth and keeps its token for later runs. `browser`
+/// gets the authorization URL to show or open; it must not block. Waits up
+/// to five minutes for the browser. `Ok` and `Err` are messages for the
+/// user, and neither holds a secret.
+pub fn mcp_login(server: &str, browser: &(dyn Fn(&str) + Sync)) -> Result<String, String> {
+    mcp::oauth::login_configured(
+        &|name| env::var(name).ok(),
+        server,
+        browser,
+        mcp::oauth::LOGIN_TIMEOUT,
+    )
+}
+
+/// `socium mcp logout <server>`: forgets the server's stored token.
+pub fn mcp_logout(server: &str) -> Result<String, String> {
+    mcp::oauth::logout_configured(&|name| env::var(name).ok(), server)
+}
+
 /// Reads configuration and API keys. Injected so tests never touch the
 /// process environment.
 type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;

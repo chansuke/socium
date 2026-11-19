@@ -10,11 +10,7 @@
 //! code that runs and provider keys never reach it.
 
 mod http;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the login uses it in the next steps")
-)]
-mod oauth;
+pub(crate) mod oauth;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the transport uses it in the next steps")

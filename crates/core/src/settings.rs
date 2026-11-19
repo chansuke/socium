@@ -817,6 +817,18 @@ impl Settings {
     }
 }
 
+/// `[A-Za-z0-9_-]{1,32}` without `__`, so `mcp__<name>__<tool>` names one
+/// server and the name is safe in a file name.
+pub(crate) fn valid_mcp_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_MCP_SERVER_NAME
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        && !name.contains("__")
+        && !name.ends_with('_')
+}
+
 /// A validated `[mcp.servers.<name>]`, or `None` when it is turned off or
 /// names a variable that is not set (with a warning).
 fn mcp_server(
@@ -825,14 +837,7 @@ fn mcp_server(
     env: &dyn Fn(&str) -> Option<String>,
     warnings: &mut Vec<String>,
 ) -> Result<Option<McpServerSettings>, String> {
-    let valid_name = !name.is_empty()
-        && name.len() <= MAX_MCP_SERVER_NAME
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-        && !name.contains("__")
-        && !name.ends_with('_');
-    if !valid_name {
+    if !valid_mcp_server_name(&name) {
         return Err(format!(
             "mcp.servers.{name}: a server name must be 1 to {MAX_MCP_SERVER_NAME} letters, digits, '_' or '-', without '__' and not ending in '_'"
         ));
