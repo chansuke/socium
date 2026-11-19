@@ -19,7 +19,8 @@ they leave to you.
   CI, editor settings) and reads of credential files always ask; wider
   searches and diffs leave those files out. Socium's
   settings must live outside the workspace, so the model cannot change them.
-- File tools constrain paths to the workspace and protect `.git` and `.socium`.
+- File tools constrain paths to the workspace. They neither change nor read
+  `.git` and `.socium`, except saved command output and `.socium/scratch`.
   These checks do not isolate concurrently changing files, malicious host
   processes. All subprocesses use Linux bubblewrap with filesystem, PID, user,
   and network namespaces, plus a seccomp policy. Read-only helpers cannot write
