@@ -24,6 +24,9 @@
   tell Socium what to do instead.
 - **Your model, your session.** Claude by default, or any provider you add in
   `models.toml`. Stop at any time and resume with `-c` or `-r`.
+- **Your MCP servers.** Tools of the stdio MCP servers you list in
+  `config.toml` are offered to the model and ask before each call unless you
+  allow them. The servers themselves run on the host, outside the sandbox.
 
 <p align="center">
   <img src="docs/assets/demo.gif" width="860" alt="Socium runs a failing test, reads the file, fixes it, and runs the test again, asking before each command">
@@ -74,6 +77,8 @@ To let builds see your toolchains and caches, copy
 - [Sandbox and approvals](docs/configuration.md#sandbox-and-approval-settings):
   which host directories commands may read, and which commands run without
   asking.
+- [MCP servers](docs/configuration.md#mcp-servers): local servers whose tools
+  the model may call.
 - [Environment variables](docs/configuration.md#environment-variables):
   `MODEL`, `EFFORT`, `MAX_TOKENS`, and the rest.
 

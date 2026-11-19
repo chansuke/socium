@@ -112,7 +112,8 @@ pub(crate) fn run_subagent<'a>(
         let tools = child
             .tools
             .iter()
-            .filter(|tool| kind.tools.allows(tool.name()))
+            // MCP tools are the main agent's alone (ADR 20).
+            .filter(|tool| kind.tools.allows(tool.name()) && !crate::mcp::is_mcp_tool(tool.name()))
             .cloned()
             .collect::<Vec<_>>();
         let system = format!(
@@ -122,6 +123,7 @@ pub(crate) fn run_subagent<'a>(
         let child = TurnContext {
             system: &system,
             tools: &tools,
+            mcp: None,
             ..child
         };
         let (root, session) = (ctx.workspace_root, ctx.session_id);
@@ -731,6 +733,32 @@ mod tests {
             format!("{SUBAGENT_FRAMING}\n\n{SUBAGENT_WORKER_INSTRUCTIONS}")
         );
         assert_eq!(tool_names(&requests[1]), expected);
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_are_offered_to_the_main_agent_and_not_to_a_worker() {
+        let workspace = make_temp_dir("subagent_mcp");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![delegate("worker"), text("Nothing to do."), text("Done.")],
+        );
+        service.env = Arc::new(|name| std::env::var(name).ok());
+        service.install_settings(crate::settings::Settings {
+            mcp_servers: vec![crate::mcp::tests::fake_settings("fake", "", &["echo"])],
+            ..Default::default()
+        });
+
+        service.submit("Fix it".into()).await.unwrap();
+
+        let requests = requests.lock().unwrap().clone();
+        assert!(tool_names(&requests[0]).contains(&"mcp__fake__echo".to_string()));
+        assert!(
+            !tool_names(&requests[1])
+                .iter()
+                .any(|name| name.starts_with("mcp__")),
+            "{:?}",
+            tool_names(&requests[1])
+        );
     }
 
     #[tokio::test]

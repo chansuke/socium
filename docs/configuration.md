@@ -189,6 +189,62 @@ key, the tool is not offered and startup says why. To try it against the real
 API (this costs money), run
 `nix develop -c cargo test -p socium-core live_web_search -- --ignored`.
 
+## MCP servers
+
+Socium can start MCP (Model Context Protocol) servers and offer their tools to
+the model. Only local servers over stdio are supported, and only their tools:
+no resources, prompts, sampling, remote (HTTP) servers, or OAuth. Each server
+is a table under `[mcp.servers]` in `config.toml`; a workspace cannot add one.
+
+```toml
+[mcp.servers.github]
+command = ["github-mcp-server", "stdio"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }
+allow = ["get_issue"]
+# enabled = false
+```
+
+- `command` is the program, an absolute path or a name found on PATH, and its
+  arguments. It runs on the host, outside the sandbox, so it has your network
+  and your files. Configure only servers you trust. Its directory is `/`, not
+  the workspace, so a launcher such as `python3 -m` or `npx` does not pick up
+  the workspace's modules or packages; give a server that works on a directory
+  its absolute path.
+- The server gets PATH (without relative entries or entries in the workspace),
+  HOME, USER, and LANG from Socium's environment, plus `env`; nothing else, so
+  provider API keys reach it only if `env` names them. `${NAME}` in an `env`
+  value is replaced by that variable from Socium's environment. When it is not
+  set, the server is not started and startup says why.
+- `tool_timeout_secs` (default 600) is how long a tool call may take. A call
+  that runs longer, or that you cancel, is given up and the server is asked to
+  stop it; whether it ran is then unknown, and it is not sent again.
+- The model sees each tool as `mcp__<server>__<tool>`, with the server's
+  description (cut at 2048 characters) and input schema. A server name is 1 to
+  32 letters, digits, `_`, or `-`, without `__` and not ending in `_`. A tool
+  whose full name would exceed 64 characters or contain other characters, or
+  whose input schema is larger than 64 KiB, is not offered, with a warning. A
+  server offers at most 64 tools and 128 KiB of descriptions and schemas, and
+  all servers together 100 tools and 256 KiB; the tools beyond that, in the
+  order the server lists them, are left out with one warning per server.
+- A tool call asks for approval, since nothing confines what the server does;
+  you can allow that one tool for the rest of the session. Tools listed in
+  `allow` (their names on the server) run without asking. `socium -p` refuses a
+  call that needs approval and tells the model to add the tool to `allow`.
+- Servers start in parallel while the interface opens, and the first turn waits
+  for them, at most 30 seconds each; you can cancel the wait. A server must
+  answer with protocol revision 2025-06-18, 2025-03-26, or 2024-11-05. A server
+  that fails to start is skipped with a warning that ends with its last
+  standard error lines. Its standard error is never sent to the model, and
+  `env` values of 8 or more characters are shown as `[redacted]` in warnings
+  and errors. A server that writes a value into a tool result is not filtered.
+- When Socium exits it closes each server's standard input, waits a second,
+  sends the server's process group SIGTERM, waits another second, and then
+  sends SIGKILL.
+- Subagents do not get MCP tools.
+
+The design and what is deferred are in
+[ADR 20](adr/0020-mcpサーバーを利用者の設定だけからstdioで起動しtoolを既定で尋ねて呼ぶ.md).
+
 ## Project instructions
 
 Socium reads `AGENTS.md` (or `CLAUDE.md`) in the workspace root into its

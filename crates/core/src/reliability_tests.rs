@@ -493,6 +493,7 @@ fn failed_execution_intent_after_approval_has_no_side_effects() {
         &control,
         &crate::settings::Settings::default(),
         None,
+        None,
         &mut |e| {
             if let AgentProgress::ApprovalRequested { request_id, .. } = e {
                 control.answer_approval(request_id, true);
@@ -1064,6 +1065,7 @@ fn run_with_settings(
         &input,
         control,
         settings,
+        None,
         None,
         &mut |event| on_progress(event),
         &mut |_| Ok(()),

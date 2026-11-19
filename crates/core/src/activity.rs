@@ -370,6 +370,14 @@ pub fn summarize_tool_input(tool: &str, input: &Value) -> String {
     if tool == crate::constants::PLAN_TOOL_NAME {
         return crate::plan::summarize_update(input);
     }
+    if crate::mcp::is_mcp_tool(tool) {
+        // Each server names its own fields, so the arguments are shown as
+        // they are.
+        return match input {
+            Value::Object(fields) if !fields.is_empty() => one_line(&input.to_string()),
+            _ => String::new(),
+        };
+    }
     let Some(key) = primary_input_key(tool) else {
         return String::new();
     };
@@ -714,6 +722,11 @@ mod tests {
             "a.rs, b.rs"
         );
         assert_eq!(summarize_tool_input("git_branch", &json!({})), "");
+        assert_eq!(
+            summarize_tool_input("mcp__github__get_issue", &json!({"issue": 7})),
+            r#"{"issue":7}"#
+        );
+        assert_eq!(summarize_tool_input("mcp__time__now", &json!({})), "");
     }
 
     #[test]
