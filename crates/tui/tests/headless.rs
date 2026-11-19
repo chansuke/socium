@@ -448,9 +448,11 @@ fn a_missing_ripgrep_is_named_at_startup() {
     let fixture = fixture(port);
     let bin = fixture.root.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    // Only bwrap and git, linked from their store directories; no rg.
-    let dirs =
-        ["bwrap", "git"].map(|program| program_on_path(program).parent().unwrap().to_path_buf());
+    // Only bwrap, git, and the `true` the sandbox check runs, from their
+    // own directories; no rg. A build sandbox may have no /usr/bin to fall
+    // back on.
+    let dirs = ["bwrap", "git", "true"]
+        .map(|program| program_on_path(program).parent().unwrap().to_path_buf());
     let output = command(&fixture, &["-p", "hi"])
         .env("PATH", std::env::join_paths(dirs).unwrap())
         .output()
