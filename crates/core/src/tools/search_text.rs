@@ -56,7 +56,12 @@ impl Tool for SearchTextTool {
         input: &Value,
         _on_progress: &mut dyn FnMut(AgentProgress),
     ) -> Result<String, ToolError> {
-        search_text_controlled(ctx.workspace_root, input, ctx.control)
+        search_text_controlled(
+            ctx.workspace_root,
+            input,
+            ctx.control,
+            &ctx.settings.approval.sensitive,
+        )
     }
 }
 
@@ -96,12 +101,18 @@ pub(crate) fn search_text_from_workspace(
     workspace_root: &Path,
     input: &Value,
 ) -> Result<String, ToolError> {
-    search_text_controlled(workspace_root, input, &crate::TaskControl::default())
+    search_text_controlled(
+        workspace_root,
+        input,
+        &crate::TaskControl::default(),
+        &crate::settings::Settings::default().approval.sensitive,
+    )
 }
 fn search_text_controlled(
     workspace_root: &Path,
     input: &Value,
     control: &crate::TaskControl,
+    sensitive: &crate::settings::PathPatterns,
 ) -> Result<String, ToolError> {
     let SearchTextInput {
         pattern,
@@ -120,11 +131,24 @@ fn search_text_controlled(
     )?;
     let note = execution.incomplete_note();
     let SearchExecution {
-        matches,
+        mut matches,
         status_code,
         ..
     } = execution;
+    let named = crate::approval::relative_target(workspace_root, path).unwrap_or_default();
+    let mut withheld = Vec::new();
+    matches.retain(|entry| {
+        let keep = !crate::approval::withholds(sensitive, &entry.path, &named);
+        if !keep && !withheld.contains(&entry.path) {
+            withheld.push(entry.path.clone());
+        }
+        keep
+    });
     let mut formatted = format_search_results("Pattern", pattern, path, glob, max_results, matches);
+    if !withheld.is_empty() {
+        formatted.push('\n');
+        formatted.push_str(&crate::approval::withheld_note(&withheld));
+    }
 
     if let Some(note) = note {
         formatted.push('\n');
@@ -154,6 +178,27 @@ mod tests {
             search_text_from_workspace(workspace.path(), &json!({"pattern": "needle"})).unwrap();
         assert!(output.contains("[line cut at 500 characters]"), "{output}");
         assert!(output.len() < 1_000, "{}", output.len());
+    }
+
+    #[test]
+    fn a_wide_search_leaves_out_files_that_may_hold_credentials() {
+        let workspace = make_temp_dir("search_secrets");
+        fs::write(workspace.path().join("credentials.json"), "needle-secret\n").unwrap();
+        fs::write(workspace.path().join("notes.txt"), "needle here\n").unwrap();
+
+        let wide =
+            search_text_from_workspace(workspace.path(), &json!({"pattern": "needle"})).unwrap();
+        assert!(wide.contains("notes.txt:1"), "{wide}");
+        assert!(!wide.contains("needle-secret"), "{wide}");
+        assert!(wide.contains("credentials.json"), "{wide}");
+
+        // Named on its own, it was approved first, so it is searched.
+        let named = search_text_from_workspace(
+            workspace.path(),
+            &json!({"pattern": "needle", "path": "credentials.json"}),
+        )
+        .unwrap();
+        assert!(named.contains("needle-secret"), "{named}");
     }
 
     #[test]

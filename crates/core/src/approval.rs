@@ -179,6 +179,26 @@ pub(crate) fn gate(
     }
 }
 
+/// Whether a search or diff of `named` leaves out the contents of `path`,
+/// both relative to the workspace: a file that may hold credentials, unless
+/// it is the one named, whose read was approved already.
+pub(crate) fn withholds(
+    sensitive: &crate::settings::PathPatterns,
+    path: &str,
+    named: &str,
+) -> bool {
+    path != named && sensitive.matches(path)
+}
+
+/// The note under a result that left out such files.
+pub(crate) fn withheld_note(paths: &[String]) -> String {
+    format!(
+        "Left out {} that may hold credentials: {}. Name one as the path to read it, which asks for approval.",
+        if paths.len() == 1 { "a file" } else { "files" },
+        paths.join(", ")
+    )
+}
+
 /// Whether a session grant covers `wanted`.
 pub(crate) fn grants_cover(grants: &[Grant], wanted: &Grant) -> bool {
     grants.iter().any(|grant| grant.covers(wanted))
@@ -281,12 +301,12 @@ fn edited_paths(name: &str, input: &Value, root: &Path) -> Vec<(String, String)>
         .collect()
 }
 
-/// The workspace path a read tool would read, and the path as it was
-/// asked for, so a link named like a secret or a protected file is caught
-/// wherever it points.
+/// The workspace path a tool would show the contents of, and the path as
+/// it was asked for, so a link named like a secret or a protected file is
+/// caught wherever it points.
 fn read_path(name: &str, input: &Value, root: &Path) -> Option<(String, String)> {
     let path = match name {
-        "read_file" => input["path"].as_str()?,
+        "read_file" | "search_text" | "git_diff" => input["path"].as_str()?,
         crate::constants::TEXT_EDITOR_TOOL_NAME if input["command"] == "view" => {
             input["path"].as_str()?
         }
@@ -633,6 +653,16 @@ mod tests {
             ),
             Gate::Ask(_)
         ));
+        // Searching or diffing a named secret shows its contents too.
+        for (tool, input) in [
+            ("search_text", json!({"pattern": "TOKEN", "path": ".env"})),
+            ("git_diff", json!({"path": ".env"})),
+        ] {
+            assert!(
+                matches!(decide(root.path(), &auto, tool, input), Gate::Ask(_)),
+                "{tool}"
+            );
+        }
         // A link named like a secret asks too, wherever it points.
         std::fs::create_dir(root.path().join("secrets")).unwrap();
         std::fs::write(root.path().join("secrets/token"), "x").unwrap();

@@ -105,7 +105,7 @@ impl Tool for GitDiffTool {
         input: &Value,
         _on_progress: &mut dyn FnMut(AgentProgress),
     ) -> Result<String, ToolError> {
-        git_diff_from_workspace(ctx.workspace_root, input)
+        git_diff_withholding(ctx.workspace_root, input, &ctx.settings.approval.sensitive)
     }
 }
 
@@ -248,22 +248,65 @@ pub(crate) fn git_status_from_workspace(
     Ok(result.join("\n"))
 }
 
+#[cfg(test)]
 pub(crate) fn git_diff_from_workspace(
     workspace_root: &Path,
     input: &Value,
 ) -> Result<String, ToolError> {
+    git_diff_withholding(
+        workspace_root,
+        input,
+        &crate::settings::Settings::default().approval.sensitive,
+    )
+}
+
+/// `git diff`, without the changes to files that may hold credentials
+/// unless the path names one.
+fn git_diff_withholding(
+    workspace_root: &Path,
+    input: &Value,
+    sensitive: &crate::settings::PathPatterns,
+) -> Result<String, ToolError> {
     let GitPathInput { path } = GitPathInput::parse(input, "git_diff", "git_diff path")?;
+    let mut pathspec = vec!["--".to_string()];
+    if let Some(path) = path {
+        pathspec.push(git_relative_path(workspace_root, path)?);
+    }
+    let changed = run_git_capture(
+        workspace_root,
+        &[
+            ["diff", "--name-only", "--relative", "-z"]
+                .map(String::from)
+                .as_slice(),
+            &pathspec,
+        ]
+        .concat(),
+    )?;
+    let named = path
+        .and_then(|path| crate::approval::relative_target(workspace_root, path))
+        .unwrap_or_default();
+    let (withheld, shown): (Vec<String>, Vec<String>) = stdout_to_string(&changed)?
+        .split('\0')
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .partition(|name| crate::approval::withholds(sensitive, name, &named));
+    // Pathspecs are literal here, so the files to show are named one by one
+    // rather than the others excluded.
+    if !withheld.is_empty() {
+        pathspec.truncate(1);
+        pathspec.extend(shown.iter().cloned());
+    }
     let mut args = vec![
         "diff".to_string(),
         "--no-ext-diff".into(),
         "--no-textconv".into(),
     ];
-    if let Some(path) = path {
-        args.push("--".to_string());
-        args.push(git_relative_path(workspace_root, path)?);
-    }
-    let output = run_git_capture(workspace_root, &args)?;
-    let stdout = stdout_to_string(&output)?;
+    args.extend(pathspec);
+    let stdout = if !withheld.is_empty() && shown.is_empty() {
+        String::new()
+    } else {
+        stdout_to_string(&run_git_capture(workspace_root, &args)?)?
+    };
     let mut result = Vec::new();
     if let Some(path) = path {
         result.push(format!("Path: {path}"));
@@ -272,6 +315,9 @@ pub(crate) fn git_diff_from_workspace(
         result.push("(no diff)".to_string());
     } else {
         result.push(stdout);
+    }
+    if !withheld.is_empty() {
+        result.push(crate::approval::withheld_note(&withheld));
     }
     Ok(result.join("\n"))
 }
@@ -806,6 +852,26 @@ mod tests {
         assert!(output.contains("+++ b/tracked.txt"));
         assert!(output.contains("-initial"));
         assert!(output.contains("+changed"));
+    }
+
+    #[test]
+    fn git_diff_leaves_out_files_that_may_hold_credentials() {
+        let workspace = make_temp_dir("git-diff-secrets");
+        init_git_repo(workspace.path());
+        fs::write(workspace.path().join(".env"), "TOKEN=old\n").unwrap();
+        crate::test_support::run_git(workspace.path(), &["add", "-f", ".env"]);
+        crate::test_support::run_git(workspace.path(), &["commit", "-m", "env"]);
+        fs::write(workspace.path().join(".env"), "TOKEN=new-secret\n").unwrap();
+        fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+
+        let output = git_diff_from_workspace(workspace.path(), &json!({})).unwrap();
+        assert!(output.contains("+changed"), "{output}");
+        assert!(!output.contains("new-secret"), "{output}");
+        assert!(output.contains(".env"), "{output}");
+
+        // Named on its own, it was approved first, so it is shown.
+        let named = git_diff_from_workspace(workspace.path(), &json!({"path": ".env"})).unwrap();
+        assert!(named.contains("new-secret"), "{named}");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 [2026-11-11の詳細レビュー](../review-socium-pi-dsh-2026-11-11.md)を実施可能な単位に分解したローカルのMarkdownチケット。元レポートと再現証拠を保持し、36件をGitHub Issueとして起票済み。親Issueは [#52](https://github.com/chansuke/socium/issues/52)。
 
-全50件（P1: 14件、P2: 35件、P3: 1件）。元36件に日常信頼性・Web検索の4件と、モデル切り替え（[ADR 6](../adr/0006-モデルを接続形式と接続先の組で登録しmodelコマンドで切り替える.md)）の2件と、2026-11-19 の公開前レビューの指摘を追加した。現在の完了状態はGitHubを参照する。基準となるレビューは `de374125a5ff00cc54b8f94da020250b3ab6b46c` 時点の記録であり、現行コードの未修正事項一覧ではない。
+全51件（P1: 15件、P2: 35件、P3: 1件）。元36件に日常信頼性・Web検索の4件と、モデル切り替え（[ADR 6](../adr/0006-モデルを接続形式と接続先の組で登録しmodelコマンドで切り替える.md)）の2件と、2026-11-19 の公開前レビューの指摘を追加した。現在の完了状態はGitHubを参照する。基準となるレビューは `de374125a5ff00cc54b8f94da020250b3ab6b46c` 時点の記録であり、現行コードの未修正事項一覧ではない。
 
 **GitHubでの進め方**
 
@@ -87,6 +87,7 @@ P2の保存基盤などがP1修正の前提になる場合、重大度とは別�
 | [SOC-046](SOC-046-responses-unfinished-calls.md) | なし | P2 | provider・session・配布・headless | Responses API で終わっていない tool 呼び出しを実行しない | [SOC-042](SOC-042-openai-responses.md) |
 | [SOC-049](SOC-049-commit-metadata-guard.md) | なし | P1 | 文書の整合（基盤修正と独立） | 公開してはいけないコミットの情報を入れない | なし |
 | [SOC-050](SOC-050-third-party-notices.md) | なし | P2 | provider・session・配布・headless | パッケージに依存 crate のライセンス表示を入れる | なし |
+| [SOC-052](SOC-052-secret-reads-in-search-and-diff.md) | なし | P1 | 権限・承認 | 検索と差分からも認証情報ファイルの中身を出さない | [SOC-044](SOC-044-sensitive-credential-files.md) |
 
 
 **レビューとの対応**
