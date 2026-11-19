@@ -176,6 +176,18 @@ pub(super) fn command(
                 ));
             }
         }
+        // The workspace, its state and its secrets are masked only at their
+        // canonical path, so a second path to the same directory would show
+        // them unmasked.
+        if let Some(alias) = &mount.alias
+            && (root.starts_with(&mount.source) || mount.source.starts_with(root))
+        {
+            return Err(io::Error::other(format!(
+                "sandbox.read_only lists {} through a symlink, and its target {} overlaps the workspace; list the target instead",
+                alias.display(),
+                mount.source.display()
+            )));
+        }
     }
     let paths = search_path(policy);
     let program = resolve(

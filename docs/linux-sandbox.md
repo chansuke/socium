@@ -155,8 +155,10 @@ writes; inspect unknown outcomes before retrying after a crash.
   fresh `/tmp` and before the workspace, so a listed ancestor of the workspace
   can neither make it read-only nor reveal `.socium`. `/`, the home directory
   and its ancestors, `/proc`, `/dev`, `/socium-home`, and `/tmp` itself are
-  refused; a directory that does not exist is skipped with a warning.
-  Executables inside these directories may run.
+  refused; a directory that does not exist is skipped with a warning. A
+  symlink is mounted at both its target and its own path, so a symlink whose
+  target contains the workspace or lies inside it is refused: list the target
+  instead. Executables inside these directories may run.
 - `path`: PATH entries, kept only when they lie in a `read_only` directory or a
   system runtime.
 - `env`: extra variables, such as `CARGO_HOME`.
