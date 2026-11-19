@@ -205,5 +205,5 @@ deletion is performed; command output files are limited to the newest 100
 commands. Archive a stopped session manually when disk usage warrants it. Add `.socium/` to the project's `.gitignore`.
 
 Validation targets Linux. Live model/network behavior and macOS execution have
-not been exercised by the offline tests. Web search is a separate planned feature
-in SOC-037 / issue #90, not implemented by this milestone.
+not been exercised by the offline tests. Web search (SOC-037) came later and is
+not part of this milestone.

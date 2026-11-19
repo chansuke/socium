@@ -2,7 +2,7 @@
 
 [2026-11-11の詳細レビュー](../review-socium-pi-dsh-2026-11-11.md)を実施可能な単位に分解したローカルのMarkdownチケット。元レポートと再現証拠を保持し、36件をGitHub Issueとして起票済み。親Issueは [#52](https://github.com/chansuke/socium/issues/52)。
 
-全46件（P1: 13件、P2: 32件、P3: 1件）。元36件に日常信頼性・Web検索の4件と、モデル切り替え（[ADR 6](../adr/0006-モデルを接続形式と接続先の組で登録しmodelコマンドで切り替える.md)）の2件と、2026-11-19 の公開前レビューの指摘を追加した。現在の完了状態はGitHubを参照する。基準となるレビューは `de374125a5ff00cc54b8f94da020250b3ab6b46c` 時点の記録であり、現行コードの未修正事項一覧ではない。
+全47件（P1: 13件、P2: 33件、P3: 1件）。元36件に日常信頼性・Web検索の4件と、モデル切り替え（[ADR 6](../adr/0006-モデルを接続形式と接続先の組で登録しmodelコマンドで切り替える.md)）の2件と、2026-11-19 の公開前レビューの指摘を追加した。現在の完了状態はGitHubを参照する。基準となるレビューは `de374125a5ff00cc54b8f94da020250b3ab6b46c` 時点の記録であり、現行コードの未修正事項一覧ではない。
 
 **GitHubでの進め方**
 
@@ -83,6 +83,7 @@ P2の保存基盤などがP1修正の前提になる場合、重大度とは別�
 | [SOC-044](SOC-044-sensitive-credential-files.md) | なし | P2 | 権限・承認 | よくある認証情報ファイルを読むときに承認を求める | なし |
 | [SOC-047](SOC-047-version-flag.md) | なし | P2 | provider・session・配布・headless | `socium --version` で版を表示する | なし |
 | [SOC-043](SOC-043-protect-cargo-manifests.md) | なし | P1 | 権限・承認 | Cargo.toml と Cargo.lock の編集に承認を求める | なし |
+| [SOC-048](SOC-048-approval-wording.md) | なし | P2 | 文書の整合（基盤修正と独立） | README の承認の説明を実装に合わせる | [SOC-043](SOC-043-protect-cargo-manifests.md) |
 
 
 **レビューとの対応**
