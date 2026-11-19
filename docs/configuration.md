@@ -166,7 +166,8 @@ workspace Socium opens, and startup lists what it adds.
 - Edits to files a host tool runs or loads by itself (`build.rs`, `.envrc`,
   `flake.nix`, `.cargo/config.toml`, `.vscode/`, `.github/workflows/`, Git hook
   managers, and similar) always ask, and so do reads of files that commonly
-  hold credentials (`.env`, `.netrc`, `*.pem`, SSH keys, and similar); `protected`
+  hold credentials (`.env`, `.netrc`, `*.pem`, SSH keys, `auth.json`,
+  `credentials.json`, and similar); `protected`
   and `sensitive` replace these lists. Approval has no time limit. A denied call
   tells the model not to retry it.
 

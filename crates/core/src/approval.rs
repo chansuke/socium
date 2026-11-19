@@ -160,8 +160,8 @@ pub(crate) fn gate(
                     grant: Some(Grant::Edit(protected)),
                 }));
             }
-            if let Some(path) = read_path(name, input, root)
-                && approval.sensitive.matches(&path)
+            if let Some((path, requested)) = read_path(name, input, root)
+                && (approval.sensitive.matches(&path) || approval.sensitive.matches(&requested))
                 && !granted(&Grant::Read(vec![path.clone()]))
             {
                 return Ok(Gate::Ask(Ask {
@@ -278,8 +278,9 @@ fn edited_paths(name: &str, input: &Value, root: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The workspace path a read tool would read.
-fn read_path(name: &str, input: &Value, root: &Path) -> Option<String> {
+/// The workspace path a read tool would read, and the path as it was
+/// asked for, so a link named like a secret is caught wherever it points.
+fn read_path(name: &str, input: &Value, root: &Path) -> Option<(String, String)> {
     let path = match name {
         "read_file" => input["path"].as_str()?,
         crate::constants::TEXT_EDITOR_TOOL_NAME if input["command"] == "view" => {
@@ -287,7 +288,13 @@ fn read_path(name: &str, input: &Value, root: &Path) -> Option<String> {
         }
         _ => return None,
     };
-    relative_target(root, path)
+    let requested = Path::new(path);
+    let requested = requested
+        .strip_prefix(root)
+        .unwrap_or(requested)
+        .to_string_lossy()
+        .replace('\\', "/");
+    Some((relative_target(root, path)?, requested))
 }
 
 /// `requested` as it resolves inside the workspace, symlinks followed, so
@@ -600,6 +607,28 @@ mod tests {
                 root.path(),
                 &auto,
                 "read_file",
+                json!({"path": "auth.json"})
+            ),
+            Gate::Ask(_)
+        ));
+        // A link named like a secret asks too, wherever it points.
+        std::fs::create_dir(root.path().join("secrets")).unwrap();
+        std::fs::write(root.path().join("secrets/token"), "x").unwrap();
+        std::os::unix::fs::symlink("secrets/token", root.path().join("credentials.json")).unwrap();
+        assert!(matches!(
+            decide(
+                root.path(),
+                &auto,
+                "read_file",
+                json!({"path": "credentials.json"})
+            ),
+            Gate::Ask(_)
+        ));
+        assert!(matches!(
+            decide(
+                root.path(),
+                &auto,
+                "read_file",
                 json!({"path": ".env.example"})
             ),
             Gate::Run(None)
@@ -624,6 +653,7 @@ mod tests {
         for file in [
             ".env",
             "app/.env.local",
+            "backend/auth.json",
             ".github/workflows/ci.yaml",
             "build.rs",
             "src/lib.rs",
@@ -645,7 +675,9 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(&restrictions.hidden), [".env", "app/.env.local"]);
+        let mut hidden = names(&restrictions.hidden);
+        hidden.sort();
+        assert_eq!(hidden, [".env", "app/.env.local", "backend/auth.json"]);
         let mut frozen = names(&restrictions.frozen);
         frozen.sort();
         assert_eq!(frozen, [".github/workflows", ".vscode", "build.rs"]);

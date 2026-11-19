@@ -57,6 +57,10 @@ pub(crate) const DEFAULT_SENSITIVE: &[&str] = &[
     ".npmrc",
     ".pypirc",
     ".git-credentials",
+    ".pgpass",
+    "auth.json",
+    "credentials.json",
+    "client_secret*.json",
     "*.pem",
     "*.key",
     "*.p12",
@@ -719,6 +723,12 @@ mod tests {
             ".env.local",
             "certs/server.pem",
             ".envrc",
+            "auth.json",
+            "credentials.json",
+            "config/credentials.json",
+            "client_secret_1234.apps.googleusercontent.com.json",
+            ".pgpass",
+            "backend/auth.json",
         ] {
             assert!(patterns.matches(path), "{path}");
         }
