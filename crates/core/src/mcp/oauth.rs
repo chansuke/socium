@@ -9,17 +9,410 @@
 //! error: every message here is built from URLs, status codes and the
 //! authorization server's error code alone.
 
-use super::http::{describe, read_body};
-use super::token_store::ClientAuth;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, WWW_AUTHENTICATE};
+use super::http::{describe, http_client, read_body};
+use super::token_store::{ClientAuth, StoredToken, TokenStore, now_seconds};
+use crate::settings::{McpOAuthSettings, McpServerSettings, McpTransportSettings};
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde_json::{Value, json};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 /// Each request to an authorization server must finish within this long.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// A metadata document or token response larger than this is refused.
 const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
+/// The longest request the callback listener reads, and how long one
+/// connection may take to send it.
+const MAX_CALLBACK_BYTES: usize = 16 * 1024;
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Logs in to the remote server of `settings` and stores its token.
+/// `browser` gets the authorization URL to open; it must not block. `Err`
+/// is a sentence for the user.
+pub(crate) fn login(
+    settings: &McpServerSettings,
+    store: &TokenStore,
+    browser: &(dyn Fn(&str) + Sync),
+    timeout: Duration,
+) -> Result<(), String> {
+    let name = &settings.name;
+    let McpTransportSettings::Http {
+        url,
+        headers,
+        oauth,
+    } = &settings.transport
+    else {
+        return Err(format!(
+            "MCP server {name} runs a command; only a server with url logs in with OAuth."
+        ));
+    };
+    if headers
+        .keys()
+        .any(|header| header.eq_ignore_ascii_case("authorization"))
+    {
+        return Err(format!(
+            "MCP server {name} sets an Authorization header in config.toml, which Socium sends instead of an OAuth token; remove it to log in."
+        ));
+    }
+    let config = oauth.clone().unwrap_or_default();
+    // reqwest needs a runtime, and the caller may be inside one, so the
+    // login runs on a thread with its own.
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|err| format!("its runtime could not start: {err}"))?
+                    .block_on(authorize(name, url, &config, store, browser, timeout))
+            })
+            .join()
+            .unwrap_or_else(|_| Err("the login panicked".into()))
+    })
+    .map_err(|why| format!("Could not log in to MCP server {name}: {why}."))
+}
+
+async fn authorize(
+    name: &str,
+    url: &str,
+    config: &McpOAuthSettings,
+    store: &TokenStore,
+    browser: &(dyn Fn(&str) + Sync),
+    timeout: Duration,
+) -> Result<(), String> {
+    let client =
+        http_client().map_err(|err| format!("its HTTP client could not be built: {err}"))?;
+    let found = discover(&client, url).await?;
+    let port = config.callback_port.unwrap_or(0);
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|err| {
+            format!("Socium could not listen on 127.0.0.1:{port} for the browser: {err}")
+        })?;
+    let port = listener
+        .local_addr()
+        .map_err(|err| format!("Socium could not listen for the browser: {err}"))?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let oauth_client = match &config.client_id {
+        Some(id) => OAuthClient {
+            id: id.clone(),
+            secret: config.client_secret.clone(),
+            auth: match &config.client_secret {
+                None => ClientAuth::None,
+                // RFC 6749 2.3.1: every server supports Basic.
+                Some(_) => match &found.token_auth_methods {
+                    Some(methods)
+                        if !methods.iter().any(|m| m == "client_secret_basic")
+                            && methods.iter().any(|m| m == "client_secret_post") =>
+                    {
+                        ClientAuth::ClientSecretPost
+                    }
+                    _ => ClientAuth::ClientSecretBasic,
+                },
+            },
+        },
+        None => {
+            let endpoint = found.registration_endpoint.as_ref().ok_or_else(|| {
+                format!(
+                    "its authorization server does not register clients; register one there and set mcp.servers.{name}.oauth.client_id"
+                )
+            })?;
+            register(&client, endpoint, &redirect_uri).await?
+        }
+    };
+    let verifier = random_text(32);
+    let state = random_text(16);
+    let scopes = if config.scopes.is_empty() {
+        &found.scopes_supported
+    } else {
+        &config.scopes
+    };
+    let mut authorization = found.authorization_endpoint.clone();
+    {
+        let mut query = authorization.query_pairs_mut();
+        query
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &oauth_client.id)
+            .append_pair("redirect_uri", &redirect_uri)
+            .append_pair("code_challenge", &code_challenge(&verifier))
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("state", &state)
+            .append_pair("resource", &found.resource);
+        if !scopes.is_empty() {
+            query.append_pair("scope", &scopes.join(" "));
+        }
+    }
+    browser(authorization.as_str());
+    let code = tokio::time::timeout(timeout, wait_for_code(&listener, &state))
+        .await
+        .map_err(|_| {
+            format!(
+                "the browser did not come back within {}",
+                describe_duration(timeout)
+            )
+        })??;
+    drop(listener);
+    let issued = token_request(
+        &client,
+        &found.token_endpoint,
+        vec![
+            ("grant_type", "authorization_code".into()),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("code_verifier", verifier),
+            ("resource", found.resource.clone()),
+        ],
+        &oauth_client,
+    )
+    .await?;
+    let token = StoredToken {
+        url: url.to_string(),
+        resource: found.resource,
+        access_token: issued.access_token,
+        refresh_token: issued.refresh_token,
+        expires_at: issued.expires_at,
+        token_endpoint: found.token_endpoint.to_string(),
+        // A configured secret stays in the environment.
+        client_secret: if config.client_id.is_some() {
+            None
+        } else {
+            oauth_client.secret
+        },
+        client_id: oauth_client.id,
+        client_auth: oauth_client.auth,
+    };
+    store.save(name, &token).map_err(|err| {
+        format!(
+            "the token could not be saved in {}: {err}",
+            store.dir().display()
+        )
+    })
+}
+
+/// Answers the browser until it comes back to `/callback`, and returns the
+/// code when the state matches this login's.
+async fn wait_for_code(listener: &TcpListener, state: &str) -> Result<String, String> {
+    loop {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            continue;
+        };
+        let Ok(Ok(target)) =
+            tokio::time::timeout(CALLBACK_READ_TIMEOUT, read_request_target(&mut stream)).await
+        else {
+            continue;
+        };
+        let Ok(url) = Url::parse(&format!("http://127.0.0.1{target}")) else {
+            respond(
+                &mut stream,
+                "400 Bad Request",
+                "This is not a login callback.",
+            )
+            .await;
+            continue;
+        };
+        if url.path() != "/callback" {
+            respond(
+                &mut stream,
+                "404 Not Found",
+                "This is not a login callback.",
+            )
+            .await;
+            continue;
+        }
+        let parameter = |key: &str| {
+            url.query_pairs()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.into_owned())
+        };
+        if parameter("state").as_deref() != Some(state) {
+            respond(
+                &mut stream,
+                "400 Bad Request",
+                "Socium refused this login: the answer is not for the login it started. Run socium mcp login again.",
+            )
+            .await;
+            return Err(
+                "the browser came back with a state that does not match this login, so the answer was refused".into(),
+            );
+        }
+        if let Some(error) = parameter("error") {
+            respond(
+                &mut stream,
+                "400 Bad Request",
+                "The authorization server refused the login. You can close this tab.",
+            )
+            .await;
+            return Err(format!(
+                "the authorization server refused{}",
+                error_code(&json!({ "error": error }))
+            ));
+        }
+        let Some(code) = parameter("code").filter(|code| !code.is_empty()) else {
+            respond(&mut stream, "400 Bad Request", "The answer has no code.").await;
+            return Err("the browser came back without a code".into());
+        };
+        respond(
+            &mut stream,
+            "200 OK",
+            "Socium is logged in. You can close this tab and return to the terminal.",
+        )
+        .await;
+        return Ok(code);
+    }
+}
+
+/// The target of a `GET` request line.
+async fn read_request_target(stream: &mut TcpStream) -> Result<String, ()> {
+    let mut request = Vec::new();
+    let mut buffer = [0; 2048];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut buffer).await.map_err(drop)?;
+        if read == 0 || request.len() + read > MAX_CALLBACK_BYTES {
+            return Err(());
+        }
+        request.extend_from_slice(&buffer[..read]);
+    }
+    let line = request.split(|byte| *byte == b'\n').next().ok_or(())?;
+    let line = std::str::from_utf8(line).map_err(drop)?;
+    let mut parts = line.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some("GET"), Some(target)) if target.starts_with('/') => Ok(target.to_string()),
+        _ => Err(()),
+    }
+}
+
+async fn respond(stream: &mut TcpStream, status: &str, message: &str) {
+    let body =
+        format!("<!doctype html><meta charset=\"utf-8\"><title>Socium</title><p>{message}</p>\n");
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
+}
+
+fn describe_duration(duration: Duration) -> String {
+    match duration.as_secs() {
+        seconds if seconds >= 60 && seconds % 60 == 0 => format!("{} minutes", seconds / 60),
+        1 => "1 second".into(),
+        seconds => format!("{seconds} seconds"),
+    }
+}
+
+/// `bytes` random bytes as base64url, for a PKCE verifier (RFC 7636 4.1:
+/// 32 bytes give 43 characters) or a state.
+fn random_text(bytes: usize) -> String {
+    let mut random = vec![0; bytes];
+    aws_lc_rs::rand::fill(&mut random).expect("the system random source works");
+    URL_SAFE_NO_PAD.encode(random)
+}
+
+/// RFC 7636 4.2: `BASE64URL(SHA256(verifier))`.
+fn code_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(aws_lc_rs::digest::digest(
+        &aws_lc_rs::digest::SHA256,
+        verifier.as_bytes(),
+    ))
+}
+
+/// What a token endpoint issued.
+pub(super) struct Issued {
+    pub(super) access_token: String,
+    pub(super) refresh_token: Option<String>,
+    pub(super) expires_at: Option<u64>,
+}
+
+/// Posts `form` to the token endpoint as `oauth_client`.
+pub(super) async fn token_request(
+    client: &Client,
+    endpoint: &Url,
+    mut form: Vec<(&'static str, String)>,
+    oauth_client: &OAuthClient,
+) -> Result<Issued, String> {
+    let mut request = client
+        .post(endpoint.clone())
+        .header(ACCEPT, "application/json")
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .timeout(REQUEST_TIMEOUT);
+    match (oauth_client.auth, &oauth_client.secret) {
+        (ClientAuth::ClientSecretBasic, Some(secret)) => {
+            // RFC 6749 2.3.1: each part is form-encoded first.
+            let credentials = format!("{}:{}", form_encode(&oauth_client.id), form_encode(secret));
+            let mut value =
+                HeaderValue::from_str(&format!("Basic {}", STANDARD.encode(credentials)))
+                    .map_err(|_| "the client credentials do not fit in a header")?;
+            value.set_sensitive(true);
+            request = request.header(AUTHORIZATION, value);
+        }
+        (ClientAuth::ClientSecretPost, Some(secret)) => {
+            form.push(("client_id", oauth_client.id.clone()));
+            form.push(("client_secret", secret.clone()));
+        }
+        _ => form.push(("client_id", oauth_client.id.clone())),
+    }
+    let response = request
+        .body(encode_form(&form))
+        .send()
+        .await
+        .map_err(|err| {
+            format!(
+                "the token endpoint {endpoint} could not be reached: {}",
+                describe(&err)
+            )
+        })?;
+    let document = answer(response, "token endpoint", endpoint).await?;
+    let access_token = document["access_token"]
+        .as_str()
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| format!("the token endpoint {endpoint} answered without an access_token"))?;
+    if HeaderValue::from_str(&format!("Bearer {access_token}")).is_err() {
+        return Err(format!(
+            "the token endpoint {endpoint} issued an access token that does not fit in a header"
+        ));
+    }
+    match document["token_type"].as_str() {
+        Some(kind) if kind.eq_ignore_ascii_case("bearer") => {}
+        Some(kind) => {
+            return Err(format!(
+                "the token endpoint {endpoint} issued a {} token; Socium uses only Bearer tokens",
+                kind.chars().take(32).collect::<String>()
+            ));
+        }
+        None => {
+            return Err(format!(
+                "the token endpoint {endpoint} answered without a token_type"
+            ));
+        }
+    }
+    Ok(Issued {
+        access_token: access_token.to_string(),
+        refresh_token: document["refresh_token"]
+            .as_str()
+            .filter(|token| !token.is_empty())
+            .map(str::to_string),
+        expires_at: document["expires_in"]
+            .as_u64()
+            .map(|seconds| now_seconds().saturating_add(seconds)),
+    })
+}
+
+/// `application/x-www-form-urlencoded`, as the URL crate writes a query.
+fn encode_form(pairs: &[(&str, String)]) -> String {
+    let mut url = Url::parse("http://form.invalid/").expect("a valid URL");
+    url.query_pairs_mut()
+        .extend_pairs(pairs.iter().map(|(key, value)| (*key, value.as_str())));
+    url.query().unwrap_or_default().to_string()
+}
+
+fn form_encode(value: &str) -> String {
+    encode_form(&[("v", value.to_string())])[2..].to_string()
+}
 
 /// What discovery found about a server and its authorization server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -554,6 +947,311 @@ pub(super) mod tests {
         );
         assert_eq!(error_code(&json!({"error": "has spaces"})), "");
         assert_eq!(error_code(&Value::Null), "");
+    }
+
+    /// A GET over plain HTTP: the status and the `Location` header.
+    pub(crate) fn http_get(url: &str) -> (u16, Option<String>) {
+        use std::io::{Read, Write};
+        let url = Url::parse(url).unwrap();
+        let mut stream = std::net::TcpStream::connect((
+            url.host_str().unwrap(),
+            url.port_or_known_default().unwrap(),
+        ))
+        .unwrap();
+        let target = match url.query() {
+            Some(query) => format!("{}?{query}", url.path()),
+            None => url.path().to_string(),
+        };
+        write!(
+            stream,
+            "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let status = response[9..12].parse().unwrap();
+        let location = response
+            .lines()
+            .take_while(|line| !line.is_empty())
+            .find_map(|line| line.strip_prefix("Location: "))
+            .map(str::to_string);
+        (status, location)
+    }
+
+    /// Acts as the user's browser: opens the authorization URL, where the
+    /// fake server agrees at once, and follows its redirect to Socium's
+    /// callback after `tamper` changed it. Records the URLs it was given
+    /// and the callback's status.
+    pub(crate) struct Browser {
+        pub(crate) opened: std::sync::Mutex<Vec<String>>,
+        pub(crate) callback: std::sync::Arc<std::sync::Mutex<Option<u16>>>,
+        tamper: fn(String) -> String,
+    }
+
+    impl Browser {
+        pub(crate) fn new(tamper: fn(String) -> String) -> Self {
+            Self {
+                opened: std::sync::Mutex::new(Vec::new()),
+                callback: Default::default(),
+                tamper,
+            }
+        }
+
+        pub(crate) fn open(&self, url: &str) {
+            self.opened.lock().unwrap().push(url.to_string());
+            let (url, tamper, callback) = (url.to_string(), self.tamper, self.callback.clone());
+            std::thread::spawn(move || {
+                let (status, location) = http_get(&url);
+                assert_eq!(status, 302, "the fake server refused {url}");
+                let (status, _) = http_get(&tamper(location.unwrap()));
+                *callback.lock().unwrap() = Some(status);
+            });
+        }
+
+        /// The status the callback answered, once the browser thread has
+        /// read it: the login may return before the thread gets there.
+        pub(crate) fn callback_status(&self) -> Option<u16> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let status = *self.callback.lock().unwrap();
+                if status.is_some() || std::time::Instant::now() >= deadline {
+                    return status;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    pub(crate) fn oauth_settings(
+        fake: &FakeHttpServer,
+        name: &str,
+        oauth: Option<McpOAuthSettings>,
+    ) -> McpServerSettings {
+        let mut settings = fake.settings(name, &[], &[]);
+        if let McpTransportSettings::Http { oauth: slot, .. } = &mut settings.transport {
+            *slot = oauth;
+        }
+        settings
+    }
+
+    fn params_of(fake: &FakeHttpServer, path: &str) -> Vec<Value> {
+        fake.requests()
+            .into_iter()
+            .filter(|request| request["path"] == path)
+            .map(|request| request["params"].clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_login_registers_proves_pkce_and_stores_the_token_for_the_resource() {
+        let fake = FakeHttpServer::start(&["--oauth", "--scopes=read,write"]);
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        let browser = Browser::new(|location| location);
+
+        login(
+            &oauth_settings(&fake, "fake", None),
+            &store,
+            &|url| browser.open(url),
+            Duration::from_secs(20),
+        )
+        .unwrap();
+
+        assert_eq!(browser.callback_status(), Some(200));
+        let opened = browser.opened.lock().unwrap()[0].clone();
+        let register = &params_of(&fake, "/auth/register")[0];
+        let authorize = &params_of(&fake, "/auth/authorize")[0];
+        let exchange = &params_of(&fake, "/auth/token")[0];
+        let redirect = register["redirect_uris"][0].as_str().unwrap();
+        assert!(redirect.starts_with("http://127.0.0.1:"), "{redirect}");
+        assert!(redirect.ends_with("/callback"), "{redirect}");
+        assert_eq!(authorize["redirect_uri"], redirect);
+        assert_eq!(authorize["resource"], fake.url.as_str());
+        assert_eq!(authorize["code_challenge_method"], "S256");
+        assert_eq!(authorize["scope"], "read write");
+        assert_eq!(authorize["state"].as_str().unwrap().len(), 22);
+        assert_eq!(exchange["grant_type"], "authorization_code");
+        assert_eq!(exchange["resource"], fake.url.as_str());
+        assert_eq!(exchange["redirect_uri"], redirect);
+        assert_eq!(exchange["client_id"], register_client(&fake));
+        let verifier = exchange["code_verifier"].as_str().unwrap();
+        assert_eq!(verifier.len(), 43);
+        assert_eq!(
+            authorize["code_challenge"].as_str().unwrap(),
+            code_challenge(verifier)
+        );
+        // Only the challenge travels through the browser.
+        assert!(!opened.contains(verifier), "{opened}");
+
+        let token = store.load("fake", &fake.url).unwrap().unwrap();
+        assert!(token.access_token.starts_with("access-"), "{token:?}");
+        assert!(
+            token
+                .refresh_token
+                .as_ref()
+                .unwrap()
+                .starts_with("refresh-")
+        );
+        assert!(!token.expires_within(3000), "{token:?}");
+        assert_eq!(token.resource, fake.url);
+        assert_eq!(token.client_auth, ClientAuth::None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(store.path("fake"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    fn register_client(fake: &FakeHttpServer) -> String {
+        params_of(fake, "/auth/authorize")[0]["client_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn a_configured_client_logs_in_with_its_secret_and_the_secret_is_not_stored() {
+        let fake =
+            FakeHttpServer::start(&["--oauth", "--no-registration", "--discovery=well-known"]);
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        let browser = Browser::new(|location| location);
+        let oauth = McpOAuthSettings {
+            client_id: Some("pre-client".into()),
+            client_secret: Some("pre-secret".into()),
+            scopes: vec!["repo".into()],
+            callback_port: None,
+        };
+
+        login(
+            &oauth_settings(&fake, "fake", Some(oauth)),
+            &store,
+            &|url| browser.open(url),
+            Duration::from_secs(20),
+        )
+        .unwrap();
+
+        assert!(params_of(&fake, "/auth/register").is_empty());
+        assert_eq!(params_of(&fake, "/auth/authorize")[0]["scope"], "repo");
+        let exchange = fake
+            .requests()
+            .into_iter()
+            .find(|request| request["path"] == "/auth/token")
+            .unwrap();
+        assert!(exchange["basic"].as_str().unwrap().starts_with("Basic "));
+        assert_eq!(exchange["params"]["client_id"], Value::Null);
+        let token = store.load("fake", &fake.url).unwrap().unwrap();
+        assert_eq!(
+            (
+                token.client_id.as_str(),
+                &token.client_secret,
+                token.client_auth
+            ),
+            ("pre-client", &None, ClientAuth::ClientSecretBasic)
+        );
+        let file = std::fs::read_to_string(store.path("fake")).unwrap();
+        assert!(!file.contains("pre-secret"), "{file}");
+    }
+
+    #[test]
+    fn a_login_fails_without_a_token_when_the_state_differs_or_the_server_refuses() {
+        let fake = FakeHttpServer::start(&["--oauth"]);
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        let settings = oauth_settings(&fake, "fake", None);
+        let run = |tamper: fn(String) -> String| {
+            let browser = Browser::new(tamper);
+            let result = login(
+                &settings,
+                &store,
+                &|url| browser.open(url),
+                Duration::from_secs(20),
+            );
+            (result.unwrap_err(), browser.callback_status())
+        };
+
+        let (err, page) = run(|location| location.replace("state=", "state=forged"));
+        assert!(
+            err.starts_with("Could not log in to MCP server fake: the browser came back with a state that does not match"),
+            "{err}"
+        );
+        assert_eq!(page, Some(400));
+        let (err, _) = run(|location| {
+            let callback = location.split('?').next().unwrap().to_string();
+            let state = location.split("state=").nth(1).unwrap().to_string();
+            format!("{callback}?error=access_denied&error_description=code-1+leaked&state={state}")
+        });
+        assert_eq!(
+            err,
+            "Could not log in to MCP server fake: the authorization server refused: access_denied."
+        );
+        assert!(params_of(&fake, "/auth/token").is_empty());
+        assert_eq!(store.load("fake", &fake.url).unwrap(), None);
+
+        // No browser at all.
+        let err = login(&settings, &store, &|_| {}, Duration::from_secs(1)).unwrap_err();
+        assert!(
+            err.ends_with("the browser did not come back within 1 second."),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_login_refuses_a_command_server_and_a_configured_authorization_header() {
+        let fake = FakeHttpServer::start(&["--oauth"]);
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        let with_header = fake.settings("fake", &[("authorization", "Bearer x")], &[]);
+        let err = login(&with_header, &store, &|_| {}, Duration::from_secs(1)).unwrap_err();
+        assert!(err.contains("sets an Authorization header"), "{err}");
+        let command = crate::mcp::tests::fake_settings("local", "", &[]);
+        let err = login(&command, &store, &|_| {}, Duration::from_secs(1)).unwrap_err();
+        assert!(err.contains("runs a command"), "{err}");
+    }
+
+    #[test]
+    fn a_configured_callback_port_is_the_redirect_uri() {
+        let fake = FakeHttpServer::start(&["--oauth"]);
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let browser = Browser::new(|location| location);
+        let oauth = McpOAuthSettings {
+            callback_port: Some(port),
+            ..McpOAuthSettings::default()
+        };
+
+        login(
+            &oauth_settings(&fake, "fake", Some(oauth)),
+            &store,
+            &|url| browser.open(url),
+            Duration::from_secs(20),
+        )
+        .unwrap();
+
+        assert_eq!(
+            params_of(&fake, "/auth/authorize")[0]["redirect_uri"],
+            format!("http://127.0.0.1:{port}/callback")
+        );
+    }
+
+    #[test]
+    fn the_code_challenge_matches_rfc_7636() {
+        // RFC 7636 appendix B.
+        assert_eq!(
+            code_challenge("dBjftJeZ4CVP-mJ92K6Wy-dA-l5JSiEqWhcCUAnXc3yqOFzAvpIIU0ZZKLpRwnSXg8"),
+            "qrXhlVndRVbSmVRR1eZZGpi1j1q-9zXQQcaH37ltwMA"
+        );
+        assert_ne!(random_text(32), random_text(32));
+        assert_eq!(form_encode("a b+c:d"), "a+b%2Bc%3Ad");
     }
 
     #[test]

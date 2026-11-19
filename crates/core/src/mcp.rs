@@ -15,9 +15,9 @@ mod http;
     expect(dead_code, reason = "the login uses it in the next steps")
 )]
 mod oauth;
-#[expect(
-    dead_code,
-    reason = "the login and the transport use it in the next steps"
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the transport uses it in the next steps")
 )]
 pub(crate) mod token_store;
 
