@@ -5,9 +5,28 @@
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Args {
     pub(crate) launch: Launch,
-    /// `-p TEXT`: run TEXT as one turn and print JSON Lines; `-` reads the
-    /// prompt from standard input.
-    pub(crate) print: Option<String>,
+    /// `-p`: run one turn without the terminal UI.
+    pub(crate) print: Option<Print>,
+}
+
+/// `-p [PROMPT] [--output-format FMT]`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Print {
+    /// The positional prompt; piped standard input comes before it.
+    pub(crate) prompt: Option<String>,
+    pub(crate) format: OutputFormat,
+}
+
+/// What `-p` writes to standard output.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputFormat {
+    /// The reply text alone.
+    #[default]
+    Text,
+    /// The `finished` record alone.
+    Json,
+    /// Every record as JSON Lines.
+    StreamJson,
 }
 
 /// What the command line asks for.
@@ -23,7 +42,7 @@ pub(crate) enum Launch {
 
 pub(crate) fn usage(program: &str) -> String {
     format!(
-        "Usage: {program} [-c | -r [ID]] [-p PROMPT]\n\
+        "Usage: {program} [-c | -r [ID]] [-p [PROMPT] [--output-format FMT]]\n\
          \n\
          Starts a new conversation in the current directory.\n\
          \n\
@@ -31,10 +50,13 @@ pub(crate) fn usage(program: &str) -> String {
            -c, --continue     Continue the most recently saved conversation\n  \
            -r, --resume [ID]  Resume a conversation; without ID, choose from a list.\n                     \
                               ID may be any unique prefix.\n  \
-           -p, --print PROMPT Run PROMPT as one turn without the terminal UI and\n                     \
-                              print its progress and result as JSON Lines.\n                     \
-                              PROMPT - reads it from standard input. Calls that\n                     \
-                              need approval are refused.\n  \
+           -p, --print        Run PROMPT as one turn without the terminal UI and\n                     \
+                              print the reply. Piped standard input comes before\n                     \
+                              PROMPT. Calls that need approval are refused.\n      \
+               --output-format FMT\n                     \
+                              With -p: text (the reply, the default), json (the\n                     \
+                              final result), or stream-json (progress and result\n                     \
+                              as JSON Lines)\n  \
            -h, --help         Show this help"
     )
 }
@@ -42,7 +64,9 @@ pub(crate) fn usage(program: &str) -> String {
 pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut args = args.into_iter().peekable();
     let mut launch = None;
-    let mut print = None;
+    let mut print = false;
+    let mut prompt = None;
+    let mut format = None;
     let set = |next: Launch, launch: &mut Option<Launch>| match launch {
         Some(Launch::Help) => Ok(()),
         Some(_) if next != Launch::Help => {
@@ -61,27 +85,57 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, Stri
                 let id = args.next_if(|next| !next.starts_with('-'));
                 set(Launch::Resume(id), &mut launch)?;
             }
-            "-p" | "--print" => {
-                let prompt = args
+            "-p" | "--print" => print = true,
+            "--output-format" => {
+                let value = args
                     .next()
-                    .ok_or_else(|| format!("{arg} needs a prompt, or - to read one from stdin"))?;
-                if print.replace(prompt).is_some() {
-                    return Err("--print can be given only once".to_string());
+                    .ok_or("--output-format needs text, json, or stream-json")?;
+                format = Some(output_format(&value)?);
+            }
+            _ if !arg.starts_with('-') && prompt.is_none() => prompt = Some(arg),
+            _ => {
+                if let Some(id) = arg.strip_prefix("--resume=").filter(|id| !id.is_empty()) {
+                    set(Launch::Resume(Some(id.to_string())), &mut launch)?;
+                } else if let Some(value) = arg.strip_prefix("--output-format=") {
+                    format = Some(output_format(value)?);
+                } else {
+                    return Err(format!("Unexpected argument '{arg}'"));
                 }
             }
-            _ => match arg.strip_prefix("--resume=") {
-                Some(id) if !id.is_empty() => {
-                    set(Launch::Resume(Some(id.to_string())), &mut launch)?
-                }
-                _ => return Err(format!("Unexpected argument '{arg}'")),
-            },
         }
     }
     let launch = launch.unwrap_or(Launch::New);
-    if print.is_some() && launch == Launch::Resume(None) {
+    if !print {
+        if let Some(prompt) = prompt {
+            return Err(format!("Unexpected argument '{prompt}'"));
+        }
+        if format.is_some() {
+            return Err("--output-format needs --print".to_string());
+        }
+        return Ok(Args {
+            launch,
+            print: None,
+        });
+    }
+    if launch == Launch::Resume(None) {
         return Err("--print cannot open the session picker; give --resume an ID".to_string());
     }
-    Ok(Args { launch, print })
+    let format = format.unwrap_or_default();
+    Ok(Args {
+        launch,
+        print: Some(Print { prompt, format }),
+    })
+}
+
+fn output_format(value: &str) -> Result<OutputFormat, String> {
+    match value {
+        "text" => Ok(OutputFormat::Text),
+        "json" => Ok(OutputFormat::Json),
+        "stream-json" => Ok(OutputFormat::StreamJson),
+        _ => Err(format!(
+            "Unknown output format '{value}'; use text, json, or stream-json"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -96,29 +150,73 @@ mod tests {
         parse(args.iter().map(|arg| arg.to_string()))
     }
 
+    fn print(prompt: Option<&str>, format: OutputFormat) -> Option<Print> {
+        Some(Print {
+            prompt: prompt.map(str::to_string),
+            format,
+        })
+    }
+
     #[test]
-    fn print_runs_one_prompt_in_any_session_but_the_picker() {
-        assert_eq!(
-            printed(&["-p", "fix the test"]),
+    fn print_takes_the_prompt_as_a_positional_anywhere() {
+        let new = |print| {
             Ok(Args {
                 launch: Launch::New,
-                print: Some("fix the test".into())
+                print,
             })
+        };
+        assert_eq!(
+            printed(&["-p", "fix the test"]),
+            new(print(Some("fix the test"), OutputFormat::Text))
         );
         assert_eq!(
-            printed(&["-c", "--print", "-"]),
+            printed(&["fix the test", "--print"]),
+            new(print(Some("fix the test"), OutputFormat::Text))
+        );
+        assert_eq!(printed(&["-p"]), new(print(None, OutputFormat::Text)));
+        assert_eq!(
+            printed(&["-c", "-p", "go on"]),
             Ok(Args {
                 launch: Launch::Continue,
-                print: Some("-".into())
+                print: print(Some("go on"), OutputFormat::Text)
             })
         );
         assert_eq!(
             printed(&["-r", "2026", "-p", "go on"]).unwrap().launch,
             Launch::Resume(Some("2026".into()))
         );
-        assert!(printed(&["-p"]).unwrap_err().contains("needs a prompt"));
         assert!(printed(&["-r", "-p", "x"]).unwrap_err().contains("picker"));
-        assert!(printed(&["-p", "a", "-p", "b"]).is_err());
+        assert!(printed(&["-p", "a", "b"]).unwrap_err().contains("'b'"));
+        assert_eq!(printed(&["-p", "-"]), Err("Unexpected argument '-'".into()));
+        assert_eq!(printed(&["q"]), Err("Unexpected argument 'q'".into()));
+    }
+
+    #[test]
+    fn output_format_picks_what_print_writes() {
+        let format = |args: &[&str]| printed(args).map(|args| args.print.unwrap().format);
+        assert_eq!(
+            format(&["-p", "q", "--output-format", "text"]),
+            Ok(OutputFormat::Text)
+        );
+        assert_eq!(
+            format(&["--output-format=json", "-p", "q"]),
+            Ok(OutputFormat::Json)
+        );
+        assert_eq!(
+            format(&["-p", "--output-format", "stream-json", "q"]),
+            Ok(OutputFormat::StreamJson)
+        );
+        assert!(
+            format(&["-p", "--output-format", "xml"])
+                .unwrap_err()
+                .contains("'xml'")
+        );
+        assert!(format(&["-p", "--output-format"]).is_err());
+        assert!(
+            printed(&["--output-format", "json"])
+                .unwrap_err()
+                .contains("--print")
+        );
     }
 
     #[test]

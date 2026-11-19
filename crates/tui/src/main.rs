@@ -52,8 +52,8 @@ async fn main() -> Result<()> {
         // A new session opens under the picker; closing it keeps that one.
         Launch::Resume(None) => (SessionStart::New, true),
     };
-    if let Some(prompt) = print {
-        std::process::exit(headless::main(start, &prompt).await);
+    if let Some(print) = print {
+        std::process::exit(headless::main(start, print).await);
     }
     let agent = AgentService::from_current_dir(start).map_err(|err| eyre!(err.to_string()))?;
     let mut app = App::new(agent)?;
