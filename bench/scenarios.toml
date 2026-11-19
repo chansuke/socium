@@ -1,0 +1,35 @@
+# Fixed conversations for bench/run.py. The loopback model answers the n-th
+# request with the n-th call, then with a short reply, so every run of a
+# scenario asks Socium for the same work. `repo` is copied into a fresh Git
+# repository for each run. `expect` lists texts the last request must hold,
+# and `tool_errors` how many calls fail by design.
+
+[[scenario]]
+name = "hello"
+repo = "evals/tasks/cite-location/repo"
+prompt = "Say hello."
+calls = []
+
+[[scenario]]
+name = "read-and-search"
+repo = "evals/tasks/long-billing/repo"
+prompt = "Where is the late fee computed?"
+calls = [
+  { tool = "list_files", input = {} },
+  { tool = "read_file", input = { path = "legacy_billing.py" } },
+  { tool = "search_text", input = { pattern = "late_fee" } },
+  { tool = "git_log", input = {} },
+]
+expect = ["def projected_fees", "fixture"]
+
+[[scenario]]
+name = "long-command-output"
+repo = "evals/tasks/tail-failure/repo"
+prompt = "Run ./build.sh and tell me why it fails."
+calls = [
+  { tool = "run_command", input = { command = ["sh", "build.sh"] } },
+  { tool = "read_file", input = { path = "src/parse.c" } },
+]
+# build.sh exits 1 by design.
+tool_errors = 1
+expect = ["src/parse.c:217:14", "compiling unit 3000 of 3000"]
