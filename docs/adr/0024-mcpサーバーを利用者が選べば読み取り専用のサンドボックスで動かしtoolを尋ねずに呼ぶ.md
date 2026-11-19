@@ -71,19 +71,23 @@ sandbox = "read-only"
 ### 起動
 
 * サーバーは `SandboxExecutor` で起動する。方針 (`ExecutionPolicy`) は次のとおり。
-  * workspace は `WorkspaceAccess::ReadOnly` でマウントする。ネットワークは閉じ、HOME と tmp は private にする。cwd は ADR 20 と同じく workspace のルートとする。
+  * workspace は `WorkspaceAccess::ReadOnly` でマウントする。ネットワークは閉じ、HOME と tmp は private にする。cwd は workspace のルートとする。ADR 20 はホストのサーバーの cwd を `/` にするが、それはワークスペースのモジュールがホストで動くのを防ぐためである。ここでは読み込まれても動くのはサンドボックスの中で、ast-grep の例のように workspace からの相対パスで探す道具が使える。
   * `sandbox.read_only`、`sandbox.path`、`sandbox.env` は継承しない。これらはビルドとテストのために利用者が開いたもので、サーバーに渡す理由がない。見えるのは、runtime パス (`/nix/store`、`/usr` など) と、このサーバーの `read_only` だけである。
-  * PATH は runtime パスだけにする。`command` の先頭は、サンドボックスの中で見える場所に解決されなければならない。runtime パスの中か、このサーバーの `read_only` の中である。Nix で入れたサーバーなら、そのまま名前で書ける。
+  * PATH は runtime パスだけにする。ワークスペースの中を指す項目はもともと入らない。`command` の先頭は、サンドボックスの中で見える場所に解決されなければならない。runtime パスの中か、このサーバーの `read_only` の中である。Nix で入れたサーバーなら、そのまま名前で書ける。`./server` のような相対パスは ADR 20 と同じく設定を読む時点で拒否する。
 * 環境変数。
   * ADR 20 が渡す PATH、HOME、USER、LANG は渡さない。HOME と PATH はサンドボックスが決める。
-  * `env` は、サンドボックスができた後の子にだけ、bubblewrap の `--setenv` で渡す。bubblewrap 自身の環境には入れない。`LD_PRELOAD` のようなローダーの変数が、サンドボックスの外で bubblewrap に読み込まれないようにするためである。
+  * `env` は、サンドボックスができた後の子にだけ、bubblewrap の `--setenv` で渡す。`--setenv` の並びは `sandbox.env` と同じく記述子 (`--args`) から bubblewrap に読ませ、bubblewrap 自身の環境にもコマンドラインにも入れない。`LD_PRELOAD` のようなローダーの変数が、サンドボックスの外で bubblewrap に読み込まれないようにするためと、誰でも読める `/proc/<pid>/cmdline` に値を出さないためである。
   * 名前の検査は ADR 12 の `sandbox.env` と同じとする。
 * 起動の時点で `approval::restrictions` の制限を計算し、`approval.sensitive` に当たるファイルを空のファイルとして見せる。制限の計算が失敗したら (列挙が時間を超えた、256 件を超えた、など)、そのサーバーを起動しない。起動しない理由は、ADR 20 の他の失敗と同じく警告に出す。承認に切り替えることも、制限なしで動かすこともしない。
 * ここから後は、ADR 20 と同じである。
-  * ハンドシェイク、`tools/list`、30 秒の起動の期限。
+  * ハンドシェイク、`tools/list`、30 秒の起動の期限と、起動の中止。
+  * `tool_timeout_secs` による呼び出しの期限。
+  * tool の数と定義の大きさの上限。サンドボックスのサーバーも、ホストのサーバーと同じ全体の上限に数える。
+  * stdin への書き込みを専用の thread で行うこと。
   * `notifications/cancelled` による中断。
   * registry がサーバーを持ち、捨てれば process group ごと終わらせること。
 * registry が持つ子プロセスは bubblewrap になる。bubblewrap は `--unshare-all` で PID namespace を分け、`--die-with-parent` を付けている。そのため bubblewrap を終わらせれば、サンドボックスの中のプロセスは子孫まで消える。`setsid` した子孫が消えることは、既存のテストで確かめている (`execution/tests.rs` の setsid のケース)。
+* 終了の手順は ADR 20 と同じく、stdin を閉じて 1 秒、SIGTERM を送って 1 秒、SIGKILL、回収の順である。signal を受けるのは bubblewrap のプロセスグループで、SIGTERM がサンドボックスの中のサーバーに届くか、bubblewrap が先に終わって namespace ごと消えるかは未確認である。どちらでも子孫は残らないので、穏やかに終わる機会は stdin を閉じる段階だと考える。実装のテストで確かめる。
 
 ### 見える範囲と保証
 
@@ -178,7 +182,8 @@ sandbox = "read-only"
   * `read_only` の検査。ホームとその祖先、予約されたパス、ワークスペースと設定ディレクトリに重なるものの拒否。
 * `execution/tests.rs` と `mcp.rs` のテスト。偽のサーバー (`fake_mcp_server.py`) をサンドボックスで起動し、次のことを確かめる。
   * workspace への書き込み、ネットワーク、ホストの HOME、`sandbox.read_only` と `sandbox.env`、保証の対象の秘密のファイルの中身に届かないこと。
-  * `env` が子に届き、bubblewrap 自身の環境には入らないこと。
+  * `env` が子に届き、bubblewrap 自身の環境にもコマンドラインにも入らないこと。
+  * 終了の手順で、stdin を閉じても終わらないサーバーが SIGTERM と SIGKILL の段階で消えること。
   * 秘密のファイルの列挙が失敗したら、サーバーを起動しないこと。
   * registry を捨てると、`setsid` した子孫まで消えること。
 * `approval.rs` のテスト。サンドボックスのサーバーの tool が尋ねずに動き、ホストのサーバーの tool は ADR 20 のとおり尋ねること。
@@ -238,4 +243,4 @@ ADR 20 (MCP サーバーとその承認)、ADR 21 (遠隔のサーバー)、ADR 
 * その値は、サンドボックスを作る前の bubblewrap 自身の環境に入る (`execution/linux.rs` の `command`)。
 * 2026-11-19 に `file` で確かめたところ、flake の bubblewrap (`/nix/store/3hqwbwxij9lxhyrf2amsm2xg24xszmmx-bubblewrap-0.12.0/bin/bwrap`) は動的リンクされていた。
 
-この ADR の `env` は `--setenv` で渡すので、この問題の影響を受けない。`sandbox.env` のほうは別のチケットで扱う。
+この ADR の `env` は `--setenv` で渡すので、この問題の影響を受けない。`sandbox.env` のほうは PR #100 で、同じく記述子から `--setenv` で渡すように直す。
