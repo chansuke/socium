@@ -7,8 +7,9 @@
 //! Callers hand it commands over a channel and wait on std channels, which
 //! keeps the client synchronous like the stdio transport.
 //!
-//! The configured headers usually hold a token: they are marked sensitive
-//! and never appear in a message.
+//! The configured headers usually hold a token: they are marked sensitive,
+//! and the client blanks their values out of the messages it builds from
+//! what the server answers.
 
 use super::{MAX_MESSAGE_BYTES, Reply, RequestError, lock};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
@@ -28,6 +29,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const END_SESSION_TIMEOUT: Duration = Duration::from_secs(2);
 /// A JSON-RPC error message quoted from an HTTP error body is cut here.
 const QUOTED_ERROR_CHARS: usize = 300;
+/// Answers to the server's own requests in flight at once; one beyond this
+/// is dropped, so a server that floods pings cannot pile up connections.
+const SERVER_ANSWERS: usize = 8;
+/// How long posting a notification or an answer to the server may take.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+/// What an event stream may begin with, to be skipped.
+const BOM: &[u8] = b"\xef\xbb\xbf";
 
 pub(super) struct HttpTransport {
     commands: UnboundedSender<Command>,
@@ -62,6 +70,8 @@ struct Connection {
     session: Mutex<Option<HeaderValue>>,
     /// The negotiated revision, sent on every request after initialize.
     protocol_version: Mutex<Option<HeaderValue>>,
+    /// Permits for answers to the server's requests.
+    answers: Arc<tokio::sync::Semaphore>,
 }
 
 impl HttpTransport {
@@ -83,11 +93,17 @@ impl HttpTransport {
             value.set_sensitive(true);
             header_map.insert(header, value);
         }
-        let client = reqwest::Client::builder()
+        let mut client = reqwest::Client::builder()
             // A redirect would carry the headers to another address.
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
-            .user_agent(concat!("socium/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("socium/", env!("CARGO_PKG_VERSION")));
+        // Plain http is allowed only to loopback, where a proxy from the
+        // environment would see the headers in the clear.
+        if is_loopback(&url) {
+            client = client.no_proxy();
+        }
+        let client = client
             .build()
             .map_err(|err| not_started(format!("its HTTP client could not be built: {err}")))?;
         let connection = Arc::new(Connection {
@@ -97,6 +113,7 @@ impl HttpTransport {
             headers: header_map,
             session: Mutex::new(None),
             protocol_version: Mutex::new(None),
+            answers: Arc::new(tokio::sync::Semaphore::new(SERVER_ANSWERS)),
         });
         let (commands, receiver) = unbounded_channel();
         let (finished_sender, finished) = mpsc::channel();
@@ -163,11 +180,10 @@ impl HttpTransport {
         }
     }
 
-    /// Sends `MCP-Protocol-Version: <version>` from now on.
-    pub(super) fn negotiated(&self, version: &str) {
-        let value = HeaderValue::from_str(version)
-            .unwrap_or_else(|_| HeaderValue::from_static(super::PROTOCOL_VERSION));
-        *lock(&self.connection.protocol_version) = Some(value);
+    /// Sends `MCP-Protocol-Version: <version>` from now on; `version` is
+    /// one of the revisions the client speaks.
+    pub(super) fn negotiated(&self, version: &'static str) {
+        *lock(&self.connection.protocol_version) = Some(HeaderValue::from_static(version));
     }
 }
 
@@ -205,7 +221,11 @@ fn run(connection: &Arc<Connection>, mut commands: UnboundedReceiver<Command>) {
                 Command::Notify { message, done } => {
                     let connection = connection.clone();
                     tokio::spawn(async move {
-                        let _ = done.send(connection.post(&message).await);
+                        let posted =
+                            tokio::time::timeout(CONTROL_TIMEOUT, connection.post(&message))
+                                .await
+                                .unwrap_or(Err(RequestError::TimedOut));
+                        let _ = done.send(posted);
                     });
                 }
                 Command::Forget(id) => {
@@ -248,9 +268,14 @@ impl Connection {
         if status.is_success() {
             return Ok(response);
         }
+        if status == StatusCode::NOT_FOUND && session.is_some() {
+            // The next initialize starts a new session.
+            lock(&self.session).take();
+            lock(&self.protocol_version).take();
+            return Err(RequestError::SessionEnded);
+        }
         Err(RequestError::Transport(match status {
             StatusCode::UNAUTHORIZED => "needs authorization (HTTP 401); Socium sends only the headers of its [mcp.servers] table and does not support OAuth".to_string(),
-            StatusCode::NOT_FOUND if session.is_some() => "ended the session (HTTP 404); reload the settings or restart Socium to start a new one".to_string(),
             _ => format!("answered HTTP {status}{}", quoted_error(response).await),
         }))
     }
@@ -300,8 +325,7 @@ impl Connection {
     /// the stream are answered (pings only, as over stdio) and its
     /// notifications skipped.
     async fn read_events(self: &Arc<Self>, mut response: Response, id: u64) -> Reply {
-        let mut buffer = Vec::new();
-        let mut data = Vec::new();
+        let mut stream = EventStream::new(MAX_MESSAGE_BYTES);
         loop {
             let chunk = response
                 .chunk()
@@ -312,29 +336,10 @@ impl Connection {
                     "closed its event stream before answering".into(),
                 ));
             };
-            buffer.extend_from_slice(&chunk);
-            while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
-                let mut line = buffer.drain(..=end).collect::<Vec<_>>();
-                line.pop();
-                if line.last() == Some(&b'\r') {
-                    line.pop();
+            for data in stream.push(&chunk).map_err(Self::broke)? {
+                if let Some(found) = self.event(&data, id) {
+                    return Ok(found);
                 }
-                if line.is_empty() {
-                    // The end of an event.
-                    if let Some(found) = self.event(&data, id) {
-                        return Ok(found);
-                    }
-                    data.clear();
-                } else if let Some(field) = line.strip_prefix(b"data:") {
-                    if !data.is_empty() {
-                        data.push(b'\n');
-                    }
-                    data.extend_from_slice(field.strip_prefix(b" ").unwrap_or(field));
-                }
-                // `event:`, `id:`, `retry:` and comments carry nothing used here.
-            }
-            if buffer.len() + data.len() > MAX_MESSAGE_BYTES {
-                return Err(Self::broke("an event is larger than the limit"));
             }
         }
     }
@@ -353,10 +358,14 @@ impl Connection {
                 } else {
                     json!({"jsonrpc": "2.0", "id": request, "error": {"code": -32601, "message": "Method not found"}})
                 };
-                let connection = self.clone();
-                tokio::spawn(async move {
-                    let _ = connection.post(&reply).await;
-                });
+                if let Ok(permit) = self.answers.clone().try_acquire_owned() {
+                    let connection = self.clone();
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let _ =
+                            tokio::time::timeout(CONTROL_TIMEOUT, connection.post(&reply)).await;
+                    });
+                }
                 None
             }
             _ => None,
@@ -382,13 +391,113 @@ fn is_response_to(message: &Value, id: u64) -> bool {
     message.get("method").is_none() && message["id"].as_u64() == Some(id)
 }
 
+/// Whether `url` names this machine, by name or by a loopback address.
+fn is_loopback(url: &Url) -> bool {
+    match url.host_str() {
+        Some(host) if host.eq_ignore_ascii_case("localhost") => true,
+        Some(host) => host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback()),
+        None => false,
+    }
+}
+
+/// The data of each event in an event stream, read as the WHATWG parser
+/// does: lines end in CRLF, LF, or CR, even across chunks; a leading BOM is
+/// skipped; and a line or event larger than `limit` is refused before it
+/// is kept.
+struct EventStream {
+    /// The line not ended yet.
+    line: Vec<u8>,
+    data: Vec<u8>,
+    limit: usize,
+    /// Whether the start, which may hold a BOM, has been read.
+    started: bool,
+    /// Whether the last chunk ended in CR, whose LF may open the next one.
+    after_cr: bool,
+}
+
+impl EventStream {
+    fn new(limit: usize) -> Self {
+        Self {
+            line: Vec::new(),
+            data: Vec::new(),
+            limit,
+            started: false,
+            after_cr: false,
+        }
+    }
+
+    /// Reads `chunk` and returns the data of the events it ends.
+    fn push(&mut self, mut chunk: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
+        if std::mem::take(&mut self.after_cr) && chunk.first() == Some(&b'\n') {
+            chunk = &chunk[1..];
+        }
+        let mut events = Vec::new();
+        while !chunk.is_empty() {
+            let end = chunk.iter().position(|byte| matches!(byte, b'\n' | b'\r'));
+            let part = &chunk[..end.unwrap_or(chunk.len())];
+            if self.line.len() + part.len() > self.limit {
+                return Err("an event is larger than the limit");
+            }
+            self.line.extend_from_slice(part);
+            let Some(end) = end else { break };
+            let mut next = end + 1;
+            if chunk[end] == b'\r' {
+                match chunk.get(next) {
+                    Some(b'\n') => next += 1,
+                    Some(_) => {}
+                    None => self.after_cr = true,
+                }
+            }
+            chunk = &chunk[next..];
+            let line = std::mem::take(&mut self.line);
+            if let Some(event) = self.line_ended(&line)? {
+                events.push(event);
+            }
+        }
+        Ok(events)
+    }
+
+    /// Takes in one line; an empty one ends the event.
+    fn line_ended(&mut self, mut line: &[u8]) -> Result<Option<Vec<u8>>, &'static str> {
+        if !self.started {
+            self.started = true;
+            line = line.strip_prefix(BOM).unwrap_or(line);
+        }
+        if line.is_empty() {
+            if self.data.is_empty() {
+                return Ok(None);
+            }
+            let mut data = std::mem::take(&mut self.data);
+            data.pop();
+            return Ok(Some(data));
+        }
+        // `event:`, `id:`, `retry:` and comments carry nothing used here.
+        let value = match line.strip_prefix(b"data") {
+            Some([]) => &[][..],
+            Some([b':', value @ ..]) => value.strip_prefix(b" ").unwrap_or(value),
+            _ => return Ok(None),
+        };
+        if self.data.len() + value.len() + 1 > self.limit {
+            return Err("an event is larger than the limit");
+        }
+        // Each data line ends in LF; the last one is dropped at the end.
+        self.data.extend_from_slice(value);
+        self.data.push(b'\n');
+        Ok(None)
+    }
+}
+
 async fn read_body(mut response: Response, limit: usize) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|err| describe(&err))? {
-        body.extend_from_slice(&chunk);
-        if body.len() > limit {
+        if body.len() + chunk.len() > limit {
             return Err("the body is larger than the limit".into());
         }
+        body.extend_from_slice(&chunk);
     }
     Ok(body)
 }
@@ -422,4 +531,57 @@ fn describe(err: &reqwest::Error) -> String {
         source = cause.source();
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn events(chunks: &[&[u8]], limit: usize) -> Result<Vec<String>, &'static str> {
+        let mut stream = EventStream::new(limit);
+        let mut events = Vec::new();
+        for chunk in chunks {
+            for data in stream.push(chunk)? {
+                events.push(String::from_utf8(data).unwrap());
+            }
+        }
+        Ok(events)
+    }
+
+    #[test]
+    fn an_event_stream_ends_lines_in_crlf_lf_or_cr_even_across_chunks() {
+        let stream: &[u8] =
+            b"\xef\xbb\xbfdata: a\r\n\r\ndata: b\rdata:c\r\rid: 1\ndata\ndata: d\n\n: note\n";
+        for split in 0..=stream.len() {
+            let (first, second) = stream.split_at(split);
+            assert_eq!(
+                events(&[first, second], 1024),
+                Ok(vec!["a".into(), "b\nc".into(), "\nd".into()]),
+                "split at {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_event_larger_than_the_limit_is_refused_wherever_the_chunks_break() {
+        let stream = format!("data: {}\n\n", "x".repeat(40));
+        for split in 0..=stream.len() {
+            let (first, second) = stream.as_bytes().split_at(split);
+            assert!(events(&[first, second], 32).is_err(), "split at {split}");
+        }
+        assert_eq!(events(&[stream.as_bytes()], 64).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_loopback_urls_bypass_a_proxy() {
+        for (url, loopback) in [
+            ("http://127.0.0.1:8931/mcp", true),
+            ("http://localhost/mcp", true),
+            ("http://[::1]:80/mcp", true),
+            ("https://mcp.example.com/mcp", false),
+            ("https://10.0.0.1/mcp", false),
+        ] {
+            assert_eq!(is_loopback(&Url::parse(url).unwrap()), loopback, "{url}");
+        }
+    }
 }

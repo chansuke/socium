@@ -172,6 +172,9 @@ enum RequestError {
     Malformed,
     /// The HTTP exchange failed, as a phrase that follows "it".
     Transport(String),
+    /// A remote server answered 404 to the session: it no longer knows it,
+    /// so the request was not run.
+    SessionEnded,
 }
 
 /// When a request stops waiting for its response.
@@ -202,13 +205,18 @@ impl Secrets {
             McpTransportSettings::Stdio { env, .. } => env,
             McpTransportSettings::Http { headers, .. } => headers,
         };
+        // A header such as `Bearer <token>` is also caught when the server
+        // repeats the token alone.
         let mut values = given
             .values()
+            .flat_map(|value| [Some(value.as_str()), value.split_whitespace().last()])
+            .flatten()
             .filter(|value| value.chars().count() >= MIN_SECRET_CHARS)
-            .cloned()
+            .map(str::to_string)
             .collect::<Vec<_>>();
         // Longest first, so a value that contains another is replaced whole.
-        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        values.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        values.dedup();
         Self(values)
     }
 
@@ -256,64 +264,9 @@ impl McpServer {
             secrets: Secrets::of(settings),
             call_timeout: settings.tool_timeout,
         };
-        let failed = |server: &Self, what: &str, err: RequestError| {
-            let reason = match err {
-                RequestError::TimedOut => {
-                    format!("did not {what} within {} seconds", timeout.as_secs())
-                }
-                RequestError::Refused(message) => format!("refused to {what}: {message}"),
-                RequestError::Malformed => format!("sent a malformed answer when asked to {what}"),
-                RequestError::Transport(message) => message,
-                RequestError::Gone | RequestError::Cancelled => {
-                    format!(
-                        "stopped before it could {what}{}",
-                        server.transport.exit_status()
-                    )
-                }
-            };
-            let at = match server.transport.origin() {
-                Some(origin) => format!(" at {origin}"),
-                None => String::new(),
-            };
-            server.secrets.redact(&format!(
-                "MCP server {}{at} was not started: it {reason}.{}",
-                server.name,
-                server.transport.stderr_tail()
-            ))
-        };
-        let refuse = |server: &Self, problem: String| {
-            server.secrets.redact(&format!(
-                "MCP server {} was not started: {problem}.",
-                server.name
-            ))
-        };
-        let initialized = server
-            .request(
-                "initialize",
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {"name": "socium", "version": env!("CARGO_PKG_VERSION")},
-                }),
-                &wait,
-            )
-            .map_err(|err| failed(&server, "initialize", err))?;
-        let version = initialized["protocolVersion"].as_str().unwrap_or_default();
-        if !PROTOCOL_VERSIONS.contains(&version) {
-            return Err(refuse(
-                &server,
-                format!(
-                    "it answered with protocol version `{version}`, and Socium speaks {}",
-                    PROTOCOL_VERSIONS.join(", ")
-                ),
-            ));
-        }
-        if let Transport::Http(http) = &server.transport {
-            http.negotiated(version);
-        }
-        server
-            .notify("notifications/initialized", None, Some(wait.deadline))
-            .map_err(|err| failed(&server, "initialize", err))?;
+        let failed =
+            |server: &Self, what: &str, err: RequestError| server.not_started(what, err, timeout);
+        let initialized = server.handshake(&wait, timeout)?;
         let mut tools = Vec::new();
         // A server that does not offer tools has none to list.
         if !initialized["capabilities"]["tools"].is_object() {
@@ -329,7 +282,7 @@ impl McpServer {
                 .request("tools/list", params, &wait)
                 .map_err(|err| failed(&server, "list its tools", err))?;
             let Some(listed) = page["tools"].as_array() else {
-                return Err(refuse(&server, "its tool list is not an array".into()));
+                return Err(server.refused("its tool list is not an array"));
             };
             for tool in listed {
                 let Some(name) = tool["name"].as_str() else {
@@ -360,9 +313,77 @@ impl McpServer {
                 _ => return Ok((server, tools)),
             }
         }
-        Err(refuse(
-            &server,
-            format!("its tool list has more than {MAX_TOOL_PAGES} pages"),
+        Err(server.refused(&format!(
+            "its tool list has more than {MAX_TOOL_PAGES} pages"
+        )))
+    }
+
+    /// `initialize` and `notifications/initialized`, after which the
+    /// server takes other requests. Returns the initialize result, or the
+    /// warning for the user.
+    fn handshake(&self, wait: &Wait<'_>, timeout: Duration) -> Result<Value, String> {
+        let initialized = self
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "socium", "version": env!("CARGO_PKG_VERSION")},
+                }),
+                wait,
+            )
+            .map_err(|err| self.not_started("initialize", err, timeout))?;
+        let answered = initialized["protocolVersion"].as_str().unwrap_or_default();
+        let Some(version) = PROTOCOL_VERSIONS
+            .iter()
+            .find(|version| **version == answered)
+        else {
+            return Err(self.refused(&format!(
+                "it answered with protocol version `{answered}`, and Socium speaks {}",
+                PROTOCOL_VERSIONS.join(", ")
+            )));
+        };
+        if let Transport::Http(http) = &self.transport {
+            http.negotiated(version);
+        }
+        self.notify("notifications/initialized", None, Some(wait.deadline))
+            .map_err(|err| self.not_started("initialize", err, timeout))?;
+        Ok(initialized)
+    }
+
+    /// The warning for a server that failed to `what`.
+    fn not_started(&self, what: &str, err: RequestError, timeout: Duration) -> String {
+        let reason = match err {
+            RequestError::TimedOut => {
+                format!("did not {what} within {} seconds", timeout.as_secs())
+            }
+            RequestError::Refused(message) => format!("refused to {what}: {message}"),
+            RequestError::Malformed => format!("sent a malformed answer when asked to {what}"),
+            RequestError::Transport(message) => message,
+            RequestError::SessionEnded => "ended the session it had just started".into(),
+            RequestError::Gone | RequestError::Cancelled => {
+                format!(
+                    "stopped before it could {what}{}",
+                    self.transport.exit_status()
+                )
+            }
+        };
+        let at = match self.transport.origin() {
+            Some(origin) => format!(" at {origin}"),
+            None => String::new(),
+        };
+        self.secrets.redact(&format!(
+            "MCP server {}{at} was not started: it {reason}.{}",
+            self.name,
+            self.transport.stderr_tail()
+        ))
+    }
+
+    /// The warning for a server whose answers Socium cannot use.
+    fn refused(&self, problem: &str) -> String {
+        self.secrets.redact(&format!(
+            "MCP server {} was not started: {problem}.",
+            self.name
         ))
     }
 
@@ -468,6 +489,24 @@ impl McpServer {
                     ),
                     RequestError::Transport(message) => {
                         format!("The {} MCP server {message}", self.name)
+                    }
+                    // The spec has the client start a new session. The call
+                    // is not sent again: the model decides.
+                    RequestError::SessionEnded => {
+                        let wait = Wait {
+                            deadline: Instant::now() + STARTUP_TIMEOUT,
+                            control,
+                        };
+                        match self.handshake(&wait, STARTUP_TIMEOUT) {
+                            Ok(_) => format!(
+                                "The {} MCP server had ended its session (HTTP 404), so the call did not run; Socium started a new session, so call the tool again",
+                                self.name
+                            ),
+                            Err(_) => format!(
+                                "The {} MCP server ended its session (HTTP 404), so the call did not run, and a new session could not be started; reload the settings or restart Socium",
+                                self.name
+                            ),
+                        }
                     }
                     // A child's standard error stays out: it is for the
                     // user, and may hold what the server was given.
@@ -1115,6 +1154,7 @@ pub(crate) mod tests {
                 "mcp__fake__batch",
                 "mcp__fake__secret",
                 "mcp__fake__expire",
+                "mcp__fake__reflect",
             ]
         );
         assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -1692,7 +1732,7 @@ pub(crate) mod tests {
         }
     }
 
-    const STREAMS: [&[&str]; 2] = [&[], &["--sse"]];
+    const STREAMS: [&[&str]; 3] = [&[], &["--sse"], &["--sse", "--cr"]];
 
     #[test]
     fn a_remote_server_answers_in_json_bodies_and_in_event_streams() {
@@ -1702,7 +1742,7 @@ pub(crate) mod tests {
 
             assert_eq!(warnings.len(), 1, "{options:?}: {warnings:?}");
             assert!(warnings[0].contains("`bad.name`"), "{warnings:?}");
-            assert_eq!(registry.definitions().len(), 16, "{options:?}");
+            assert_eq!(registry.definitions().len(), 17, "{options:?}");
             assert_eq!(
                 registry.definitions()[0].input_schema["required"],
                 json!(["text"])
@@ -1840,16 +1880,64 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_expired_remote_session_is_an_error_that_names_the_server() {
+    fn an_expired_remote_session_is_renewed_without_sending_the_call_again() {
         let fake = FakeHttpServer::start(&["--sse"]);
         let (registry, _) = connect_fake(&[fake.settings("fake", &[], &[])]);
 
         call(&registry, "mcp__fake__expire", json!({})).unwrap();
         let err = call(&registry, "mcp__fake__echo", json!({"text": "x"})).unwrap_err();
 
+        assert!(err.contains("had ended its session (HTTP 404)"), "{err}");
+        assert!(err.contains("call the tool again"), "{err}");
+        let requests = fake.requests();
+        let echoes = |requests: &[Value]| {
+            requests
+                .iter()
+                .filter(|request| request["rpc"] == "tools/call")
+                .count()
+        };
+        let after = requests
+            .iter()
+            .rposition(|request| request["rpc"] == "initialize")
+            .unwrap();
+        assert!(after > 2, "a second initialize: {requests:?}");
+        assert_eq!(requests[after]["session"], Value::Null);
+        assert_eq!(requests[after]["version"], Value::Null);
+        // The expire call and the echo the server refused; none after.
+        assert_eq!(echoes(&requests[after..]), 0);
+        assert_eq!(
+            call(&registry, "mcp__fake__echo", json!({"text": "x"})),
+            Ok("echo: x".into())
+        );
+    }
+
+    #[test]
+    fn a_header_token_is_blanked_out_with_or_without_its_scheme() {
+        let fake = FakeHttpServer::start(&[]);
+        let settings = fake.settings("fake", &[("Authorization", "Bearer s3cret-token")], &[]);
+
+        let secrets = Secrets::of(&settings);
+
+        assert_eq!(
+            secrets.redact("got Bearer s3cret-token, then s3cret-token"),
+            "got [redacted], then [redacted]"
+        );
+    }
+
+    #[test]
+    fn a_remote_server_that_repeats_its_token_has_it_blanked_out() {
+        let fake = FakeHttpServer::start(&["--token=s3cret-token"]);
+        let (registry, _) = connect_fake(&[fake.settings(
+            "fake",
+            &[("Authorization", "Bearer s3cret-token")],
+            &[],
+        )]);
+
+        let err = call(&registry, "mcp__fake__reflect", json!({})).unwrap_err();
+
         assert_eq!(
             err,
-            "The fake MCP server ended the session (HTTP 404); reload the settings or restart Socium to start a new one"
+            "The fake MCP server answered HTTP 400 Bad Request: rejected [redacted]"
         );
     }
 

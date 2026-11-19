@@ -19,7 +19,9 @@ neither result nor error), `empty` (a result without content), `batch`
 `--http` serves the MCP endpoint `/mcp` on 127.0.0.1 and prints
 `PORT <n>` once it listens. With `--sse` every request is answered with an
 event stream that carries a notification first (and a ping for `pong`);
-otherwise with one JSON body. `--token=T` requires `Authorization: Bearer
+otherwise with one JSON body. `--cr` starts each stream with a BOM and ends
+its lines with CR alone. Over HTTP, `reflect` answers HTTP 400 with the
+Authorization header in its error. `--token=T` requires `Authorization: Bearer
 T`. `--log=PATH` appends one JSON line per HTTP request: the HTTP method,
 the JSON-RPC method, and the session and protocol version headers.
 """
@@ -63,6 +65,7 @@ PAGES = [
         {"name": "batch", "description": "Answers inside a batch."},
         {"name": "secret", "description": "Repeats FAKE_SECRET in an error."},
         {"name": "expire", "description": "Ends every HTTP session."},
+        {"name": "reflect", "description": "Repeats the Authorization header in an error."},
     ],
 ]
 if MODE == "--many":
@@ -322,6 +325,9 @@ def serve_http():
                 return self.answer(message["id"], result)
             if method == "tools/call":
                 params = message["params"]
+                if params["name"] == "reflect":
+                    error = {"code": -32000, "message": "rejected " + self.headers.get("Authorization", "")}
+                    return self.reply(400, {"jsonrpc": "2.0", "id": message["id"], "error": error})
                 return self.answer(message["id"], None, call_name=params["name"], arguments=params.get("arguments") or {})
             self.reply(200, {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": "Method not found"}})
 
@@ -336,8 +342,10 @@ def serve_http():
                 self.send_header("Connection", "close")
                 self.end_headers()
                 self.close_connection = True
+                if "cr" in OPTIONS:
+                    self.wfile.write(b"\xef\xbb\xbf")
                 self.event({"jsonrpc": "2.0", "method": "notifications/message", "params": {"level": "info", "data": "working"}})
-                self.wfile.write(b": keep-alive\n\n")
+                self.wfile.write(b": keep-alive\r\r" if "cr" in OPTIONS else b": keep-alive\n\n")
                 self.wfile.flush()
             reply = {"jsonrpc": "2.0", "id": id}
             if call_name is not None:
@@ -359,9 +367,10 @@ def serve_http():
                 self.reply(200, reply, headers)
 
         def event(self, message, multiline=False):
+            end = "\r" if "cr" in OPTIONS else "\n"
             text = json.dumps(message, indent=1 if multiline else None)
-            data = "".join("data: " + line + "\n" for line in text.split("\n"))
-            self.wfile.write(("event: message\nid: %d\n" % time.time_ns() + data + "\n").encode())
+            data = "".join("data: " + line + end for line in text.split("\n"))
+            self.wfile.write(("event: message" + end + "id: %d" % time.time_ns() + end + data + end).encode())
             self.wfile.flush()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
