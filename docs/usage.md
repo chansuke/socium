@@ -164,13 +164,16 @@ limits, editing guarantees, migration, and recovery procedures.
 ## MCP servers
 
 `/mcp` lists every MCP server of `config.toml`, one line each: its name,
-whether it is local (with its command) or remote (with its URL), and its
-state. A connected server's tools follow; a server that needs a login, failed
-to start, or is disabled (`enabled = false` or an unset `${NAME}`) says why.
-While servers are still starting, it shows them as starting rather than
-waiting. Env and header values, tokens, and client secrets are never shown.
-It only reports: change the settings or log in from a shell, then restart
-Socium.
+whether it is local (with its program, not its arguments, which may hold a
+token) or remote (with its URL), and its state. A connected server's tools
+follow; a server that needs a login, failed to start, or is disabled
+(`enabled = false` or an unset `${NAME}`) says why. A server that exited after
+it started shows as failed, and a remote one whose token can no longer be
+renewed as needing a login. While servers are still starting, it shows them as
+starting rather than waiting. Socium shows no env or header value, token, or
+client secret, and blanks out of a failure reason the values of 8 or more
+characters it gave the server. It only reports: change the settings or log in
+from a shell, then restart Socium.
 
 ## MCP login
 
