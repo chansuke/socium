@@ -1,0 +1,384 @@
+[
+ {
+  "task": "fix-failing-test",
+  "total_ms": 7526,
+  "model_ms": 6708,
+  "ttft_ms": 3672,
+  "tools_ms": 703,
+  "rounds": 5,
+  "tool_calls": 6,
+  "per_round": [
+   [
+    "list_files",
+    "run_command"
+   ],
+   [
+    "read_file",
+    "read_file"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command"
+   ],
+   []
+  ]
+ },
+ {
+  "task": "fix-pagination",
+  "total_ms": 8808,
+  "model_ms": 8413,
+  "ttft_ms": 5378,
+  "tools_ms": 224,
+  "rounds": 6,
+  "tool_calls": 6,
+  "per_round": [
+   [
+    "list_files"
+   ],
+   [
+    "read_file",
+    "read_file"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command"
+   ],
+   []
+  ]
+ },
+ {
+  "task": "add-tests",
+  "total_ms": 12074,
+  "model_ms": 11698,
+  "ttft_ms": 4926,
+  "tools_ms": 298,
+  "rounds": 6,
+  "tool_calls": 8,
+  "per_round": [
+   [
+    "list_files",
+    "read_file"
+   ],
+   [
+    "read_file",
+    "run_command"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command",
+    "run_command"
+   ],
+   [
+    "git_status"
+   ],
+   []
+  ]
+ },
+ {
+  "task": "tail-failure",
+  "total_ms": 8603,
+  "model_ms": 8400,
+  "ttft_ms": 4293,
+  "tools_ms": 142,
+  "rounds": 6,
+  "tool_calls": 8,
+  "per_round": [
+   [
+    "list_files",
+    "run_command"
+   ],
+   [
+    "read_file",
+    "list_files"
+   ],
+   [
+    "run_command",
+    "read_file"
+   ],
+   [
+    "read_file"
+   ],
+   [
+    "run_command"
+   ],
+   []
+  ]
+ },
+ {
+  "task": "refactor-rename",
+  "total_ms": 9398,
+  "model_ms": 8924,
+  "ttft_ms": 4629,
+  "tools_ms": 373,
+  "rounds": 6,
+  "tool_calls": 15,
+  "per_round": [
+   [
+    "search_text",
+    "list_files"
+   ],
+   [
+    "read_file",
+    "read_file",
+    "read_file",
+    "read_file",
+    "read_file"
+   ],
+   [
+    "apply_patch",
+    "apply_patch",
+    "apply_patch",
+    "apply_patch",
+    "apply_patch"
+   ],
+   [
+    "search_text",
+    "run_command"
+   ],
+   [
+    "git_status"
+   ],
+   []
+  ]
+ },
+ {
+  "task": "semver-precedence",
+  "total_ms": 33778,
+  "model_ms": 33289,
+  "ttft_ms": 9811,
+  "tools_ms": 381,
+  "rounds": 10,
+  "tool_calls": 11,
+  "per_round": [
+   [
+    "list_files",
+    "read_file"
+   ],
+   [
+    "read_file"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "run_command",
+    "git_status"
+   ],
+   []
+  ]
+ },
+ {
+  "task": "rust-ring",
+  "total_ms": 15179,
+  "model_ms": 14510,
+  "ttft_ms": 4524,
+  "tools_ms": 616,
+  "rounds": 5,
+  "tool_calls": 6,
+  "per_round": [
+   [
+    "list_files",
+    "read_file"
+   ],
+   [
+    "read_file",
+    "run_command"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command"
+   ],
+   []
+  ]
+ },
+ {
+  "task": "cart-rounding",
+  "total_ms": 20920,
+  "model_ms": 20392,
+  "ttft_ms": 7048,
+  "tools_ms": 382,
+  "rounds": 9,
+  "tool_calls": 17,
+  "per_round": [
+   [
+    "list_files",
+    "run_command"
+   ],
+   [
+    "read_file",
+    "read_file",
+    "read_file",
+    "read_file",
+    "read_file"
+   ],
+   [
+    "run_command",
+    "update_plan"
+   ],
+   [
+    "apply_patch",
+    "apply_patch"
+   ],
+   [
+    "run_command",
+    "update_plan"
+   ],
+   [
+    "run_command",
+    "update_plan"
+   ],
+   [
+    "update_plan"
+   ],
+   [
+    "update_plan"
+   ],
+   []
+  ]
+ },
+ {
+  "task": "spec-config",
+  "total_ms": 146588,
+  "model_ms": 145998,
+  "ttft_ms": 11869,
+  "tools_ms": 383,
+  "rounds": 11,
+  "tool_calls": 13,
+  "per_round": [
+   [
+    "list_files",
+    "read_file"
+   ],
+   [
+    "read_file",
+    "read_file"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "read_file"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command",
+    "run_command"
+   ],
+   [
+    "read_file"
+   ],
+   []
+  ]
+ },
+ {
+  "task": "stale-cache",
+  "total_ms": 44721,
+  "model_ms": 41842,
+  "ttft_ms": 16690,
+  "tools_ms": 2669,
+  "rounds": 20,
+  "tool_calls": 23,
+  "per_round": [
+   [
+    "list_files",
+    "read_file"
+   ],
+   [
+    "git_status",
+    "run_command"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "str_replace_based_edit_tool"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "apply_patch"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "run_command",
+    "read_file"
+   ],
+   [
+    "run_command"
+   ],
+   [
+    "git_diff"
+   ]
+  ]
+ }
+]
