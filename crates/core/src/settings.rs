@@ -1,7 +1,8 @@
 //! User settings from `config.toml` in the Socium config directory
 //! (`$XDG_CONFIG_HOME/socium/`, else `~/.config/socium/`, or the file named
 //! by `SOCIUM_CONFIG_FILE`): what sandboxed commands may additionally see,
-//! and when tool calls need the user's approval (ADR 12, ADR 13).
+//! when tool calls need the user's approval, and which MCP servers to start
+//! (ADR 12, ADR 13, ADR 20).
 //!
 //! The config directory must lie outside the workspace, so neither the
 //! model's file tools nor its commands can change these settings.
@@ -83,6 +84,9 @@ pub struct Settings {
     /// The `web_search` tool, which sends the model's queries to DeepSeek's
     /// paid Search API; `None` unless the user turned it on.
     pub(crate) web_search: Option<WebSearchSettings>,
+    /// `[mcp.servers.<name>]`: MCP servers Socium starts on the host, in
+    /// name order, the disabled ones left out.
+    pub(crate) mcp_servers: Vec<McpServerSettings>,
     /// Where the settings came from, shown in errors and `/help`.
     pub(crate) source: Option<PathBuf>,
 }
@@ -93,6 +97,26 @@ pub(crate) struct WebSearchSettings {
     /// The Search API root, normalized without a trailing slash.
     pub(crate) base_url: String,
 }
+
+/// One `[mcp.servers.<name>]` table (ADR 20).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct McpServerSettings {
+    /// Matches `[A-Za-z0-9_-]{1,32}` without `__`, so `mcp__<name>__<tool>`
+    /// names one server.
+    pub(crate) name: String,
+    /// The program and its arguments, run with the workspace as its
+    /// directory.
+    pub(crate) command: Vec<String>,
+    /// Variables set for the server on top of PATH, HOME, USER and LANG,
+    /// `${NAME}` already expanded from Socium's environment.
+    pub(crate) env: BTreeMap<String, String>,
+    /// Remote tool names that run without asking.
+    pub(crate) allow: Vec<String>,
+}
+
+/// Longest server name, so `mcp__<server>__<tool>` leaves room for the tool
+/// within the 64 characters providers accept.
+const MAX_MCP_SERVER_NAME: usize = 32;
 
 /// DeepSeek's API root, where `/v1/tools/search` lives.
 pub(crate) const DEEPSEEK_SEARCH_BASE_URL: &str = "https://api.deepseek.com";
@@ -293,6 +317,31 @@ struct RawFile {
     approval: RawApproval,
     #[serde(default)]
     web_search: RawWebSearch,
+    #[serde(default)]
+    mcp: RawMcp,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawMcp {
+    #[serde(default)]
+    servers: BTreeMap<String, RawMcpServer>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcpServer {
+    command: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default = "enabled_by_default")]
+    enabled: bool,
+}
+
+fn enabled_by_default() -> bool {
+    true
 }
 
 #[derive(Deserialize, Default)]
@@ -441,7 +490,7 @@ impl Settings {
         };
         let home = lookup("HOME").filter(|home| !home.is_empty());
         let (mut settings, warnings) =
-            Self::from_toml(&text, home.as_deref()).map_err(|message| {
+            Self::parse(&text, home.as_deref(), lookup).map_err(|message| {
                 Error::new(
                     ErrorKind::InvalidInput,
                     format!("{}: {message}", path.display()),
@@ -451,7 +500,19 @@ impl Settings {
         Ok((settings, warnings))
     }
 
+    /// As [`Settings::parse`] with no environment, so every `${NAME}` is
+    /// missing.
+    #[cfg(test)]
     pub(crate) fn from_toml(text: &str, home: Option<&str>) -> Result<(Self, Vec<String>), String> {
+        Self::parse(text, home, &|_| None)
+    }
+
+    /// `env` supplies the values of `${NAME}` in MCP server variables.
+    pub(crate) fn parse(
+        text: &str,
+        home: Option<&str>,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<(Self, Vec<String>), String> {
         let raw: RawFile = toml::from_str(text).map_err(|err| err.to_string())?;
         let mut warnings = Vec::new();
         let expand = |value: &str| -> Result<PathBuf, String> {
@@ -585,11 +646,18 @@ impl Settings {
                     .map_err(|err| format!("web_search.{err}"))
             })
             .transpose()?;
+        let mut mcp_servers = Vec::new();
+        for (name, server) in raw.mcp.servers {
+            if let Some(server) = mcp_server(name, server, env, &mut warnings)? {
+                mcp_servers.push(server);
+            }
+        }
         Ok((
             Self {
                 sandbox,
                 approval,
                 web_search,
+                mcp_servers,
                 source: None,
             },
             warnings,
@@ -609,8 +677,111 @@ impl Settings {
             lines
                 .push("approval.commands = \"auto\": sandboxed commands run without asking".into());
         }
+        for server in &self.mcp_servers {
+            lines.push(format!(
+                "MCP server {} runs on the host, outside the sandbox: {}",
+                server.name,
+                server.command.join(" ")
+            ));
+        }
         lines
     }
+}
+
+/// A validated `[mcp.servers.<name>]`, or `None` when it is turned off or
+/// names a variable that is not set (with a warning).
+fn mcp_server(
+    name: String,
+    raw: RawMcpServer,
+    env: &dyn Fn(&str) -> Option<String>,
+    warnings: &mut Vec<String>,
+) -> Result<Option<McpServerSettings>, String> {
+    let valid_name = !name.is_empty()
+        && name.len() <= MAX_MCP_SERVER_NAME
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        && !name.contains("__");
+    if !valid_name {
+        return Err(format!(
+            "mcp.servers.{name}: a server name must be 1 to {MAX_MCP_SERVER_NAME} letters, digits, '_' or '-', without '__'"
+        ));
+    }
+    if raw.command.first().is_none_or(|program| program.is_empty()) {
+        return Err(format!(
+            "mcp.servers.{name}.command must name a program and its arguments"
+        ));
+    }
+    if let Some(tool) = raw.allow.iter().find(|tool| tool.trim().is_empty()) {
+        return Err(format!(
+            "mcp.servers.{name}.allow: '{tool}' is not a tool name"
+        ));
+    }
+    if !raw.enabled {
+        return Ok(None);
+    }
+    let mut variables = BTreeMap::new();
+    for (variable, value) in raw.env {
+        if variable.is_empty() || variable.contains(['=', '\0']) {
+            return Err(format!(
+                "mcp.servers.{name}.env: '{variable}' is not a variable name"
+            ));
+        }
+        match expand_variables(&value, env) {
+            Ok(expanded) => {
+                variables.insert(variable, expanded);
+            }
+            Err(Expansion::Missing(missing)) => {
+                warnings.push(format!(
+                    "mcp.servers.{name}.env.{variable}: ${{{missing}}} is not set, so the {name} server is not started"
+                ));
+                return Ok(None);
+            }
+            Err(Expansion::Malformed) => {
+                return Err(format!(
+                    "mcp.servers.{name}.env.{variable}: '${{' must be followed by a variable name and '}}'"
+                ));
+            }
+        }
+    }
+    Ok(Some(McpServerSettings {
+        name,
+        command: raw.command,
+        env: variables,
+        allow: raw.allow,
+    }))
+}
+
+enum Expansion {
+    Missing(String),
+    Malformed,
+}
+
+/// `value` with each `${NAME}` replaced by the variable's value. Any other
+/// `$` stays as written.
+fn expand_variables(
+    value: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, Expansion> {
+    let mut expanded = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find('}').ok_or(Expansion::Malformed)?;
+        let variable = &after[..end];
+        let valid = !variable.is_empty()
+            && variable
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            return Err(Expansion::Malformed);
+        }
+        expanded.push_str(&env(variable).ok_or_else(|| Expansion::Missing(variable.into()))?);
+        rest = &after[end + 1..];
+    }
+    expanded.push_str(rest);
+    Ok(expanded)
 }
 
 /// `.` and `..` resolved without touching the filesystem.
@@ -696,6 +867,111 @@ mod tests {
             err.starts_with("web_search.base_url must use https"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn mcp_servers_are_parsed_with_their_variables_expanded() {
+        let text = r#"
+[mcp.servers.github]
+command = ["github-mcp-server", "stdio"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}", MODE = "read-$only" }
+allow = ["get_issue"]
+
+[mcp.servers.time]
+command = ["uvx", "mcp-server-time"]
+
+[mcp.servers.off]
+command = ["off"]
+enabled = false
+"#;
+        let env = |name: &str| (name == "GITHUB_TOKEN").then(|| "ghp_x".to_string());
+        let (settings, warnings) = Settings::parse(text, None, &env).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            settings.mcp_servers,
+            [
+                McpServerSettings {
+                    name: "github".into(),
+                    command: vec!["github-mcp-server".into(), "stdio".into()],
+                    env: BTreeMap::from([
+                        ("GITHUB_PERSONAL_ACCESS_TOKEN".into(), "ghp_x".into()),
+                        ("MODE".into(), "read-$only".into()),
+                    ]),
+                    allow: vec!["get_issue".into()],
+                },
+                McpServerSettings {
+                    name: "time".into(),
+                    command: vec!["uvx".into(), "mcp-server-time".into()],
+                    env: BTreeMap::new(),
+                    allow: Vec::new(),
+                },
+            ]
+        );
+        let summary = settings.summary();
+        assert!(
+            summary.contains(
+                &"MCP server github runs on the host, outside the sandbox: github-mcp-server stdio"
+                    .to_string()
+            ),
+            "{summary:?}"
+        );
+        assert!(
+            Settings::from_toml("", None)
+                .unwrap()
+                .0
+                .mcp_servers
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_mcp_server_whose_variable_is_unset_is_skipped_with_a_warning() {
+        let text = "[mcp.servers.github]\ncommand = [\"gh-mcp\"]\nenv = { TOKEN = \"${GITHUB_TOKEN}\" }\n[mcp.servers.time]\ncommand = [\"time-mcp\"]";
+        let (settings, warnings) = Settings::from_toml(text, None).unwrap();
+        assert_eq!(settings.mcp_servers.len(), 1);
+        assert_eq!(settings.mcp_servers[0].name, "time");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("${GITHUB_TOKEN} is not set")
+                && warnings[0].contains("github server is not started"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_mcp_servers_are_errors() {
+        for (text, expected) in [
+            (
+                "[mcp.servers.\"a b\"]\ncommand = [\"x\"]",
+                "mcp.servers.a b: a server name",
+            ),
+            (
+                "[mcp.servers.a__b]\ncommand = [\"x\"]",
+                "mcp.servers.a__b: a server name",
+            ),
+            (
+                &format!("[mcp.servers.{}]\ncommand = [\"x\"]", "a".repeat(33)),
+                "a server name",
+            ),
+            ("[mcp.servers.x]\ncommand = []", "mcp.servers.x.command"),
+            ("[mcp.servers.x]\nenv = {}", "missing field `command`"),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\nalow = []",
+                "unknown field",
+            ),
+            ("[mcp]\nserver = {}", "unknown field"),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\nenv = { A = \"${B\" }",
+                "mcp.servers.x.env.A",
+            ),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\nallow = [\"\"]",
+                "mcp.servers.x.allow",
+            ),
+        ] {
+            let err = Settings::from_toml(text, None).unwrap_err();
+            assert!(err.contains(expected), "{text}: {err}");
+        }
     }
 
     #[test]
