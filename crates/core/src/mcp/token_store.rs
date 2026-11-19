@@ -30,6 +30,10 @@ pub(crate) struct StoredToken {
     /// lifetime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<u64>,
+    /// When the access token was issued, which with `expires_at` gives its
+    /// lifetime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) issued_at: Option<u64>,
     pub(crate) token_endpoint: String,
     pub(crate) client_id: String,
     /// Only for a client the login registered; a configured secret stays
@@ -62,6 +66,7 @@ impl std::fmt::Debug for StoredToken {
             .field("access_token", &"<hidden>")
             .field("refresh_token", &hidden(&self.refresh_token))
             .field("expires_at", &self.expires_at)
+            .field("issued_at", &self.issued_at)
             .field("token_endpoint", &self.token_endpoint)
             .field("client_id", &self.client_id)
             .field("client_secret", &hidden(&self.client_secret))
@@ -71,10 +76,19 @@ impl std::fmt::Debug for StoredToken {
 }
 
 impl StoredToken {
-    /// Whether the access token expires within `margin` seconds.
-    pub(crate) fn expires_within(&self, margin: u64) -> bool {
-        self.expires_at
-            .is_some_and(|at| now_seconds().saturating_add(margin) >= at)
+    /// Whether the access token should be renewed before it is sent: it
+    /// expires within `margin` seconds, or within half its lifetime when
+    /// that is shorter, so a short-lived token is not renewed for every
+    /// request.
+    pub(crate) fn due_for_renewal(&self, margin: u64) -> bool {
+        let Some(expires_at) = self.expires_at else {
+            return false;
+        };
+        let margin = match self.issued_at {
+            Some(issued_at) => margin.min(expires_at.saturating_sub(issued_at) / 2),
+            None => margin,
+        };
+        now_seconds().saturating_add(margin) >= expires_at
     }
 }
 
@@ -91,16 +105,19 @@ pub(crate) struct TokenStore {
 }
 
 impl TokenStore {
-    /// `$XDG_STATE_HOME/socium/mcp-auth` (an absolute value only), else
-    /// `$HOME/.local/state/socium/mcp-auth`; `None` without either.
+    /// `$XDG_STATE_HOME/socium/mcp-auth`, else
+    /// `$HOME/.local/state/socium/mcp-auth`, from absolute values only, so
+    /// the store never depends on the current directory; `None` without
+    /// either.
     pub(crate) fn from_env(lookup: &dyn Fn(&str) -> Option<String>) -> Option<Self> {
         let state_home = lookup("XDG_STATE_HOME")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
             .or_else(|| {
                 lookup("HOME")
-                    .filter(|home| !home.is_empty())
-                    .map(|home| Path::new(&home).join(".local/state"))
+                    .map(PathBuf::from)
+                    .filter(|home| home.is_absolute())
+                    .map(|home| home.join(".local/state"))
             })?;
         Some(Self::at(state_home.join("socium").join("mcp-auth")))
     }
@@ -137,19 +154,64 @@ impl TokenStore {
     }
 
     /// Replaces the token of `server`, creating the directory owner-only.
+    /// A token too large to load again is refused.
     pub(crate) fn save(&self, server: &str, token: &StoredToken) -> io::Result<()> {
         self.prepare_dir()?;
         let bytes = serde_json::to_vec_pretty(token).map_err(Error::other)?;
+        if bytes.len() as u64 > MAX_TOKEN_FILE_BYTES {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "the token is larger than {} KiB",
+                    MAX_TOKEN_FILE_BYTES / 1024
+                ),
+            ));
+        }
         atomic_write_with_mode(&self.path(server), &bytes, Some(0o600))
     }
 
-    /// Deletes the token of `server`; `false` when there was none.
+    /// Deletes the token of `server`; `false` when there was none. It waits
+    /// for a renewal under way, which would otherwise write the file back.
     pub(crate) fn remove(&self, server: &str) -> io::Result<bool> {
+        let _lock = self.lock(server, true)?;
         match fs::remove_file(self.path(server)) {
             Ok(()) => Ok(true),
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
             Err(err) => Err(err),
         }
+    }
+
+    /// Holds the lock that every Socium of this user takes to renew or
+    /// remove `server`'s token, until the returned file is dropped. Without
+    /// `wait`, `None` means another holds it.
+    pub(crate) fn lock(&self, server: &str, wait: bool) -> io::Result<Option<fs::File>> {
+        self.prepare_dir()?;
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(self.dir.join(format!("{server}.lock")))?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let operation = if wait {
+                libc::LOCK_EX
+            } else {
+                libc::LOCK_EX | libc::LOCK_NB
+            };
+            // SAFETY: flock only reads the descriptor, which `file` owns.
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+                let err = Error::last_os_error();
+                if err.kind() == ErrorKind::WouldBlock {
+                    return Ok(None);
+                }
+                return Err(err);
+            }
+        }
+        Ok(Some(file))
     }
 
     /// Creates `socium/mcp-auth` 0700 and refuses one that is a symlink or
@@ -205,6 +267,7 @@ mod tests {
             access_token: "access-s3cret".into(),
             refresh_token: Some("refresh-s3cret".into()),
             expires_at: Some(now_seconds() + 3600),
+            issued_at: Some(now_seconds()),
             token_endpoint: "https://auth.example/token".into(),
             client_id: "client-1".into(),
             client_secret: Some("client-s3cret".into()),
@@ -232,6 +295,56 @@ mod tests {
             TokenStore::at("/h/.local/state/socium/mcp-auth".into())
         );
         assert_eq!(TokenStore::from_env(&lookup(&[])), None);
+        // Nor does a relative HOME name a store.
+        assert_eq!(TokenStore::from_env(&lookup(&[("HOME", "h")])), None);
+    }
+
+    #[test]
+    fn a_short_lived_token_is_renewed_at_half_its_lifetime() {
+        let now = now_seconds();
+        let lasting = |issued: u64, lifetime: u64| StoredToken {
+            issued_at: Some(issued),
+            expires_at: Some(issued + lifetime),
+            ..token("https://mcp.example/mcp")
+        };
+        // A 30-second token is not due right after it was issued.
+        assert!(!lasting(now, 30).due_for_renewal(60));
+        assert!(lasting(now - 16, 30).due_for_renewal(60));
+        // A long one is due a minute before it expires.
+        assert!(!lasting(now - 3500, 3600).due_for_renewal(60));
+        assert!(lasting(now - 3550, 3600).due_for_renewal(60));
+    }
+
+    #[test]
+    fn a_token_too_large_to_load_again_is_not_saved() {
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        let huge = StoredToken {
+            access_token: "x".repeat(300 * 1024),
+            ..token("https://mcp.example/mcp")
+        };
+
+        assert!(store.save("big", &huge).is_err());
+        assert_eq!(store.load("big", "https://mcp.example/mcp").unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_renewal_lock_is_held_by_one_holder_at_a_time() {
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+
+        let held = store.lock("github", false).unwrap();
+        assert!(held.is_some());
+        assert!(store.lock("github", false).unwrap().is_none());
+        drop(held);
+        // A child forked by another test may hold a copy of the descriptor
+        // until it execs, so the release can take a moment to show.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while store.lock("github", false).unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "never released");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]

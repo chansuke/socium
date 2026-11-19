@@ -67,8 +67,10 @@ use std::time::Duration;
 /// to five minutes for the browser. `Ok` and `Err` are messages for the
 /// user, and neither holds a secret.
 pub fn mcp_login(server: &str, browser: &(dyn Fn(&str) + Sync)) -> Result<String, String> {
+    let workspace = env::current_dir().map_err(|err| err.to_string())?;
     mcp::oauth::login_configured(
         &|name| env::var(name).ok(),
+        &workspace,
         server,
         browser,
         mcp::oauth::LOGIN_TIMEOUT,
@@ -77,7 +79,8 @@ pub fn mcp_login(server: &str, browser: &(dyn Fn(&str) + Sync)) -> Result<String
 
 /// `socium mcp logout <server>`: forgets the server's stored token.
 pub fn mcp_logout(server: &str) -> Result<String, String> {
-    mcp::oauth::logout_configured(&|name| env::var(name).ok(), server)
+    let workspace = env::current_dir().map_err(|err| err.to_string())?;
+    mcp::oauth::logout_configured(&|name| env::var(name).ok(), &workspace, server)
 }
 
 /// Reads configuration and API keys. Injected so tests never touch the

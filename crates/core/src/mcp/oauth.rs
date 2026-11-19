@@ -7,16 +7,22 @@
 //!
 //! Tokens, codes, client secrets and PKCE verifiers never appear in an
 //! error: every message here is built from URLs, status codes and the
-//! authorization server's error code alone.
+//! authorization server's error code, when it is one the OAuth
+//! specifications define.
+//!
+//! A URL that the server or its metadata names may point at this machine
+//! or a private network only when the configured `url` does too, so a
+//! remote server cannot make the login reach a service inside it.
 
-use super::http::{describe, http_client, read_body};
+use super::http::{HttpClients, describe, read_body};
 use super::token_store::{ClientAuth, StoredToken, TokenStore, now_seconds};
 use crate::settings::{McpOAuthSettings, McpServerSettings, McpTransportSettings, Settings};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE};
-use reqwest::{Client, Response, StatusCode, Url};
+use reqwest::{Response, StatusCode, Url};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -33,13 +39,17 @@ const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// `socium mcp login <server>`: logs in to the server of that name in
-/// config.toml. `Ok` and `Err` are sentences for the user.
+/// config.toml. As at startup, neither the configuration nor the token
+/// store may be inside `workspace`, the current directory. `Ok` and `Err`
+/// are sentences for the user.
 pub(crate) fn login_configured(
     lookup: &dyn Fn(&str) -> Option<String>,
+    workspace: &std::path::Path,
     server: &str,
     browser: &(dyn Fn(&str) + Sync),
     timeout: Duration,
 ) -> Result<String, String> {
+    crate::settings::ensure_config_outside(workspace, lookup).map_err(|err| err.to_string())?;
     let (settings, warnings) = Settings::load(lookup).map_err(|err| err.to_string())?;
     let Some(found) = settings.mcp_servers.iter().find(|s| s.name == server) else {
         let prefix = format!("mcp.servers.{server}.");
@@ -70,8 +80,10 @@ pub(crate) fn login_configured(
 /// not config.toml still names it.
 pub(crate) fn logout_configured(
     lookup: &dyn Fn(&str) -> Option<String>,
+    workspace: &std::path::Path,
     server: &str,
 ) -> Result<String, String> {
+    crate::settings::ensure_config_outside(workspace, lookup).map_err(|err| err.to_string())?;
     if !crate::settings::valid_mcp_server_name(server) {
         return Err(format!("'{server}' is not an MCP server name."));
     }
@@ -142,9 +154,9 @@ async fn authorize(
     browser: &(dyn Fn(&str) + Sync),
     timeout: Duration,
 ) -> Result<(), String> {
-    let client =
-        http_client().map_err(|err| format!("its HTTP client could not be built: {err}"))?;
-    let found = discover(&client, url).await?;
+    let clients =
+        HttpClients::new().map_err(|err| format!("its HTTP client could not be built: {err}"))?;
+    let found = discover(&clients, url, config.issuer.as_deref()).await?;
     let port = config.callback_port.unwrap_or(0);
     let listener = TcpListener::bind(("127.0.0.1", port))
         .await
@@ -160,10 +172,11 @@ async fn authorize(
         Some(id) => OAuthClient {
             id: id.clone(),
             secret: config.client_secret.clone(),
-            auth: match &config.client_secret {
-                None => ClientAuth::None,
+            auth: match (&config.client_secret, config.token_endpoint_auth_method) {
+                (None, _) => ClientAuth::None,
+                (Some(_), Some(method)) => method,
                 // RFC 6749 2.3.1: every server supports Basic.
-                Some(_) => match &found.token_auth_methods {
+                (Some(_), None) => match &found.token_auth_methods {
                     Some(methods)
                         if !methods.iter().any(|m| m == "client_secret_basic")
                             && methods.iter().any(|m| m == "client_secret_post") =>
@@ -180,7 +193,7 @@ async fn authorize(
                     "its authorization server does not register clients; register one there and set mcp.servers.{name}.oauth.client_id"
                 )
             })?;
-            register(&client, endpoint, &redirect_uri).await?
+            register(&clients, endpoint, &redirect_uri).await?
         }
     };
     let verifier = random_text(32);
@@ -216,7 +229,7 @@ async fn authorize(
         })??;
     drop(listener);
     let issued = token_request(
-        &client,
+        &clients,
         &found.token_endpoint,
         vec![
             ("grant_type", "authorization_code".into()),
@@ -234,6 +247,7 @@ async fn authorize(
         access_token: issued.access_token,
         refresh_token: issued.refresh_token,
         expires_at: issued.expires_at,
+        issued_at: Some(issued.issued_at),
         token_endpoint: found.token_endpoint.to_string(),
         // A configured secret stays in the environment.
         client_secret: if config.client_id.is_some() {
@@ -379,8 +393,11 @@ fn code_challenge(verifier: &str) -> String {
     ))
 }
 
-/// A stored token renews this long before it expires.
+/// A stored token renews this long before it expires, or at half its
+/// lifetime when that is sooner.
 const REFRESH_MARGIN_SECONDS: u64 = 60;
+/// How long a renewal waits for another Socium renewing the same token.
+const RENEWAL_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A connected server's token: sent as `Authorization: Bearer`, refreshed
 /// before it expires or once after a 401, and saved again when renewed.
@@ -409,54 +426,83 @@ impl OAuthSession {
 
     /// The access token to send, renewed first when it is about to expire.
     /// `Err` means the user has to log in again.
-    pub(super) async fn access_token(&self, client: &Client) -> Result<String, ()> {
-        let mut token = self.token.lock().await;
-        if token.expires_within(REFRESH_MARGIN_SECONDS) && token.refresh_token.is_some() {
-            self.renew(&mut token, client).await?;
+    pub(super) async fn access_token(
+        self: &Arc<Self>,
+        clients: &HttpClients,
+    ) -> Result<String, ()> {
+        let token = self.token.lock().await.clone();
+        if token.due_for_renewal(REFRESH_MARGIN_SECONDS) && token.refresh_token.is_some() {
+            return self.renew(clients, &token.access_token).await;
         }
-        Ok(token.access_token.clone())
+        Ok(token.access_token)
     }
 
     /// After the server refused `sent` with 401: renews the token unless
     /// another request already did. `Err` means the user has to log in.
-    pub(super) async fn refused(&self, client: &Client, sent: &str) -> Result<(), ()> {
-        let mut token = self.token.lock().await;
-        if token.access_token != sent {
-            return Ok(());
-        }
-        if token.refresh_token.is_none() {
-            return Err(());
-        }
-        self.renew(&mut token, client).await
+    pub(super) async fn refused(
+        self: &Arc<Self>,
+        clients: &HttpClients,
+        sent: &str,
+    ) -> Result<(), ()> {
+        self.renew(clients, sent).await.map(drop)
     }
 
-    async fn renew(&self, token: &mut StoredToken, client: &Client) -> Result<(), ()> {
-        match refresh(client, token, self.client_secret.as_deref()).await {
-            Ok(renewed) => {
-                // A token that cannot be saved still works for this run.
-                let _ = self.store.save(&self.server, &renewed);
-                *token = renewed;
-                Ok(())
-            }
-            Err(_) => {
-                // Another Socium may have renewed it first, using up the
-                // refresh token this one holds.
-                match self.store.load(&self.server, &token.url) {
-                    Ok(Some(stored)) if stored.access_token != token.access_token => {
-                        *token = stored;
-                        Ok(())
-                    }
-                    _ => Err(()),
-                }
-            }
+    /// Replaces `stale` with a renewed token and returns it. The renewal
+    /// runs on its own task, so a call cancelled meanwhile cannot drop a
+    /// token the authorization server already issued in exchange for the
+    /// refresh token.
+    async fn renew(self: &Arc<Self>, clients: &HttpClients, stale: &str) -> Result<String, ()> {
+        let (session, clients, stale) = (self.clone(), clients.clone(), stale.to_string());
+        tokio::spawn(async move { session.renew_now(&clients, &stale).await })
+            .await
+            .unwrap_or(Err(()))
+    }
+
+    async fn renew_now(&self, clients: &HttpClients, stale: &str) -> Result<String, ()> {
+        let mut token = self.token.lock().await;
+        if token.access_token != stale {
+            // Another request of this run renewed it.
+            return Ok(token.access_token.clone());
         }
+        let Some(refresh_token) = token.refresh_token.clone() else {
+            return Err(());
+        };
+        // Every Socium of this user renews under one lock, and the file is
+        // read again under it: gone means the user logged out, and another
+        // token means another Socium renewed it first.
+        let started = std::time::Instant::now();
+        let _lock = loop {
+            match self.store.lock(&self.server, false) {
+                Ok(Some(lock)) => break lock,
+                Ok(None) if started.elapsed() < RENEWAL_LOCK_TIMEOUT => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                _ => return Err(()),
+            }
+        };
+        match self.store.load(&self.server, &token.url) {
+            Ok(Some(stored)) if stored.refresh_token.as_deref() != Some(&refresh_token) => {
+                *token = stored;
+                return Ok(token.access_token.clone());
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return Err(()),
+        }
+        let renewed = refresh(clients, &token, self.client_secret.as_deref())
+            .await
+            .map_err(drop)?;
+        // A token that cannot be saved still works for this run, and the
+        // next renewal saves again.
+        let _ = self.store.save(&self.server, &renewed);
+        *token = renewed;
+        Ok(token.access_token.clone())
     }
 }
 
 /// Exchanges the refresh token of `token` for a new access token (OAuth
 /// 2.1 4.3), keeping the old refresh token when the server issues none.
 pub(super) async fn refresh(
-    client: &Client,
+    clients: &HttpClients,
     token: &StoredToken,
     configured_secret: Option<&str>,
 ) -> Result<StoredToken, String> {
@@ -473,7 +519,7 @@ pub(super) async fn refresh(
         auth: token.client_auth,
     };
     let issued = token_request(
-        client,
+        clients,
         &endpoint,
         vec![
             ("grant_type", "refresh_token".into()),
@@ -487,6 +533,7 @@ pub(super) async fn refresh(
         access_token: issued.access_token,
         refresh_token: issued.refresh_token.or_else(|| token.refresh_token.clone()),
         expires_at: issued.expires_at,
+        issued_at: Some(issued.issued_at),
         ..token.clone()
     })
 }
@@ -496,16 +543,18 @@ pub(super) struct Issued {
     pub(super) access_token: String,
     pub(super) refresh_token: Option<String>,
     pub(super) expires_at: Option<u64>,
+    pub(super) issued_at: u64,
 }
 
 /// Posts `form` to the token endpoint as `oauth_client`.
 pub(super) async fn token_request(
-    client: &Client,
+    clients: &HttpClients,
     endpoint: &Url,
     mut form: Vec<(&'static str, String)>,
     oauth_client: &OAuthClient,
 ) -> Result<Issued, String> {
-    let mut request = client
+    let mut request = clients
+        .to(endpoint)
         .post(endpoint.clone())
         .header(ACCEPT, "application/json")
         .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -548,10 +597,10 @@ pub(super) async fn token_request(
     }
     match document["token_type"].as_str() {
         Some(kind) if kind.eq_ignore_ascii_case("bearer") => {}
-        Some(kind) => {
+        // The type is not quoted: a server may write anything there.
+        Some(_) => {
             return Err(format!(
-                "the token endpoint {endpoint} issued a {} token; Socium uses only Bearer tokens",
-                kind.chars().take(32).collect::<String>()
+                "the token endpoint {endpoint} issued a token that is not a Bearer token, the only kind Socium uses"
             ));
         }
         None => {
@@ -560,7 +609,9 @@ pub(super) async fn token_request(
             ));
         }
     }
+    let issued_at = now_seconds();
     Ok(Issued {
+        issued_at,
         access_token: access_token.to_string(),
         refresh_token: document["refresh_token"]
             .as_str()
@@ -568,7 +619,7 @@ pub(super) async fn token_request(
             .map(str::to_string),
         expires_at: document["expires_in"]
             .as_u64()
-            .map(|seconds| now_seconds().saturating_add(seconds)),
+            .map(|seconds| issued_at.saturating_add(seconds)),
     })
 }
 
@@ -599,12 +650,30 @@ pub(super) struct Discovery {
     pub(super) token_auth_methods: Option<Vec<String>>,
 }
 
-/// Finds the authorization server of the MCP server at `url`. `Err` is a
-/// phrase that follows "it" or stands alone after a colon.
-pub(super) async fn discover(client: &Client, url: &str) -> Result<Discovery, String> {
+/// Finds the authorization server of the MCP server at `url`; with
+/// `issuer`, the one of the server's that the configured client belongs
+/// to. `Err` is a phrase that follows "it" or stands alone after a colon.
+pub(super) async fn discover(
+    clients: &HttpClients,
+    url: &str,
+    issuer: Option<&str>,
+) -> Result<Discovery, String> {
     let server = Url::parse(url).map_err(|err| format!("its url is invalid: {err}"))?;
+    let local = is_internal(&server);
+    // A URL the server or its metadata names, checked like a configured one
+    // and kept off this machine and private networks unless `url` is there.
+    let named = |field: &str, raw: &str| -> Result<Url, String> {
+        let (named, _) = crate::models::check_endpoint_url(field, raw)?;
+        if !local && is_internal(&named) {
+            return Err(format!(
+                "{field} {named} points at this machine or a private network, and the server is not there"
+            ));
+        }
+        Ok(named)
+    };
     // An unauthenticated initialize, as any first request would be.
-    let probe = client
+    let probe = clients
+        .to(&server)
         .post(server.clone())
         .header(ACCEPT, "application/json, text/event-stream")
         .header(CONTENT_TYPE, "application/json")
@@ -626,7 +695,7 @@ pub(super) async fn discover(client: &Client, url: &str) -> Result<Discovery, St
         .await
         .map_err(|err| format!("the server could not be reached: {}", describe(&err)))?;
     let challenged = probe.status() == StatusCode::UNAUTHORIZED;
-    let named = probe
+    let pointed = probe
         .headers()
         .get_all(WWW_AUTHENTICATE)
         .iter()
@@ -634,15 +703,15 @@ pub(super) async fn discover(client: &Client, url: &str) -> Result<Discovery, St
         .find_map(resource_metadata_parameter);
     drop(probe);
     let mut candidates = Vec::new();
-    if let Some(named) = named {
-        let (named, _) = crate::models::check_endpoint_url("resource_metadata", &named)
+    if let Some(pointed) = pointed {
+        let pointed = named("resource_metadata", &pointed)
             .map_err(|err| format!("its WWW-Authenticate header names a {err}"))?;
-        candidates.push(named);
+        candidates.push(pointed);
     }
     candidates.extend(protected_resource_urls(&server));
     let mut found = None;
     for candidate in &candidates {
-        if let Some(document) = get_json(client, candidate).await
+        if let Some(document) = get_json(clients, candidate).await
             && document["authorization_servers"]
                 .as_array()
                 .is_some_and(|servers| !servers.is_empty())
@@ -658,29 +727,39 @@ pub(super) async fn discover(client: &Client, url: &str) -> Result<Discovery, St
             "the server did not ask for authorization and publishes no protected resource metadata (RFC 9728); it may need no login".into()
         });
     };
-    let resource = match metadata["resource"].as_str() {
-        Some(resource) => {
-            let covered = Url::parse(resource).is_ok_and(|parsed| covers(&parsed, &server));
-            if !covered {
-                return Err(format!(
-                    "the server's metadata is for the resource '{resource}', which does not cover {url}"
-                ));
-            }
-            resource.to_string()
-        }
-        None => url.to_string(),
+    // RFC 9728 3.2 requires `resource`. It may name a path above the
+    // server's, as many servers give their origin for a `/mcp` endpoint.
+    let Some(resource) = metadata["resource"].as_str() else {
+        return Err("the server's metadata (RFC 9728) has no resource".into());
     };
+    let covered = Url::parse(resource)
+        .is_ok_and(|parsed| parsed.fragment().is_none() && covers(&parsed, &server));
+    if !covered {
+        return Err(format!(
+            "the server's metadata is for the resource '{resource}', which does not cover {url}"
+        ));
+    }
+    let resource = resource.to_string();
     let scopes_supported = strings(&metadata["scopes_supported"]).unwrap_or_default();
+    let listed = strings(&metadata["authorization_servers"]).unwrap_or_default();
     // RFC 9728 leaves the choice to the client; the first is the server's
-    // own preference.
-    let issuer = metadata["authorization_servers"][0]
-        .as_str()
-        .ok_or("the server's metadata names an authorization server that is not a URL")?;
-    let (issuer_url, _) = crate::models::check_endpoint_url("authorization server", issuer)
+    // own preference. A configured client belongs to one of them.
+    let issuer = match issuer {
+        Some(configured) => listed
+            .iter()
+            .find(|listed| *listed == configured)
+            .ok_or_else(|| {
+                format!("the server's metadata does not name the configured issuer {configured}")
+            })?,
+        None => listed
+            .first()
+            .ok_or("the server's metadata names an authorization server that is not a URL")?,
+    };
+    let issuer_url = named("authorization server", issuer)
         .map_err(|err| format!("the server's metadata names an {err}"))?;
     let mut server_metadata = None;
     for candidate in authorization_server_urls(&issuer_url) {
-        if let Some(document) = get_json(client, &candidate).await {
+        if let Some(document) = get_json(clients, &candidate).await {
             server_metadata = Some(document);
             break;
         }
@@ -690,12 +769,9 @@ pub(super) async fn discover(client: &Client, url: &str) -> Result<Discovery, St
             "the authorization server {issuer} publishes no metadata (RFC 8414 or OpenID Connect Discovery)"
         )
     })?;
-    // RFC 8414 3.3: the metadata must be the issuer's own.
-    if metadata["issuer"]
-        .as_str()
-        .map(|given| given.trim_end_matches('/'))
-        != Some(issuer.trim_end_matches('/'))
-    {
+    // RFC 8414 3.3: the metadata must be the issuer's own, character for
+    // character.
+    if metadata["issuer"].as_str() != Some(issuer.as_str()) {
         return Err(format!(
             "the metadata of the authorization server {issuer} names another issuer"
         ));
@@ -703,8 +779,8 @@ pub(super) async fn discover(client: &Client, url: &str) -> Result<Discovery, St
     let endpoint = |field: &str| -> Result<Option<Url>, String> {
         match &metadata[field] {
             Value::Null => Ok(None),
-            Value::String(raw) => crate::models::check_endpoint_url(field, raw)
-                .map(|(url, _)| Some(url))
+            Value::String(raw) => named(field, raw)
+                .map(Some)
                 .map_err(|err| format!("the authorization server's {err}")),
             _ => Err(format!("the authorization server's {field} is not a URL")),
         }
@@ -717,11 +793,13 @@ pub(super) async fn discover(client: &Client, url: &str) -> Result<Discovery, St
     let authorization_endpoint = required("authorization_endpoint")?;
     let token_endpoint = required("token_endpoint")?;
     let registration_endpoint = endpoint("registration_endpoint")?;
-    if let Some(methods) = strings(&metadata["code_challenge_methods_supported"])
-        && !methods.iter().any(|method| method == "S256")
-    {
+    // A server that does not say it checks S256 may ignore the challenge,
+    // which would leave the code unbound to this login.
+    let s256 = strings(&metadata["code_challenge_methods_supported"])
+        .is_some_and(|methods| methods.iter().any(|method| method == "S256"));
+    if !s256 {
         return Err(format!(
-            "the authorization server {issuer} does not support PKCE with S256"
+            "the authorization server {issuer} does not list PKCE with S256 in code_challenge_methods_supported"
         ));
     }
     Ok(Discovery {
@@ -732,6 +810,40 @@ pub(super) async fn discover(client: &Client, url: &str) -> Result<Discovery, St
         registration_endpoint,
         token_auth_methods: strings(&metadata["token_endpoint_auth_methods_supported"]),
     })
+}
+
+/// Whether `url` names this machine or a private network by its host:
+/// `localhost` or a loopback, private, link-local, or unspecified address.
+/// A name that resolves to one is not caught.
+fn is_internal(url: &Url) -> bool {
+    use std::net::IpAddr;
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+        return true;
+    }
+    let v4 = |address: std::net::Ipv4Addr| {
+        address.is_loopback()
+            || address.is_private()
+            || address.is_link_local()
+            || address.is_unspecified()
+            || address.is_broadcast()
+            // 100.64.0.0/10, shared address space.
+            || (address.octets()[0] == 100 && address.octets()[1] & 0xc0 == 64)
+    };
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => v4(address),
+        Ok(IpAddr::V6(address)) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                || address.to_ipv4_mapped().is_some_and(v4)
+        }
+        Err(_) => false,
+    }
 }
 
 /// A client of the authorization server: registered by the login, or
@@ -756,11 +868,12 @@ impl std::fmt::Debug for OAuthClient {
 /// Registers Socium as a client that redirects to `redirect_uri`
 /// (RFC 7591), asking to be a public one: PKCE protects the code.
 pub(super) async fn register(
-    client: &Client,
+    clients: &HttpClients,
     endpoint: &Url,
     redirect_uri: &str,
 ) -> Result<OAuthClient, String> {
-    let response = client
+    let response = clients
+        .to(endpoint)
         .post(endpoint.clone())
         .header(ACCEPT, "application/json")
         .json(&json!({
@@ -787,10 +900,17 @@ pub(super) async fn register(
             format!("the registration endpoint {endpoint} answered without a client_id")
         })?;
     let secret = document["client_secret"].as_str().map(str::to_string);
+    // RFC 7591 2: the server says how the client it registered proves
+    // itself, client_secret_basic when it does not say.
     let auth = match (&secret, document["token_endpoint_auth_method"].as_str()) {
-        (None, _) => ClientAuth::None,
+        (_, Some("none")) | (None, None) => ClientAuth::None,
+        (Some(_), Some("client_secret_basic") | None) => ClientAuth::ClientSecretBasic,
         (Some(_), Some("client_secret_post")) => ClientAuth::ClientSecretPost,
-        (Some(_), _) => ClientAuth::ClientSecretBasic,
+        _ => {
+            return Err(format!(
+                "the registration endpoint {endpoint} registered a client that proves itself in a way Socium does not support"
+            ));
+        }
     };
     Ok(OAuthClient {
         id: id.to_string(),
@@ -826,66 +946,109 @@ async fn answer(response: Response, what: &str, endpoint: &Url) -> Result<Value,
     Ok(document)
 }
 
-/// `": <error>"` for an OAuth error response. The description is left
-/// out: a server may repeat what it was sent, such as a code.
+/// The error codes of RFC 6749, RFC 7591, RFC 6750, RFC 8707 and OpenID
+/// Connect, the only ones quoted.
+const OAUTH_ERRORS: &[&str] = &[
+    "access_denied",
+    "consent_required",
+    "insufficient_scope",
+    "interaction_required",
+    "invalid_client",
+    "invalid_client_metadata",
+    "invalid_grant",
+    "invalid_redirect_uri",
+    "invalid_request",
+    "invalid_scope",
+    "invalid_software_statement",
+    "invalid_target",
+    "invalid_token",
+    "login_required",
+    "server_error",
+    "temporarily_unavailable",
+    "unapproved_software_statement",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "unsupported_response_type",
+];
+
+/// `": <error>"` for an OAuth error response with a known code. Anything
+/// else, and the description, is left out: a server may repeat what it was
+/// sent, such as a code or a secret.
 fn error_code(document: &Value) -> String {
     match document["error"].as_str() {
-        Some(code)
-            if !code.is_empty()
-                && code.len() <= 64
-                && code
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) =>
-        {
-            format!(": {code}")
-        }
-        _ => String::new(),
+        Some(code) if OAUTH_ERRORS.contains(&code) => format!(": {code}"),
+        Some(_) => ": an error code Socium does not know".into(),
+        None => String::new(),
     }
 }
 
-/// The `resource_metadata` parameter of a `Bearer` challenge.
+/// The `resource_metadata` parameter of a `Bearer` challenge in one
+/// `WWW-Authenticate` value, which may hold several challenges (RFC 9110
+/// 11.6.1), such as `Basic realm="a", Bearer resource_metadata="..."`.
 fn resource_metadata_parameter(header: &str) -> Option<String> {
-    let rest = header.trim_start();
-    let scheme_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    if !rest[..scheme_end].eq_ignore_ascii_case("bearer") {
-        return None;
-    }
-    let mut rest = &rest[scheme_end..];
-    loop {
-        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
-        let equals = rest.find('=')?;
-        let name = rest[..equals].trim();
-        rest = rest[equals + 1..].trim_start();
-        let value;
-        if let Some(quoted) = rest.strip_prefix('"') {
-            let mut text = String::new();
-            let mut chars = quoted.char_indices();
-            let mut end = None;
-            while let Some((index, c)) = chars.next() {
-                match c {
-                    '\\' => {
-                        if let Some((_, escaped)) = chars.next() {
-                            text.push(escaped);
-                        }
-                    }
-                    '"' => {
-                        end = Some(index);
-                        break;
-                    }
-                    other => text.push(other),
-                }
-            }
-            rest = &quoted[end? + 1..];
-            value = text;
+    let mut bearer = false;
+    for item in challenge_items(header) {
+        let item = item.trim();
+        let token_end = item
+            .find(|c: char| c.is_whitespace() || c == '=')
+            .unwrap_or(item.len());
+        let (token, rest) = item.split_at(token_end);
+        let rest = rest.trim_start();
+        // A token followed by `=` is a parameter of the current challenge;
+        // otherwise the token names a new one, maybe with its first
+        // parameter after it.
+        let parameter = if rest.starts_with('=') && !rest.starts_with("==") {
+            Some((token, rest[1..].trim_start()))
         } else {
-            let end = rest.find(',').unwrap_or(rest.len());
-            value = rest[..end].trim().to_string();
-            rest = &rest[end..];
-        }
-        if name.eq_ignore_ascii_case("resource_metadata") {
-            return Some(value);
+            bearer = token.eq_ignore_ascii_case("bearer");
+            rest.split_once('=')
+                .map(|(name, value)| (name.trim(), value.trim_start()))
+        };
+        if let Some((name, value)) = parameter
+            && bearer
+            && name.eq_ignore_ascii_case("resource_metadata")
+        {
+            return Some(unquote(value));
         }
     }
+    None
+}
+
+/// `header` split at the commas outside quoted strings.
+fn challenge_items(header: &str) -> Vec<&str> {
+    let (mut items, mut start, mut quoted, mut escaped) = (Vec::new(), 0, false, false);
+    for (index, c) in header.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                items.push(&header[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&header[start..]);
+    items
+}
+
+/// A parameter value: a quoted string without its quotes and escapes, or
+/// a token as it is.
+fn unquote(value: &str) -> String {
+    let Some(quoted) = value.strip_prefix('"') else {
+        return value.trim().to_string();
+    };
+    let mut text = String::new();
+    let mut chars = quoted.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => text.extend(chars.next()),
+            '"' => break,
+            other => text.push(other),
+        }
+    }
+    text
 }
 
 /// RFC 9728 3.1: the well-known path goes between the host and the
@@ -945,8 +1108,9 @@ fn covers(resource: &Url, server: &Url) -> bool {
 }
 
 /// A JSON object served at `url` with 200, or `None` for anything else.
-async fn get_json(client: &Client, url: &Url) -> Option<Value> {
-    let response = client
+async fn get_json(clients: &HttpClients, url: &Url) -> Option<Value> {
+    let response = clients
+        .to(url)
         .get(url.clone())
         .header(ACCEPT, "application/json")
         .timeout(REQUEST_TIMEOUT)
@@ -989,8 +1153,8 @@ pub(crate) mod tests {
 
     fn discovered(options: &[&str]) -> (FakeHttpServer, Result<Discovery, String>) {
         let fake = FakeHttpServer::start(options);
-        let client = super::super::http::http_client().unwrap();
-        let found = block_on(discover(&client, &fake.url));
+        let client = HttpClients::new().unwrap();
+        let found = block_on(discover(&client, &fake.url, None));
         (fake, found)
     }
 
@@ -1059,15 +1223,15 @@ pub(crate) mod tests {
         );
         let (_, found) = discovered(&[]);
         assert!(found.unwrap_err().contains("it may need no login"));
-        let client = super::super::http::http_client().unwrap();
-        let found = block_on(discover(&client, "http://127.0.0.1:9/mcp"));
+        let client = HttpClients::new().unwrap();
+        let found = block_on(discover(&client, "http://127.0.0.1:9/mcp", None));
         assert!(found.unwrap_err().contains("could not be reached"));
     }
 
     #[test]
     fn socium_registers_as_a_public_client_with_its_redirect_uri() {
         let (fake, found) = discovered(&["--oauth"]);
-        let client = super::super::http::http_client().unwrap();
+        let client = HttpClients::new().unwrap();
         let endpoint = found.unwrap().registration_endpoint.unwrap();
 
         let registered = block_on(register(
@@ -1110,12 +1274,94 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn discovery_refuses_metadata_without_resource_or_s256_and_an_unlisted_issuer() {
+        let (_, found) = discovered(&["--oauth", "--no-resource"]);
+        let err = found.unwrap_err();
+        assert!(err.contains("has no resource"), "{err}");
+        let (_, found) = discovered(&["--oauth", "--no-s256"]);
+        let err = found.unwrap_err();
+        assert!(err.contains("does not list PKCE with S256"), "{err}");
+
+        let fake = FakeHttpServer::start(&["--oauth"]);
+        let clients = HttpClients::new().unwrap();
+        let err = block_on(discover(
+            &clients,
+            &fake.url,
+            Some("https://other.example/auth"),
+        ))
+        .unwrap_err();
+        assert!(err.contains("does not name the configured issuer"), "{err}");
+        let issuer = format!("{}/auth", fake.url.trim_end_matches("/mcp"));
+        assert!(block_on(discover(&clients, &fake.url, Some(&issuer))).is_ok());
+    }
+
+    #[test]
+    fn hosts_on_this_machine_or_a_private_network_are_internal() {
+        for (url, internal) in [
+            ("http://127.0.0.1:8/x", true),
+            ("http://localhost/x", true),
+            ("https://app.localhost/x", true),
+            ("https://10.1.2.3/x", true),
+            ("https://192.168.0.1/x", true),
+            ("https://169.254.169.254/latest", true),
+            ("https://100.64.0.1/x", true),
+            ("https://[::1]/x", true),
+            ("https://[fd00::1]/x", true),
+            ("https://[::ffff:10.0.0.1]/x", true),
+            ("https://auth.example.com/x", false),
+            ("https://8.8.8.8/x", false),
+        ] {
+            assert_eq!(is_internal(&Url::parse(url).unwrap()), internal, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_bearer_challenge_is_found_among_others_in_one_header() {
+        let meta = Some("https://x.example/meta".to_string());
+        for header in [
+            r#"Basic realm="a, b", Bearer error="invalid_token", resource_metadata="https://x.example/meta""#,
+            r#"Basic abc==, Bearer resource_metadata=https://x.example/meta"#,
+            r#"Bearer realm="say \"hi\", then", resource_metadata="https://x.example/meta""#,
+            r#"Newauth, Bearer resource_metadata="https://x.example/meta""#,
+        ] {
+            assert_eq!(resource_metadata_parameter(header), meta, "{header}");
+        }
+        assert_eq!(
+            resource_metadata_parameter(r#"Basic resource_metadata="https://x.example/meta""#),
+            None
+        );
+    }
+
+    #[test]
+    fn a_registered_client_proves_itself_the_way_the_server_said() {
+        let (_fake, found) = discovered(&["--oauth", "--registration-auth=client_secret_post"]);
+        let clients = HttpClients::new().unwrap();
+        let endpoint = found.unwrap().registration_endpoint.unwrap();
+        let registered =
+            block_on(register(&clients, &endpoint, "http://127.0.0.1:1/callback")).unwrap();
+        assert_eq!(registered.auth, ClientAuth::ClientSecretPost);
+        assert!(registered.secret.is_some());
+
+        let (_fake, found) = discovered(&["--oauth", "--registration-auth=private_key_jwt"]);
+        let endpoint = found.unwrap().registration_endpoint.unwrap();
+        let err =
+            block_on(register(&clients, &endpoint, "http://127.0.0.1:1/callback")).unwrap_err();
+        assert!(err.contains("does not support"), "{err}");
+    }
+
+    #[test]
     fn an_oauth_error_is_quoted_by_its_code_alone() {
         assert_eq!(
             error_code(&json!({"error": "invalid_grant", "error_description": "code abc is used"})),
             ": invalid_grant"
         );
-        assert_eq!(error_code(&json!({"error": "has spaces"})), "");
+        // A code the specifications do not define may be what the server
+        // was sent, such as the verifier.
+        let verifier = random_text(32);
+        assert_eq!(
+            error_code(&json!({ "error": verifier })),
+            ": an error code Socium does not know"
+        );
         assert_eq!(error_code(&Value::Null), "");
     }
 
@@ -1262,7 +1508,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .starts_with("refresh-")
         );
-        assert!(!token.expires_within(3000), "{token:?}");
+        assert!(!token.due_for_renewal(3000), "{token:?}");
         assert_eq!(token.resource, fake.url);
         assert_eq!(token.client_auth, ClientAuth::None);
         #[cfg(unix)]
@@ -1295,6 +1541,8 @@ pub(crate) mod tests {
             client_secret: Some("pre-secret".into()),
             scopes: vec!["repo".into()],
             callback_port: None,
+            issuer: Some(format!("{}/auth", fake.url.trim_end_matches("/mcp"))),
+            token_endpoint_auth_method: None,
         };
 
         login(
@@ -1414,14 +1662,62 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_login_refuses_a_workspace_that_holds_the_configuration_or_the_token_store() {
+        let fake = FakeHttpServer::start(&["--oauth"]);
+        let project = tempfile::tempdir().unwrap();
+        let config = project.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!("[mcp.servers.fake]\nurl = \"{}\"\n", fake.url),
+        )
+        .unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        for (config, state) in [
+            (config.clone(), outside.path().join("state")),
+            (
+                outside.path().join("config.toml"),
+                project.path().join("state"),
+            ),
+        ] {
+            std::fs::write(
+                outside.path().join("config.toml"),
+                format!("[mcp.servers.fake]\nurl = \"{}\"\n", fake.url),
+            )
+            .unwrap();
+            let (config, state_home) = (
+                config.to_str().unwrap().to_string(),
+                state.to_str().unwrap().to_string(),
+            );
+            let lookup = move |name: &str| match name {
+                "SOCIUM_CONFIG_FILE" => Some(config.clone()),
+                "XDG_STATE_HOME" => Some(state_home.clone()),
+                _ => None,
+            };
+
+            let err = login_configured(
+                &lookup,
+                project.path(),
+                "fake",
+                &|_| panic!("no browser"),
+                Duration::from_secs(1),
+            )
+            .unwrap_err();
+
+            assert!(err.contains("contains Socium's configuration"), "{err}");
+            assert!(!state.exists());
+        }
+    }
+
+    #[test]
     fn login_and_logout_find_the_server_in_config_toml() {
         let fake = FakeHttpServer::start(&["--oauth"]);
+        let project = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let config = home.path().join("config.toml");
         std::fs::write(
             &config,
             format!(
-                "[mcp.servers.fake]\nurl = \"{}\"\n[mcp.servers.gated]\nurl = \"https://a.example/mcp\"\noauth = {{ client_id = \"c\", client_secret = \"${{UNSET_SECRET}}\" }}\n[mcp.servers.local]\ncommand = [\"x\"]\n",
+                "[mcp.servers.fake]\nurl = \"{}\"\n[mcp.servers.gated]\nurl = \"https://a.example/mcp\"\noauth = {{ client_id = \"c\", client_secret = \"${{UNSET_SECRET}}\", issuer = \"https://a.example/auth\" }}\n[mcp.servers.local]\ncommand = [\"x\"]\n",
                 fake.url
             ),
         )
@@ -1440,6 +1736,7 @@ pub(crate) mod tests {
 
         let done = login_configured(
             &lookup,
+            project.path(),
             "fake",
             &|url| browser.open(url),
             Duration::from_secs(20),
@@ -1455,26 +1752,47 @@ pub(crate) mod tests {
             )
         );
         assert!(path.exists());
-        let err = login_configured(&lookup, "other", &|_| {}, Duration::from_secs(1)).unwrap_err();
+        let err = login_configured(
+            &lookup,
+            project.path(),
+            "other",
+            &|_| {},
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
         assert!(
             err.starts_with("No MCP server named other is configured in "),
             "{err}"
         );
-        let err = login_configured(&lookup, "gated", &|_| {}, Duration::from_secs(1)).unwrap_err();
+        let err = login_configured(
+            &lookup,
+            project.path(),
+            "gated",
+            &|_| {},
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
         assert!(err.contains("${UNSET_SECRET} is not set"), "{err}");
-        let err = login_configured(&lookup, "local", &|_| {}, Duration::from_secs(1)).unwrap_err();
+        let err = login_configured(
+            &lookup,
+            project.path(),
+            "local",
+            &|_| {},
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
         assert!(err.contains("runs a command"), "{err}");
 
         assert_eq!(
-            logout_configured(&lookup, "fake").unwrap(),
+            logout_configured(&lookup, project.path(), "fake").unwrap(),
             format!("Logged out of MCP server fake: removed {}.", path.display())
         );
         assert!(!path.exists());
         assert_eq!(
-            logout_configured(&lookup, "fake").unwrap(),
+            logout_configured(&lookup, project.path(), "fake").unwrap(),
             "MCP server fake has no stored token."
         );
-        assert!(logout_configured(&lookup, "../x").is_err());
+        assert!(logout_configured(&lookup, project.path(), "../x").is_err());
     }
 
     /// A server of the fake with a token stored by a real login.
@@ -1564,11 +1882,19 @@ pub(crate) mod tests {
         assert_eq!(grants(&fake), ["authorization_code"]);
     }
 
+    /// Makes the stored token `seconds` older, and returns it.
+    fn age(store: &TokenStore, fake: &FakeHttpServer, seconds: u64) -> StoredToken {
+        let mut token = store.load("fake", &fake.url).unwrap().unwrap();
+        token.issued_at = token.issued_at.map(|at| at - seconds);
+        token.expires_at = token.expires_at.map(|at| at - seconds);
+        store.save("fake", &token).unwrap();
+        token
+    }
+
     #[test]
     fn a_token_about_to_expire_is_renewed_and_saved() {
-        // Within the renewal margin from the start.
         let (fake, _home, store) = logged_in(&["--oauth", "--expires=30"]);
-        let before = store.load("fake", &fake.url).unwrap().unwrap();
+        let before = age(&store, &fake, 20);
         let settings = oauth_settings(&fake, "fake", None);
 
         let (registry, _) = crate::mcp::tests::connect_with_tokens(&[settings], Some(&store));
@@ -1588,6 +1914,79 @@ pub(crate) mod tests {
         assert_eq!(
             sent.last().unwrap(),
             &format!("Bearer {}", after.access_token).as_str()
+        );
+    }
+
+    #[test]
+    fn a_renewal_after_a_logout_fails_and_writes_no_file() {
+        let (fake, _home, store) = logged_in(&["--oauth", "--expires=30"]);
+        let token = age(&store, &fake, 20);
+        store.remove("fake").unwrap();
+        let session = Arc::new(OAuthSession::new("fake", store.clone(), None, token));
+        let clients = HttpClients::new().unwrap();
+
+        assert!(block_on(session.access_token(&clients)).is_err());
+
+        assert_eq!(store.load("fake", &fake.url).unwrap(), None);
+        assert_eq!(grants(&fake), ["authorization_code"]);
+    }
+
+    #[test]
+    fn a_token_another_socium_renewed_is_taken_instead_of_renewing_again() {
+        let (fake, _home, store) = logged_in(&["--oauth", "--expires=30"]);
+        let old = age(&store, &fake, 20);
+        let clients = HttpClients::new().unwrap();
+        // The other Socium renews first and uses up the refresh token.
+        let newer = block_on(refresh(&clients, &old, None)).unwrap();
+        store.save("fake", &newer).unwrap();
+        let session = Arc::new(OAuthSession::new("fake", store.clone(), None, old));
+
+        let token = block_on(session.access_token(&clients));
+
+        assert_eq!(token, Ok(newer.access_token));
+        assert_eq!(grants(&fake), ["authorization_code", "refresh_token"]);
+    }
+
+    #[test]
+    fn a_renewal_is_saved_even_when_the_call_waiting_for_it_is_cancelled() {
+        let (fake, _home, store) = logged_in(&["--oauth", "--expires=30", "--token-delay=0.5"]);
+        let old = age(&store, &fake, 20);
+        let session = Arc::new(OAuthSession::new("fake", store.clone(), None, old.clone()));
+        let clients = HttpClients::new().unwrap();
+
+        block_on(async {
+            let waited =
+                tokio::time::timeout(Duration::from_millis(100), session.access_token(&clients))
+                    .await;
+            assert!(waited.is_err(), "the renewal was still under way");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while store.load("fake", &fake.url).unwrap().unwrap().access_token == old.access_token {
+                assert!(std::time::Instant::now() < deadline, "never saved");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+
+        let saved = store.load("fake", &fake.url).unwrap().unwrap();
+        assert_ne!(saved.refresh_token, old.refresh_token);
+    }
+
+    #[test]
+    fn a_token_of_another_client_than_the_configured_one_is_not_used() {
+        let (fake, _home, store) = logged_in(&["--oauth"]);
+        let oauth = McpOAuthSettings {
+            client_id: Some("pre-client".into()),
+            ..McpOAuthSettings::default()
+        };
+
+        let (registry, warnings) = crate::mcp::tests::connect_with_tokens(
+            &[oauth_settings(&fake, "fake", Some(oauth))],
+            Some(&store),
+        );
+
+        assert!(registry.target("mcp__fake__echo").is_none());
+        assert_eq!(
+            warnings,
+            ["MCP server fake needs you to log in: run socium mcp login fake"]
         );
     }
 
@@ -1616,6 +2015,7 @@ pub(crate) mod tests {
         let login_warning = "MCP server fake needs you to log in: run socium mcp login fake";
         // The refresh is refused.
         let (fake, _home, store) = logged_in(&["--oauth", "--expires=30", "--refresh=fail"]);
+        age(&store, &fake, 20);
         let (registry, warnings) = crate::mcp::tests::connect_with_tokens(
             &[oauth_settings(&fake, "fake", None)],
             Some(&store),

@@ -151,6 +151,13 @@ pub(crate) struct McpOAuthSettings {
     pub(crate) scopes: Vec<String>,
     /// The login's loopback port, for a client whose redirect URI is fixed.
     pub(crate) callback_port: Option<u16>,
+    /// The authorization server the client was registered with. Required
+    /// with `client_secret`, so the secret goes only to that server's token
+    /// endpoint, whatever the MCP server names.
+    pub(crate) issuer: Option<String>,
+    /// How the client was registered to prove itself; `None` picks from
+    /// what the authorization server supports.
+    pub(crate) token_endpoint_auth_method: Option<crate::mcp::token_store::ClientAuth>,
 }
 
 impl std::fmt::Debug for McpOAuthSettings {
@@ -163,6 +170,11 @@ impl std::fmt::Debug for McpOAuthSettings {
             )
             .field("scopes", &self.scopes)
             .field("callback_port", &self.callback_port)
+            .field("issuer", &self.issuer)
+            .field(
+                "token_endpoint_auth_method",
+                &self.token_endpoint_auth_method,
+            )
             .finish()
     }
 }
@@ -436,6 +448,8 @@ struct RawMcpOAuth {
     #[serde(default)]
     scopes: Vec<String>,
     callback_port: Option<u16>,
+    issuer: Option<String>,
+    token_endpoint_auth_method: Option<String>,
 }
 
 fn enabled_by_default() -> bool {
@@ -989,6 +1003,31 @@ fn oauth_settings(
             "mcp.servers.{name}.oauth.callback_port must be 1 to 65535; leave it out for any free port"
         ));
     }
+    if raw.client_secret.is_some() && raw.issuer.is_none() {
+        return Err(format!(
+            "mcp.servers.{name}.oauth.client_secret needs issuer: the authorization server the client was registered with, so the secret is sent only there"
+        ));
+    }
+    if let Some(issuer) = &raw.issuer {
+        crate::models::check_endpoint_url("issuer", issuer)
+            .map_err(|err| format!("mcp.servers.{name}.oauth.{err}"))?;
+    }
+    use crate::mcp::token_store::ClientAuth;
+    let token_endpoint_auth_method = match raw.token_endpoint_auth_method.as_deref() {
+        None => None,
+        Some(_) if raw.client_secret.is_none() => {
+            return Err(format!(
+                "mcp.servers.{name}.oauth.token_endpoint_auth_method needs client_secret"
+            ));
+        }
+        Some("client_secret_basic") => Some(ClientAuth::ClientSecretBasic),
+        Some("client_secret_post") => Some(ClientAuth::ClientSecretPost),
+        Some(other) => {
+            return Err(format!(
+                "mcp.servers.{name}.oauth.token_endpoint_auth_method: '{other}' is not client_secret_basic or client_secret_post"
+            ));
+        }
+    };
     let client_secret = match raw.client_secret {
         Some(secret) => {
             let table = BTreeMap::from([("client_secret".to_string(), secret)]);
@@ -1010,6 +1049,8 @@ fn oauth_settings(
         client_secret,
         scopes: raw.scopes,
         callback_port: raw.callback_port,
+        issuer: raw.issuer,
+        token_endpoint_auth_method,
     }))
 }
 
@@ -1334,7 +1375,7 @@ url = "http://127.0.0.1:8931/mcp"
         let text = r#"
 [mcp.servers.github]
 url = "https://api.githubcopilot.com/mcp/"
-oauth = { client_id = "Iv1.abc", client_secret = "${GITHUB_SECRET}", scopes = ["repo", "read:org"], callback_port = 8976 }
+oauth = { client_id = "Iv1.abc", client_secret = "${GITHUB_SECRET}", issuer = "https://github.com/login/oauth", token_endpoint_auth_method = "client_secret_post", scopes = ["repo", "read:org"], callback_port = 8976 }
 
 [mcp.servers.linear]
 url = "https://mcp.linear.app/mcp"
@@ -1353,6 +1394,10 @@ oauth = {}
                 client_secret: Some("gh-client-s3cret".into()),
                 scopes: vec!["repo".into(), "read:org".into()],
                 callback_port: Some(8976),
+                issuer: Some("https://github.com/login/oauth".into()),
+                token_endpoint_auth_method: Some(
+                    crate::mcp::token_store::ClientAuth::ClientSecretPost
+                ),
             }
         );
         assert_eq!(
@@ -1480,6 +1525,22 @@ oauth = {}
             (
                 "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { scopes = [\"a b\"] }",
                 "mcp.servers.x.oauth.scopes: 'a b' is not a scope",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_id = \"c\", client_secret = \"s\" }",
+                "oauth.client_secret needs issuer",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_id = \"c\", token_endpoint_auth_method = \"client_secret_post\" }",
+                "oauth.token_endpoint_auth_method needs client_secret",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_id = \"c\", client_secret = \"s\", issuer = \"https://a.example\", token_endpoint_auth_method = \"private_key_jwt\" }",
+                "'private_key_jwt' is not client_secret_basic",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_id = \"c\", client_secret = \"s\", issuer = \"http://a.example\" }",
+                "mcp.servers.x.oauth.issuer must use https",
             ),
             (
                 "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { callback_port = 0 }",

@@ -70,10 +70,12 @@ pub(super) enum Authorization {
     None,
     /// The configured headers hold `Authorization`, which wins over OAuth.
     Header,
-    OAuth(Box<OAuthSession>),
+    OAuth(Arc<OAuthSession>),
 }
 
 struct Connection {
+    clients: HttpClients,
+    /// The one of `clients` for `url`.
     client: reqwest::Client,
     url: Url,
     /// `scheme://host[:port]`, for messages.
@@ -88,17 +90,38 @@ struct Connection {
     answers: Arc<tokio::sync::Semaphore>,
 }
 
-/// The client for an MCP server and its authorization server. It follows
+/// The clients for an MCP server and its authorization server. They follow
 /// no redirect, since one would carry a token or a code to another address.
-pub(super) fn http_client() -> reqwest::Result<reqwest::Client> {
-    client_builder().build()
+/// They differ only in the proxy: plain http is allowed only to loopback,
+/// where a proxy from the environment would see a token in the clear.
+#[derive(Clone)]
+pub(super) struct HttpClients {
+    direct: reqwest::Client,
+    proxied: reqwest::Client,
 }
 
-fn client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(CONNECT_TIMEOUT)
-        .user_agent(concat!("socium/", env!("CARGO_PKG_VERSION")))
+impl HttpClients {
+    pub(super) fn new() -> reqwest::Result<Self> {
+        let builder = || {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(CONNECT_TIMEOUT)
+                .user_agent(concat!("socium/", env!("CARGO_PKG_VERSION")))
+        };
+        Ok(Self {
+            direct: builder().no_proxy().build()?,
+            proxied: builder().build()?,
+        })
+    }
+
+    /// The client for requests to `url`.
+    pub(super) fn to(&self, url: &Url) -> &reqwest::Client {
+        if is_loopback(url) {
+            &self.direct
+        } else {
+            &self.proxied
+        }
+    }
 }
 
 impl HttpTransport {
@@ -121,16 +144,11 @@ impl HttpTransport {
             value.set_sensitive(true);
             header_map.insert(header, value);
         }
-        // Plain http is allowed only to loopback, where a proxy from the
-        // environment would see the headers in the clear.
-        let client = if is_loopback(&url) {
-            client_builder().no_proxy().build()
-        } else {
-            http_client()
-        }
-        .map_err(|err| not_started(format!("its HTTP client could not be built: {err}")))?;
+        let clients = HttpClients::new()
+            .map_err(|err| not_started(format!("its HTTP client could not be built: {err}")))?;
         let connection = Arc::new(Connection {
-            client,
+            client: clients.to(&url).clone(),
+            clients,
             origin: url.origin().ascii_serialization(),
             url,
             headers: header_map,
@@ -274,7 +292,7 @@ impl Connection {
             let bearer = match &self.auth {
                 Authorization::OAuth(session) => Some(
                     session
-                        .access_token(&self.client)
+                        .access_token(&self.clients)
                         .await
                         .map_err(|()| RequestError::NeedsLogin)?,
                 ),
@@ -315,7 +333,7 @@ impl Connection {
                 match (&self.auth, &bearer) {
                     (Authorization::OAuth(session), Some(sent)) if !renewed => {
                         session
-                            .refused(&self.client, sent)
+                            .refused(&self.clients, sent)
                             .await
                             .map_err(|()| RequestError::NeedsLogin)?;
                         renewed = true;
@@ -336,9 +354,13 @@ impl Connection {
                 lock(&self.protocol_version).take();
                 return Err(RequestError::SessionEnded);
             }
+            // The server may write the token it was sent into its error.
+            let mut quoted = quoted_error(response).await;
+            if let Some(bearer) = &bearer {
+                quoted = quoted.replace(bearer.as_str(), "[redacted]");
+            }
             return Err(RequestError::Transport(format!(
-                "answered HTTP {status}{}",
-                quoted_error(response).await
+                "answered HTTP {status}{quoted}"
             )));
         }
     }

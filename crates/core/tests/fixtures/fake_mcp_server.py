@@ -36,7 +36,11 @@ RFC 8414's URL (`--as-metadata=oauth`, the default) or OpenID Connect's
 registration; then only the client `pre-client` with the secret
 `pre-secret` exists. `--expires=N` sets the access token lifetime in
 seconds, `--refresh=fail` refuses every refresh, and `--scopes=a,b` lists
-`scopes_supported`. `/authorize` redirects at once, as if the user agreed;
+`scopes_supported`. `--no-s256` leaves `code_challenge_methods_supported`
+out, `--no-resource` leaves `resource` out of the protected resource
+metadata, `--token-delay=S` holds each token answer S seconds, and
+`--registration-auth=M` registers clients with a secret and the
+authentication method M. `/authorize` redirects at once, as if the user agreed;
 `/token` checks the PKCE verifier, the redirect URI and the resource. Each
 authorization request is logged with its path and parameters.
 """
@@ -325,6 +329,8 @@ def serve_http():
             prm_path = "/meta/resource" if discovery == "header" else "/.well-known/oauth-protected-resource/mcp"
             if url.path == prm_path:
                 metadata = {"resource": origin + "/mcp", "authorization_servers": [origin + "/auth"]}
+                if "no-resource" in OPTIONS:
+                    del metadata["resource"]
                 if OPTIONS.get("scopes"):
                     metadata["scopes_supported"] = OPTIONS["scopes"].split(",")
                 return self.reply(200, metadata)
@@ -340,6 +346,8 @@ def serve_http():
                     "response_types_supported": ["code"],
                     "code_challenge_methods_supported": ["S256"],
                 }
+                if "no-s256" in OPTIONS:
+                    del metadata["code_challenge_methods_supported"]
                 if "no-registration" not in OPTIONS:
                     metadata["registration_endpoint"] = origin + "/auth/register"
                 return self.reply(200, metadata)
@@ -390,6 +398,7 @@ def serve_http():
             return client_id
 
         def token(self, form):
+            time.sleep(float(OPTIONS.get("token-delay", "0")))
             client_id = self.authenticate(form)
             if client_id is None:
                 return self.reply(401, {"error": "invalid_client"})
@@ -421,9 +430,14 @@ def serve_http():
 
         def register(self, body):
             client_id = next_id("client")
+            method = OPTIONS.get("registration-auth")
+            secret = next_id("secret") if method else None
             with state:
-                clients[client_id] = {"secret": None, "redirect_uris": body.get("redirect_uris")}
-            self.reply(201, {"client_id": client_id, "redirect_uris": body.get("redirect_uris"), "token_endpoint_auth_method": "none"})
+                clients[client_id] = {"secret": secret, "redirect_uris": body.get("redirect_uris")}
+            answer = {"client_id": client_id, "redirect_uris": body.get("redirect_uris"), "token_endpoint_auth_method": method or "none"}
+            if secret:
+                answer["client_secret"] = secret
+            self.reply(201, answer)
 
         def do_DELETE(self):
             session = self.headers.get("Mcp-Session-Id")

@@ -272,14 +272,20 @@ impl McpServer {
                     http::Authorization::Header
                 } else {
                     // An unreadable token file counts as none: the server's
-                    // 401 then asks the user to log in again.
+                    // 401 then asks the user to log in again. So does a
+                    // token of another client than the configured one, so
+                    // the configured secret never goes to the token endpoint
+                    // of an earlier login.
+                    let configured = oauth.as_ref().and_then(|oauth| oauth.client_id.as_deref());
                     let stored = tokens.and_then(|store| {
                         let token = store.load(&settings.name, url).ok().flatten()?;
-                        Some((store.clone(), token))
+                        configured
+                            .is_none_or(|id| id == token.client_id)
+                            .then(|| (store.clone(), token))
                     });
                     match stored {
                         Some((store, token)) => {
-                            http::Authorization::OAuth(Box::new(oauth::OAuthSession::new(
+                            http::Authorization::OAuth(Arc::new(oauth::OAuthSession::new(
                                 &settings.name,
                                 store,
                                 oauth.as_ref().and_then(|oauth| oauth.client_secret.clone()),
