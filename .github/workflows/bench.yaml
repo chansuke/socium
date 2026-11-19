@@ -1,0 +1,70 @@
+name: Benchmark
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  bench:
+    name: Compare with the parent commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      # A pull request checks out its merge commit, whose first parent is the
+      # base branch, and a push to main checks out the new tip, whose first
+      # parent is the old one. Either way HEAD^1 is what HEAD changes.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Permit sandbox backend user namespaces
+        uses: ./.github/actions/permit-sandbox-backend
+
+      # The release package, as users install it. Pushes to main put it in
+      # the cache, so the parent is usually downloaded, not built.
+      - name: Build the parent and this commit
+        run: |
+          nix build "git+file://$PWD?rev=$(git rev-parse HEAD^1)&shallow=1#default" --out-link base
+          nix build .#default --out-link head
+
+      - name: Run the benchmark
+        run: |
+          # Failed runs fail the job, after the table that lists them.
+          status=0
+          nix develop --command python3 bench/run.py \
+            --binary base=base/bin/socium --binary head=head/bin/socium \
+            --repeat 7 --out bench.json || status=$?
+          {
+            echo "## Benchmark against $(git rev-parse --short HEAD^1)"
+            echo
+            python3 bench/compare.py bench.json || true
+            echo
+            echo "<details><summary>All numbers</summary>"
+            echo
+            echo '```json'
+            cat bench.json
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Remove CI sandbox backend profile
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/socium-ci-bwrap.apparmor" ]]; then
+            sudo apparmor_parser -R "$RUNNER_TEMP/socium-ci-bwrap.apparmor"
+          fi
