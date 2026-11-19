@@ -476,12 +476,16 @@ struct RawApproval {
     sensitive: Option<Vec<String>>,
 }
 
-/// Directories and files that configure Socium: none of them may be inside
-/// a workspace, or the model could rewrite its own limits.
+/// Directories and files that configure Socium, and the MCP token store:
+/// none of them may be inside a workspace, or the model could rewrite its
+/// own limits or read a token.
 pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(dir) = config_dir(lookup) {
         paths.push(dir);
+    }
+    if let Some(store) = crate::mcp::token_store::TokenStore::from_env(lookup) {
+        paths.push(store.dir().to_path_buf());
     }
     for variable in [
         CONFIG_FILE_ENV,
@@ -508,8 +512,9 @@ pub(crate) fn config_dir(lookup: &dyn Fn(&str) -> Option<String>) -> Option<Path
     Some(config_home.join("socium"))
 }
 
-/// Refuses a workspace that contains Socium's own configuration: its file
-/// tools could then edit `config.toml`, `models.toml`, or subagent types.
+/// Refuses a workspace that contains Socium's own configuration or MCP
+/// tokens: its file tools could then edit `config.toml`, `models.toml`, or
+/// subagent types, or read a token.
 pub(crate) fn ensure_config_outside(
     workspace: &Path,
     lookup: &dyn Fn(&str) -> Option<String>,
@@ -521,7 +526,7 @@ pub(crate) fn ensure_config_outside(
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!(
-                    "The workspace {} contains Socium's configuration ({}); the agent could change its own permissions. Start Socium in a project directory instead",
+                    "The workspace {} contains Socium's configuration ({}); the agent could change its own permissions or read MCP tokens. Start Socium in a project directory instead",
                     workspace.display(),
                     path.display()
                 ),
@@ -1670,6 +1675,16 @@ deny = ["git  push"]
         let project = home.path().join("project");
         std::fs::create_dir(&project).unwrap();
         ensure_config_outside(&project, &lookup).unwrap();
+        // The MCP token store counts too.
+        let state = project.join("state").to_str().unwrap().to_string();
+        let home_str = home.path().to_str().unwrap().to_string();
+        let lookup = move |key: &str| match key {
+            "HOME" => Some(home_str.clone()),
+            "XDG_STATE_HOME" => Some(state.clone()),
+            _ => None,
+        };
+        let err = ensure_config_outside(&project, &lookup).unwrap_err();
+        assert!(err.to_string().contains("mcp-auth"), "{err}");
     }
 
     mod properties {

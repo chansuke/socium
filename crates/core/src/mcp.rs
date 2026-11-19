@@ -10,6 +10,11 @@
 //! code that runs and provider keys never reach it.
 
 mod http;
+#[expect(
+    dead_code,
+    reason = "the login and the transport use it in the next steps"
+)]
+pub(crate) mod token_store;
 
 use crate::TaskControl;
 use crate::settings::{McpServerSettings, McpTransportSettings};
