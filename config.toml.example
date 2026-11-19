@@ -95,7 +95,9 @@ enabled = false
 #
 # `oauth` is only for a client registered ahead of time (GitHub's server, for
 # one, does not register clients itself). client_secret is expanded like
-# headers; callback_port fixes the redirect URI http://127.0.0.1:<port>/callback.
+# headers and needs issuer, the authorization server the client belongs to, as
+# the server's /.well-known/oauth-protected-resource lists it; callback_port
+# fixes the redirect URI http://127.0.0.1:<port>/callback.
 # [mcp.servers.linear]
 # url = "https://mcp.linear.app/mcp"
-# oauth = { client_id = "my-client", client_secret = "${LINEAR_CLIENT_SECRET}", scopes = ["read"], callback_port = 8976 }
+# oauth = { client_id = "my-client", client_secret = "${LINEAR_CLIENT_SECRET}", issuer = "https://mcp.linear.app", scopes = ["read"], callback_port = 8976 }

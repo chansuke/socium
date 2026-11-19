@@ -268,15 +268,23 @@ url = "https://mcp.linear.app/mcp"
   authorization server ahead of time, such as a GitHub OAuth app (GitHub's
   server does not register clients itself). `client_id` is the client,
   `client_secret` its secret with `${NAME}` expanded as in `headers` (never
-  shown or stored), `scopes` the scopes to ask for (by default those the
-  server lists), and `callback_port` the fixed port of the redirect URI
-  `http://127.0.0.1:<port>/callback` registered for that client. Without
+  shown or stored), `issuer` the authorization server it was registered with
+  (required with `client_secret`, so the secret goes only there),
+  `token_endpoint_auth_method` how it was registered to prove itself
+  (`client_secret_basic` or `client_secret_post`; by default what the server
+  supports), `scopes` the scopes to ask for (by default those the server
+  lists), and `callback_port` the fixed port of the redirect URI
+  `http://127.0.0.1:<port>/callback` registered for that client. A stored
+  token of another client than `client_id` is not used. Without
   `oauth`, login registers a new client each time. `oauth` does not apply to
   a `command` server.
 - Tokens are kept per user in
   `$XDG_STATE_HOME/socium/mcp-auth/<server>.json` (by default
   `~/.local/state/socium/mcp-auth/`), owner-only, never in the workspace;
-  Socium refuses to start in a workspace that contains that directory. A
+  Socium, `socium mcp login`, and `socium mcp logout` refuse to run in a
+  workspace that contains that directory or the configuration. Every Socium
+  of the user renews a token under one lock, and none writes a token back
+  after a logout. A
   token is used only while the server's `url` is the one it was issued for.
 - A tool call asks for approval, since nothing confines what the server does
   (the request says whether it runs on the host or at the server's address);
