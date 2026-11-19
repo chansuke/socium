@@ -16,7 +16,8 @@ they leave to you.
   author, or the edit's diff. An answer allows the call once or, when offered,
   a command prefix or file for the rest of the session; it never widens the OS
   sandbox. Edits to files host tools run on their own (`build.rs`, `.envrc`,
-  CI, editor settings) and reads of credential files always ask. Socium's
+  CI, editor settings) and reads of credential files always ask; wider
+  searches and diffs leave those files out. Socium's
   settings must live outside the workspace, so the model cannot change them.
 - File tools constrain paths to the workspace and protect `.git` and `.socium`.
   These checks do not isolate concurrently changing files, malicious host
