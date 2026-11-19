@@ -732,6 +732,18 @@ impl AgentService {
                 .map(|registry| registry.statuses().to_vec())
                 .unwrap_or_default(),
         };
+        statuses.extend(
+            self.settings
+                .mcp_disabled
+                .iter()
+                .map(|server| McpServerStatus {
+                    name: server.name.clone(),
+                    transport: server.transport.clone(),
+                    state: McpServerState::Disabled {
+                        reason: server.reason.clone(),
+                    },
+                }),
+        );
         statuses.sort_by(|a, b| a.name.cmp(&b.name));
         statuses
     }
@@ -2414,6 +2426,49 @@ mod tests {
                     "--hang".into()
                 ]
             }
+        );
+    }
+
+    #[test]
+    fn mcp_servers_include_the_disabled_ones_and_say_why() {
+        let workspace = make_temp_dir("mcp_status_disabled");
+        let provider = ScriptedProvider::new(Vec::new());
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        let (settings, _) = crate::Settings::from_toml(
+            "[mcp.servers.off]\ncommand = [\"off-mcp\", \"--port\", \"1\"]\nenabled = false\n\
+             [mcp.servers.github]\nurl = \"https://a.example/mcp\"\n\
+             headers = { Authorization = \"Bearer ${SOCIUM_TEST_UNSET_TOKEN}\" }",
+            None,
+        )
+        .unwrap();
+        service.install_settings(settings);
+
+        assert_eq!(
+            service.mcp_servers(),
+            [
+                crate::McpServerStatus {
+                    name: "github".into(),
+                    transport: crate::McpServerTransport::Remote {
+                        url: "https://a.example/mcp".into()
+                    },
+                    state: crate::McpServerState::Disabled {
+                        reason: crate::McpDisabled::UnsetVariable {
+                            setting: "headers.Authorization".into(),
+                            variable: "SOCIUM_TEST_UNSET_TOKEN".into(),
+                        }
+                    },
+                },
+                crate::McpServerStatus {
+                    name: "off".into(),
+                    transport: crate::McpServerTransport::Local {
+                        command: vec!["off-mcp".into(), "--port".into(), "1".into()]
+                    },
+                    state: crate::McpServerState::Disabled {
+                        reason: crate::McpDisabled::Setting
+                    },
+                },
+            ]
         );
     }
 
