@@ -153,7 +153,12 @@ fn of_type<'a>(records: &'a [Value], kind: &str) -> Vec<&'a Value> {
 fn a_turn_prints_only_versioned_json_lines_and_its_result() {
     let (port, bodies) = serve(vec![text_reply("hello from the fake model")]);
     let fixture = fixture(port);
-    let output = command(&fixture, &["-p", "say hello"]).output().unwrap();
+    let output = command(
+        &fixture,
+        &["-p", "say hello", "--output-format", "stream-json"],
+    )
+    .output()
+    .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     let records = records(&output);
@@ -181,7 +186,12 @@ fn a_call_that_needs_approval_is_refused_and_the_model_is_told_why() {
         text_reply("understood"),
     ]);
     let fixture = fixture(port);
-    let output = command(&fixture, &["-p", "make a file"]).output().unwrap();
+    let output = command(
+        &fixture,
+        &["-p", "make a file", "--output-format", "stream-json"],
+    )
+    .output()
+    .unwrap();
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -210,7 +220,9 @@ fn a_call_that_needs_approval_is_refused_and_the_model_is_told_why() {
 fn an_interrupt_cancels_the_turn_and_still_reports_it() {
     let (port, _) = serve(vec![Reply::Stall]);
     let fixture = fixture(port);
-    let mut child = command(&fixture, &["-p", "wait"]).spawn().unwrap();
+    let mut child = command(&fixture, &["--output-format", "stream-json", "-p", "wait"])
+        .spawn()
+        .unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut first = String::new();
     stdout.read_line(&mut first).unwrap();
@@ -247,9 +259,12 @@ fn a_plan_the_model_records_reaches_the_activity_lines_and_the_result() {
         text_reply("planned"),
     ]);
     let fixture = fixture(port);
-    let output = command(&fixture, &["-p", "fix the parser"])
-        .output()
-        .unwrap();
+    let output = command(
+        &fixture,
+        &["-p", "fix the parser", "--output-format", "stream-json"],
+    )
+    .output()
+    .unwrap();
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -279,6 +294,127 @@ fn a_plan_the_model_records_reaches_the_activity_lines_and_the_result() {
     assert_eq!(updated["event"]["plan"]["goal"], "Fix the parser");
     let finished = records.last().unwrap();
     assert_eq!(finished["plan"], updated["event"]["plan"]);
+}
+
+/// Runs the binary with `stdin` piped in instead of an empty input.
+fn with_stdin(mut command: Command, stdin: &str) -> Output {
+    let mut child = command.stdin(Stdio::piped()).spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn by_default_stdout_holds_only_the_reply_text() {
+    let (port, _) = serve(vec![text_reply("hello from the fake model")]);
+    let fixture = fixture(port);
+    let output = command(&fixture, &["-p", "say hello"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "hello from the fake model\n"
+    );
+    assert!(!stderr.contains("\"v\""), "{stderr}");
+}
+
+#[test]
+fn piped_stdin_comes_before_the_prompt_after_a_blank_line() {
+    let (port, bodies) = serve(vec![text_reply("summary")]);
+    let fixture = fixture(port);
+    let output = with_stdin(
+        command(&fixture, &["summarize this", "-p"]),
+        "line one\nline two\n",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        bodies.lock().unwrap()[0]["messages"][0]["content"],
+        "line one\nline two\n\nsummarize this"
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "summary\n");
+}
+
+#[test]
+fn piped_stdin_alone_is_the_prompt() {
+    let (port, bodies) = serve(vec![text_reply("hi")]);
+    let fixture = fixture(port);
+    let output = with_stdin(command(&fixture, &["-p"]), "say hi\n");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        bodies.lock().unwrap()[0]["messages"][0]["content"],
+        "say hi"
+    );
+}
+
+#[test]
+fn no_prompt_and_empty_stdin_is_a_usage_error() {
+    let fixture = fixture(1);
+    let output = command(&fixture, &["-p"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("the prompt is empty"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn json_output_is_the_finished_record_alone() {
+    let (port, _) = serve(vec![text_reply("hello")]);
+    let fixture = fixture(port);
+    let output = command(&fixture, &["-p", "say hello", "--output-format=json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = records(&output);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert_eq!(records[0]["v"], 1);
+    assert_eq!(records[0]["type"], "finished");
+    assert_eq!(records[0]["ok"], true);
+    assert_eq!(records[0]["text"], "hello");
+}
+
+#[test]
+fn a_failed_turn_in_text_mode_reports_the_error_on_stderr() {
+    let (port, _) = serve(vec![Reply::Events(vec![json!({
+        "type": "error",
+        "error": {"type": "invalid_request_error", "message": "the fake model refuses"}
+    })])]);
+    let fixture = fixture(port);
+    let output = command(&fixture, &["-p", "say hello"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        output.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with("socium: ") && line.contains("the fake model refuses")),
+        "{stderr}"
+    );
 }
 
 /// The directory of `program` on the test's PATH, resolved to the store

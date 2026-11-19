@@ -1,34 +1,38 @@
-//! `-p`: one turn without the terminal UI. Standard output carries only
-//! JSON Lines, one record per line, each with the schema version in `v`:
+//! `-p`: one turn without the terminal UI. Piped standard input comes
+//! before the prompt. What standard output carries depends on the format:
 //!
-//! - `started`: the session ID and the model;
-//! - `activity`: an `ActivityEvent` as the Activity pane and the session's
-//!   activity log record it;
-//! - `finished`: `ok`, the reply text or the error, notices, the plan, and the tokens
-//!   the turn used.
+//! - `text`, the default: the reply text alone; an error, notices, and
+//!   diagnostics go to standard error;
+//! - `stream-json`: JSON Lines, one record per line, each with the schema
+//!   version in `v`:
+//!   - `started`: the session ID and the model;
+//!   - `activity`: an `ActivityEvent` as the Activity pane and the session's
+//!     activity log record it;
+//!   - `finished`: `ok`, the reply text or the error, notices, the plan, and the tokens
+//!     the turn used;
+//! - `json`: the `finished` record alone.
 //!
 //! Diagnostics go to standard error. No one can answer an approval here, so
 //! a call that needs one is refused with a message that says how to allow
 //! it. Ctrl+C, or standard output closing, cancels the turn.
+use crate::cli::{OutputFormat, Print};
 use serde_json::{Value, json};
 use socium_core::{AgentError, AgentProgress, AgentService, SessionStart};
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 
 /// Exit status: 0 when the turn finished, 1 when it failed, 2 for a usage
 /// error, and 130 when it was cancelled.
-pub(crate) async fn main(start: SessionStart, prompt: &str) -> i32 {
-    let prompt = if prompt == "-" {
-        let mut text = String::new();
-        if let Err(err) = std::io::stdin().read_to_string(&mut text) {
-            eprintln!("socium: cannot read the prompt from stdin: {err}");
-            return 2;
-        }
-        text
-    } else {
-        prompt.to_string()
-    };
+pub(crate) async fn main(start: SessionStart, print: Print) -> i32 {
+    let mut stdin = String::new();
+    if !std::io::stdin().is_terminal()
+        && let Err(err) = std::io::stdin().read_to_string(&mut stdin)
+    {
+        eprintln!("socium: cannot read the prompt from stdin: {err}");
+        return 2;
+    }
+    let prompt = join_prompt(&stdin, print.prompt.as_deref());
     if prompt.trim().is_empty() {
         eprintln!("socium: the prompt is empty");
         return 2;
@@ -49,17 +53,33 @@ pub(crate) async fn main(start: SessionStart, prompt: &str) -> i32 {
             on_signal.cancel();
         }
     });
-    run(&mut agent, prompt, &mut std::io::stdout(), &mut |line| {
-        eprintln!("socium: {line}")
-    })
+    run(
+        &mut agent,
+        prompt,
+        print.format,
+        &mut std::io::stdout(),
+        &mut |line| eprintln!("socium: {line}"),
+    )
     .await
 }
 
-/// Runs `prompt` as one turn and writes its records to `out`. A write that
-/// fails, such as a closed pipe, cancels the turn.
+/// Piped input, a blank line, then the prompt; either alone when the other
+/// is missing. Line endings that close the piped input are dropped.
+fn join_prompt(stdin: &str, prompt: Option<&str>) -> String {
+    let stdin = stdin.trim_end_matches(['\r', '\n']);
+    match prompt {
+        Some(prompt) if !stdin.is_empty() => format!("{stdin}\n\n{prompt}"),
+        Some(prompt) => prompt.to_string(),
+        None => stdin.to_string(),
+    }
+}
+
+/// Runs `prompt` as one turn and writes what `format` asks for to `out`. A
+/// write that fails, such as a closed pipe, cancels the turn.
 pub(crate) async fn run(
     agent: &mut AgentService,
     prompt: String,
+    format: OutputFormat,
     out: &mut (dyn Write + Send),
     diagnostic: &mut dyn FnMut(&str),
 ) -> i32 {
@@ -68,40 +88,47 @@ pub(crate) async fn run(
     }
     let control = agent.task_control();
     let model = agent.active_model();
-    let mut emit = |record: Value| {
-        if writeln!(out, "{record}")
-            .and_then(|()| out.flush())
-            .is_err()
-        {
+    let mut emit = |line: &dyn std::fmt::Display| {
+        if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
             control.cancel();
         }
     };
-    emit(record(
-        "started",
-        json!({"session": agent.session_id(), "model": model.alias, "model_id": model.model_id}),
-    ));
+    let stream = format == OutputFormat::StreamJson;
+    if stream {
+        emit(&record(
+            "started",
+            json!({"session": agent.session_id(), "model": model.alias, "model_id": model.model_id}),
+        ));
+    }
     let result = agent
         .submit_with_progress(prompt, |event| {
-            if let AgentProgress::Activity(activity) = event {
-                emit(record("activity", json!({ "event": activity })));
+            if stream && let AgentProgress::Activity(activity) = event {
+                emit(&record("activity", json!({ "event": activity })));
             }
         })
         .await;
+    let status = match &result {
+        Ok(_) => 0,
+        Err(AgentError::Cancelled) => 130,
+        Err(_) => 1,
+    };
+    if format == OutputFormat::Text {
+        match &result {
+            Ok(reply) => {
+                for notice in &reply.notices {
+                    diagnostic(notice);
+                }
+                emit(&reply.text);
+            }
+            Err(err) => diagnostic(&err.to_string()),
+        }
+        return status;
+    }
     let (usage, cost) = agent.session_usage();
     let unreported_calls = agent.unreported_model_calls();
-    let (fields, status) = match &result {
-        Ok(reply) => (
-            json!({"ok": true, "text": reply.text, "notices": reply.notices}),
-            0,
-        ),
-        Err(err) => (
-            json!({"ok": false, "error": err.to_string()}),
-            if matches!(err, AgentError::Cancelled) {
-                130
-            } else {
-                1
-            },
-        ),
+    let fields = match &result {
+        Ok(reply) => json!({"ok": true, "text": reply.text, "notices": reply.notices}),
+        Err(err) => json!({"ok": false, "error": err.to_string()}),
     };
     let mut finished = record("finished", fields);
     finished["session"] = json!(agent.session_id());
@@ -111,7 +138,7 @@ pub(crate) async fn run(
     finished["unreported_calls"] = json!(unreported_calls);
     // The plan the session's `update_plan` calls left; null without one.
     finished["plan"] = json!(agent.plan());
-    emit(finished);
+    emit(&finished);
     status
 }
 

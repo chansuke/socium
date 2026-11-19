@@ -219,7 +219,8 @@ def run_turn(argv, repo, env, deadline, cost_cap, spent_so_far):
     deadline is cancelled (SIGINT, as Ctrl+C) rather than left to spend.
     A model without a price cannot be capped, so its run stops at once."""
     agent = subprocess.Popen(
-        argv, cwd=repo, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        argv, cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
     )
     records, stopped, spent, price = [], None, spent_so_far, None
     stderr = []
@@ -299,7 +300,7 @@ def run_task(name, task, binary, workdir, env):
     started = time.monotonic()
     records, statuses, stopped, spent, stderr = [], [], None, 0.0, ""
     for index, prompt in enumerate(task["turns"]):
-        argv = [binary, *(["-c"] if index else []), "-p", prompt]
+        argv = [binary, *(["-c"] if index else []), "-p", prompt, "--output-format", "stream-json"]
         turn, status, stopped, spent, err = run_turn(argv, repo, env, deadline, cap, spent)
         records += turn
         statuses.append(status)
