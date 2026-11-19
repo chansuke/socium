@@ -18,7 +18,7 @@ pub(crate) fn servers_text(servers: &[McpServerStatus]) -> String {
     ];
     for server in servers {
         let (kind, place) = match &server.transport {
-            McpServerTransport::Local { command } => ("local", command_line(command)),
+            McpServerTransport::Local { program } => ("local", program.clone()),
             McpServerTransport::Remote { url } => ("remote", url.clone()),
         };
         lines.push(String::new());
@@ -64,30 +64,15 @@ fn state_label(state: &McpServerState) -> String {
     }
 }
 
-/// The program and its arguments as one line, an argument with spaces or
-/// quotes in single quotes.
-fn command_line(argv: &[String]) -> String {
-    argv.iter()
-        .map(|arg| {
-            if !arg.is_empty() && !arg.contains(|c: char| c.is_whitespace() || "'\"".contains(c)) {
-                arg.clone()
-            } else {
-                format!("'{}'", arg.replace('\'', r"'\''"))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn local(name: &str, command: &[&str], state: McpServerState) -> McpServerStatus {
+    fn local(name: &str, program: &str, state: McpServerState) -> McpServerStatus {
         McpServerStatus {
             name: name.into(),
             transport: McpServerTransport::Local {
-                command: command.iter().map(|arg| arg.to_string()).collect(),
+                program: program.into(),
             },
             state,
         }
@@ -113,7 +98,7 @@ mod tests {
             ),
             local(
                 "gh",
-                &["gh-mcp"],
+                "gh-mcp",
                 McpServerState::Disabled {
                     reason: McpDisabled::UnsetVariable {
                         setting: "env.TOKEN".into(),
@@ -128,29 +113,29 @@ mod tests {
             ),
             local(
                 "missing",
-                &["no-such-mcp"],
+                "no-such-mcp",
                 McpServerState::Failed {
                     reason: "it stopped. Its last standard error lines:\nboom\nbye".into(),
                 },
             ),
             local(
                 "off",
-                &["off-mcp"],
+                "off-mcp",
                 McpServerState::Disabled {
                     reason: McpDisabled::Setting,
                 },
             ),
-            local("slow", &["slow-mcp"], McpServerState::Starting),
+            local("slow", "slow-mcp", McpServerState::Starting),
             local(
                 "time",
-                &["uvx", "mcp-server-time", "--local-timezone=Asia/Tokyo"],
+                "uvx",
                 McpServerState::Connected {
                     tools: vec!["get_current_time".into(), "convert_time".into()],
                 },
             ),
             local(
                 "quiet",
-                &["quiet-mcp"],
+                "quiet-mcp",
                 McpServerState::Connected { tools: Vec::new() },
             ),
         ]);
@@ -178,23 +163,10 @@ off · local · off-mcp · disabled (enabled = false)
 
 slow · local · slow-mcp · starting
 
-time · local · uvx mcp-server-time --local-timezone=Asia/Tokyo · connected, 2 tools
+time · local · uvx · connected, 2 tools
   tools: get_current_time, convert_time
 
 quiet · local · quiet-mcp · connected, 0 tools"
-        );
-    }
-
-    #[test]
-    fn arguments_with_spaces_or_quotes_are_quoted() {
-        assert_eq!(
-            command_line(&[
-                "node".into(),
-                "my server.js".into(),
-                "it's".into(),
-                "".into()
-            ]),
-            r"node 'my server.js' 'it'\''s' ''"
         );
     }
 

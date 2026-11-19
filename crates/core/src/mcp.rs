@@ -404,6 +404,23 @@ impl McpServer {
         Ok(initialized)
     }
 
+    /// How a server that started is doing when it no longer serves: it
+    /// exited, or it wants a login. `None` while it may still answer.
+    fn ended(&self) -> Option<McpServerState> {
+        match &self.transport {
+            Transport::Stdio(stdio) => {
+                let status = stdio.exited()?;
+                Some(McpServerState::Failed {
+                    reason: self.secrets.redact(&format!(
+                        "it exited after it started ({status}).{}",
+                        stdio.stderr_tail()
+                    )),
+                })
+            }
+            Transport::Http(http) => http.needs_login().then_some(McpServerState::NeedsLogin),
+        }
+    }
+
     /// Why the server did not start after it failed to `what`.
     fn not_started(&self, what: &str, err: RequestError, timeout: Duration) -> StartError {
         if let RequestError::NeedsLogin = err {
@@ -637,12 +654,13 @@ pub struct McpServerStatus {
     pub state: McpServerState,
 }
 
-/// Where a server runs. Only the command line or the URL: env and header
-/// values, tokens and client secrets are never part of it.
+/// Where a server runs. Only the program or the URL: arguments, which may
+/// hold a token, env and header values, and client secrets are never part
+/// of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpServerTransport {
-    /// A child process on the host.
-    Local { command: Vec<String> },
+    /// A child process on the host, by the program its command runs.
+    Local { program: String },
     /// A server over Streamable HTTP; settings reject a URL with
     /// credentials, a query, or a fragment.
     Remote { url: String },
@@ -652,7 +670,7 @@ impl McpServerTransport {
     pub(crate) fn of(settings: &McpTransportSettings) -> Self {
         match settings {
             McpTransportSettings::Stdio { command, .. } => Self::Local {
-                command: command.clone(),
+                program: command[0].clone(),
             },
             McpTransportSettings::Http { url, .. } => Self::Remote { url: url.clone() },
         }
@@ -1084,7 +1102,8 @@ pub(crate) struct McpRegistry {
     routes: HashMap<String, Route>,
     definitions: Vec<ToolDefinition>,
     notices: Notices,
-    statuses: Vec<McpServerStatus>,
+    /// With the index in `servers` of each server that started.
+    statuses: Vec<(McpServerStatus, Option<usize>)>,
 }
 
 impl McpRegistry {
@@ -1140,11 +1159,14 @@ impl McpRegistry {
                 Ok(connected) => connected,
                 Err(err) => {
                     warnings.push(err.warning(&settings.name));
-                    registry.statuses.push(McpServerStatus {
-                        name: settings.name.clone(),
-                        transport,
-                        state: err.state(),
-                    });
+                    registry.statuses.push((
+                        McpServerStatus {
+                            name: settings.name.clone(),
+                            transport,
+                            state: err.state(),
+                        },
+                        None,
+                    ));
                     continue;
                 }
             };
@@ -1213,11 +1235,14 @@ impl McpRegistry {
                     MAX_MCP_DEFINITION_BYTES / 1024
                 ));
             }
-            registry.statuses.push(McpServerStatus {
-                name: settings.name.clone(),
-                transport,
-                state: McpServerState::Connected { tools: offered },
-            });
+            registry.statuses.push((
+                McpServerStatus {
+                    name: settings.name.clone(),
+                    transport,
+                    state: McpServerState::Connected { tools: offered },
+                },
+                Some(index),
+            ));
             registry.servers.push(server);
         }
         (registry, warnings)
@@ -1233,20 +1258,37 @@ impl McpRegistry {
         let mut registry = Self::default();
         registry.statuses = servers
             .iter()
-            .map(|server| McpServerStatus {
-                name: server.name.clone(),
-                transport: McpServerTransport::of(&server.transport),
-                state: McpServerState::Failed {
+            .map(|server| {
+                let state = McpServerState::Failed {
                     reason: reason.to_string(),
-                },
+                };
+                let status = McpServerStatus {
+                    name: server.name.clone(),
+                    transport: McpServerTransport::of(&server.transport),
+                    state,
+                };
+                (status, None)
             })
             .collect();
         registry
     }
 
     /// How each server it was given ended up, in the order given.
-    pub(crate) fn statuses(&self) -> &[McpServerStatus] {
-        &self.statuses
+    /// A server that started shows how it is now: one that exited or that
+    /// wants a login since is no longer connected.
+    pub(crate) fn statuses(&self) -> Vec<McpServerStatus> {
+        self.statuses
+            .iter()
+            .map(
+                |(status, started)| match started.and_then(|index| self.servers[index].ended()) {
+                    Some(state) => McpServerStatus {
+                        state,
+                        ..status.clone()
+                    },
+                    None => status.clone(),
+                },
+            )
+            .collect()
     }
 
     /// The tools to offer the model.
@@ -1558,7 +1600,7 @@ pub(crate) mod tests {
         assert_eq!(
             statuses[0].transport,
             McpServerTransport::Local {
-                command: vec!["python3".into(), FAKE_SERVER.into()]
+                program: "python3".into()
             }
         );
         // The tool whose exposed name providers refuse is not counted.
@@ -1608,6 +1650,42 @@ pub(crate) mod tests {
             }
         );
         assert_eq!(statuses[3].state, McpServerState::NeedsLogin);
+    }
+
+    #[test]
+    fn a_server_that_exits_after_starting_is_no_longer_connected() {
+        let (registry, _) = connect_fake(&[fake_settings("fake", "", &[])]);
+        assert!(matches!(
+            registry.statuses()[0].state,
+            McpServerState::Connected { .. }
+        ));
+
+        call(&registry, "mcp__fake__die", json!({})).unwrap_err();
+
+        let McpServerState::Failed { reason } = &registry.statuses()[0].state else {
+            panic!("{:?}", registry.statuses());
+        };
+        assert!(
+            reason.starts_with("it exited after it started (exit status: 3)."),
+            "{reason}"
+        );
+        assert!(reason.contains("fatal: the database is gone"), "{reason}");
+    }
+
+    #[test]
+    fn a_failure_the_server_wrote_a_secret_into_is_blanked_in_the_status() {
+        let mut settings = fake_settings("crash", "--crash", &[]);
+        stdio(&mut settings)
+            .1
+            .insert("FAKE_SECRET".into(), "s3cret-value-123".into());
+
+        let (registry, _) = connect_fake(&[settings]);
+
+        let McpServerState::Failed { reason } = &registry.statuses()[0].state else {
+            panic!("{:?}", registry.statuses());
+        };
+        assert!(reason.contains("token=[redacted]"), "{reason}");
+        assert!(!reason.contains("s3cret"), "{reason}");
     }
 
     #[cfg(target_os = "linux")]

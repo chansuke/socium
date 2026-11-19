@@ -729,7 +729,7 @@ impl AgentService {
                 .collect(),
             McpStartup::Ready(registry) => registry
                 .as_ref()
-                .map(|registry| registry.statuses().to_vec())
+                .map(|registry| registry.statuses())
                 .unwrap_or_default(),
         };
         statuses.extend(
@@ -1744,7 +1744,6 @@ impl AgentService {
     {
         self.wait_for_sandbox()?;
         self.settle_mcp().await?;
-        let mcp_warnings = std::mem::take(&mut self.mcp_warnings);
         self.ensure_state_lock()?;
         if let Some(problem) = self.limit_problem() {
             return Err(Error::new(ErrorKind::InvalidInput, problem).into());
@@ -1784,7 +1783,12 @@ impl AgentService {
             .registry()
             .map(|registry| registry.take_notices())
             .unwrap_or_default();
-        for message in mcp_warnings.into_iter().chain(notices) {
+        // Taken only now, so a turn that failed before this still leaves
+        // them for the next one.
+        for message in std::mem::take(&mut self.mcp_warnings)
+            .into_iter()
+            .chain(notices)
+        {
             emit(&mut on_progress, ActivityKind::Warning { message });
         }
         if let Some(message) = self.reload_instructions() {
@@ -2420,11 +2424,7 @@ mod tests {
         assert_eq!(
             statuses[1].transport,
             crate::McpServerTransport::Local {
-                command: vec![
-                    "python3".into(),
-                    crate::mcp::tests::FAKE_SERVER.into(),
-                    "--hang".into()
-                ]
+                program: "python3".into()
             }
         );
     }
@@ -2462,7 +2462,7 @@ mod tests {
                 crate::McpServerStatus {
                     name: "off".into(),
                     transport: crate::McpServerTransport::Local {
-                        command: vec!["off-mcp".into(), "--port".into(), "1".into()]
+                        program: "off-mcp".into()
                     },
                     state: crate::McpServerState::Disabled {
                         reason: crate::McpDisabled::Setting
@@ -2482,7 +2482,7 @@ mod tests {
             (name == "SOCIUM_TEST_TOKEN").then(|| "s3cret-from-env".to_string())
         });
         let (settings, _) = crate::Settings::parse(
-            "[mcp.servers.local]\ncommand = [\"/nonexistent/mcp-server\"]\n\
+            "[mcp.servers.local]\ncommand = [\"/nonexistent/mcp-server\", \"--token\", \"s3cret-arg\"]\n\
              env = { TOKEN = \"${SOCIUM_TEST_TOKEN}\", PLAIN = \"s3cret-plain\" }\n\
              [mcp.servers.remote]\nurl = \"http://127.0.0.1:9/mcp\"\n\
              headers = { Authorization = \"Bearer s3cret-header\", X-Key = \"${SOCIUM_TEST_TOKEN}\" }\n\

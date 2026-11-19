@@ -921,7 +921,7 @@ fn mcp_server(
                 ));
             }
             let local = || McpServerTransport::Local {
-                command: command.clone(),
+                program: command[0].clone(),
             };
             if !raw.enabled {
                 return disabled(&name, local(), McpDisabled::Setting);
@@ -1339,7 +1339,7 @@ enabled = false
             [DisabledMcpServer {
                 name: "off".into(),
                 transport: crate::mcp::McpServerTransport::Local {
-                    command: vec!["off".into()]
+                    program: "off".into()
                 },
                 reason: crate::mcp::McpDisabled::Setting,
             }]
@@ -1372,7 +1372,7 @@ enabled = false
             [DisabledMcpServer {
                 name: "github".into(),
                 transport: crate::mcp::McpServerTransport::Local {
-                    command: vec!["gh-mcp".into()]
+                    program: "gh-mcp".into()
                 },
                 reason: crate::mcp::McpDisabled::UnsetVariable {
                     setting: "env.TOKEN".into(),

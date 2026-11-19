@@ -89,6 +89,8 @@ struct Connection {
     protocol_version: Mutex<Option<HeaderValue>>,
     /// Permits for answers to the server's requests.
     answers: Arc<tokio::sync::Semaphore>,
+    /// Set once the server refused Socium for want of a login.
+    login_needed: std::sync::atomic::AtomicBool,
 }
 
 /// The clients for an MCP server and its authorization server. They follow
@@ -236,6 +238,7 @@ impl HttpTransport {
             session: Mutex::new(None),
             protocol_version: Mutex::new(None),
             answers: Arc::new(tokio::sync::Semaphore::new(SERVER_ANSWERS)),
+            login_needed: std::sync::atomic::AtomicBool::new(false),
         });
         let (commands, receiver) = unbounded_channel();
         let (finished_sender, finished) = mpsc::channel();
@@ -300,6 +303,14 @@ impl HttpTransport {
             Err(mpsc::RecvTimeoutError::Timeout) => Err(RequestError::TimedOut),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(RequestError::Gone),
         }
+    }
+
+    /// Whether the server has refused Socium for want of a login since it
+    /// started.
+    pub(super) fn needs_login(&self) -> bool {
+        self.connection
+            .login_needed
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Sends `MCP-Protocol-Version: <version>` from now on; `version` is
@@ -367,6 +378,19 @@ impl Connection {
     /// tries once more after a 401. An error is a phrase that follows "it",
     /// and never holds a header value.
     async fn send(&self, method: Method, body: Option<&Value>) -> Result<Response, RequestError> {
+        let sent = self.exchange(method, body).await;
+        if let Err(RequestError::NeedsLogin) = &sent {
+            self.login_needed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        sent
+    }
+
+    async fn exchange(
+        &self,
+        method: Method,
+        body: Option<&Value>,
+    ) -> Result<Response, RequestError> {
         let mut renewed = false;
         loop {
             let bearer = match &self.auth {
