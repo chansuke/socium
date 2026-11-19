@@ -118,7 +118,7 @@ pub(crate) async fn run(
                 for notice in &reply.notices {
                     diagnostic(notice);
                 }
-                emit(&reply.text);
+                emit(&printable(&reply.text));
             }
             Err(err) => diagnostic(&err.to_string()),
         }
@@ -140,6 +140,15 @@ pub(crate) async fn run(
     finished["plan"] = json!(agent.plan());
     emit(&finished);
     status
+}
+
+/// `text` without the control characters a terminal acts on, such as escape
+/// sequences that set the title or write to the clipboard. Tabs and line
+/// breaks stay; `\r\n` becomes `\n`.
+fn printable(text: &str) -> String {
+    text.chars()
+        .filter(|c| matches!(c, '\n' | '\t') || !c.is_control())
+        .collect()
 }
 
 fn record(kind: &str, fields: Value) -> Value {

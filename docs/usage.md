@@ -164,7 +164,8 @@ limits, editing guarantees, migration, and recovery procedures.
 ## Running without the TUI
 
 `socium -p "<prompt>"` runs one turn without the terminal UI and prints the
-reply text on standard output. Text piped into it comes before the prompt,
+reply text on standard output, without control characters other than tabs
+and line breaks, so a reply cannot drive the terminal. Text piped into it comes before the prompt,
 separated by a blank line, so `git diff | socium -p "review this"` works; the
 piped text alone is also a prompt. Errors, notices, and diagnostics go to
 standard error.
