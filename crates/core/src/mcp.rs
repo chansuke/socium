@@ -1,12 +1,15 @@
-//! A client for MCP servers the user configured in `config.toml` (ADR 20):
-//! each server runs on the host as a child process that speaks
-//! newline-delimited JSON-RPC on stdin and stdout, and its tools are offered
-//! to the main agent as `mcp__<server>__<tool>`.
+//! A client for MCP servers the user configured in `config.toml` (ADR 20,
+//! ADR 21): a server with `command` runs on the host as a child process
+//! that speaks newline-delimited JSON-RPC on stdin and stdout, and one with
+//! `url` is reached over Streamable HTTP ([`http`]). Their tools are
+//! offered to the main agent as `mcp__<server>__<tool>`.
 //!
-//! Only tools are used. A server starts in `/`, finds its program on a PATH
+//! Only tools are used. A child starts in `/`, finds its program on a PATH
 //! without the workspace in it, and gets a fixed environment (PATH, HOME,
 //! USER, LANG and what its table sets), so the workspace cannot choose the
 //! code that runs and provider keys never reach it.
+
+mod http;
 
 use crate::TaskControl;
 use crate::settings::{McpServerSettings, McpTransportSettings};
@@ -91,6 +94,7 @@ pub(crate) struct McpServer {
 
 enum Transport {
     Stdio(StdioTransport),
+    Http(http::HttpTransport),
 }
 
 impl Transport {
@@ -99,6 +103,7 @@ impl Transport {
     fn send(&self, id: u64, message: &Value) -> Result<mpsc::Receiver<Reply>, RequestError> {
         match self {
             Self::Stdio(stdio) => stdio.send(id, message),
+            Self::Http(http) => http.send(id, message),
         }
     }
 
@@ -106,14 +111,25 @@ impl Transport {
     fn forget(&self, id: u64) {
         match self {
             Self::Stdio(stdio) => stdio.forget(id),
+            Self::Http(http) => http.forget(id),
         }
     }
 
     /// Sends a notification. With a deadline, waits until the server took
     /// it, where the transport can tell.
-    fn notify(&self, message: &Value, _deadline: Option<Instant>) -> Result<(), RequestError> {
+    fn notify(&self, message: &Value, deadline: Option<Instant>) -> Result<(), RequestError> {
         match self {
             Self::Stdio(stdio) => stdio.queue(message),
+            Self::Http(http) => http.notify(message, deadline),
+        }
+    }
+
+    /// Where a remote server is, as `scheme://host[:port]`; `None` for a
+    /// child process.
+    fn origin(&self) -> Option<&str> {
+        match self {
+            Self::Stdio(_) => None,
+            Self::Http(http) => Some(http.origin()),
         }
     }
 
@@ -121,6 +137,7 @@ impl Transport {
     fn exit_status(&self) -> String {
         match self {
             Self::Stdio(stdio) => stdio.exit_status(),
+            Self::Http(_) => String::new(),
         }
     }
 
@@ -129,13 +146,16 @@ impl Transport {
     fn stderr_tail(&self) -> String {
         match self {
             Self::Stdio(stdio) => stdio.stderr_tail(),
+            Self::Http(_) => String::new(),
         }
     }
 
-    /// Starts stopping: a child's input closes, which tells it to exit.
+    /// Starts stopping: a child's input closes, which tells it to exit. A
+    /// remote session ends when its transport is dropped.
     fn close(&self) {
         match self {
             Self::Stdio(stdio) => stdio.close_input(),
+            Self::Http(_) => {}
         }
     }
 }
@@ -150,6 +170,8 @@ enum RequestError {
     Refused(String),
     /// A response that is neither a result nor an error.
     Malformed,
+    /// The HTTP exchange failed, as a phrase that follows "it".
+    Transport(String),
 }
 
 /// When a request stops waiting for its response.
@@ -223,11 +245,8 @@ impl McpServer {
             McpTransportSettings::Stdio { command, env } => Transport::Stdio(
                 StdioTransport::spawn(&settings.name, command, env, workspace_root, host_env)?,
             ),
-            McpTransportSettings::Http { .. } => {
-                return Err(format!(
-                    "MCP server {} was not started: remote servers are not supported yet.",
-                    settings.name
-                ));
+            McpTransportSettings::Http { url, headers } => {
+                Transport::Http(http::HttpTransport::start(&settings.name, url, headers)?)
             }
         };
         let server = Self {
@@ -244,6 +263,7 @@ impl McpServer {
                 }
                 RequestError::Refused(message) => format!("refused to {what}: {message}"),
                 RequestError::Malformed => format!("sent a malformed answer when asked to {what}"),
+                RequestError::Transport(message) => message,
                 RequestError::Gone | RequestError::Cancelled => {
                     format!(
                         "stopped before it could {what}{}",
@@ -251,8 +271,12 @@ impl McpServer {
                     )
                 }
             };
+            let at = match server.transport.origin() {
+                Some(origin) => format!(" at {origin}"),
+                None => String::new(),
+            };
             server.secrets.redact(&format!(
-                "MCP server {} was not started: it {reason}.{}",
+                "MCP server {}{at} was not started: it {reason}.{}",
                 server.name,
                 server.transport.stderr_tail()
             ))
@@ -283,6 +307,9 @@ impl McpServer {
                     PROTOCOL_VERSIONS.join(", ")
                 ),
             ));
+        }
+        if let Transport::Http(http) = &server.transport {
+            http.negotiated(version);
         }
         server
             .notify("notifications/initialized", None, Some(wait.deadline))
@@ -439,6 +466,9 @@ impl McpServer {
                         "The {} MCP server sent a malformed answer, {unknown}",
                         self.name
                     ),
+                    RequestError::Transport(message) => {
+                        format!("The {} MCP server {message}", self.name)
+                    }
                     // A child's standard error stays out: it is for the
                     // user, and may hold what the server was given.
                     RequestError::Gone => format!(
@@ -1081,6 +1111,7 @@ pub(crate) mod tests {
                 "mcp__fake__empty",
                 "mcp__fake__batch",
                 "mcp__fake__secret",
+                "mcp__fake__expire",
             ]
         );
         assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -1243,7 +1274,9 @@ pub(crate) mod tests {
     #[test]
     fn dropping_the_registry_ends_the_server() {
         let (registry, _) = connect_fake(&[fake_settings("fake", "", &[])]);
-        let Transport::Stdio(stdio) = &registry.servers[0].transport;
+        let Transport::Stdio(stdio) = &registry.servers[0].transport else {
+            unreachable!("a child process");
+        };
         let pid = lock(&stdio.child).id();
         assert!(Path::new(&format!("/proc/{pid}")).exists());
 
@@ -1334,7 +1367,9 @@ pub(crate) mod tests {
     #[test]
     fn a_server_that_stops_reading_does_not_hold_up_cancelling_or_stopping() {
         let (registry, _) = connect_fake(&[fake_settings("fake", "", &[])]);
-        let Transport::Stdio(stdio) = &registry.servers[0].transport;
+        let Transport::Stdio(stdio) = &registry.servers[0].transport else {
+            unreachable!("a child process");
+        };
         let pid = lock(&stdio.child).id();
         let deaf = registry
             .call(
@@ -1582,5 +1617,251 @@ pub(crate) mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "x".repeat(STDERR_LINE_CHARS));
         assert_eq!(lines[1], "last words");
+    }
+
+    /// The fake server in its HTTP mode, stopped when dropped.
+    pub(crate) struct FakeHttpServer {
+        child: Child,
+        pub(crate) url: String,
+        log: std::path::PathBuf,
+        _dir: tempfile::TempDir,
+    }
+
+    impl FakeHttpServer {
+        pub(crate) fn start(options: &[&str]) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("requests.jsonl");
+            let mut child = Command::new("python3")
+                .arg(FAKE_SERVER)
+                .arg("--http")
+                .arg(format!("--log={}", log.display()))
+                .args(options)
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let port = line.trim().strip_prefix("PORT ").expect("a port");
+            Self {
+                child,
+                url: format!("http://127.0.0.1:{port}/mcp"),
+                log,
+                _dir: dir,
+            }
+        }
+
+        pub(crate) fn settings(
+            &self,
+            name: &str,
+            headers: &[(&str, &str)],
+            allow: &[&str],
+        ) -> McpServerSettings {
+            McpServerSettings {
+                name: name.into(),
+                transport: McpTransportSettings::Http {
+                    url: self.url.clone(),
+                    headers: headers
+                        .iter()
+                        .map(|(name, value)| (name.to_string(), value.to_string()))
+                        .collect(),
+                },
+                allow: allow.iter().map(|tool| tool.to_string()).collect(),
+                tool_timeout: Duration::from_secs(600),
+            }
+        }
+
+        /// One entry per HTTP request the server received.
+        fn requests(&self) -> Vec<Value> {
+            std::fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        }
+    }
+
+    impl Drop for FakeHttpServer {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    const STREAMS: [&[&str]; 2] = [&[], &["--sse"]];
+
+    #[test]
+    fn a_remote_server_answers_in_json_bodies_and_in_event_streams() {
+        for options in STREAMS {
+            let fake = FakeHttpServer::start(options);
+            let (registry, warnings) = connect_fake(&[fake.settings("fake", &[], &["echo"])]);
+
+            assert_eq!(warnings.len(), 1, "{options:?}: {warnings:?}");
+            assert!(warnings[0].contains("`bad.name`"), "{warnings:?}");
+            assert_eq!(registry.definitions().len(), 16, "{options:?}");
+            assert_eq!(
+                registry.definitions()[0].input_schema["required"],
+                json!(["text"])
+            );
+            assert_eq!(
+                call(&registry, "mcp__fake__echo", json!({"text": "hi"})),
+                Ok("echo: hi".into())
+            );
+            assert_eq!(
+                call(&registry, "mcp__fake__fail", json!({})),
+                Err("it broke".into())
+            );
+            assert_eq!(
+                call(&registry, "mcp__fake__image", Value::Null),
+                Ok("a chart\n[image content omitted]".into())
+            );
+            assert_eq!(
+                call(&registry, "mcp__fake__structured", json!({})),
+                Ok(r#"{"temperature":21}"#.into())
+            );
+            // A ping inside the call's event stream was answered.
+            let pings = if options.is_empty() { "[]" } else { "[{}]" };
+            assert_eq!(
+                call(&registry, "mcp__fake__pong", json!({})),
+                Ok(pings.into())
+            );
+
+            let requests = fake.requests();
+            assert_eq!(
+                (
+                    &requests[0]["rpc"],
+                    &requests[0]["session"],
+                    &requests[0]["version"]
+                ),
+                (&json!("initialize"), &Value::Null, &Value::Null)
+            );
+            assert_eq!(requests[1]["rpc"], "notifications/initialized");
+            for request in &requests[1..] {
+                assert_eq!(request["session"], "session-1", "{request}");
+                // The version the server chose, not the one Socium offered.
+                assert_eq!(request["version"], "2025-03-26", "{request}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancelled_remote_call_returns_promptly_and_the_server_is_told() {
+        for options in STREAMS {
+            let fake = FakeHttpServer::start(options);
+            let (registry, _) = connect_fake(&[fake.settings("fake", &[], &[])]);
+            let control = TaskControl::default();
+            let canceller = control.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                canceller.cancel();
+            });
+
+            let started = Instant::now();
+            let result = registry
+                .call("mcp__fake__slow", &json!({}), &control)
+                .unwrap();
+
+            assert!(started.elapsed() < Duration::from_secs(5), "{options:?}");
+            let err = result.unwrap_err().to_string();
+            assert!(err.starts_with("Cancelled"), "{err}");
+            // The notification travels on its own; give it a moment.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let told = call(&registry, "mcp__fake__cancelled", json!({}));
+                if told == Ok("4".into()) || Instant::now() > deadline {
+                    assert_eq!(told, Ok("4".into()), "{options:?}");
+                    break;
+                }
+                std::thread::sleep(POLL);
+            }
+        }
+    }
+
+    #[test]
+    fn a_remote_server_that_needs_a_token_gets_it_only_from_the_headers() {
+        let fake = FakeHttpServer::start(&["--token=s3cret-token"]);
+        let unreachable = McpServerSettings {
+            transport: McpTransportSettings::Http {
+                url: "http://127.0.0.1:9/mcp".into(),
+                headers: BTreeMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer unused-s3cret".to_string(),
+                )]),
+            },
+            ..fake.settings("gone", &[], &[])
+        };
+
+        let (registry, warnings) = connect_fake(&[
+            fake.settings("anonymous", &[], &[]),
+            fake.settings("wrong", &[("Authorization", "Bearer wrong-s3cret")], &[]),
+            unreachable,
+            fake.settings("right", &[("Authorization", "Bearer s3cret-token")], &[]),
+        ]);
+
+        assert!(registry.target("mcp__right__echo").is_some());
+        assert!(registry.target("mcp__wrong__echo").is_none());
+        let warnings = warnings
+            .into_iter()
+            .filter(|warning| !warning.contains("bad.name"))
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        let origin = fake.url.trim_end_matches("/mcp");
+        assert!(
+            warnings[0].starts_with(&format!("MCP server anonymous at {origin} was not started: it needs authorization (HTTP 401)"))
+                && warnings[0].contains("does not support OAuth"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[1].contains("needs authorization"),
+            "{}",
+            warnings[1]
+        );
+        assert!(
+            warnings[2].starts_with(
+                "MCP server gone at http://127.0.0.1:9 was not started: it could not be reached"
+            ),
+            "{}",
+            warnings[2]
+        );
+        assert_eq!(
+            call(&registry, "mcp__right__echo", json!({"text": "hi"})),
+            Ok("echo: hi".into())
+        );
+        call(&registry, "mcp__right__expire", json!({})).unwrap();
+        let expired = call(&registry, "mcp__right__echo", json!({"text": "hi"})).unwrap_err();
+        for text in warnings.iter().chain([&expired]) {
+            assert!(!text.contains("s3cret"), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_expired_remote_session_is_an_error_that_names_the_server() {
+        let fake = FakeHttpServer::start(&["--sse"]);
+        let (registry, _) = connect_fake(&[fake.settings("fake", &[], &[])]);
+
+        call(&registry, "mcp__fake__expire", json!({})).unwrap();
+        let err = call(&registry, "mcp__fake__echo", json!({"text": "x"})).unwrap_err();
+
+        assert_eq!(
+            err,
+            "The fake MCP server ended the session (HTTP 404); reload the settings or restart Socium to start a new one"
+        );
+    }
+
+    #[test]
+    fn dropping_the_registry_ends_the_remote_session() {
+        let fake = FakeHttpServer::start(&[]);
+        let (registry, _) = connect_fake(&[fake.settings("fake", &[], &[])]);
+
+        drop(registry);
+
+        let requests = fake.requests();
+        let last = requests.last().unwrap();
+        assert_eq!(
+            (&last["http"], &last["session"]),
+            (&json!("DELETE"), &json!("session-1"))
+        );
     }
 }
