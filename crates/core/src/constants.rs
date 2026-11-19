@@ -101,6 +101,9 @@ pub const PLAN_NUDGE_ROUNDS: usize = 8;
 // tool loop and returns only the final report, cut to this many characters.
 pub const AGENT_TOOL_NAME: &str = "agent";
 pub const MAX_SUBAGENT_REPORT_CHARACTERS: usize = 20_000;
+/// Read-only subagents from one response that run at once; the rest wait
+/// for a free turn, so a long run cannot open unbounded model streams.
+pub const MAX_CONCURRENT_SUBAGENTS: usize = 4;
 /// What every subagent is told before its type's instructions.
 pub const SUBAGENT_FRAMING: &str = "You are a subagent of Socium, a coding agent, working inside the user's current workspace. Another agent delegated one task to you; you cannot see its conversation, and it sees only your final message. If your task names a step of that agent's plan, say in your report whether it is done and what is left.";
 pub const SUBAGENT_EXPLORER_INSTRUCTIONS: &str = "Your tools are read-only: read, list, and search files and inspect Git history, but never try to change anything. Search broadly first, then read what matters; stop as soon as you can answer. Finish with a concise, self-contained report that answers the task, citing exact locations as path:line (for example src/main.rs:42), and say plainly what you could not find or verify.";

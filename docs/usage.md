@@ -100,7 +100,7 @@ asked. You can add your own types; see
 - Subagents cannot start subagents, and the main agent waits for them. New
   subagents of types that cannot change the workspace (such as `explorer`),
   called one after another in the same response, run at the same time, tool
-  calls included; others run one at a time.
+  calls included, up to four at once; others run one at a time.
 - Each subagent's steps appear in the Activity pane under its own `agent` call,
   marked with `│`, and its repeated calls and silent rounds are counted apart
   from the other agents'.
