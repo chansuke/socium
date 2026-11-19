@@ -62,7 +62,26 @@ impl ResponsesStreamBuilder {
         }
         let event: Value = serde_json::from_str(data)?;
         let output_index = event["output_index"].as_u64().unwrap_or(0);
-        match event["type"].as_str().unwrap_or_default() {
+        let kind = event["type"].as_str().unwrap_or_default();
+        // Nothing may follow the end: no more output, and no second end
+        // that would change how the response stopped.
+        if self.outcome.is_some() && kind.starts_with("response.") {
+            return Err(ProviderError::Stream(format!(
+                "Response sent {kind} after it ended"
+            )));
+        }
+        // A finished item is settled; a delta after it would change it.
+        if kind.ends_with(".delta")
+            && self
+                .items
+                .iter()
+                .any(|state| state.output_index == output_index && state.finished)
+        {
+            return Err(ProviderError::Stream(format!(
+                "Output item {output_index} changed after it ended"
+            )));
+        }
+        match kind {
             "response.output_item.added" => {
                 self.item(output_index, &event["item"], emit);
             }
@@ -113,8 +132,19 @@ impl ResponsesStreamBuilder {
                 self.refusal
                     .push_str(event["delta"].as_str().unwrap_or_default());
             }
-            "response.output_item.done" => self.finish_item(output_index, &event["item"], emit),
+            "response.output_item.done" => self.finish_item(output_index, &event["item"], emit)?,
             "response.completed" => {
+                // A call whose item never finished may hold cut arguments,
+                // so a response that says it completed is not trusted to run
+                // it.
+                if let Some(name) = self.items.iter().find_map(|state| match &state.kind {
+                    ItemKind::FunctionCall { name, .. } if !state.finished => Some(name),
+                    _ => None,
+                }) {
+                    return Err(ProviderError::Stream(format!(
+                        "Response completed before its {name} call finished"
+                    )));
+                }
                 self.usage = parse_usage(&event["response"]["usage"]);
                 self.outcome = Some(Outcome::Completed);
             }
@@ -231,7 +261,7 @@ impl ResponsesStreamBuilder {
         output_index: u64,
         item: &Value,
         emit: &mut impl FnMut(ProviderEvent),
-    ) {
+    ) -> Result<(), ProviderError> {
         if item["type"] == "message" {
             let mut text = String::new();
             for part in item["content"].as_array().into_iter().flatten() {
@@ -258,8 +288,30 @@ impl ResponsesStreamBuilder {
             }
         }
         let Some(state) = self.item(output_index, item, emit) else {
-            return;
+            return Ok(());
         };
+        let started_as = match state.kind {
+            ItemKind::Message { .. } => "message",
+            ItemKind::Reasoning { .. } => "reasoning",
+            ItemKind::FunctionCall { .. } => "function_call",
+        };
+        // Only one end of the item's own type, complete, settles it; a call
+        // settled any other way may hold cut arguments.
+        let status = item.get("status");
+        if state.finished
+            || item["type"] != started_as
+            || (started_as == "function_call" && status.is_some_and(|status| status != "completed"))
+        {
+            return Err(ProviderError::Stream(format!(
+                "Output item {output_index} ({started_as}) ended as {} {}",
+                item["type"].as_str().unwrap_or("unknown"),
+                if state.finished {
+                    "a second time".to_string()
+                } else {
+                    status.map(Value::to_string).unwrap_or_default()
+                }
+            )));
+        }
         match &mut state.kind {
             ItemKind::Message { .. } => {}
             ItemKind::Reasoning {
@@ -305,6 +357,7 @@ impl ResponsesStreamBuilder {
             state.finished = true;
             emit(ProviderEvent::BlockFinished { index: state.block });
         }
+        Ok(())
     }
 
     /// Closes the open blocks, reports the stop reason in Anthropic's terms,
@@ -761,6 +814,106 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(err.contains("before it completed"), "{err}");
+    }
+
+    #[test]
+    fn a_completed_response_with_an_unfinished_call_fails() {
+        // Arguments that streamed but whose item never finished may be cut,
+        // so the call is not run.
+        let mut events = function_call_events(0, r#"{"path":"README.md"}"#);
+        events.pop();
+        events.push(completed());
+        let err = run(&events).0.err().unwrap().to_string();
+        assert!(err.contains("read_file"), "{err}");
+    }
+
+    #[test]
+    fn a_call_ended_by_another_item_or_left_incomplete_fails() {
+        for done in [
+            json!({"type": "response.output_item.done", "output_index": 0,
+                "item": {"type": "message", "content": []}}),
+            json!({"type": "response.output_item.done", "output_index": 0,
+                "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                    "name": "read_file", "arguments": r#"{"path":"a"}"#, "status": "incomplete"}}),
+            json!({"type": "response.output_item.done", "output_index": 0,
+                "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                    "name": "read_file", "arguments": r#"{"path":"a"}"#, "status": "in_progress"}}),
+            json!({"type": "response.output_item.done", "output_index": 0,
+                "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                    "name": "read_file", "arguments": r#"{"path":"a"}"#, "status": 1}}),
+        ] {
+            let mut events = function_call_events(0, r#"{"path":"a"}"#);
+            *events.last_mut().unwrap() = done;
+            events.push(completed());
+            let err = run(&events).0.err().unwrap().to_string();
+            assert!(err.contains("item 0"), "{err}");
+        }
+        // The other way round: a call's end where a message started.
+        let mut events = message_events(0, "hi");
+        *events.last_mut().unwrap() = function_call_events(0, "{}").pop().unwrap();
+        events.push(completed());
+        let err = run(&events).0.err().unwrap().to_string();
+        assert!(err.contains("item 0"), "{err}");
+    }
+
+    #[test]
+    fn text_or_reasoning_after_its_item_ended_fails() {
+        for late in [
+            json!({"type": "response.output_text.delta", "output_index": 0, "delta": "more"}),
+            json!({"type": "response.reasoning_summary_text.delta", "output_index": 0,
+                "summary_index": 0, "delta": "more"}),
+        ] {
+            let mut events = message_events(0, "hi");
+            if late["type"] == "response.reasoning_summary_text.delta" {
+                events = reasoning_events(Some("opaque"));
+            }
+            events.push(late);
+            events.push(completed());
+            let err = run(&events).0.err().unwrap().to_string();
+            assert!(err.contains("item 0"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_call_changed_after_it_ended_fails() {
+        // Arguments after the call's end, and a second end.
+        let mut events = function_call_events(0, r#"{"path":"a"}"#);
+        events.push(json!({"type": "response.function_call_arguments.delta",
+            "output_index": 0, "item_id": "fc_1", "delta": "x"}));
+        events.push(completed());
+        let err = run(&events).0.err().unwrap().to_string();
+        assert!(err.contains("item 0"), "{err}");
+
+        let mut events = function_call_events(0, r#"{"path":"a"}"#);
+        events.push(events.last().unwrap().clone());
+        events.push(completed());
+        let err = run(&events).0.err().unwrap().to_string();
+        assert!(err.contains("item 0"), "{err}");
+    }
+
+    #[test]
+    fn output_after_the_response_ended_fails() {
+        let mut events = function_call_events(0, r#"{"path":"README.md"}"#);
+        let done = events.last().unwrap().clone();
+        events.push(completed());
+        events.push(done);
+        let err = run(&events).0.err().unwrap().to_string();
+        assert!(err.contains("after it ended"), "{err}");
+
+        let mut events = message_events(0, "hi");
+        events.push(completed());
+        events.push(
+            json!({"type": "response.output_text.delta", "output_index": 0, "delta": "more"}),
+        );
+        let err = run(&events).0.err().unwrap().to_string();
+        assert!(err.contains("after it ended"), "{err}");
+
+        // A second end cannot turn an unsafe stop into a completed one.
+        let mut events = message_events(0, "hi");
+        events.push(incomplete("content_filter"));
+        events.push(completed());
+        let err = run(&events).0.err().unwrap().to_string();
+        assert!(err.contains("after it ended"), "{err}");
     }
 
     #[test]
