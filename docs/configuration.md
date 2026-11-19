@@ -163,8 +163,8 @@ workspace Socium opens, and startup lists what it adds.
   an `allow` prefix, commands run without asking in a narrower sandbox: files
   that hold secrets read as empty, and files the host runs on its own cannot
   change. `deny` prefixes are always refused. Commits always ask, with the diff.
-- Edits to files a host tool runs or loads by itself (`build.rs`, `.envrc`,
-  `flake.nix`, `.cargo/config.toml`, `.vscode/`, `.github/workflows/`, Git hook
+- Edits to files a host tool runs or loads by itself (`build.rs`, `Cargo.toml`,
+  `Cargo.lock`, `.envrc`, `flake.nix`, `.cargo/config.toml`, `.vscode/`, `.github/workflows/`, Git hook
   managers, and similar) always ask, and so do reads of files that commonly
   hold credentials (`.env`, `.netrc`, `*.pem`, SSH keys, `auth.json`,
   `credentials.json`, and similar); `protected`
