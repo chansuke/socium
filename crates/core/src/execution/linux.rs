@@ -330,9 +330,11 @@ pub(super) fn command(
     // Intentionally no inherited environment, including credentials, proxies,
     // agent sockets, loader variables and Git execution/configuration overrides.
     // The user's own sandbox.env settings are the only additions; settings
-    // validation keeps them away from PATH, HOME, TMPDIR and GIT_*.
+    // validation keeps them away from PATH, HOME, TMPDIR and GIT_*. bwrap sets
+    // them in the child, so a loader variable such as LD_PRELOAD never reaches
+    // bwrap itself, which runs on the host before any isolation exists.
     for (name, value) in &policy.env {
-        cmd.env(name, value);
+        cmd.arg("--setenv").arg(name).arg(value);
     }
     cmd.arg("--seccomp")
         .arg(filter.as_raw_fd().to_string())

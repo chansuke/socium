@@ -554,6 +554,32 @@ fn user_mounts_path_and_env_reach_commands_read_only() {
     assert!(SandboxExecutor::command(&plain, &["hello-tool".into()], root.path()).is_err());
 }
 
+/// sandbox.env reaches the command only, never bwrap itself: a loader
+/// variable such as LD_PRELOAD in bwrap's own environment would load code on
+/// the host before any isolation exists. LD_DEBUG_OUTPUT names a host
+/// directory the sandbox cannot write, so a log there comes from bwrap.
+#[test]
+fn user_env_skips_the_host_side_launcher() {
+    let root = tempfile::tempdir().unwrap();
+    let host = tempfile::tempdir().unwrap();
+    let mut policy = ExecutionPolicy::new(root.path(), WorkspaceAccess::Write).unwrap();
+    policy.env = vec![
+        ("LD_DEBUG".into(), "files".into()),
+        (
+            "LD_DEBUG_OUTPUT".into(),
+            host.path().join("ld").display().to_string(),
+        ),
+        ("TOOL_SETTING".into(), "inside".into()),
+    ];
+    let output = run_with(&policy, root.path(), &["sh", "-c", "echo $TOOL_SETTING"], 5);
+    let logs = fs::read_dir(host.path()).unwrap().count();
+    assert_eq!(logs, 0, "the host-side bwrap read sandbox.env");
+    // The child's own loader also logs, to its output since the host
+    // directory is out of its reach; only the variable's arrival matters.
+    assert!(String::from_utf8_lossy(&output.stdout).contains("inside\n"));
+    success(output);
+}
+
 #[test]
 fn hidden_files_read_empty_and_frozen_paths_refuse_writes() {
     let root = tempfile::tempdir().unwrap();
