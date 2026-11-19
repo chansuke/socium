@@ -455,3 +455,16 @@ fn a_missing_ripgrep_is_named_at_startup() {
     );
     assert!(!stderr.contains("git is not installed"), "{stderr}");
 }
+
+#[test]
+fn version_prints_the_package_version() {
+    let output = Command::new(env!("CARGO_BIN_EXE_socium"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("socium {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}

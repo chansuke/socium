@@ -177,9 +177,7 @@ def ask_once(agent, binary):
 def version_ms(binary):
     with tempfile.TemporaryDirectory(prefix="agent-bench-") as home:
         started = time.perf_counter()
-        # Socium has no --version; --help does as little.
-        flag = "--help" if Path(binary).name == "socium" else "--version"
-        subprocess.run([binary, flag], capture_output=True, timeout=60,
+        subprocess.run([binary, "--version"], capture_output=True, timeout=60,
                        env={"PATH": os.environ.get("PATH", ""), "HOME": home})
         return round((time.perf_counter() - started) * 1000, 1)
 
