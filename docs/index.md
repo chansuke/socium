@@ -13,6 +13,7 @@ Start with the [README](../README.md) for installation, then [Using Socium](usag
 - [Public release review](public-release-review.md): cleanup, security findings, checks, and remaining limits.
 - [Contributing](../CONTRIBUTING.md): development and verification.
 - [Verification checklist](verification.md): checks a diff triggers, each from a bug fixed here before.
+- [Benchmark](../bench/README.md): what a run costs apart from the model, compared with the parent commit in CI.
 
 ## Design decisions
 
@@ -33,6 +34,9 @@ reproduction files ([2026-11-11](review-evidence/2026-11-11/),
 [2026-11-14](review-evidence/2026-11-14/)), describe the reviewed commits, not
 the current release. The reproduction assertions intentionally demonstrate old
 failures and are not part of the current test suite.
+
+The [2026-11-19 benchmark results](benchmark-2026-11-19.md) compare Socium
+with seven other agents and explain why the lean-ctx proxy is not used.
 
 The [first reliability milestone](daily-reliability-validation.md) records what
 PR #94 validated. Subsequent changes and test counts are documented in their PRs.
