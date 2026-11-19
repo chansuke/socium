@@ -73,7 +73,11 @@ versions Socium refuses to run; the exact path allows only the pinned one.
 
 Directories in `sandbox.read_only` are read-only in every row. A command
 nobody reviewed gets the narrower view only when the protected and sensitive
-files can be listed in time (at most 256 paths); otherwise it asks.
+files can be listed in time (at most 256 paths); otherwise it asks. When it
+ends, the protected files are listed again, symlinks included; any it created
+or replaced, such as a new `.envrc` or a workflow written after moving
+`.github` aside, is moved to `.socium/quarantine`, and the command reports
+them as an error.
 
 Every tool subprocess goes through this executor. The trusted backend version
 query runs outside the sandbox with an empty environment before setup. Human approval displays

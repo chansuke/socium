@@ -177,8 +177,19 @@ where
             .to_string(),
     });
 
-    let output = format_command_execution(&execution);
-    if control.is_cancelled() || execution.timed_out || execution.exit_code != Some(0) {
+    let mut output = format_command_execution(&execution);
+    let withheld = match restrictions {
+        Some(restrictions) => restrictions.withhold_changes(workspace_root)?,
+        None => None,
+    };
+    if let Some(note) = &withheld {
+        output.push_str(note);
+    }
+    if withheld.is_some()
+        || control.is_cancelled()
+        || execution.timed_out
+        || execution.exit_code != Some(0)
+    {
         Err(output.into())
     } else {
         Ok(output)
@@ -396,6 +407,78 @@ fn display_command(command: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::{TaskControl, agent::types::ContentBlock, tools::run_tool_call_controlled};
+
+    /// Freezing the protected files that exist does not stop a command
+    /// nobody reviewed from creating new ones, or from moving a frozen
+    /// directory's parent aside and writing a fresh one in its place.
+    #[test]
+    fn an_unreviewed_command_cannot_leave_files_host_tools_run() {
+        let settings =
+            crate::settings::Settings::from_toml("[approval]\ncommands = \"auto\"\n", None)
+                .unwrap()
+                .0;
+        for (script, created) in [
+            ("echo x > .envrc", ".envrc"),
+            ("ln -s notes.txt .envrc", ".envrc"),
+            (
+                "mv .github .gh2 && mkdir -p .github/workflows && echo evil > .github/workflows/x.yml",
+                ".github/workflows/x.yml",
+            ),
+            (
+                "mkdir -p crates/a && echo 'fn main() {}' > crates/a/build.rs",
+                "crates/a/build.rs",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join(".github/workflows")).unwrap();
+            std::fs::write(root.path().join(".github/workflows/ci.yaml"), "on: push\n").unwrap();
+            let input = json!({"command": ["sh", "-c", script]});
+            let crate::approval::Gate::Run(Some(restrictions)) =
+                crate::approval::gate("run_command", &input, root.path(), &settings, &|_| false)
+                    .unwrap()
+            else {
+                panic!("an auto-approved command runs restricted");
+            };
+            let result = run_command_controlled(
+                root.path(),
+                &input,
+                &TaskControl::default(),
+                &settings.sandbox,
+                Some(&restrictions),
+                &mut |_| {},
+            );
+            let message = result.expect_err(script).to_string();
+            assert!(message.contains(created), "{script}: {message}");
+            assert!(
+                root.path().join(created).symlink_metadata().is_err(),
+                "{script} left {created}"
+            );
+            let quarantine = root.path().join(".socium/quarantine");
+            let kept = std::fs::read_dir(&quarantine)
+                .unwrap()
+                .flatten()
+                .any(|stamp| stamp.path().join(created).symlink_metadata().is_ok());
+            assert!(kept, "{script}: {created} is not in quarantine");
+        }
+        let root = tempfile::tempdir().unwrap();
+        let input = json!({"command": ["sh", "-c", "echo x > notes.txt"]});
+        let crate::approval::Gate::Run(Some(restrictions)) =
+            crate::approval::gate("run_command", &input, root.path(), &settings, &|_| false)
+                .unwrap()
+        else {
+            panic!("an auto-approved command runs restricted");
+        };
+        run_command_controlled(
+            root.path(),
+            &input,
+            &TaskControl::default(),
+            &settings.sandbox,
+            Some(&restrictions),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(root.path().join("notes.txt").exists());
+    }
     #[test]
     fn forged_approval_is_denied_and_human_approval_is_single_use() {
         let workspace = tempfile::tempdir().unwrap();

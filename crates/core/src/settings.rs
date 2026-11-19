@@ -178,7 +178,7 @@ impl Default for ApprovalSettings {
 /// directory name at any depth; one with `/` matches the path from the
 /// workspace root, where `**` stands for any number of directories and `*`
 /// for part of one name. `!` excludes; the last matching pattern decides.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PathPatterns(Vec<String>);
 
 impl PathPatterns {

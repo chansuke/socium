@@ -11,12 +11,16 @@
 use crate::settings::{CommandApproval, PathPatterns, Settings};
 use crate::tools::error::ToolError;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Most paths a command's sandbox will hide or freeze; more falls back to
 /// asking, since mounting thousands of paths is slow and fragile.
 const MAX_RESTRICTED_PATHS: usize = 256;
+
+/// How long listing the workspace's protected and sensitive files may take.
+const LIST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Something the user allowed for the rest of the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +61,65 @@ impl Grant {
 pub(crate) struct Restrictions {
     pub(crate) hidden: Vec<PathBuf>,
     pub(crate) frozen: Vec<PathBuf>,
+    /// Freezing covers only files that exist, so the protected files at the
+    /// start are kept to find any the command created or replaced.
+    protected: PathPatterns,
+    before: BTreeMap<String, FileId>,
+}
+
+/// A path's device and inode, so a file replaced at the same path shows.
+type FileId = (u64, u64);
+
+impl Restrictions {
+    /// Moves protected files the command created or replaced into
+    /// `.socium/quarantine`, where no host tool finds them and no command
+    /// reaches them, and says what it moved and what is gone. `None` when
+    /// the command left them as they were.
+    pub(crate) fn withhold_changes(&self, root: &Path) -> Result<Option<String>, String> {
+        let after = find_matching_files(root, &|path| self.protected.matches(path))?;
+        let changed = after
+            .iter()
+            .filter(|(path, id)| self.before.get(path) != Some(id))
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        let missing = self
+            .before
+            .keys()
+            .filter(|path| !after.iter().any(|(kept, _)| kept == *path))
+            .cloned()
+            .collect::<Vec<_>>();
+        if changed.is_empty() && missing.is_empty() {
+            return Ok(None);
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut note = String::new();
+        if !changed.is_empty() {
+            for path in &changed {
+                crate::agent::state::workspace_state_path(
+                    root,
+                    &format!("quarantine/{stamp}/{path}"),
+                )
+                .and_then(|destination| std::fs::rename(root.join(path), destination))
+                .map_err(|err| format!("{path} could not be moved out of the workspace ({err})"))?;
+            }
+            note.push_str(&format!(
+                "\nSocium moved {} to .socium/quarantine/{stamp}/: a command that runs without review may not create or replace files that host tools run on their own. Write them with the file tools, which ask the user first.",
+                changed.join(", ")
+            ));
+        }
+        if !missing.is_empty() {
+            note.push_str(&format!(
+                "\n{} {} no longer where the command found {}.",
+                missing.join(", "),
+                if missing.len() == 1 { "is" } else { "are" },
+                if missing.len() == 1 { "it" } else { "them" },
+            ));
+        }
+        Ok(Some(note))
+    }
 }
 
 pub(crate) enum Gate {
@@ -344,21 +407,20 @@ fn restrictions(
     root: &Path,
     approval: &crate::settings::ApprovalSettings,
 ) -> Result<Restrictions, String> {
-    let candidates = find_matching_files(
-        root,
-        approval
-            .protected
-            .patterns()
-            .iter()
-            .chain(approval.sensitive.patterns()),
-    )?;
-    let mut restrictions = Restrictions::default();
+    let candidates = find_matching_files(root, &|path| {
+        approval.protected.matches(path) || approval.sensitive.matches(path)
+    })?;
+    let mut restrictions = Restrictions {
+        protected: approval.protected.clone(),
+        ..Restrictions::default()
+    };
     let mut frozen_dirs: Vec<String> = Vec::new();
-    for file in candidates {
+    for (file, id) in candidates {
         if approval.sensitive.matches(&file) {
             restrictions.hidden.push(root.join(&file));
         }
         if approval.protected.matches(&file) {
+            restrictions.before.insert(file.clone(), id);
             let target = shallowest_matching_dir(&file, &approval.protected).unwrap_or(file);
             if !frozen_dirs
                 .iter()
@@ -410,57 +472,47 @@ fn shallowest_matching_dir(file: &str, patterns: &PathPatterns) -> Option<String
         .find(|dir| patterns.matches(dir))
 }
 
-/// Workspace files matching any of the positive `patterns`, ignored files
-/// and hidden files included, `.git` and `.socium` excluded.
-fn find_matching_files<'a>(
+/// Workspace files and symlinks whose path `wanted` matches, with their
+/// identity, ignored and hidden files included. `.git` and `.socium`
+/// directories are skipped, and symlinks are listed, not followed: direnv
+/// or Cargo would follow a linked `.envrc` or `build.rs` all the same.
+fn find_matching_files(
     root: &Path,
-    patterns: impl Iterator<Item = &'a String>,
-) -> Result<Vec<String>, String> {
-    let mut command = vec![
-        "rg".to_string(),
-        "--no-config".into(),
-        "--files".into(),
-        "--hidden".into(),
-        "--no-ignore".into(),
-        "--null".into(),
-    ];
-    let mut any = false;
-    for pattern in patterns.filter(|pattern| !pattern.starts_with('!')) {
-        command.push("--glob".into());
-        command.push(pattern.clone());
-        any = true;
+    wanted: &dyn Fn(&str) -> bool,
+) -> Result<Vec<(String, FileId)>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let deadline = Instant::now() + LIST_TIMEOUT;
+    let unlisted = |err: std::io::Error| format!("protected files could not be listed ({err})");
+    let mut found = Vec::new();
+    let mut dirs = vec![PathBuf::new()];
+    while let Some(dir) = dirs.pop() {
+        if Instant::now() > deadline {
+            return Err("protected files could not be listed in time".into());
+        }
+        let entries = match std::fs::read_dir(root.join(&dir)) {
+            Ok(entries) => entries,
+            // A directory no one may read holds nothing a command could use.
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => continue,
+            Err(err) => return Err(unlisted(err)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(unlisted)?;
+            let relative = dir.join(entry.file_name());
+            if entry.file_type().map_err(unlisted)?.is_dir() {
+                if entry.file_name() != ".git" && entry.file_name() != ".socium" {
+                    dirs.push(relative);
+                }
+                continue;
+            }
+            let path = relative.to_string_lossy();
+            if wanted(&path) {
+                let metadata = entry.metadata().map_err(unlisted)?;
+                found.push((path.into_owned(), (metadata.dev(), metadata.ino())));
+            }
+        }
     }
-    if !any {
-        return Ok(Vec::new());
-    }
-    command.extend([
-        "--glob".into(),
-        "!.git".into(),
-        "--glob".into(),
-        "!.socium".into(),
-    ]);
-    let output = crate::process::run(
-        &command,
-        root,
-        Duration::from_secs(5),
-        &crate::TaskControl::default(),
-    )
-    .map_err(|err| format!("protected files could not be listed ({err})"))?;
-    if output.timed_out || output.truncated || !matches!(output.status.code(), Some(0 | 1)) {
-        return Err("protected files could not be listed in time".into());
-    }
-    let mut files = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| {
-            String::from_utf8_lossy(path)
-                .trim_start_matches("./")
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    files.sort();
-    Ok(files)
+    found.sort();
+    Ok(found)
 }
 
 #[cfg(test)]
