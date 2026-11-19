@@ -2472,6 +2472,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mcp_servers_never_hold_header_env_or_secret_values() {
+        let workspace = make_temp_dir("mcp_status_secrets");
+        let provider = ScriptedProvider::new(Vec::new());
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.env = std::sync::Arc::new(|name| {
+            (name == "SOCIUM_TEST_TOKEN").then(|| "s3cret-from-env".to_string())
+        });
+        let (settings, _) = crate::Settings::parse(
+            "[mcp.servers.local]\ncommand = [\"/nonexistent/mcp-server\"]\n\
+             env = { TOKEN = \"${SOCIUM_TEST_TOKEN}\", PLAIN = \"s3cret-plain\" }\n\
+             [mcp.servers.remote]\nurl = \"http://127.0.0.1:9/mcp\"\n\
+             headers = { Authorization = \"Bearer s3cret-header\", X-Key = \"${SOCIUM_TEST_TOKEN}\" }\n\
+             [mcp.servers.client]\nurl = \"http://127.0.0.1:9/other\"\n\
+             oauth = { client_id = \"app\", client_secret = \"s3cret-client\", issuer = \"https://a.example\" }",
+            None,
+            &|name| (name == "SOCIUM_TEST_TOKEN").then(|| "s3cret-from-env".to_string()),
+        )
+        .unwrap();
+        service.install_settings(settings);
+
+        let mut seen = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let statuses = service.mcp_servers();
+            seen.push(format!("{statuses:?}"));
+            if statuses
+                .iter()
+                .all(|status| status.state != crate::McpServerState::Starting)
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{statuses:?}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        for text in &seen {
+            assert!(!text.contains("s3cret"), "{text}");
+        }
+        assert!(seen.last().unwrap().contains("127.0.0.1:9/mcp"), "{seen:?}");
+    }
+
     #[tokio::test]
     async fn mcp_servers_show_a_settled_startup_and_its_warnings_still_reach_the_next_turn() {
         let workspace = make_temp_dir("mcp_status_settled");
