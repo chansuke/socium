@@ -96,22 +96,40 @@ impl Restrictions {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let mut note = String::new();
-        if !changed.is_empty() {
-            for path in &changed {
-                let source = root.join(path);
-                with_owner_access(source.parent().unwrap_or(root), || {
-                    crate::agent::state::workspace_state_path(
-                        root,
-                        &format!("quarantine/{stamp}/{path}"),
-                    )
-                    .and_then(|destination| std::fs::rename(&source, destination))
-                })
-                .map_err(|err| format!("{path} could not be moved out of the workspace ({err})"))?;
+        let mut moved = Vec::new();
+        let mut removed = Vec::new();
+        for path in &changed {
+            let source = root.join(path);
+            let parent = source.parent().unwrap_or(root);
+            let quarantined = with_owner_access(parent, || {
+                crate::agent::state::workspace_state_path(
+                    root,
+                    &format!("quarantine/{stamp}/{path}"),
+                )
+                .and_then(|destination| std::fs::rename(&source, destination))
+            });
+            if quarantined.is_ok() {
+                moved.push(path.as_str());
+            } else {
+                // Such as on a full disk or another file system.
+                with_owner_access(parent, || std::fs::remove_file(&source)).map_err(|err| {
+                    format!("{path} could not be moved out of the workspace or removed ({err})")
+                })?;
+                removed.push(path.as_str());
             }
+        }
+        let mut note = String::new();
+        let rule = "a command that runs without review may not create or replace files that host tools run on their own. Write them with the file tools, which ask the user first.";
+        if !moved.is_empty() {
             note.push_str(&format!(
-                "\nSocium moved {} to .socium/quarantine/{stamp}/: a command that runs without review may not create or replace files that host tools run on their own. Write them with the file tools, which ask the user first.",
-                changed.join(", ")
+                "\nSocium moved {} to .socium/quarantine/{stamp}/: {rule}",
+                moved.join(", ")
+            ));
+        }
+        if !removed.is_empty() {
+            note.push_str(&format!(
+                "\nSocium removed {}, which it could not quarantine: {rule}",
+                removed.join(", ")
             ));
         }
         if !missing.is_empty() {

@@ -162,7 +162,16 @@ where
         workspace_root,
         &policy,
         on_progress,
-    )?;
+    );
+    // What the command wrote is checked however it ended.
+    let withheld = match restrictions {
+        Some(restrictions) => restrictions.withhold_changes(workspace_root)?,
+        None => None,
+    };
+    let execution = match execution {
+        Ok(execution) => execution,
+        Err(err) => return Err(format!("{err}{}", withheld.unwrap_or_default()).into()),
+    };
     let cut = |stream: &str| stream.chars().count() > MAX_COMMAND_OUTPUT_CHARACTERS;
     on_progress(AgentProgress::CommandFinished {
         command: execution.command_display.clone(),
@@ -178,10 +187,6 @@ where
     });
 
     let mut output = format_command_execution(&execution);
-    let withheld = match restrictions {
-        Some(restrictions) => restrictions.withhold_changes(workspace_root)?,
-        None => None,
-    };
     if let Some(note) = &withheld {
         output.push_str(note);
     }
@@ -240,6 +245,10 @@ fn execute_command(
     let mut reported = std::time::Instant::now();
     const ARTIFACT_LIMIT: u64 = crate::constants::MAX_COMMAND_ARTIFACT_BYTES;
     let mut observer = |stderr: bool, bytes: &[u8]| -> std::io::Result<()> {
+        #[cfg(test)]
+        if tests::FAIL_OUTPUT.get() {
+            return Err(std::io::Error::other("no space left on device"));
+        }
         let index = usize::from(stderr);
         let keep = (ARTIFACT_LIMIT.saturating_sub(totals[index]) as usize).min(bytes.len());
         files[index].write_all(&bytes[..keep])?;
@@ -491,6 +500,58 @@ mod tests {
         .unwrap();
         assert!(root.path().join("notes.txt").exists());
     }
+
+    thread_local! {
+        /// Makes saving a command's output fail, as on a full disk.
+        pub(super) static FAIL_OUTPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn run_unreviewed(root: &Path, script: &str) -> Result<String, ToolError> {
+        let settings =
+            crate::settings::Settings::from_toml("[approval]\ncommands = \"auto\"\n", None)
+                .unwrap()
+                .0;
+        let input = json!({"command": ["sh", "-c", script]});
+        let crate::approval::Gate::Run(Some(restrictions)) =
+            crate::approval::gate("run_command", &input, root, &settings, &|_| false).unwrap()
+        else {
+            panic!("an auto-approved command runs restricted");
+        };
+        run_command_controlled(
+            root,
+            &input,
+            &TaskControl::default(),
+            &settings.sandbox,
+            Some(&restrictions),
+            &mut |_| {},
+        )
+    }
+
+    #[test]
+    fn a_command_whose_output_cannot_be_saved_still_loses_new_protected_files() {
+        let root = tempfile::tempdir().unwrap();
+        FAIL_OUTPUT.set(true);
+        let result = run_unreviewed(root.path(), "echo x > .envrc; echo done");
+        FAIL_OUTPUT.set(false);
+        let message = result.expect_err("the output was not saved").to_string();
+        assert!(message.contains("output capture failed"), "{message}");
+        assert!(message.contains(".envrc"), "{message}");
+        assert!(root.path().join(".envrc").symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn a_protected_file_the_quarantine_cannot_take_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let quarantine =
+            crate::agent::state::workspace_state_path(root.path(), "quarantine").unwrap();
+        std::fs::write(quarantine, "").unwrap();
+        let message = run_unreviewed(root.path(), "echo x > .envrc")
+            .expect_err("a new .envrc is an error")
+            .to_string();
+        assert!(message.contains(".envrc"), "{message}");
+        assert!(root.path().join(".envrc").symlink_metadata().is_err());
+    }
+
     #[test]
     fn forged_approval_is_denied_and_human_approval_is_single_use() {
         let workspace = tempfile::tempdir().unwrap();
