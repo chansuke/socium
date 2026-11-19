@@ -10,8 +10,9 @@
 //! authorization server's error code alone.
 
 use super::http::{describe, read_body};
+use super::token_store::ClientAuth;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, WWW_AUTHENTICATE};
-use reqwest::{Client, StatusCode, Url};
+use reqwest::{Client, Response, StatusCode, Url};
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -168,6 +169,115 @@ pub(super) async fn discover(client: &Client, url: &str) -> Result<Discovery, St
         registration_endpoint,
         token_auth_methods: strings(&metadata["token_endpoint_auth_methods_supported"]),
     })
+}
+
+/// A client of the authorization server: registered by the login, or
+/// configured in `oauth`.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct OAuthClient {
+    pub(super) id: String,
+    pub(super) secret: Option<String>,
+    pub(super) auth: ClientAuth,
+}
+
+impl std::fmt::Debug for OAuthClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthClient")
+            .field("id", &self.id)
+            .field("secret", &self.secret.as_ref().map(|_| "<hidden>"))
+            .field("auth", &self.auth)
+            .finish()
+    }
+}
+
+/// Registers Socium as a client that redirects to `redirect_uri`
+/// (RFC 7591), asking to be a public one: PKCE protects the code.
+pub(super) async fn register(
+    client: &Client,
+    endpoint: &Url,
+    redirect_uri: &str,
+) -> Result<OAuthClient, String> {
+    let response = client
+        .post(endpoint.clone())
+        .header(ACCEPT, "application/json")
+        .json(&json!({
+            "client_name": "Socium",
+            "redirect_uris": [redirect_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        }))
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|err| {
+            format!(
+                "the registration endpoint {endpoint} could not be reached: {}",
+                describe(&err)
+            )
+        })?;
+    let document = answer(response, "registration endpoint", endpoint).await?;
+    let id = document["client_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            format!("the registration endpoint {endpoint} answered without a client_id")
+        })?;
+    let secret = document["client_secret"].as_str().map(str::to_string);
+    let auth = match (&secret, document["token_endpoint_auth_method"].as_str()) {
+        (None, _) => ClientAuth::None,
+        (Some(_), Some("client_secret_post")) => ClientAuth::ClientSecretPost,
+        (Some(_), _) => ClientAuth::ClientSecretBasic,
+    };
+    Ok(OAuthClient {
+        id: id.to_string(),
+        secret,
+        auth,
+    })
+}
+
+/// The JSON object of a successful answer from an authorization server's
+/// `what` at `endpoint`. A refusal quotes only the OAuth error code.
+async fn answer(response: Response, what: &str, endpoint: &Url) -> Result<Value, String> {
+    let status = response.status();
+    if status.is_redirection() {
+        return Err(format!(
+            "the {what} {endpoint} answered with a redirect (HTTP {status}), which Socium does not follow"
+        ));
+    }
+    let body = read_body(response, MAX_DOCUMENT_BYTES)
+        .await
+        .map_err(|why| format!("the {what} {endpoint} broke off its answer: {why}"))?;
+    let document = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(format!(
+            "the {what} {endpoint} refused (HTTP {status}{})",
+            error_code(&document)
+        ));
+    }
+    if !document.is_object() {
+        return Err(format!(
+            "the {what} {endpoint} answered with no JSON object"
+        ));
+    }
+    Ok(document)
+}
+
+/// `": <error>"` for an OAuth error response. The description is left
+/// out: a server may repeat what it was sent, such as a code.
+fn error_code(document: &Value) -> String {
+    match document["error"].as_str() {
+        Some(code)
+            if !code.is_empty()
+                && code.len() <= 64
+                && code
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) =>
+        {
+            format!(": {code}")
+        }
+        _ => String::new(),
+    }
 }
 
 /// The `resource_metadata` parameter of a `Bearer` challenge.
@@ -389,6 +499,61 @@ pub(super) mod tests {
         let client = super::super::http::http_client().unwrap();
         let found = block_on(discover(&client, "http://127.0.0.1:9/mcp"));
         assert!(found.unwrap_err().contains("could not be reached"));
+    }
+
+    #[test]
+    fn socium_registers_as_a_public_client_with_its_redirect_uri() {
+        let (fake, found) = discovered(&["--oauth"]);
+        let client = super::super::http::http_client().unwrap();
+        let endpoint = found.unwrap().registration_endpoint.unwrap();
+
+        let registered = block_on(register(
+            &client,
+            &endpoint,
+            "http://127.0.0.1:4567/callback",
+        ))
+        .unwrap();
+
+        assert!(registered.id.starts_with("client-"), "{registered:?}");
+        assert_eq!(
+            (registered.secret, registered.auth),
+            (None, ClientAuth::None)
+        );
+        let request = fake
+            .requests()
+            .into_iter()
+            .find(|request| request["path"] == "/auth/register")
+            .unwrap();
+        assert_eq!(
+            request["params"]["redirect_uris"],
+            json!(["http://127.0.0.1:4567/callback"])
+        );
+        assert_eq!(request["params"]["token_endpoint_auth_method"], "none");
+        assert_eq!(
+            request["params"]["grant_types"],
+            json!(["authorization_code", "refresh_token"])
+        );
+
+        // A server without registration answers 404.
+        let (fake, _) = discovered(&["--oauth", "--no-registration"]);
+        let endpoint = Url::parse(&format!(
+            "{}/auth/register",
+            fake.url.trim_end_matches("/mcp")
+        ))
+        .unwrap();
+        let err =
+            block_on(register(&client, &endpoint, "http://127.0.0.1:1/callback")).unwrap_err();
+        assert!(err.contains("refused (HTTP 404 Not Found)"), "{err}");
+    }
+
+    #[test]
+    fn an_oauth_error_is_quoted_by_its_code_alone() {
+        assert_eq!(
+            error_code(&json!({"error": "invalid_grant", "error_description": "code abc is used"})),
+            ": invalid_grant"
+        );
+        assert_eq!(error_code(&json!({"error": "has spaces"})), "");
+        assert_eq!(error_code(&Value::Null), "");
     }
 
     #[test]
