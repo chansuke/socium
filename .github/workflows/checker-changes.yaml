@@ -30,7 +30,7 @@ jobs:
           NUMBER: ${{ github.event.pull_request.number }}
         run: |
           changed=$(gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" --jq '.[].filename')
-          checks=$(grep -E '^(\.github/|\.pre-commit-config\.yaml$|adrs\.toml$|flake\.nix$)' <<<"$changed" || true)
+          checks=$(grep -E '^(\.github/|\.pre-commit-config\.yaml$|adrs\.toml$|flake\.nix$|scripts/(test-)?check-commit-metadata\.sh$)' <<<"$changed" || true)
           if [[ -n $checks ]]; then
             echo "This pull request changes files that define its own checks:"
             echo "$checks"

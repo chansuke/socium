@@ -1,0 +1,44 @@
+name: Commit metadata
+on:
+  pull_request:
+  # Also after merging, since a merge or squash commit is written by GitHub
+  # from the pull request's title and body.
+  push:
+    branches:
+      - main
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+# A newer push to main checks only its own commits, so it must not cancel
+# the check of the push before it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    name: Check commit metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Test the check
+        run: scripts/test-check-commit-metadata.sh
+
+      # A pull request's merge commit has the base branch as its first
+      # parent and the pull request as its second.
+      - name: Check the pull request's commits
+        if: github.event_name == 'pull_request'
+        run: scripts/check-commit-metadata.sh HEAD^1..HEAD^2
+
+      - name: Check the pushed commits
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: scripts/check-commit-metadata.sh "$BEFORE..HEAD"
