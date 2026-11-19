@@ -330,10 +330,14 @@ struct RawApproval {
 }
 
 /// Directories and files that configure Socium: none of them may be inside
-/// a workspace, or the model could rewrite its own limits.
+/// a workspace, or the model could rewrite its own limits. The files read
+/// from the directory are listed too, since each may link elsewhere.
 pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    let mut agent_dirs = Vec::new();
     if let Some(dir) = config_dir(lookup) {
+        paths.extend([dir.join("config.toml"), dir.join("models.toml")]);
+        agent_dirs.push(dir.join("agents"));
         paths.push(dir);
     }
     for variable in [
@@ -342,8 +346,17 @@ pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathB
         crate::agent::subagent::catalog::AGENTS_DIR_ENV,
     ] {
         if let Some(path) = lookup(variable).filter(|value| !value.is_empty()) {
+            if variable == crate::agent::subagent::catalog::AGENTS_DIR_ENV {
+                agent_dirs.push(PathBuf::from(&path));
+            }
             paths.push(PathBuf::from(path));
         }
+    }
+    for dir in agent_dirs {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            paths.extend(entries.flatten().map(|entry| entry.path()));
+        }
+        paths.push(dir);
     }
     paths
 }
@@ -833,6 +846,32 @@ deny = ["git  push"]
         let project = home.path().join("project");
         std::fs::create_dir(&project).unwrap();
         ensure_config_outside(&project, &lookup).unwrap();
+    }
+
+    /// A configuration directory outside the workspace still lets the
+    /// workspace write the configuration when a file in it links there, as
+    /// dotfile managers do.
+    #[test]
+    fn a_config_file_linked_into_the_workspace_is_refused() {
+        for linked in ["config.toml", "models.toml", "agents/reviewer.md", "agents"] {
+            let home = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let config = home.path().join(".config/socium");
+            std::fs::create_dir_all(config.join("agents")).unwrap();
+            let target = workspace.path().join("dotfiles");
+            std::fs::create_dir(&target).unwrap();
+            let link = config.join(linked);
+            if link.exists() {
+                std::fs::remove_dir(&link).unwrap();
+            }
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let home_str = home.path().to_str().unwrap().to_string();
+            let lookup = move |key: &str| (key == "HOME").then(|| home_str.clone());
+            assert!(
+                ensure_config_outside(workspace.path(), &lookup).is_err(),
+                "{linked}"
+            );
+        }
     }
 
     mod properties {
