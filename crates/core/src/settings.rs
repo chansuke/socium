@@ -133,7 +133,38 @@ pub(crate) enum McpTransportSettings {
         /// Sent with every request, `${NAME}` already expanded. The values
         /// are often secrets, so they are never shown.
         headers: BTreeMap<String, String>,
+        /// `oauth`: a client registered with the server's authorization
+        /// server ahead of time (ADR 22). A server without it still uses
+        /// OAuth once `socium mcp login` stored a token for it.
+        oauth: Option<McpOAuthSettings>,
     },
+}
+
+/// `oauth = { ... }` under a server with `url`.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(crate) struct McpOAuthSettings {
+    /// Registered ahead of time; without it, login registers a client.
+    pub(crate) client_id: Option<String>,
+    /// `${NAME}` already expanded. Never shown.
+    pub(crate) client_secret: Option<String>,
+    /// Asked for at login; empty means the server's own list, if any.
+    pub(crate) scopes: Vec<String>,
+    /// The login's loopback port, for a client whose redirect URI is fixed.
+    pub(crate) callback_port: Option<u16>,
+}
+
+impl std::fmt::Debug for McpOAuthSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpOAuthSettings")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<hidden>"),
+            )
+            .field("scopes", &self.scopes)
+            .field("callback_port", &self.callback_port)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for McpTransportSettings {
@@ -144,10 +175,15 @@ impl std::fmt::Debug for McpTransportSettings {
                 .field("command", command)
                 .field("env", env)
                 .finish(),
-            Self::Http { url, headers } => f
+            Self::Http {
+                url,
+                headers,
+                oauth,
+            } => f
                 .debug_struct("Http")
                 .field("url", url)
                 .field("headers", &headers.keys().collect::<Vec<_>>())
+                .field("oauth", oauth)
                 .finish(),
         }
     }
@@ -384,11 +420,22 @@ struct RawMcpServer {
     env: Option<BTreeMap<String, String>>,
     url: Option<String>,
     headers: Option<BTreeMap<String, String>>,
+    oauth: Option<RawMcpOAuth>,
     #[serde(default)]
     allow: Vec<String>,
     tool_timeout_secs: Option<u64>,
     #[serde(default = "enabled_by_default")]
     enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcpOAuth {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+    callback_port: Option<u16>,
 }
 
 fn enabled_by_default() -> bool {
@@ -734,14 +781,31 @@ impl Settings {
                     "MCP server {} runs on the host, outside the sandbox: {}",
                     server.name, command[0]
                 ),
-                McpTransportSettings::Http { url, headers } if headers.is_empty() => {
-                    format!("MCP server {} is remote: {url}", server.name)
+                McpTransportSettings::Http {
+                    url,
+                    headers,
+                    oauth,
+                } => {
+                    let mut notes = Vec::new();
+                    if !headers.is_empty() {
+                        notes.push(format!(
+                            "headers: {}",
+                            headers.keys().cloned().collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                    if let Some(client_id) = oauth.as_ref().and_then(|o| o.client_id.as_ref()) {
+                        notes.push(format!("OAuth client: {client_id}"));
+                    }
+                    if notes.is_empty() {
+                        format!("MCP server {} is remote: {url}", server.name)
+                    } else {
+                        format!(
+                            "MCP server {} is remote: {url} ({})",
+                            server.name,
+                            notes.join("; ")
+                        )
+                    }
                 }
-                McpTransportSettings::Http { url, headers } => format!(
-                    "MCP server {} is remote: {url} (headers: {})",
-                    server.name,
-                    headers.keys().cloned().collect::<Vec<_>>().join(", ")
-                ),
             });
         }
         lines
@@ -783,6 +847,11 @@ fn mcp_server(
             if raw.headers.is_some() {
                 return Err(format!(
                     "mcp.servers.{name}.headers applies only to a server with url; a command server takes env"
+                ));
+            }
+            if raw.oauth.is_some() {
+                return Err(format!(
+                    "mcp.servers.{name}.oauth applies only to a server with url; a command server takes env"
                 ));
             }
             let Some(program) = command.first().filter(|program| !program.is_empty()) else {
@@ -849,7 +918,18 @@ fn mcp_server(
                     "mcp.servers.{name}.headers.{header}: the value is not a valid header value once its variables are expanded"
                 ));
             }
-            McpTransportSettings::Http { url, headers }
+            let oauth = match raw.oauth {
+                Some(oauth) => match oauth_settings(&name, oauth, env, warnings)? {
+                    Some(oauth) => Some(oauth),
+                    None => return Ok(None),
+                },
+                None => None,
+            };
+            McpTransportSettings::Http {
+                url,
+                headers,
+                oauth,
+            }
         }
         (Some(_), Some(_)) | (None, None) => {
             return Err(format!(
@@ -864,6 +944,62 @@ fn mcp_server(
         tool_timeout: raw
             .tool_timeout_secs
             .map_or(DEFAULT_MCP_TOOL_TIMEOUT, Duration::from_secs),
+    }))
+}
+
+/// A validated `oauth` table, or `None` when `client_secret` names a
+/// variable that is not set (with a warning). The secret is never repeated.
+fn oauth_settings(
+    name: &str,
+    raw: RawMcpOAuth,
+    env: &dyn Fn(&str) -> Option<String>,
+    warnings: &mut Vec<String>,
+) -> Result<Option<McpOAuthSettings>, String> {
+    let printable =
+        |value: &str| !value.trim().is_empty() && value.chars().all(|c| c.is_ascii_graphic());
+    if let Some(client_id) = &raw.client_id
+        && !printable(client_id)
+    {
+        return Err(format!(
+            "mcp.servers.{name}.oauth.client_id must be printable ASCII without spaces"
+        ));
+    }
+    if raw.client_secret.is_some() && raw.client_id.is_none() {
+        return Err(format!(
+            "mcp.servers.{name}.oauth.client_secret needs client_id: a secret belongs to a client registered ahead of time"
+        ));
+    }
+    if let Some(scope) = raw.scopes.iter().find(|scope| !printable(scope)) {
+        return Err(format!(
+            "mcp.servers.{name}.oauth.scopes: '{scope}' is not a scope (printable ASCII without spaces)"
+        ));
+    }
+    if raw.callback_port == Some(0) {
+        return Err(format!(
+            "mcp.servers.{name}.oauth.callback_port must be 1 to 65535; leave it out for any free port"
+        ));
+    }
+    let client_secret = match raw.client_secret {
+        Some(secret) => {
+            let table = BTreeMap::from([("client_secret".to_string(), secret)]);
+            let Some(mut expanded) = expand_table(name, "oauth", table, env, warnings)? else {
+                return Ok(None);
+            };
+            let secret = expanded.remove("client_secret").unwrap_or_default();
+            if !printable(&secret) {
+                return Err(format!(
+                    "mcp.servers.{name}.oauth.client_secret must be printable ASCII without spaces once its variables are expanded"
+                ));
+            }
+            Some(secret)
+        }
+        None => None,
+    };
+    Ok(Some(McpOAuthSettings {
+        client_id: raw.client_id,
+        client_secret,
+        scopes: raw.scopes,
+        callback_port: raw.callback_port,
     }))
 }
 
@@ -1167,6 +1303,7 @@ url = "http://127.0.0.1:8931/mcp"
                     ("Authorization".into(), "Bearer ghp_secret".into()),
                     ("X-Toolsets".into(), "repos".into()),
                 ]),
+                oauth: None,
             }
         );
         assert_eq!(settings.mcp_servers[0].allow, ["get_issue"]);
@@ -1180,6 +1317,61 @@ url = "http://127.0.0.1:8931/mcp"
         let shown = format!("{settings:?}");
         assert!(shown.contains("Authorization"), "{shown}");
         assert!(!shown.contains("ghp_secret"), "{shown}");
+    }
+
+    #[test]
+    fn a_remote_mcp_server_may_name_an_oauth_client_whose_secret_stays_hidden() {
+        let text = r#"
+[mcp.servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+oauth = { client_id = "Iv1.abc", client_secret = "${GITHUB_SECRET}", scopes = ["repo", "read:org"], callback_port = 8976 }
+
+[mcp.servers.linear]
+url = "https://mcp.linear.app/mcp"
+oauth = {}
+"#;
+        let env = |name: &str| (name == "GITHUB_SECRET").then(|| "gh-client-s3cret".to_string());
+        let (settings, warnings) = Settings::parse(text, None, &env).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let McpTransportSettings::Http { oauth, .. } = &settings.mcp_servers[0].transport else {
+            unreachable!("a url server");
+        };
+        assert_eq!(
+            oauth.as_ref().unwrap(),
+            &McpOAuthSettings {
+                client_id: Some("Iv1.abc".into()),
+                client_secret: Some("gh-client-s3cret".into()),
+                scopes: vec!["repo".into(), "read:org".into()],
+                callback_port: Some(8976),
+            }
+        );
+        assert_eq!(
+            settings.summary(),
+            [
+                "MCP server github is remote: https://api.githubcopilot.com/mcp/ (OAuth client: Iv1.abc)",
+                "MCP server linear is remote: https://mcp.linear.app/mcp",
+            ]
+        );
+        let shown = format!("{settings:?}");
+        assert!(shown.contains("Iv1.abc"), "{shown}");
+        assert!(!shown.contains("s3cret"), "{shown}");
+
+        // An unset secret skips the server, like a header.
+        let (settings, warnings) = Settings::from_toml(text, None).unwrap();
+        assert_eq!(settings.mcp_servers.len(), 1);
+        assert_eq!(
+            warnings,
+            [
+                "mcp.servers.github.oauth.client_secret: ${GITHUB_SECRET} is not set, so the github server is not started"
+            ]
+        );
+        let env = |_: &str| Some("two words s3cret".to_string());
+        let err = Settings::parse(text, None, &env).unwrap_err();
+        assert!(
+            err.contains("oauth.client_secret must be printable"),
+            "{err}"
+        );
+        assert!(!err.contains("s3cret"), "{err}");
     }
 
     #[test]
@@ -1262,6 +1454,34 @@ url = "http://127.0.0.1:8931/mcp"
             (
                 "[mcp.servers.x]\ncommand = [\"x\"]\nheaders = { A = \"b\" }",
                 "mcp.servers.x.headers applies only to a server with url",
+            ),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\noauth = {}",
+                "mcp.servers.x.oauth applies only to a server with url",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_secret = \"s\" }",
+                "mcp.servers.x.oauth.client_secret needs client_id",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_id = \"a b\" }",
+                "mcp.servers.x.oauth.client_id",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { scopes = [\"a b\"] }",
+                "mcp.servers.x.oauth.scopes: 'a b' is not a scope",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { callback_port = 0 }",
+                "mcp.servers.x.oauth.callback_port must be 1 to 65535",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { callback_port = 70000 }",
+                "callback_port",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { scope = [] }",
+                "unknown field",
             ),
             (
                 "[mcp.servers.x]\nurl = \"http://a.example/mcp\"",

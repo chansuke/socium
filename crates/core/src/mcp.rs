@@ -253,7 +253,7 @@ impl McpServer {
             McpTransportSettings::Stdio { command, env } => Transport::Stdio(
                 StdioTransport::spawn(&settings.name, command, env, workspace_root, host_env)?,
             ),
-            McpTransportSettings::Http { url, headers } => {
+            McpTransportSettings::Http { url, headers, .. } => {
                 Transport::Http(http::HttpTransport::start(&settings.name, url, headers)?)
             }
         };
@@ -1709,6 +1709,7 @@ pub(crate) mod tests {
                         .iter()
                         .map(|(name, value)| (name.to_string(), value.to_string()))
                         .collect(),
+                    oauth: None,
                 },
                 allow: allow.iter().map(|tool| tool.to_string()).collect(),
                 tool_timeout: Duration::from_secs(600),
@@ -1831,6 +1832,7 @@ pub(crate) mod tests {
                     "Authorization".to_string(),
                     "Bearer unused-s3cret".to_string(),
                 )]),
+                oauth: None,
             },
             ..fake.settings("gone", &[], &[])
         };
