@@ -428,6 +428,18 @@ mod tests {
                 "mkdir -p crates/a && echo 'fn main() {}' > crates/a/build.rs",
                 "crates/a/build.rs",
             ),
+            (
+                "mkdir -p crates/b && echo 'fn main() {}' > crates/b/build.rs && chmod 111 crates/b",
+                "crates/b/build.rs",
+            ),
+            (
+                "mkdir -p crates/c && echo 'fn main() {}' > crates/c/build.rs && chmod 444 crates/c",
+                "crates/c/build.rs",
+            ),
+            (
+                "mkdir -p crates/d && echo 'fn main() {}' > crates/d/build.rs && chmod 555 crates/d",
+                "crates/d/build.rs",
+            ),
         ] {
             let root = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(root.path().join(".github/workflows")).unwrap();

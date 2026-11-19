@@ -76,7 +76,8 @@ impl Restrictions {
     /// reaches them, and says what it moved and what is gone. `None` when
     /// the command left them as they were.
     pub(crate) fn withhold_changes(&self, root: &Path) -> Result<Option<String>, String> {
-        let after = find_matching_files(root, &|path| self.protected.matches(path))?;
+        let after =
+            find_matching_files(root, &|path| self.protected.matches(path), Listing::After)?;
         let changed = after
             .iter()
             .filter(|(path, id)| self.before.get(path) != Some(id))
@@ -98,11 +99,14 @@ impl Restrictions {
         let mut note = String::new();
         if !changed.is_empty() {
             for path in &changed {
-                crate::agent::state::workspace_state_path(
-                    root,
-                    &format!("quarantine/{stamp}/{path}"),
-                )
-                .and_then(|destination| std::fs::rename(root.join(path), destination))
+                let source = root.join(path);
+                with_owner_access(source.parent().unwrap_or(root), || {
+                    crate::agent::state::workspace_state_path(
+                        root,
+                        &format!("quarantine/{stamp}/{path}"),
+                    )
+                    .and_then(|destination| std::fs::rename(&source, destination))
+                })
                 .map_err(|err| format!("{path} could not be moved out of the workspace ({err})"))?;
             }
             note.push_str(&format!(
@@ -407,9 +411,11 @@ fn restrictions(
     root: &Path,
     approval: &crate::settings::ApprovalSettings,
 ) -> Result<Restrictions, String> {
-    let candidates = find_matching_files(root, &|path| {
-        approval.protected.matches(path) || approval.sensitive.matches(path)
-    })?;
+    let candidates = find_matching_files(
+        root,
+        &|path| approval.protected.matches(path) || approval.sensitive.matches(path),
+        Listing::Before,
+    )?;
     let mut restrictions = Restrictions {
         protected: approval.protected.clone(),
         ..Restrictions::default()
@@ -465,11 +471,36 @@ fn restrictions(
     Ok(restrictions)
 }
 
+/// Runs `op`, and once more after giving the owner full access to `dir`
+/// if it was refused: a command can take that access away from a directory
+/// it made, to keep its files out of reach.
+fn with_owner_access<T>(dir: &Path, op: impl Fn() -> std::io::Result<T>) -> std::io::Result<T> {
+    use std::os::unix::fs::PermissionsExt;
+    match op() {
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            let mode = std::fs::symlink_metadata(dir)?.permissions().mode();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode | 0o700))?;
+            op()
+        }
+        result => result,
+    }
+}
+
 fn shallowest_matching_dir(file: &str, patterns: &PathPatterns) -> Option<String> {
     let parts = file.split('/').collect::<Vec<_>>();
     (1..parts.len())
         .map(|end| parts[..end].join("/"))
         .find(|dir| patterns.matches(dir))
+}
+
+/// Whether a listing runs before a command or after it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    /// May give up, since the command then asks instead.
+    Before,
+    /// Must see all the command left, so it never gives up, and it takes
+    /// back the access the command took away from a directory.
+    After,
 }
 
 /// Workspace files and symlinks whose path `wanted` matches, with their
@@ -479,22 +510,34 @@ fn shallowest_matching_dir(file: &str, patterns: &PathPatterns) -> Option<String
 fn find_matching_files(
     root: &Path,
     wanted: &dyn Fn(&str) -> bool,
+    listing: Listing,
 ) -> Result<Vec<(String, FileId)>, String> {
     use std::os::unix::fs::MetadataExt;
-    let deadline = Instant::now() + LIST_TIMEOUT;
+    #[cfg(test)]
+    let timeout = tests::TIMEOUT.get().unwrap_or(LIST_TIMEOUT);
+    #[cfg(not(test))]
+    let timeout = LIST_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let unlisted = |err: std::io::Error| format!("protected files could not be listed ({err})");
+    // Commands run as the user, so they can read what the user cannot list.
+    fn access<T>(
+        listing: Listing,
+        dir: &Path,
+        op: impl Fn() -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        match listing {
+            Listing::Before => op(),
+            Listing::After => with_owner_access(dir, op),
+        }
+    }
     let mut found = Vec::new();
     let mut dirs = vec![PathBuf::new()];
     while let Some(dir) = dirs.pop() {
-        if Instant::now() > deadline {
+        if listing == Listing::Before && Instant::now() >= deadline {
             return Err("protected files could not be listed in time".into());
         }
-        let entries = match std::fs::read_dir(root.join(&dir)) {
-            Ok(entries) => entries,
-            // A directory no one may read holds nothing a command could use.
-            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => continue,
-            Err(err) => return Err(unlisted(err)),
-        };
+        let full = root.join(&dir);
+        let entries = access(listing, &full, || std::fs::read_dir(&full)).map_err(unlisted)?;
         for entry in entries {
             let entry = entry.map_err(unlisted)?;
             let relative = dir.join(entry.file_name());
@@ -506,7 +549,7 @@ fn find_matching_files(
             }
             let path = relative.to_string_lossy();
             if wanted(&path) {
-                let metadata = entry.metadata().map_err(unlisted)?;
+                let metadata = access(listing, &full, || entry.metadata()).map_err(unlisted)?;
                 found.push((path.into_owned(), (metadata.dev(), metadata.ino())));
             }
         }
@@ -750,6 +793,58 @@ mod tests {
             .unwrap(),
             Gate::Run(None)
         ));
+    }
+
+    thread_local! {
+        /// Replaces `LIST_TIMEOUT`, so a test need not fill a workspace.
+        pub(super) static TIMEOUT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    }
+
+    fn auto() -> Settings {
+        Settings::from_toml("[approval]\ncommands = \"auto\"\n", None)
+            .unwrap()
+            .0
+    }
+
+    /// Commands run as the user, so a directory nobody can list still lets
+    /// them read a file whose name they know.
+    #[test]
+    fn a_directory_that_cannot_be_listed_makes_a_command_ask() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let locked = root.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join(".env"), "TOKEN=x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let gate = decide(
+            root.path(),
+            &auto(),
+            "run_command",
+            json!({"command": ["cat", "locked/.env"]}),
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(gate, Gate::Ask(_)));
+    }
+
+    /// Giving up on the listing after a command would leave what it wrote.
+    #[test]
+    fn only_the_listing_before_a_command_gives_up_in_time() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = auto();
+        let restrictions = restrictions(root.path(), &settings.approval).unwrap();
+        TIMEOUT.set(Some(Duration::ZERO));
+        let gate = decide(
+            root.path(),
+            &settings,
+            "run_command",
+            json!({"command": ["true"]}),
+        );
+        std::fs::write(root.path().join(".envrc"), "x").unwrap();
+        let withheld = restrictions.withhold_changes(root.path());
+        TIMEOUT.set(None);
+        assert!(matches!(gate, Gate::Ask(_)));
+        assert!(withheld.unwrap().unwrap().contains(".envrc"));
+        assert!(root.path().join(".envrc").symlink_metadata().is_err());
     }
 
     #[test]
