@@ -108,15 +108,13 @@ GitHub設定の読取りではリポジトリはprivate、mainのbranch protecti
 
 ### 履歴
 
-2026-11-15 の書き換えの翌日に、セッション URL 入りのコミット 16 件と、作者が個人のアドレスのコミット 2 件が main に入っていた。2026-11-19 に main と開いている 7 ブランチ (`mcp-*`、`sandbox-env-setenv`) を書き換えた。
+2026-11-15 の書き換えの後にも、公開しないものを含むコミットが main に入っていた。2026-11-19 に main と開いている 7 ブランチ (`mcp-*`、`sandbox-env-setenv`) を書き換えた。
 
-- メッセージからセッション URL の行を消し、個人のアドレスを noreply にした。対象は 8f1bb83 以降のコミットだけで、それより前のコミットとタグ `v0.1.0` のハッシュは変わらない。
+- メッセージからセッション URL の行を消し、個人のアドレスを noreply にした。タグ `v0.1.0` とそれより前のコミットのハッシュは変わらない。
 - 各ブランチの最後のコミットの tree とコミット数は書き換える前と同じ。開いている PR のコミット数も変わらない。
-- PR #50〜#55 の本文からセッション URL の行を消した。
 - 同じものがまた入らないよう、commit-msg フックと Commit metadata ワークフローを足した (SOC-049)。
 
 ### 公開する前に残っていること
 
-- **GitHub Support への依頼:** 古いコミットは、PR #48、#50〜#89、#95〜#105 の `refs/pull/*` から辿れる。読み取り専用で、消すには Support に頼む ([Removing sensitive data from a repository](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository))。PR #50〜#55 の本文の編集履歴にも古い本文が残る。編集履歴の版は所有者が PR のページから消せる。
 - **CI:** 課金の問題で Actions のジョブが始まらない。公開する commit で CI、Security、Commit metadata を通す。
 - **公開したらすぐに設定すること:** rebase merge だけを許す (merge と squash のコミットは PR のタイトルと本文から作られ、検査を通らない)。main に ruleset を置き、PR を必須にし、`Format, Lint and Test`、`Secrets and dependencies`、`Validate PR title`、`Check commit metadata` を必須の check にし、force push と削除を禁止する。private vulnerability reporting を有効にする。
