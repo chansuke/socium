@@ -1,0 +1,92 @@
+[
+ {
+  "task": "fix-failing-test",
+  "total_ms": 11017,
+  "model_ms": 10185,
+  "ttft_ms": 6587,
+  "tools_ms": 762,
+  "rounds": 8,
+  "tool_calls": 9
+ },
+ {
+  "task": "fix-pagination",
+  "total_ms": 8518,
+  "model_ms": 8257,
+  "ttft_ms": 5535,
+  "tools_ms": 222,
+  "rounds": 6,
+  "tool_calls": 6
+ },
+ {
+  "task": "add-tests",
+  "total_ms": 17043,
+  "model_ms": 16726,
+  "ttft_ms": 7558,
+  "tools_ms": 231,
+  "rounds": 9,
+  "tool_calls": 11
+ },
+ {
+  "task": "tail-failure",
+  "total_ms": 10921,
+  "model_ms": 10711,
+  "ttft_ms": 5173,
+  "tools_ms": 165,
+  "rounds": 5,
+  "tool_calls": 7
+ },
+ {
+  "task": "refactor-rename",
+  "total_ms": 10854,
+  "model_ms": 10366,
+  "ttft_ms": 5662,
+  "tools_ms": 408,
+  "rounds": 7,
+  "tool_calls": 17
+ },
+ {
+  "task": "semver-precedence",
+  "total_ms": 20632,
+  "model_ms": 20309,
+  "ttft_ms": 6469,
+  "tools_ms": 239,
+  "rounds": 7,
+  "tool_calls": 9
+ },
+ {
+  "task": "rust-ring",
+  "total_ms": 23226,
+  "model_ms": 22240,
+  "ttft_ms": 6399,
+  "tools_ms": 875,
+  "rounds": 8,
+  "tool_calls": 9
+ },
+ {
+  "task": "slow-events",
+  "total_ms": 269509,
+  "model_ms": 126806,
+  "ttft_ms": 19190,
+  "tools_ms": 142452,
+  "rounds": 20,
+  "tool_calls": 20
+ },
+ {
+  "task": "cart-rounding",
+  "total_ms": 23546,
+  "model_ms": 23133,
+  "ttft_ms": 6793,
+  "tools_ms": 319,
+  "rounds": 8,
+  "tool_calls": 13
+ },
+ {
+  "task": "spec-config",
+  "total_ms": 152698,
+  "model_ms": 151773,
+  "ttft_ms": 19898,
+  "tools_ms": 647,
+  "rounds": 20,
+  "tool_calls": 26
+ }
+]

@@ -77,3 +77,38 @@ The proxy also made every run slower:
 The byte savings in `read-and-search` come entirely from the shortened file.
 A real model takes seconds for each request, so the proxy's time cost
 matters less there. The removed file content and system prompt do not.
+
+## With a real model, the model takes the time
+
+`ds-flash` (DeepSeek-V4.1-Flash) ran all 39 evaluation tasks 3 times with
+Socium at `8cf152b`. All 117 runs passed, for $0.88 at DeepSeek's peak prices.
+The median run took 16.4 seconds and 9 rounds.
+
+Output tokens were 72.7% of the cost. Of the input tokens, 95.2% were read
+from DeepSeek's cache. The tool definitions are about 3,000 tokens in every
+round, and they are part of that cached prefix. Over the 1,227 rounds they
+cost about $0.008, or about 2.6% of the total. Shorter definitions would save
+under 1% and could change how the model uses the tools, so they stay as they
+are.
+
+`EFFORT=low` did not change the output. Over the first 19 runs, output went
+from 63,463 to 66,530 tokens and time from 428 to 456 seconds. The rest of
+that run was stopped.
+
+A second set of 10 single-turn tasks, one run each, recorded the time of each
+round and each tool call:
+
+| Part of the turn | Share of 548 seconds |
+|---|---|
+| Model streaming, time to first token included | 73.1% |
+| Time to first token alone, about 0.9 seconds a round | 16.3% |
+| Tool calls | 26.7% |
+| Socium itself | 0.2% |
+
+Of the tool time, 142 seconds were `slow-events`, where the agent ran the
+task's slow reference code. Without that task, tools took 1% to 5% of each
+turn. Socium's own time is about 11 ms a round. A faster Socium could save at
+most that 0.2%.
+
+The raw numbers are `eval-ds-flash.json` and `time-split.json` in
+[review-evidence/2026-11-19](review-evidence/2026-11-19/).
