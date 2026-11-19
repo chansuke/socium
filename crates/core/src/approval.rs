@@ -27,6 +27,8 @@ pub enum Grant {
     Edit(Vec<String>),
     /// Reads of these workspace paths.
     Read(Vec<String>),
+    /// Calls to the MCP tool with this exposed name.
+    McpTool(String),
 }
 
 impl Grant {
@@ -37,6 +39,7 @@ impl Grant {
             Grant::Command(prefix) => format!("`{}` commands", prefix.join(" ")),
             Grant::Edit(paths) => format!("edits to {}", paths.join(", ")),
             Grant::Read(paths) => format!("reading {}", paths.join(", ")),
+            Grant::McpTool(name) => format!("the MCP tool `{name}`"),
         }
     }
 
@@ -47,6 +50,7 @@ impl Grant {
             | (Grant::Read(granted), Grant::Read(paths)) => {
                 paths.iter().all(|path| granted.contains(path))
             }
+            (Grant::McpTool(granted), Grant::McpTool(name)) => granted == name,
             _ => false,
         }
     }
@@ -197,6 +201,30 @@ pub(crate) fn withheld_note(paths: &[String]) -> String {
         if paths.len() == 1 { "a file" } else { "files" },
         paths.join(", ")
     )
+}
+
+/// How the MCP tool exposed as `name` may run: unasked when its server's
+/// `allow` names it or the user allowed it for this session, else after the
+/// user approves, since nothing confines what the server does.
+pub(crate) fn mcp_gate(
+    name: &str,
+    target: &crate::mcp::McpTarget<'_>,
+    granted: &dyn Fn(&Grant) -> bool,
+) -> Gate {
+    let grant = Grant::McpTool(name.to_string());
+    if target.allowed || granted(&grant) {
+        return Gate::Run(None);
+    }
+    Gate::Ask(Ask {
+        reason: mcp_permissions(target.server),
+        review: None,
+        grant: Some(grant),
+    })
+}
+
+/// What an MCP tool may do, as its approval request says.
+pub(crate) fn mcp_permissions(server: &str) -> String {
+    format!("MCP tools run in the {server} server on the host, outside Socium's sandbox.")
 }
 
 /// Whether a session grant covers `wanted`.
@@ -521,6 +549,42 @@ mod tests {
 
     fn decide(root: &Path, settings: &Settings, name: &str, input: Value) -> Gate {
         gate(name, &input, root, settings, &|_| false).unwrap()
+    }
+
+    #[test]
+    fn mcp_tools_ask_unless_allowed_by_config_or_for_this_session() {
+        let target = |allowed| crate::mcp::McpTarget {
+            server: "github",
+            remote: "get_issue",
+            allowed,
+        };
+        let Gate::Ask(ask) = mcp_gate("mcp__github__get_issue", &target(false), &|_| false) else {
+            panic!("an MCP tool must ask by default");
+        };
+        assert_eq!(
+            ask.reason,
+            "MCP tools run in the github server on the host, outside Socium's sandbox."
+        );
+        let offered = ask.grant.unwrap();
+        assert_eq!(offered.scope(), "the MCP tool `mcp__github__get_issue`");
+        assert!(matches!(
+            mcp_gate("mcp__github__get_issue", &target(true), &|_| false),
+            Gate::Run(None)
+        ));
+        let grants = [offered];
+        let granted = |wanted: &Grant| grants_cover(&grants, wanted);
+        assert!(matches!(
+            mcp_gate("mcp__github__get_issue", &target(false), &granted),
+            Gate::Run(None)
+        ));
+        assert!(matches!(
+            mcp_gate("mcp__github__create_issue", &target(false), &granted),
+            Gate::Ask(_)
+        ));
+        assert!(!grants_cover(
+            &grants,
+            &Grant::Command(vec!["mcp__github__get_issue".into()])
+        ));
     }
 
     #[test]

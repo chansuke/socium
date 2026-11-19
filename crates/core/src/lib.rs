@@ -8,8 +8,6 @@ mod approval;
 mod control;
 mod execution;
 mod instructions;
-// Wired into the turn loop in the next change.
-#[allow(dead_code)]
 mod mcp;
 mod models;
 pub mod plan;
@@ -338,6 +336,43 @@ pub struct AgentService {
     /// so the same problem is reported once.
     instructions_problem: Option<String>,
     sandbox: SandboxCheck,
+    /// The MCP servers in the settings, which start on a thread while the
+    /// interface opens; the first turn waits for them.
+    mcp: McpStartup,
+}
+
+enum McpStartup {
+    Connecting(std::thread::JoinHandle<(crate::mcp::McpRegistry, Vec<String>)>),
+    /// `None` when no server is configured.
+    Ready(Option<Arc<crate::mcp::McpRegistry>>),
+}
+
+impl McpStartup {
+    fn start(
+        servers: &[crate::settings::McpServerSettings],
+        workspace_root: &std::path::Path,
+        env: EnvLookup,
+    ) -> Self {
+        if servers.is_empty() {
+            return Self::Ready(None);
+        }
+        let (servers, root) = (servers.to_vec(), workspace_root.to_path_buf());
+        Self::Connecting(std::thread::spawn(move || {
+            crate::mcp::McpRegistry::connect(
+                &servers,
+                &root,
+                env.as_ref(),
+                crate::mcp::STARTUP_TIMEOUT,
+            )
+        }))
+    }
+
+    fn registry(&self) -> Option<&Arc<crate::mcp::McpRegistry>> {
+        match self {
+            Self::Ready(registry) => registry.as_ref(),
+            Self::Connecting(_) => None,
+        }
+    }
 }
 
 /// Whether the OS sandbox enforces isolation. The check takes most of the
@@ -522,6 +557,7 @@ impl AgentService {
             instructions_problem: None,
             web_search: None,
             sandbox: SandboxCheck::Passed,
+            mcp: McpStartup::Ready(None),
         };
         service.context_window_override = service.limit_override("CONTEXT_WINDOW_TOKENS");
         service.compaction_threshold_override =
@@ -611,9 +647,37 @@ impl AgentService {
                 }
             },
         };
+        // Servers of earlier settings are stopped when replaced.
+        self.mcp = McpStartup::start(
+            &settings.mcp_servers,
+            &self.workspace_root,
+            self.env.clone(),
+        );
         self.settings = Arc::new(settings);
         self.apply_model_limits();
         self.refresh_system_prompt();
+    }
+
+    /// Waits for the MCP servers to finish starting and offers their tools.
+    /// Returns, once, why a server or a tool was left out.
+    fn settle_mcp(&mut self) -> Vec<String> {
+        if !matches!(self.mcp, McpStartup::Connecting(_)) {
+            return Vec::new();
+        }
+        let McpStartup::Connecting(handle) =
+            std::mem::replace(&mut self.mcp, McpStartup::Ready(None))
+        else {
+            unreachable!("checked above");
+        };
+        let (registry, warnings) = handle.join().unwrap_or_else(|_| {
+            (
+                crate::mcp::McpRegistry::default(),
+                vec!["MCP servers were not started: their startup panicked".into()],
+            )
+        });
+        self.mcp = McpStartup::Ready(Some(Arc::new(registry)));
+        self.apply_model_limits();
+        warnings
     }
 
     /// Rebuilds the system prompt from the settings and the project's
@@ -846,6 +910,9 @@ impl AgentService {
             .find(|tool| tool.name() == AGENT_TOOL_NAME)
         {
             *agent = self.subagents.tool_definition();
+        }
+        if let Some(registry) = self.mcp.registry() {
+            self.tools.extend(registry.definitions().iter().cloned());
         }
     }
 
@@ -1565,6 +1632,7 @@ impl AgentService {
         F: FnMut(AgentProgress) + Send,
     {
         self.wait_for_sandbox()?;
+        let mcp_warnings = self.settle_mcp();
         self.ensure_state_lock()?;
         if let Some(problem) = self.limit_problem() {
             return Err(Error::new(ErrorKind::InvalidInput, problem).into());
@@ -1599,6 +1667,9 @@ impl AgentService {
         self.messages.push(Message::user_text(user_input));
         self.persist_state()?;
         emit(&mut on_progress, ActivityKind::TurnStarted);
+        for message in mcp_warnings {
+            emit(&mut on_progress, ActivityKind::Warning { message });
+        }
         if let Some(message) = self.reload_instructions() {
             emit(&mut on_progress, ActivityKind::Warning { message });
         }
@@ -1675,6 +1746,7 @@ impl AgentService {
             settings: &self.settings,
             clock,
             web_search: self.web_search.as_ref(),
+            mcp: self.mcp.registry(),
         };
         let raw_len = self.messages.len();
         let active_model = self.selected_model.clone();
@@ -2134,6 +2206,67 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("DEEPSEEK_API_KEY is not set"))
         );
+    }
+
+    #[tokio::test]
+    async fn the_agent_loop_calls_a_tool_of_an_mcp_server_the_user_configured() {
+        let workspace = make_temp_dir("mcp");
+        let provider = ScriptedProvider::new(vec![
+            Ok(crate::providers::ProviderResponse {
+                message: crate::agent::types::AgentMessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "m1".into(),
+                        name: "mcp__fake__echo".into(),
+                        input: json!({"text": "from the model"}),
+                    }],
+                    ..Default::default()
+                },
+                streamed_text: false,
+                usage: None,
+            }),
+            Ok(text_provider_response("The server echoed it.", None)),
+        ]);
+        let requests = provider.recorded_requests.clone();
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        service.env = std::sync::Arc::new(|name| std::env::var(name).ok());
+        let (settings, _) = crate::Settings::from_toml(
+            &format!(
+                "[mcp.servers.fake]\ncommand = [\"python3\", \"{}\"]\nallow = [\"echo\"]",
+                crate::mcp::tests::FAKE_SERVER
+            ),
+            None,
+        )
+        .unwrap();
+        service.install_settings(settings);
+        let mut warnings = Vec::new();
+
+        service
+            .submit_with_progress("echo something".into(), |event| {
+                if let crate::AgentProgress::Activity(crate::ActivityEvent {
+                    kind: crate::ActivityKind::Warning { message },
+                    ..
+                }) = event
+                {
+                    warnings.push(message);
+                }
+            })
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        let offered = requests[0]["tools"].as_array().unwrap();
+        let echo = offered
+            .iter()
+            .find(|tool| tool["name"] == "mcp__fake__echo")
+            .expect("offered");
+        assert_eq!(echo["description"], "Echoes its text.");
+        let result = &requests[1]["messages"][2]["content"][0];
+        assert_eq!(result["content"], "echo: from the model");
+        assert!(result.get("is_error").is_none(), "{result}");
+        // The tool providers would refuse is reported once, in the first turn.
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("`bad.name`"), "{warnings:?}");
     }
 
     #[tokio::test]

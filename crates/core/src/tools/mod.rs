@@ -206,6 +206,7 @@ where
         control,
         &crate::settings::Settings::default(),
         None,
+        None,
         on_progress,
         &mut |_| Ok(()),
     )
@@ -225,6 +226,7 @@ pub(crate) fn run_tool_call_checkpointed<F>(
     control: &crate::TaskControl,
     settings: &crate::settings::Settings,
     edit_origin: Option<&crate::tools::edit_history::EditOrigin>,
+    mcp: Option<&crate::mcp::McpRegistry>,
     on_progress: &mut F,
     before_execute: &mut dyn FnMut(&str) -> std::io::Result<()>,
 ) -> ContentBlock
@@ -238,32 +240,43 @@ where
         if control.is_cancelled() {
             return Err("Cancelled before execution".into());
         }
-        let gate = crate::approval::gate(name, input, workspace_root, settings, &|grant| {
-            control.is_granted(grant)
-        })?;
+        let granted = |grant: &crate::approval::Grant| control.is_granted(grant);
+        let mcp_target = mcp.and_then(|registry| registry.target(name));
+        let gate = match &mcp_target {
+            Some(target) => crate::approval::mcp_gate(name, target, &granted),
+            None => crate::approval::gate(name, input, workspace_root, settings, &granted)?,
+        };
         let mut authorization = WORKSPACE_FILE_POLICY;
         let restrictions = match gate {
             crate::approval::Gate::Deny(reason) => return Err(reason.into()),
             crate::approval::Gate::Run(restrictions) => {
-                if restrictions.is_some() {
+                if restrictions.is_some() || mcp_target.is_some() {
                     authorization = ALLOWED_BY_POLICY;
                 }
                 restrictions
             }
             crate::approval::Gate::Ask(ask) => {
-                let permissions = match name {
-                    "git_commit" => {
-                        "Linux sandbox: workspace and Git metadata writable; agent state hidden; network denied"
+                let permissions = match (name, &mcp_target) {
+                    (_, Some(target)) => crate::approval::mcp_permissions(target.server),
+                    ("git_commit", None) => {
+                        "Linux sandbox: workspace and Git metadata writable; agent state hidden; network denied".into()
                     }
-                    "run_command" => {
-                        "Linux sandbox: workspace writable; existing Git metadata read-only; agent state hidden; network denied"
+                    ("run_command", None) => {
+                        "Linux sandbox: workspace writable; existing Git metadata read-only; agent state hidden; network denied".into()
                     }
-                    _ => "Socium's file tools inside the workspace; nothing runs",
+                    _ => "Socium's file tools inside the workspace; nothing runs".into(),
                 };
                 let request = serde_json::json!({"workspace":workspace_root,"tool_call_id":tool_use_id,"arguments":input,"review":ask.review,"permissions":permissions,"reason":ask.reason});
                 if !control.is_interactive() {
+                    let rule = match &mcp_target {
+                        Some(target) => format!(
+                            "by adding \"{}\" to allow under [mcp.servers.{}]",
+                            target.remote, target.server
+                        ),
+                        None => "with an approval rule".into(),
+                    };
                     return Err(format!(
-                        "Needs approval, but no one can answer here: {} Allow it with an approval rule in Socium's config.toml, or run it from the TUI.",
+                        "Needs approval, but no one can answer here: {} Allow it {rule} in Socium's config.toml, or run it from the TUI.",
                         ask.reason
                     )
                     .into());
@@ -310,7 +323,9 @@ where
                 input,
                 on_progress,
             ),
-            None => Err(ToolError::UnsupportedTool(name.into())),
+            None => mcp
+                .and_then(|registry| registry.call(name, input, control))
+                .unwrap_or_else(|| Err(ToolError::UnsupportedTool(name.into()))),
         }
     })();
     let is_error = result.is_err();
@@ -346,6 +361,7 @@ pub(crate) async fn run_tool_call_on_blocking_thread(
     control: &crate::TaskControl,
     settings: &crate::settings::Settings,
     edit_origin: Option<&crate::tools::edit_history::EditOrigin>,
+    mcp: Option<&std::sync::Arc<crate::mcp::McpRegistry>>,
     on_progress: &mut (dyn FnMut(AgentProgress) + Send),
     before_execute: &mut (dyn FnMut(&str) -> std::io::Result<()> + Send),
 ) -> ContentBlock {
@@ -360,8 +376,12 @@ pub(crate) async fn run_tool_call_on_blocking_thread(
         name.to_string(),
         input.clone(),
     );
-    let (control, settings, edit_origin) =
-        (control.clone(), settings.clone(), edit_origin.cloned());
+    let (control, settings, edit_origin, mcp) = (
+        control.clone(),
+        settings.clone(),
+        edit_origin.cloned(),
+        mcp.cloned(),
+    );
     let call = tokio::task::spawn_blocking(move || {
         let stopped = || std::io::Error::other("the turn stopped waiting for this call");
         run_tool_call_checkpointed(
@@ -372,6 +392,7 @@ pub(crate) async fn run_tool_call_on_blocking_thread(
             &control,
             &settings,
             edit_origin.as_ref(),
+            mcp.as_deref(),
             &mut |event| {
                 let _ = relay.send(Relayed::Progress(event));
             },
@@ -625,6 +646,94 @@ mod tests {
             }
             _ => panic!("expected tool_result"),
         }
+    }
+
+    fn run_mcp(
+        registry: &crate::mcp::McpRegistry,
+        name: &str,
+        control: &crate::TaskControl,
+        on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> (Vec<String>, String, Option<bool>) {
+        let workspace = make_temp_dir("mcp_call");
+        let mut authorizations = Vec::new();
+        let result = run_tool_call_checkpointed(
+            workspace.path(),
+            "call",
+            name,
+            &json!({"text": "hi"}),
+            control,
+            &crate::settings::Settings::default(),
+            None,
+            Some(registry),
+            &mut |event| on_progress(event),
+            &mut |authorization| {
+                authorizations.push(authorization.to_string());
+                Ok(())
+            },
+        );
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = result
+        else {
+            panic!("expected tool_result");
+        };
+        (authorizations, content, is_error)
+    }
+
+    #[test]
+    fn an_mcp_tool_runs_when_allowed_and_asks_otherwise() {
+        use crate::mcp::tests::{connect_fake, fake_settings};
+        let (registry, _) = connect_fake(&[fake_settings("fake", "", &["echo"])]);
+        let headless = crate::TaskControl::default();
+
+        let (authorizations, content, is_error) =
+            run_mcp(&registry, "mcp__fake__echo", &headless, &mut |_| {});
+        assert_eq!((content.as_str(), is_error), ("echo: hi", None));
+        assert_eq!(authorizations, [ALLOWED_BY_POLICY]);
+
+        let (authorizations, content, is_error) =
+            run_mcp(&registry, "mcp__fake__image", &headless, &mut |_| {});
+        assert_eq!(is_error, Some(true));
+        assert!(authorizations.is_empty(), "nothing may start unapproved");
+        assert_eq!(
+            content,
+            "Needs approval, but no one can answer here: MCP tools run in the fake server on the host, outside Socium's sandbox. Allow it by adding \"image\" to allow under [mcp.servers.fake] in Socium's config.toml, or run it from the TUI."
+        );
+
+        // Allowed for the session, it runs unasked from then on.
+        let interactive = crate::TaskControl::default();
+        interactive.enable_interactive_approval();
+        let answerer = interactive.clone();
+        let mut asked = Vec::new();
+        let mut answer = |event: AgentProgress| {
+            if let AgentProgress::ApprovalRequested {
+                request_id,
+                input,
+                session_option,
+                ..
+            } = event
+            {
+                asked.push((input, session_option));
+                answerer.answer(request_id, crate::ApprovalAnswer::AllowForSession);
+            }
+        };
+        let (authorizations, content, _) =
+            run_mcp(&registry, "mcp__fake__image", &interactive, &mut answer);
+        assert_eq!(content, "a chart\n[image content omitted]");
+        assert_eq!(authorizations, [HUMAN_APPROVED]);
+        run_mcp(&registry, "mcp__fake__image", &interactive, &mut answer);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        let (details, session_option) = &asked[0];
+        assert!(
+            details.contains(
+                "Permissions: MCP tools run in the fake server on the host, outside Socium's sandbox."
+            ),
+            "{details}"
+        );
+        assert_eq!(
+            session_option.as_deref(),
+            Some("the MCP tool `mcp__fake__image`")
+        );
     }
 
     #[test]

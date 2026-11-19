@@ -56,6 +56,9 @@ pub(crate) struct TurnContext<'a> {
     pub(crate) clock: ActivityClock,
     /// The search endpoint and key, when `web_search` is offered.
     pub(crate) web_search: Option<&'a crate::tools::web_search::WebSearch>,
+    /// The MCP servers whose tools are among `tools`; the main agent's
+    /// alone, so `None` for subagents.
+    pub(crate) mcp: Option<&'a std::sync::Arc<crate::mcp::McpRegistry>>,
 }
 
 pub(crate) struct TurnOutcome {
@@ -599,6 +602,7 @@ where
                     ctx.control,
                     ctx.settings,
                     ctx.edit_origin,
+                    ctx.mcp,
                     &mut tool_progress,
                     &mut |authorization| {
                         // The input is already in the message; the event
@@ -930,6 +934,7 @@ mod tests {
             session_id: "20261101-000000-0000",
             clock: ActivityClock::start(0),
             web_search: None,
+            mcp: None,
         };
         let agent = |agent_type: &str| {
             (
