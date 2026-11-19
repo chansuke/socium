@@ -38,6 +38,7 @@ pub(crate) enum Launch {
     /// `-r [ID]`: the session with this ID or prefix, or a picker without one.
     Resume(Option<String>),
     Help,
+    Version,
 }
 
 pub(crate) fn usage(program: &str) -> String {
@@ -57,11 +58,20 @@ pub(crate) fn usage(program: &str) -> String {
                               With -p: text (the reply, the default), json (the\n                     \
                               final result), or stream-json (progress and result\n                     \
                               as JSON Lines)\n  \
-           -h, --help         Show this help"
+           -h, --help         Show this help\n  \
+           -V, --version      Show the version"
     )
 }
 
 pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    // Asked to identify itself, it does so whatever else is on the line.
+    if args.iter().any(|arg| arg == "-V" || arg == "--version") {
+        return Ok(Args {
+            launch: Launch::Version,
+            print: None,
+        });
+    }
     let mut args = args.into_iter().peekable();
     let mut launch = None;
     let mut print = false;
@@ -155,6 +165,22 @@ mod tests {
             prompt: prompt.map(str::to_string),
             format,
         })
+    }
+
+    #[test]
+    fn version_wins_over_other_flags() {
+        for args in [
+            &["--version"][..],
+            &["-V"],
+            &["-c", "--version"],
+            &["-p", "q", "-V"],
+            &["--help", "--version"],
+            &["--version", "--output-format", "json"],
+            &["-c", "-r", "--version"],
+            &["--version", "--bogus"],
+        ] {
+            assert_eq!(printed(args).unwrap().launch, Launch::Version, "{args:?}");
+        }
     }
 
     #[test]
