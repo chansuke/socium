@@ -17,9 +17,11 @@
 
 - **Sandboxed by default.** Every command runs under bubblewrap and seccomp.
   Socium refuses to start if isolation fails; there is no unsandboxed fallback.
-- **You approve what runs.** Commands and edits ask first, with the full diff
-  to review. Allow once, allow for the session, or tell Socium what to do
-  instead.
+- **You approve what runs.** Commands, commits, edits to files the host runs
+  (build scripts, `Cargo.toml`, CI, editor settings), and reads of secret files
+  ask first, showing the command, the diff, or the file. Other edits apply at
+  once and can be undone with `/undo`. Allow once, allow for the session, or
+  tell Socium what to do instead.
 - **Your model, your session.** Claude by default, or any provider you add in
   `models.toml`. Stop at any time and resume with `-c` or `-r`.
 
