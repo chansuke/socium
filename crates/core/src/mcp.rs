@@ -40,7 +40,7 @@ const INHERITED_VARIABLES: &[&str] = &["PATH", "HOME", "USER", "LANG"];
 /// What exposed tool names begin with.
 const PREFIX: &str = "mcp__";
 /// The longest tool name model providers accept.
-const MAX_TOOL_NAME: usize = 64;
+pub(crate) const MAX_TOOL_NAME: usize = 64;
 /// Longer tool descriptions are cut, and a tool whose input schema is
 /// larger is left out, so one server cannot fill every request.
 const MAX_DESCRIPTION_CHARS: usize = 2048;

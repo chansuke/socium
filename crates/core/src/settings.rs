@@ -215,6 +215,22 @@ const RESERVED_MCP_HEADERS: &[&str] = &[
 /// within the 64 characters providers accept.
 const MAX_MCP_SERVER_NAME: usize = 32;
 
+/// What [`is_valid_mcp_server_name`] checks, for error messages.
+pub(crate) const MCP_SERVER_NAME_RULE: &str =
+    "a server name must be 1 to 32 letters, digits, '_' or '-', without '__' and not ending in '_'";
+
+/// Whether `name` can name an MCP server, so `mcp__<name>__<tool>` names
+/// one server and the name is safe in a file name.
+pub(crate) fn is_valid_mcp_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_MCP_SERVER_NAME
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        && !name.contains("__")
+        && !name.ends_with('_')
+}
+
 /// DeepSeek's API root, where `/v1/tools/search` lives.
 pub(crate) const DEEPSEEK_SEARCH_BASE_URL: &str = "https://api.deepseek.com";
 
@@ -831,18 +847,6 @@ impl Settings {
     }
 }
 
-/// `[A-Za-z0-9_-]{1,32}` without `__`, so `mcp__<name>__<tool>` names one
-/// server and the name is safe in a file name.
-pub(crate) fn valid_mcp_server_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= MAX_MCP_SERVER_NAME
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-        && !name.contains("__")
-        && !name.ends_with('_')
-}
-
 /// A validated `[mcp.servers.<name>]`, or `None` when it is turned off or
 /// names a variable that is not set (with a warning).
 fn mcp_server(
@@ -851,10 +855,8 @@ fn mcp_server(
     env: &dyn Fn(&str) -> Option<String>,
     warnings: &mut Vec<String>,
 ) -> Result<Option<McpServerSettings>, String> {
-    if !valid_mcp_server_name(&name) {
-        return Err(format!(
-            "mcp.servers.{name}: a server name must be 1 to {MAX_MCP_SERVER_NAME} letters, digits, '_' or '-', without '__' and not ending in '_'"
-        ));
+    if !is_valid_mcp_server_name(&name) {
+        return Err(format!("mcp.servers.{name}: {MCP_SERVER_NAME_RULE}"));
     }
     if raw.tool_timeout_secs == Some(0) {
         return Err(format!(

@@ -84,7 +84,7 @@ pub(crate) fn logout_configured(
     server: &str,
 ) -> Result<String, String> {
     crate::settings::ensure_config_outside(workspace, lookup).map_err(|err| err.to_string())?;
-    if !crate::settings::valid_mcp_server_name(server) {
+    if !crate::settings::is_valid_mcp_server_name(server) {
         return Err(format!("'{server}' is not an MCP server name."));
     }
     let store = TokenStore::from_env(lookup)
