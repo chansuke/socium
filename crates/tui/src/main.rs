@@ -38,6 +38,13 @@ async fn main() -> Result<()> {
             println!("{}", cli::usage(&program));
             return Ok(());
         }
+        Ok(cli::Args {
+            launch: Launch::Version,
+            ..
+        }) => {
+            println!("socium {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         Ok(args) => args,
         Err(message) => {
             eprintln!("{message}\n\n{}", cli::usage(&program));
@@ -46,7 +53,7 @@ async fn main() -> Result<()> {
     };
 
     let (start, pick_session) = match launch {
-        Launch::New | Launch::Help => (SessionStart::New, false),
+        Launch::New | Launch::Help | Launch::Version => (SessionStart::New, false),
         Launch::Continue => (SessionStart::Continue, false),
         Launch::Resume(Some(id)) => (SessionStart::Resume(id), false),
         // A new session opens under the picker; closing it keeps that one.
