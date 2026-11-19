@@ -407,6 +407,11 @@ pub(super) struct OAuthSession {
     /// The configured `client_secret`, which is not in the token file.
     client_secret: Option<String>,
     token: tokio::sync::Mutex<StoredToken>,
+    /// After a renewal that could not be saved, the refresh token it used
+    /// up, which the file still holds: the renewed token is saved later,
+    /// unless the file has changed since.
+    unsaved: std::sync::Mutex<Option<String>>,
+    notices: super::Notices,
 }
 
 impl OAuthSession {
@@ -415,12 +420,15 @@ impl OAuthSession {
         store: TokenStore,
         client_secret: Option<String>,
         token: StoredToken,
+        notices: super::Notices,
     ) -> Self {
         Self {
             server: server.to_string(),
             store,
             client_secret,
             token: tokio::sync::Mutex::new(token),
+            unsaved: std::sync::Mutex::new(None),
+            notices,
         }
     }
 
@@ -431,6 +439,7 @@ impl OAuthSession {
         clients: &HttpClients,
     ) -> Result<String, ()> {
         let token = self.token.lock().await.clone();
+        self.save_unsaved(&token, Duration::ZERO);
         if token.due_for_renewal(REFRESH_MARGIN_SECONDS) && token.refresh_token.is_some() {
             return self.renew(clients, &token.access_token).await;
         }
@@ -491,12 +500,63 @@ impl OAuthSession {
         let renewed = refresh(clients, &token, self.client_secret.as_deref())
             .await
             .map_err(drop)?;
-        // A token that cannot be saved still works for this run, and the
-        // next renewal saves again.
-        let _ = self.store.save(&self.server, &renewed);
+        // A token that cannot be saved still works for this run; it is
+        // saved again before the next request and at exit.
+        if let Err(err) = self.store.save(&self.server, &renewed) {
+            *lock(&self.unsaved) = Some(refresh_token);
+            lock(&self.notices).push(format!(
+                "MCP server {}: its renewed token could not be saved in {} ({err}). Socium keeps using it and tries again; if it never saves, run socium mcp login {} after you restart.",
+                self.server,
+                self.store.dir().display(),
+                self.server
+            ));
+        }
         *token = renewed;
         Ok(token.access_token.clone())
     }
+
+    /// Saves `token` after a renewal that could not be, when the file
+    /// still holds the refresh token the renewal used up; a logout or
+    /// another renewal since wins. It waits up to `patience` for the lock,
+    /// which another Socium, or a child forked meanwhile, may hold.
+    fn save_unsaved(&self, token: &StoredToken, patience: Duration) {
+        let mut unsaved = lock(&self.unsaved);
+        let Some(used_up) = unsaved.as_deref() else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + patience;
+        let _lock = loop {
+            match self.store.lock(&self.server, false) {
+                Ok(Some(lock)) => break lock,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => return,
+            }
+        };
+        match self.store.load(&self.server, &token.url) {
+            Ok(Some(stored)) if stored.refresh_token.as_deref() == Some(used_up) => {
+                if self.store.save(&self.server, token).is_ok() {
+                    unsaved.take();
+                }
+            }
+            _ => {
+                unsaved.take();
+            }
+        }
+    }
+}
+
+impl Drop for OAuthSession {
+    fn drop(&mut self) {
+        if let Ok(token) = self.token.try_lock() {
+            self.save_unsaved(&token, Duration::from_secs(2));
+        }
+    }
+}
+
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|err| err.into_inner())
 }
 
 /// Exchanges the refresh token of `token` for a new access token (OAuth
@@ -1918,11 +1978,60 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_renewed_token_that_cannot_be_saved_is_kept_reported_and_saved_later() {
+        let (fake, _home, store) = logged_in(&["--oauth", "--expires=30"]);
+        let old = age(&store, &fake, 20);
+        let clients = HttpClients::new().unwrap();
+        let on_disk = || store.load("fake", &fake.url).unwrap().unwrap();
+
+        // Saved on the next use.
+        store.fail_next_saves(1);
+        let notices = super::super::Notices::default();
+        let session = Arc::new(OAuthSession::new(
+            "fake",
+            store.clone(),
+            None,
+            old.clone(),
+            notices.clone(),
+        ));
+        let renewed = block_on(session.access_token(&clients)).unwrap();
+        assert_ne!(renewed, old.access_token);
+        assert_eq!(on_disk().access_token, old.access_token);
+        let shown = notices.lock().unwrap().clone();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(shown[0].contains("could not be saved"), "{shown:?}");
+        assert_eq!(block_on(session.access_token(&clients)).unwrap(), renewed);
+        assert_eq!(on_disk().access_token, renewed);
+        assert_ne!(on_disk().refresh_token, old.refresh_token);
+
+        // Saved at exit.
+        let old = age(&store, &fake, 20);
+        store.fail_next_saves(1);
+        let session = Arc::new(OAuthSession::new(
+            "fake",
+            store.clone(),
+            None,
+            old.clone(),
+            super::super::Notices::default(),
+        ));
+        let renewed = block_on(session.access_token(&clients)).unwrap();
+        assert_eq!(on_disk().access_token, old.access_token);
+        drop(session);
+        assert_eq!(on_disk().access_token, renewed);
+    }
+
+    #[test]
     fn a_renewal_after_a_logout_fails_and_writes_no_file() {
         let (fake, _home, store) = logged_in(&["--oauth", "--expires=30"]);
         let token = age(&store, &fake, 20);
         store.remove("fake").unwrap();
-        let session = Arc::new(OAuthSession::new("fake", store.clone(), None, token));
+        let session = Arc::new(OAuthSession::new(
+            "fake",
+            store.clone(),
+            None,
+            token,
+            super::super::Notices::default(),
+        ));
         let clients = HttpClients::new().unwrap();
 
         assert!(block_on(session.access_token(&clients)).is_err());
@@ -1939,7 +2048,13 @@ pub(crate) mod tests {
         // The other Socium renews first and uses up the refresh token.
         let newer = block_on(refresh(&clients, &old, None)).unwrap();
         store.save("fake", &newer).unwrap();
-        let session = Arc::new(OAuthSession::new("fake", store.clone(), None, old));
+        let session = Arc::new(OAuthSession::new(
+            "fake",
+            store.clone(),
+            None,
+            old,
+            super::super::Notices::default(),
+        ));
 
         let token = block_on(session.access_token(&clients));
 
@@ -1951,7 +2066,13 @@ pub(crate) mod tests {
     fn a_renewal_is_saved_even_when_the_call_waiting_for_it_is_cancelled() {
         let (fake, _home, store) = logged_in(&["--oauth", "--expires=30", "--token-delay=0.5"]);
         let old = age(&store, &fake, 20);
-        let session = Arc::new(OAuthSession::new("fake", store.clone(), None, old.clone()));
+        let session = Arc::new(OAuthSession::new(
+            "fake",
+            store.clone(),
+            None,
+            old.clone(),
+            super::super::Notices::default(),
+        ));
         let clients = HttpClients::new().unwrap();
 
         block_on(async {

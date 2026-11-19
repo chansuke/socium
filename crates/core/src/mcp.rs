@@ -73,6 +73,10 @@ const MIN_SECRET_CHARS: usize = 8;
 /// How often a waiting call checks for cancellation.
 const POLL: Duration = Duration::from_millis(50);
 
+/// Warnings that arise after startup, such as a renewed token that could
+/// not be saved, until the next turn shows them.
+pub(crate) type Notices = Arc<Mutex<Vec<String>>>;
+
 /// Whether `name` has the form of an MCP tool's exposed name.
 pub(crate) fn is_mcp_tool(name: &str) -> bool {
     name.starts_with(PREFIX)
@@ -251,6 +255,7 @@ impl McpServer {
         tokens: Option<&TokenStore>,
         timeout: Duration,
         stop: &TaskControl,
+        notices: &Notices,
     ) -> Result<(Self, Vec<RemoteTool>), String> {
         let wait = Wait {
             deadline: Instant::now() + timeout,
@@ -290,6 +295,7 @@ impl McpServer {
                                 store,
                                 oauth.as_ref().and_then(|oauth| oauth.client_secret.clone()),
                                 token,
+                                notices.clone(),
                             )))
                         }
                         None => http::Authorization::None,
@@ -989,6 +995,7 @@ pub(crate) struct McpRegistry {
     servers: Vec<McpServer>,
     routes: HashMap<String, Route>,
     definitions: Vec<ToolDefinition>,
+    notices: Notices,
 }
 
 impl McpRegistry {
@@ -1003,6 +1010,8 @@ impl McpRegistry {
         timeout: Duration,
         stop: &TaskControl,
     ) -> (Self, Vec<String>) {
+        let notices = Notices::default();
+        let shared = &notices;
         let connected = std::thread::scope(|scope| {
             let handles = servers
                 .iter()
@@ -1015,6 +1024,7 @@ impl McpRegistry {
                             tokens,
                             timeout,
                             stop,
+                            shared,
                         )
                     })
                 })
@@ -1029,6 +1039,7 @@ impl McpRegistry {
                 .collect::<Vec<_>>()
         });
         let mut registry = Self::default();
+        registry.notices = notices;
         let mut warnings = Vec::new();
         let mut all_bytes = 0;
         for (settings, result) in servers.iter().zip(connected) {
@@ -1105,6 +1116,11 @@ impl McpRegistry {
             registry.servers.push(server);
         }
         (registry, warnings)
+    }
+
+    /// Warnings that arose since the last call.
+    pub(crate) fn take_notices(&self) -> Vec<String> {
+        std::mem::take(&mut lock(&self.notices))
     }
 
     /// The tools to offer the model.

@@ -99,10 +99,21 @@ pub(crate) fn now_seconds() -> u64 {
 }
 
 /// The token directory of one user.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct TokenStore {
     dir: PathBuf,
+    /// Saves still to fail, for tests of a full disk.
+    #[cfg(test)]
+    failing_saves: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
+
+impl PartialEq for TokenStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.dir == other.dir
+    }
+}
+
+impl Eq for TokenStore {}
 
 impl TokenStore {
     /// `$XDG_STATE_HOME/socium/mcp-auth`, else
@@ -123,7 +134,18 @@ impl TokenStore {
     }
 
     pub(crate) fn at(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            #[cfg(test)]
+            failing_saves: Default::default(),
+        }
+    }
+
+    /// Makes the next `count` saves fail.
+    #[cfg(test)]
+    pub(crate) fn fail_next_saves(&self, count: usize) {
+        self.failing_saves
+            .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(crate) fn dir(&self) -> &Path {
@@ -156,6 +178,18 @@ impl TokenStore {
     /// Replaces the token of `server`, creating the directory owner-only.
     /// A token too large to load again is refused.
     pub(crate) fn save(&self, server: &str, token: &StoredToken) -> io::Result<()> {
+        #[cfg(test)]
+        if self
+            .failing_saves
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(Error::other("no space left on device"));
+        }
         self.prepare_dir()?;
         let bytes = serde_json::to_vec_pretty(token).map_err(Error::other)?;
         if bytes.len() as u64 > MAX_TOKEN_FILE_BYTES {

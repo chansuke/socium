@@ -1720,7 +1720,12 @@ impl AgentService {
         self.messages.push(Message::user_text(user_input));
         self.persist_state()?;
         emit(&mut on_progress, ActivityKind::TurnStarted);
-        for message in mcp_warnings {
+        let notices = self
+            .mcp
+            .registry()
+            .map(|registry| registry.take_notices())
+            .unwrap_or_default();
+        for message in mcp_warnings.into_iter().chain(notices) {
             emit(&mut on_progress, ActivityKind::Warning { message });
         }
         if let Some(message) = self.reload_instructions() {
