@@ -583,6 +583,9 @@ mod tests {
         assert!(!tools.allows("mcp__time__convert_time"));
         assert!(tools.allows("mcp__git-hub__search_issues"));
         assert!(!tools.allows("mcp__git-hubx__search_issues"));
+        // No server may be named `git-hub_`, so this is the tool `_x` of
+        // `git-hub`, not the tool `x` of another server.
+        assert!(tools.allows("mcp__git-hub___x"));
         assert!(!tools.allows("apply_patch"));
         // An MCP tool may do anything, so the type runs alone.
         assert!(tools.may_change_workspace());
@@ -593,6 +596,7 @@ mod tests {
             (r#"["mcp____echo"]"#, "names the MCP server ''"),
             (r#"["mcp__*"]"#, "must be mcp__<server>__<tool>"),
             (r#"["mcp__*__echo"]"#, "names the MCP server '*'"),
+            (r#"["mcp__safe___*"]"#, "names the MCP server 'safe_'"),
             (r#"["mcp__time__"]"#, "is not an MCP tool name"),
             (r#"["mcp__time__get*"]"#, "is not an MCP tool name"),
             (r#"["mcp__time__a.b"]"#, "is not an MCP tool name"),
