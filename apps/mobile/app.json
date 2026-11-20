@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "Socium",
+    "slug": "socium",
+    "version": "0.1.0",
+    "userInterfaceStyle": "dark",
+    "extra": {
+      "eas": {
+        "projectId": "832f8045-5851-45ad-8511-3209a80b213d"
+      }
+    },
+    "icon": "./assets/icon.png"
+  }
+}

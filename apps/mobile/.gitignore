@@ -1,0 +1,9 @@
+# Local signing material and Expo tooling state
+credentials.json
+*.jks
+*.keystore
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem
