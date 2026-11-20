@@ -837,6 +837,25 @@ mod tests {
     }
 
     #[test]
+    fn gemini_models_import_onto_the_google_wire() {
+        let opencode = ModelRegistry::from_toml(&imported("opencode").toml).unwrap();
+        let zen = opencode.provider("opencode-google").unwrap();
+        assert_eq!(zen.wire, Wire::Google);
+        assert_eq!(zen.api_key_env.as_deref(), Some("OPENCODE_API_KEY"));
+        let flash = opencode.find("opencode/gemini-3.5-flash-lite").unwrap();
+        assert_eq!(flash.provider, "opencode-google");
+
+        let google = ModelRegistry::from_toml(&imported("google").toml).unwrap();
+        let provider = google.provider("google").unwrap();
+        assert_eq!(provider.wire, Wire::Google);
+        assert_eq!(
+            provider.base_url,
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+        assert!(google.models.iter().any(|model| model.provider == "google"));
+    }
+
+    #[test]
     fn rewriting_an_import_converges_to_the_same_file() {
         let dir = tempfile::tempdir().unwrap();
         let first = imported("opencode");
