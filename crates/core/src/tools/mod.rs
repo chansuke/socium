@@ -35,7 +35,7 @@ pub(crate) struct ToolContext<'a> {
     pub(crate) settings: &'a crate::settings::Settings,
     /// What a command nobody reviewed may not touch; `None` when a person
     /// approved this call or it needs no review.
-    pub(crate) restrictions: Option<&'a crate::approval::Restrictions>,
+    pub(crate) restrictions: Option<&'a crate::access::Restrictions>,
     /// The turn an edit is recorded under; `None` outside a turn.
     pub(crate) edit_origin: Option<&'a crate::tools::edit_history::EditOrigin>,
 }
