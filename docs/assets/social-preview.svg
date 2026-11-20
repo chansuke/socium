@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
   <rect width="1280" height="640" fill="#111317"/>
   <g transform="translate(80 150) scale(2.571)">
-    <rect x="1.5" y="1.5" width="25" height="25" rx="7" fill="none" stroke="#e0a43c" stroke-width="2"/>
-    <path d="M8.5 10.5 L13 14 L8.5 17.5" fill="none" stroke="#e0a43c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M15 18 H20" stroke="#e6e6e3" stroke-width="2.2" stroke-linecap="round"/>
+    <rect x="1.75" y="1.75" width="24.5" height="24.5" rx="7.5" fill="none" stroke="#e0a43c" stroke-width="1.5"/>
+    <path d="M8.75 10 L13 14 L8.75 18" fill="none" stroke="#e0a43c" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M15.5 18 H19.75" stroke="#e6e6e3" stroke-width="2.25" stroke-linecap="round"/>
   </g>
   <text x="172" y="208" font-family="JetBrains Mono" font-weight="800" font-size="72" letter-spacing="-2" fill="#e6e6e3">socium</text>
   <text font-family="Inter Variable, Inter, sans-serif" font-weight="600" font-size="34" fill="#e6e6e3">

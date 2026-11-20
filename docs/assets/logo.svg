@@ -3,7 +3,7 @@
     .line { stroke: #1d1f24; }
     @media (prefers-color-scheme: dark) { .line { stroke: #e6e6e3; } }
   </style>
-  <rect x="1.5" y="1.5" width="25" height="25" rx="7" fill="none" stroke="#c88214" stroke-width="2"/>
-  <path d="M8.5 10.5 L13 14 L8.5 17.5" fill="none" stroke="#c88214" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-  <path class="line" d="M15 18 H20" stroke-width="2.2" stroke-linecap="round"/>
+  <rect x="1.75" y="1.75" width="24.5" height="24.5" rx="7.5" fill="none" stroke="#c88214" stroke-width="1.5"/>
+  <path d="M8.75 10 L13 14 L8.75 18" fill="none" stroke="#c88214" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M15.5 18 H19.75" stroke-width="2.25" stroke-linecap="round"/>
 </svg>
