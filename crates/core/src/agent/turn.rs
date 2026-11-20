@@ -12,7 +12,7 @@ use crate::conversation::{AgentMessageRequest, ContentBlock, Message};
 use crate::error::AgentError;
 use crate::plan::PlanLedger;
 use crate::providers::{Provider, ProviderEvent, TokenUsage};
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use crate::tools::{ToolCall, run_tool_call_on_blocking_thread};
 use serde_json::Value;
 use std::future::Future;

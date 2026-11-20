@@ -1,7 +1,7 @@
 use crate::AgentProgress;
 use crate::constants::*;
 use crate::conversation::ToolDefinition;
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{optional_bool_field, require_string_field};
 use crate::tools::text_file::{read_utf8_file_and_mode, read_utf8_file_with_limit};
