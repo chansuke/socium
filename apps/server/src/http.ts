@@ -23,7 +23,7 @@ function json(response: ServerResponse, status: number, data: unknown) {
 }
 
 async function readJson(request: IncomingMessage) {
-  if (request.headers["content-type"]?.split(";")[0] !== "application/json") {
+  if (request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !== "application/json") {
     throw new GatewayError(415, "Send the request as JSON.");
   }
   const chunks: Buffer[] = [];

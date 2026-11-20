@@ -51,7 +51,8 @@ test("gateway gates commands by access token, conversation, turn, and exact appr
   assert.equal((await send({ action: "prompt", session: "other", text: "hello" })).status, 409);
   assert.equal((await send({ action: "prompt", text: " " })).status, 400);
   assert.equal((await send({ action: "prompt", text: "x".repeat(140_000) })).status, 413);
-  assert.equal((await send({ action: "prompt", text: " hello " })).status, 200);
+  assert.equal((await send({ action: "prompt", text: "hello" }, { ...auth, "Content-Type": "text/plain" })).status, 415);
+  assert.equal((await send({ action: "prompt", text: " hello " }, { ...auth, "Content-Type": "Application/JSON ; charset=utf-8" })).status, 200);
   assert.deepEqual(commands, [{ action: "prompt", text: "hello" }]);
 
   state.turn = {
