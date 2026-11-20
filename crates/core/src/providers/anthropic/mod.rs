@@ -97,6 +97,8 @@ impl AnthropicProvider {
             let (header, value) = match self.auth {
                 AuthScheme::ApiKeyHeader => ("x-api-key", api_key.clone()),
                 AuthScheme::Bearer => ("authorization", format!("Bearer {api_key}")),
+                // The registry gives this only to the google wire.
+                AuthScheme::GoogApiKey => ("x-goog-api-key", api_key.clone()),
             };
             let mut key = reqwest::header::HeaderValue::from_str(&value)
                 .map_err(|_| ProviderError::Api("Invalid API key header".into()))?;

@@ -154,6 +154,10 @@ pub(crate) fn build_provider(
         Wire::OpenAiResponses => Ok(Box::new(OpenAiResponsesProvider::from_config(
             provider, model, lookup,
         )?)),
+        Wire::Google => Err(ProviderError::Api(format!(
+            "{}: the google wire has no provider yet",
+            provider.name
+        ))),
     }
 }
 
