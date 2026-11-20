@@ -277,9 +277,9 @@ fn replayable_reasoning(signature: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tools_for_model;
     use crate::models::ModelRegistry;
     use crate::providers::test_server::serve_once;
-    use crate::tools::tools_for_model;
 
     const OPENAI: &str = r#"
 [providers.openai]

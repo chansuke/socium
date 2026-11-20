@@ -386,10 +386,10 @@ fn user_parts(blocks: &[ContentBlock], calls: &HashMap<String, SentCall>) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tools_for_model;
     use crate::conversation::Origin;
     use crate::models::ModelRegistry;
     use crate::providers::test_server::serve_once;
-    use crate::tools::tools_for_model;
 
     const GEMINI: &str = r#"
 [providers.gemini]

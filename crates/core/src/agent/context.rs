@@ -675,9 +675,9 @@ fn truncate_summary_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ContextBudget, context_metrics_for_input, prepare_context_with_budget};
+    use crate::agent::default_tools;
     use crate::conversation::{ContentBlock, Message};
     use crate::state::ConversationSummaryState;
-    use crate::tools::default_tools;
     use serde_json::json;
 
     #[test]

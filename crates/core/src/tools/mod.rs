@@ -69,20 +69,14 @@ static BUILTIN_TOOLS: &[&dyn Tool] = &[
     &TextEditorTool,
 ];
 
-pub fn default_tools() -> Vec<ToolDefinition> {
-    tools_for_model()
-}
-
-/// Tool definitions for a model: the built-in tools, the `agent` tool with
-/// the built-in subagent types, and `update_plan`. The same for every
+/// Tool definitions for a model with the tool profile and command time
+/// limit the user set: the built-in tools, then `agent` as the caller's
+/// subagent catalog defines it, and `update_plan`. The same for every
 /// provider.
-pub(crate) fn tools_for_model() -> Vec<ToolDefinition> {
-    tools_with_settings(&crate::settings::Settings::default())
-}
-
-/// As `tools_for_model`, with the tool profile and command time limit the
-/// user set.
-pub(crate) fn tools_with_settings(settings: &crate::settings::Settings) -> Vec<ToolDefinition> {
+pub(crate) fn tools_with_settings(
+    settings: &crate::settings::Settings,
+    agent: ToolDefinition,
+) -> Vec<ToolDefinition> {
     BUILTIN_TOOLS
         .iter()
         .filter(|tool| settings.tools.allows(tool.name()))
@@ -94,10 +88,7 @@ pub(crate) fn tools_with_settings(settings: &crate::settings::Settings) -> Vec<T
         })
         // `agent` and `update_plan` need state the stateless `Tool` trait
         // does not carry; the turn loop runs them itself.
-        .chain([
-            crate::agent::subagent::catalog::SubagentCatalog::builtin().tool_definition(),
-            crate::plan::tool_definition(),
-        ])
+        .chain([agent, crate::plan::tool_definition()])
         // Only when the user turned it on and its key is set.
         .chain(
             settings
@@ -208,6 +199,7 @@ pub(crate) fn builtin(name: &str) -> Option<&'static dyn Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tools_for_model;
     use crate::constants::TEXT_EDITOR_TOOL_NAME;
     use crate::test_support::make_temp_dir;
     use serde_json::json;
@@ -215,10 +207,13 @@ mod tests {
 
     fn offered(config: &str) -> Vec<String> {
         let (settings, _) = crate::settings::Settings::from_toml(config, None).unwrap();
-        tools_with_settings(&settings)
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect()
+        tools_with_settings(
+            &settings,
+            crate::agent::subagent::catalog::SubagentCatalog::builtin().tool_definition(),
+        )
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect()
     }
 
     #[test]

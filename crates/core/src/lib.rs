@@ -783,14 +783,8 @@ impl AgentService {
             .max_output_tokens
             .or(self.max_tokens_override)
             .unwrap_or(DEFAULT_MAX_TOKENS);
-        self.tools = crate::tools::tools_with_settings(&self.settings);
-        if let Some(agent) = self
-            .tools
-            .iter_mut()
-            .find(|tool| tool.name() == AGENT_TOOL_NAME)
-        {
-            *agent = self.subagents.tool_definition();
-        }
+        self.tools =
+            crate::tools::tools_with_settings(&self.settings, self.subagents.tool_definition());
     }
 
     /// User subagent types and every registered model whose provider can
