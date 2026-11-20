@@ -12,7 +12,7 @@
   "scripts": {
     "lint": "eslint . --max-warnings 0",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "start:clients": "npm run start -w @socium/server",
+    "start:clients": "npm run start -w @socium/server --",
     "test:clients": "npm run test --workspaces --if-present",
     "dev:web": "npm run dev -w @socium/web",
     "build:web": "npm run build -w @socium/web"

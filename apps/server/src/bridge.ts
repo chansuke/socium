@@ -33,8 +33,11 @@ export class GatewayError extends Error {
 }
 
 export function createBridge(binary: string, workspace: string) {
+  const env = { ...process.env };
+  delete env.SOCIUM_CLIENT_TOKEN;
   const worker = spawn(binary, ["--client-bridge"], {
     cwd: workspace,
+    env,
     stdio: ["pipe", "pipe", "inherit"],
   });
   const lines = createInterface({ input: worker.stdout });
