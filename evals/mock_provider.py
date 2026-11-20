@@ -27,11 +27,13 @@ COMPLETION_TOKENS = 40
 
 
 def solution_calls(task, repo, play):
-    """One editor call per file in solution/, against the file as it is now."""
+    """One editor call per file in solution/, against the file as it is now.
+    Bytecode left by running the solution's tests is not part of it."""
     calls = []
     if play in ("solution", "stray"):
         solution = task / "solution"
-        for source in sorted(p for p in solution.rglob("*") if p.is_file()):
+        files = (p for p in solution.rglob("*") if p.is_file() and "__pycache__" not in p.relative_to(solution).parts)
+        for source in sorted(files):
             path = source.relative_to(solution).as_posix()
             wanted = source.read_bytes().decode("utf-8")
             target = repo / path
