@@ -141,6 +141,17 @@ pub(crate) fn session_id_at(time: SystemTime) -> String {
     )
 }
 
+/// `YYYY-MM-DD` in UTC.
+pub(crate) fn utc_date(time: SystemTime) -> String {
+    let days = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / 86_400;
+    let (year, month, day) = civil_from_days(days as i64);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
 /// Proleptic Gregorian date of a day count since 1970-01-01, from Howard
 /// Hinnant's `civil_from_days`.
 fn civil_from_days(days: i64) -> (i64, u32, u32) {

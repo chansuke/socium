@@ -490,6 +490,11 @@ pub(crate) fn models_dir_beside(models_file: &Path) -> PathBuf {
     models_file.with_file_name(MODELS_DIR_NAME)
 }
 
+/// `models.d/` beside the models file `load` reads.
+pub(crate) fn models_dir(lookup: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    models_file(lookup).map(|(path, _)| models_dir_beside(&path))
+}
+
 /// The `*.toml` files of `dir` in file-name order; none when it is missing.
 fn read_models_dir(dir: &Path) -> io::Result<Vec<Layer>> {
     let cannot_read = |path: &Path, err: Error| {
