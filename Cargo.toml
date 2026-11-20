@@ -5,3 +5,20 @@ resolver = "3"
 [profile.release]
 lto = "fat"
 codegen-units = 1
+
+# Each crate opts in with `lints.workspace = true`. To silence one of these,
+# use `#[expect(lint, reason = "...")]` on the smallest item; a reason that
+# only says the code is hard to change is not one.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

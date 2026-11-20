@@ -193,11 +193,8 @@ fn network_probe() {
     ] {
         let mut fds = [0; 2];
         // SAFETY: fds is a valid two-element buffer for the kernel to fill.
-        assert_eq!(
-            unsafe { libc::socketpair(libc::AF_UNIX, kind, 0, fds.as_mut_ptr()) },
-            0,
-            "socketpair type {kind:#x} must be allowed"
-        );
+        let made = unsafe { libc::socketpair(libc::AF_UNIX, kind, 0, fds.as_mut_ptr()) };
+        assert_eq!(made, 0, "socketpair type {kind:#x} must be allowed");
         // SAFETY: both descriptors were just created and are owned here.
         unsafe {
             libc::close(fds[0]);
@@ -207,17 +204,15 @@ fn network_probe() {
     }
     let mut fds = [0; 2];
     // SAFETY: as above; the call is expected to fail.
-    assert_eq!(
-        unsafe {
-            libc::socketpair(
-                libc::AF_UNIX,
-                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
-                0,
-                fds.as_mut_ptr(),
-            )
-        },
-        -1
-    );
+    let made = unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+            0,
+            fds.as_mut_ptr(),
+        )
+    };
+    assert_eq!(made, -1);
     for domain in [
         libc::AF_INET,
         libc::AF_INET6,
@@ -232,13 +227,14 @@ fn network_probe() {
     assert!(std::os::unix::net::UnixStream::connect("host.sock").is_err());
     assert!(std::net::TcpStream::connect("127.0.0.1:1").is_err());
     assert!(std::net::UdpSocket::bind("127.0.0.1:0").is_err());
-    // A null pointer would yield EFAULT if seccomp did not intercept the call.
-    assert_eq!(
-        unsafe { libc::syscall(libc::SYS_io_uring_setup, 1, std::ptr::null::<u8>()) },
-        -1
-    );
+    // SAFETY: a null pointer would yield EFAULT if seccomp did not intercept
+    // the call, so the kernel never writes through it.
+    let ring = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1, std::ptr::null::<u8>()) };
+    assert_eq!(ring, -1);
     assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
-    assert_eq!(unsafe { libc::unshare(libc::CLONE_NEWUSER) }, -1);
+    // SAFETY: no pointers; the expected error changes no namespace.
+    let unshared = unsafe { libc::unshare(libc::CLONE_NEWUSER) };
+    assert_eq!(unshared, -1);
     println!("sandbox-network-probe-ok");
 }
 

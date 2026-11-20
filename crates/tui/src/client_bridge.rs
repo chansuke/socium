@@ -26,6 +26,10 @@ enum Command {
     Approve { request: u64, allow: bool },
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "stdout carries the protocol, and the gateway passes stderr through to its own"
+)]
 pub(crate) async fn run() -> color_eyre::Result<()> {
     let mut agent = AgentService::from_current_dir(SessionStart::Continue)?;
     agent.wait_for_sandbox()?;

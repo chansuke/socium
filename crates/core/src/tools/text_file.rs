@@ -248,7 +248,8 @@ pub(crate) fn file_mode(metadata: &fs::Metadata) -> Option<u32> {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use crate::test_support::{make_fifo, make_temp_dir};

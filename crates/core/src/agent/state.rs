@@ -513,6 +513,7 @@ mod tests {
         let child = std::thread::spawn(|| {
             let mut command = std::process::Command::new("sh");
             command.args(["-c", "exit 0"]);
+            // SAFETY: the hook only sleeps, which is async-signal-safe.
             unsafe {
                 command.pre_exec(|| {
                     std::thread::sleep(std::time::Duration::from_millis(500));

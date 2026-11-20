@@ -24,6 +24,11 @@ use color_eyre::{Result, eyre::eyre};
 use socium_core::{AgentService, SessionStart};
 use std::{env, path::Path};
 
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "usage, version and the resume hint print outside the terminal UI"
+)]
 #[tokio::main(worker_threads = 1)]
 async fn main() -> Result<()> {
     color_eyre::install()?;

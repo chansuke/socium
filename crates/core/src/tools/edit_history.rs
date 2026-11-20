@@ -251,7 +251,11 @@ pub(crate) fn apply_changes(
         }
         applied.push(change.path.clone());
     }
-    history.records.last_mut().unwrap().complete = true;
+    history
+        .records
+        .last_mut()
+        .expect("the record was pushed before the files were written")
+        .complete = true;
     save_json_file(&path,&history).map_err(|e|format!("Files changed ({applied:?}), but history completion could not be saved: {e}; inspect before retrying"))
 }
 

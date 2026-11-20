@@ -72,6 +72,15 @@ pub(crate) struct TurnOutcome {
 
 /// Further attempts after a retryable failure before any output arrived.
 const MAX_RETRIES: u32 = 3;
+/// Replaces the user message that holds this round's tool results, which the
+/// round pushed before its first tool ran.
+fn set_round_results(messages: &mut [Message], results: &[ContentBlock]) {
+    *messages
+        .last_mut()
+        .expect("the round pushes its results message before any tool runs") =
+        Message::user_blocks(results.to_vec());
+}
+
 const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// `plan` is the main agent's plan, lent for this turn; a subagent's turn
@@ -421,7 +430,7 @@ where
                     let slot = placed.partition_point(|&earlier| earlier < index);
                     placed.insert(slot, index);
                     results.insert(first + slot, bounded(result));
-                    *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
+                    set_round_results(messages, &results);
                     // The other children still run to the end before a
                     // failed save ends the turn.
                     saved = saved.and(checkpoint(messages,serde_json::json!({"type":"tool_finished","round":round+1,"attempt":1,"tool_call_id":id,"tool":name,"is_error":failed,"result_index":first+index})));
@@ -652,7 +661,7 @@ where
                 }
             }
             results.push(result);
-            *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
+            set_round_results(messages, &results);
             checkpoint(messages,serde_json::json!({"type":"tool_finished","round":round+1,"attempt":1,"tool_call_id":call_id,"tool":tool_name,"is_error":failed,"result_index":results.len()-1})).map_err(|e|std::io::Error::other(format!("Tool finished but its result could not be saved; outcome may be unknown after restart: {e}")))?;
             // Shown only once the result that carries it is saved, so the
             // Timeline never shows a plan the history cannot replay.
@@ -667,7 +676,7 @@ where
             // Appended to a result that was not sent yet, so no earlier
             // request's prefix changes.
             content.push_str(&reminder);
-            *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
+            set_round_results(messages, &results);
             checkpoint(
                 messages,
                 serde_json::json!({"type":"plan_reminder","round":round+1}),
@@ -686,7 +695,7 @@ where
             results.push(ContentBlock::Text {
                 text: steering_text(&added),
             });
-            *messages.last_mut().unwrap() = Message::user_blocks(results.clone());
+            set_round_results(messages, &results);
             checkpoint(
                 messages,
                 serde_json::json!({"type":"user_steered","round":round+1}),

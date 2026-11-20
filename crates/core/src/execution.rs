@@ -133,5 +133,6 @@ pub(crate) fn missing_tool_programs() -> Vec<String> {
 
 pub const SANDBOX_DESCRIPTION: &str = "Linux sandbox: workspace access only plus read-only system runtimes; no network; private HOME; no host fallback";
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests;
