@@ -75,6 +75,12 @@ jobs:
       - name: Build Nix package
         run: nix build .#default
 
+      # The package's own PATH, not the dev shell's, must carry git and rg.
+      - name: Run the package's git and ripgrep tools from an empty PATH
+        run: |
+          sandbox_backend=$(readlink -f "$(nix develop --command sh -c 'command -v bwrap')")
+          python3 -I nix/package_smoke.py result/bin/socium "$sandbox_backend"
+
       - name: Remove CI sandbox backend profile
         if: always()
         run: |
