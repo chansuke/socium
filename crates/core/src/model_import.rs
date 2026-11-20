@@ -266,9 +266,9 @@ pub fn import(
         .providers
         .get(provider_id)
         .ok_or_else(|| format!("'{provider_id}' is not a models.dev provider"))?;
-    if !is_bare_key(provider_id) {
+    if !is_file_stem(provider_id) {
         return Err(format!(
-            "provider id '{provider_id}' cannot name a file (letters, digits, - and _ only)"
+            "provider id '{provider_id}' cannot name a file (letters, digits, '.', '-' and '_' only)"
         ));
     }
     if OAUTH_ONLY.contains(&provider_id) {
@@ -537,6 +537,15 @@ fn is_bare_key(text: &str) -> bool {
         && text
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Safe as `<text>.toml` inside `models.d/`: no separator, and not hidden.
+fn is_file_stem(text: &str) -> bool {
+    !text.starts_with('.')
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && !text.is_empty()
 }
 
 fn is_env_name(text: &str) -> bool {
@@ -880,6 +889,24 @@ mod tests {
         assert_eq!(chat.description.as_deref(), Some("Say \"hi\" \\ there"));
         assert_eq!(chat.provider, "p");
         assert_eq!(registry.find("p/mistral").unwrap().provider, "p");
+    }
+
+    #[test]
+    fn a_provider_id_names_a_file_inside_models_d_only() {
+        let catalog = parse_catalog(
+            r#"{"w.ai": {"npm": "@ai-sdk/xai", "env": ["W_KEY"], "models": {"m": {"id": "m"}}},
+                "../up": {"npm": "@ai-sdk/xai", "env": ["W_KEY"], "models": {"m": {"id": "m"}}},
+                ".hidden": {"npm": "@ai-sdk/xai", "env": ["W_KEY"], "models": {"m": {"id": "m"}}}}"#,
+        )
+        .unwrap();
+        let w = import(&catalog, "w.ai", "saved.json", "2026-11-20").unwrap();
+        assert!(w.toml.contains("[providers.\"w.ai\"]\n"), "{}", w.toml);
+        let registry = ModelRegistry::from_toml(&w.toml).unwrap();
+        assert_eq!(registry.find("w.ai/m").unwrap().provider, "w.ai");
+        for id in ["../up", ".hidden"] {
+            let err = import(&catalog, id, "saved.json", "2026-11-20").unwrap_err();
+            assert!(err.contains("cannot name a file"), "{id}: {err}");
+        }
     }
 
     #[test]
