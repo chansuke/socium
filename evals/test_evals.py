@@ -181,9 +181,53 @@ class ToolErrors(unittest.TestCase):
         self.assertEqual(metrics["tool_argument_errors"], 3)
 
 
-def side(path, label, passes, model="m", task_digest="t", tools=None):
+class PromptCacheOff(unittest.TestCase):
+    MODELS = """default = "h"
+[providers.anthropic]
+wire = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+[providers."local one"]
+wire = "openai-chat"
+base_url = "http://127.0.0.1:1/v1"
+[[models]]
+alias = "h"
+provider = "anthropic"
+id = "claude-haiku-5-5"
+features = ["adaptive_thinking", "prompt_caching"]
+context_window = 200000
+price = { input = 1.0, output = 5.0, cache_read = 0.1, cache_write = 1.25 }
+[[models]]
+alias = "other"
+provider = "anthropic"
+id = "x"
+features = ["prompt_caching"]
+"""
+
+    def test_only_the_measured_model_loses_prompt_caching(self):
+        import run as runner
+        import tomllib
+
+        before = tomllib.loads(self.MODELS)
+        after = tomllib.loads(runner.without_prompt_caching(self.MODELS, "h"))
+        self.assertEqual(after["models"][0]["features"], ["adaptive_thinking"])
+        before["models"][0]["features"] = ["adaptive_thinking"]
+        self.assertEqual(after, before)
+
+    def test_a_model_that_is_not_listed_or_does_not_cache_is_refused(self):
+        import run as runner
+
+        for alias in ("missing", "h"):
+            text = self.MODELS.replace('"adaptive_thinking", "prompt_caching"', '"adaptive_thinking"')
+            with self.assertRaises(SystemExit) as err:
+                runner.without_prompt_caching(text, alias)
+            self.assertIn(alias, str(err.exception))
+
+
+def side(path, label, passes, model="m", task_digest="t", tools=None, prompt_cache=None):
     with open(path, "w") as f:
         f.write(json.dumps({"type": "manifest", "label": label, "comparison": "controlled", "tools": tools,
+                            "prompt_cache": prompt_cache,
                             "mode": "model", "model": model, "budget_usd": 1.0,
                             "tasks": {"a": task_digest, "b": "t"}}) + "\n")
         for passed in passes:
@@ -220,6 +264,10 @@ class Compare(unittest.TestCase):
     def test_tool_profiles_may_differ_and_are_named(self):
         out = self.lines([True], [True], tools="basic")
         self.assertIn("tool profiles: default vs basic", out)
+
+    def test_the_prompt_cache_setting_may_differ_and_is_named(self):
+        out = self.lines([True], [True], prompt_cache="off")
+        self.assertIn("prompt cache: default vs off", out)
 
     def test_the_share_of_input_read_from_the_cache_and_the_total_cost_are_shown(self):
         out = self.lines([True, True], [True])
