@@ -2,9 +2,11 @@ import { strict as assert } from "node:assert";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
+import { readPairingUrl } from "@socium/client";
 import type { WorkspaceState } from "@socium/client/protocol";
 import type { WorkerCommand } from "./bridge.ts";
 import { createHttpServer } from "./http.ts";
+import { createPairing } from "./pairing.ts";
 
 test("gateway gates commands by access token, conversation, turn, and exact approval", async (context) => {
   const token = "client-gateway-test-token";
@@ -63,4 +65,63 @@ test("gateway gates commands by access token, conversation, turn, and exact appr
   assert.equal((await send({ action: "approve", turn: "turn-2", request: 2, allow: true })).status, 409);
   assert.equal((await send({ action: "approve", turn: "turn-2", request: 1, allow: false })).status, 200);
   assert.deepEqual(commands.at(-1), { action: "approve", request: 1, allow: false });
+});
+
+test("pairing codes are issued by the host and exchanged once for a device token", async (context) => {
+  const state: WorkspaceState = {
+    revision: "revision",
+    workspace: "workspace",
+    session: "session",
+    title: null,
+    model: "mock",
+    sessions: [],
+    messages: [],
+    warnings: [],
+    notices: [],
+    turn: null,
+  };
+  let time = 0;
+  const token = "host-access-token";
+  const server = createHttpServer({
+    snapshot: () => state,
+    close() {},
+    async send() { return state; },
+  }, token, tmpdir(), createPairing("https://socium.test/", () => time));
+  context.after(() => server.close());
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const api = `http://127.0.0.1:${address.port}/api`;
+  const host = { Authorization: `Bearer ${token}` };
+  const issue = (headers?: Record<string, string>) => fetch(`${api}/pairing`, { method: "POST", headers });
+  const redeem = (code: string) => fetch(`${api}/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  const pairingUrl = async () => readPairingUrl((await (await issue(host)).json()).url);
+
+  assert.equal((await issue()).status, 401);
+  const expired = await pairingUrl();
+  assert.equal(expired.origin, "https://socium.test");
+  time += 5 * 60_000;
+  assert.equal((await redeem(expired.code)).status, 401);
+  const replaced = await pairingUrl();
+  const active = await pairingUrl();
+  assert.equal((await redeem(replaced.code)).status, 401);
+
+  const requests = await Promise.all([redeem(active.code), redeem(active.code)]);
+  assert.deepEqual(requests.map(({ status }) => status).sort(), [200, 401]);
+  const result = requests.find(({ ok }) => ok);
+  assert(result);
+  const deviceToken = (await result.json()).token;
+  assert.notEqual(deviceToken, token);
+  const device = { Authorization: `Bearer ${deviceToken}` };
+  assert.equal((await fetch(`${api}/state`, { headers: device })).status, 200);
+  assert.equal((await issue(device)).status, 403);
+
+  for (const invalid of ["http://socium.test/pair#test", `https://user@socium.test/pair#${active.code}`, `https://socium.test/login#${active.code}`]) {
+    assert.throws(() => readPairingUrl(invalid));
+  }
 });

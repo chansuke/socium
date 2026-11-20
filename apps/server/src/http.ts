@@ -7,6 +7,7 @@ import { maxPromptLength } from "@socium/client/protocol";
 import type { WorkspaceState } from "@socium/client/protocol";
 import { GatewayError } from "./bridge.ts";
 import type { Bridge, WorkerCommand } from "./bridge.ts";
+import type { Pairing } from "./pairing.ts";
 
 const assetTypes = new Map([
   [".js", "text/javascript; charset=utf-8"],
@@ -21,9 +22,9 @@ function json(response: ServerResponse, status: number, data: unknown) {
   response.end(JSON.stringify(data));
 }
 
-async function readCommand(request: IncomingMessage) {
+async function readJson(request: IncomingMessage) {
   if (request.headers["content-type"]?.split(";")[0] !== "application/json") {
-    throw new GatewayError(415, "Send the command as JSON.");
+    throw new GatewayError(415, "Send the request as JSON.");
   }
   const chunks: Buffer[] = [];
   let size = 0;
@@ -40,7 +41,7 @@ async function readCommand(request: IncomingMessage) {
   } catch {
     // Malformed JSON and non-object JSON have the same error.
   }
-  throw new GatewayError(400, "Invalid command.");
+  throw new GatewayError(400, "Invalid request.");
 }
 
 function workerCommand(body: Record<string, unknown>, state: WorkspaceState): WorkerCommand {
@@ -76,8 +77,9 @@ function workerCommand(body: Record<string, unknown>, state: WorkspaceState): Wo
   throw new GatewayError(400, "Invalid command.");
 }
 
-export function createHttpServer(bridge: Bridge, token: string, webRoot: string) {
+export function createHttpServer(bridge: Bridge, token: string, webRoot: string, pairing?: Pairing) {
   const expected = digest(`Bearer ${token}`);
+  const clientState = (state: WorkspaceState) => ({ ...state, mobilePairing: Boolean(pairing) });
 
   return createServer({ headersTimeout: 5000, requestTimeout: 15_000 }, async (request, response) => {
     response.setHeader("Cache-Control", "no-store");
@@ -88,19 +90,33 @@ export function createHttpServer(bridge: Bridge, token: string, webRoot: string)
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
       if (url.pathname.startsWith("/api/")) {
-        if (!timingSafeEqual(digest(request.headers.authorization ?? ""), expected)) {
+        if (request.method === "POST" && url.pathname === "/api/pair" && pairing) {
+          const { code } = await readJson(request);
+          const pairedToken = typeof code === "string" && /^[\w-]{43}$/.test(code) ? pairing.redeem(code) : null;
+          if (!pairedToken) throw new GatewayError(401, "This pairing code is invalid, expired, or already used.");
+          json(response, 200, { token: pairedToken });
+          return;
+        }
+        const authorization = request.headers.authorization ?? "";
+        const hostAccess = timingSafeEqual(digest(authorization), expected);
+        if (!hostAccess && !pairing?.authorizes(authorization)) {
           throw new GatewayError(401, "Enter the access token shown on the Socium host.");
+        }
+        if (request.method === "POST" && url.pathname === "/api/pairing" && pairing) {
+          if (!hostAccess) throw new GatewayError(403, "Use the host access token to generate a pairing QR code.");
+          json(response, 200, { url: pairing.issue() });
+          return;
         }
         if (request.method === "GET" && url.pathname === "/api/state") {
           const state = bridge.snapshot();
           if (url.searchParams.get("after") === state.revision) response.writeHead(204).end();
-          else json(response, 200, state);
+          else json(response, 200, clientState(state));
           return;
         }
         if (request.method === "POST" && url.pathname === "/api/command") {
-          const body = await readCommand(request);
+          const body = await readJson(request);
           const command = workerCommand(body, bridge.snapshot());
-          json(response, 200, await bridge.send(command));
+          json(response, 200, clientState(await bridge.send(command)));
           return;
         }
       } else if (request.method === "GET" || request.method === "HEAD") {

@@ -4,14 +4,16 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createBridge } from "./bridge.ts";
 import { createHttpServer } from "./http.ts";
+import { createPairing } from "./pairing.ts";
 
 const { values } = parseArgs({
   options: {
     workspace: { type: "string" },
     port: { type: "string", default: "4173" },
+    "mobile-url": { type: "string" },
   },
 });
-if (!values.workspace) throw new Error("Usage: npm run start:clients -- --workspace /path/to/project [--port 4173]");
+if (!values.workspace) throw new Error("Usage: npm run start:clients -- --workspace /path/to/project [--port 4173] [--mobile-url https://host]");
 const port = Number(values.port);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Enter a valid TCP port.");
 const configuredToken = process.env.SOCIUM_CLIENT_TOKEN;
@@ -19,9 +21,10 @@ const token = configuredToken ?? randomBytes(32).toString("base64url");
 if (!/^[a-zA-Z0-9_-]{32,}$/.test(token)) {
   throw new Error("SOCIUM_CLIENT_TOKEN must contain at least 32 base64url characters.");
 }
+const pairing = values["mobile-url"] ? createPairing(values["mobile-url"]) : undefined;
 const workspace = realpathSync(values.workspace);
 const bridge = createBridge(process.env.SOCIUM_BIN ?? "socium", workspace);
-const server = createHttpServer(bridge, token, resolve(import.meta.dirname, "../../web/dist"));
+const server = createHttpServer(bridge, token, resolve(import.meta.dirname, "../../web/dist"), pairing);
 
 server.on("error", (error) => {
   bridge.close();
