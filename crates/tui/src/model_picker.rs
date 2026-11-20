@@ -228,6 +228,35 @@ mod tests {
     }
 
     #[test]
+    fn imported_aliases_with_slashes_complete_like_any_other() {
+        let aliases = [
+            "opus",
+            "opencode/claude-haiku-5-5",
+            "opencode/claude-opus-5-5",
+            "opencode/gpt-5-nano",
+            "groq/qwen/qwen3.6-27b",
+        ]
+        .map(String::from);
+        assert_eq!(
+            complete_alias("op", &aliases).1,
+            [
+                "opus",
+                "opencode/claude-haiku-5-5",
+                "opencode/claude-opus-5-5",
+                "opencode/gpt-5-nano"
+            ]
+        );
+        assert_eq!(complete_alias("opencode/c", &aliases).0, "opencode/claude-");
+        assert_eq!(
+            complete_alias("groq/", &aliases),
+            (
+                "groq/qwen/qwen3.6-27b".into(),
+                vec!["groq/qwen/qwen3.6-27b"]
+            )
+        );
+    }
+
+    #[test]
     fn tab_completion_only_applies_to_the_model_argument() {
         let mut app = App::for_test();
         app.input = "/model x".into();
