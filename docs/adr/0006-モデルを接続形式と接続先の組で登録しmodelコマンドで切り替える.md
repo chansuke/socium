@@ -3,6 +3,11 @@ number: 6
 title: モデルを接続形式と接続先の組で登録し/modelコマンドで切り替える
 status: accepted
 date: 2026-11-13
+links:
+- target: 22
+  kind: amendedby
+- target: 23
+  kind: amendedby
 ---
 
 # モデルを接続形式と接続先の組で登録し/modelコマンドで切り替える
