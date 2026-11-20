@@ -1,0 +1,14 @@
+{
+  "name": "@socium/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@socium/client": "0.1.0"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "node --test src/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

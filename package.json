@@ -10,10 +10,14 @@
     "packages/*"
   ],
   "scripts": {
-    "lint": "eslint . --max-warnings 0"
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "start:clients": "npm run start -w @socium/server",
+    "test:clients": "npm run test --workspaces --if-present"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@types/node": "24.19.2",
     "eslint": "10.15.0",
     "eslint-plugin-react-hooks": "7.1.1",
     "globals": "16.5.0",

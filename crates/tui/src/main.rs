@@ -3,6 +3,7 @@ mod agent_task;
 mod app;
 mod approval;
 mod cli;
+mod client_bridge;
 mod headless;
 mod input_history;
 mod model_picker;
@@ -30,6 +31,10 @@ async fn main() -> Result<()> {
         .next()
         .and_then(|arg| Some(Path::new(&arg).file_name()?.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "socium".to_string());
+    let args = args.collect::<Vec<_>>();
+    if args == ["--client-bridge"] {
+        return client_bridge::run().await;
+    }
     let cli::Args { launch, print } = match cli::parse(args) {
         Ok(cli::Args {
             launch: Launch::Help,
