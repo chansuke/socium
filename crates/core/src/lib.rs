@@ -2,6 +2,7 @@ pub use crate::state::{
     load_json_file as load_local_state, save_json_file as save_local_state, scratch_dir,
     workspace_state_path,
 };
+mod access;
 pub mod activity;
 mod activity_log;
 mod approval;
@@ -20,7 +21,7 @@ mod tool_error;
 mod transcript;
 mod usage;
 mod workspace;
-pub use approval::Grant;
+pub use access::Grant;
 pub use control::{ApprovalAnswer, TaskControl};
 pub use execution::SANDBOX_DESCRIPTION;
 pub use session::{SessionStart, SessionSummary, list_sessions};

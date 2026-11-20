@@ -284,13 +284,13 @@ fn git_diff_withholding(
         .concat(),
     )?;
     let named = path
-        .and_then(|path| crate::approval::relative_target(workspace_root, path))
+        .and_then(|path| crate::access::relative_target(workspace_root, path))
         .unwrap_or_default();
     let (withheld, shown): (Vec<String>, Vec<String>) = stdout_to_string(&changed)?
         .split('\0')
         .filter(|name| !name.is_empty())
         .map(str::to_string)
-        .partition(|name| crate::approval::withholds(sensitive, name, &named));
+        .partition(|name| crate::access::withholds(sensitive, name, &named));
     // Pathspecs are literal here, so the files to show are named one by one
     // rather than the others excluded.
     if !withheld.is_empty() {
@@ -318,7 +318,7 @@ fn git_diff_withholding(
         result.push(stdout);
     }
     if !withheld.is_empty() {
-        result.push(crate::approval::withheld_note(&withheld));
+        result.push(crate::access::withheld_note(&withheld));
     }
     Ok(result.join("\n"))
 }

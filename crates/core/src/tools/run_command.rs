@@ -133,7 +133,7 @@ fn run_command_controlled<F>(
     input: &Value,
     control: &crate::TaskControl,
     sandbox: &crate::settings::SandboxSettings,
-    restrictions: Option<&crate::approval::Restrictions>,
+    restrictions: Option<&crate::access::Restrictions>,
     on_progress: &mut F,
 ) -> Result<String, ToolError>
 where
