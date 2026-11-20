@@ -27,6 +27,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check the feature map
+        run: scripts/check-feature-map.sh
+
       - name: Setup Nix
         uses: ./.github/actions/setup-nix
         with:
