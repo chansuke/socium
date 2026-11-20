@@ -10,6 +10,9 @@ namespaces. The pinned Nix development shell supplies the compiler and native
 dependencies used by CI. Sandbox enforcement tests fail if the backend is not
 available; they must not be silently skipped or run without isolation:
 
+`scripts/verify` runs these in `nix develop` and keeps the logs in
+`target/verify/`; `scripts/verify full` adds the Nix build. By hand:
+
 ```sh
 nix develop
 cargo fmt --all --check
