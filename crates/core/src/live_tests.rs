@@ -279,7 +279,7 @@ async fn live_main_agent_delegates_to_an_explorer() {
         .submit_with_progress(
             "Use the agent tool with agent_type explorer to find the value of RETRY_LIMIT in this workspace. Do not search yourself. Then tell me the value.".into(),
             |event| {
-                if let crate::AgentProgress::Activity(activity) = event
+                if let crate::progress::AgentProgress::Activity(activity) = event
                     && let crate::ActivityKind::ToolStarted { name, .. } = activity.kind
                 {
                     match activity.agent {

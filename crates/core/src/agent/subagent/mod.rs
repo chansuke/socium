@@ -9,7 +9,6 @@
 pub(crate) mod catalog;
 pub(crate) mod record;
 
-use crate::AgentProgress;
 use crate::activity::{ActivityEvent, ActivityKind, summarize_tool_input};
 use crate::agent::compaction::compact_history;
 use crate::agent::context::{
@@ -23,6 +22,7 @@ use crate::constants::{
 };
 use crate::conversation::{Message, Role};
 use crate::error::AgentError;
+use crate::progress::AgentProgress;
 use crate::providers::TokenUsage;
 use crate::tool_error::ToolError;
 use crate::tools::input::{optional_string_field, require_object_input, require_string_field};

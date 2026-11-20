@@ -16,8 +16,8 @@ pub(crate) mod text_editor;
 pub(crate) mod text_file;
 pub(crate) mod web_search;
 
-use crate::AgentProgress;
 use crate::conversation::ContentBlock;
+use crate::progress::AgentProgress;
 use crate::tool_error::ToolError;
 use crate::tools::apply_patch::ApplyPatchTool;
 use crate::tools::find_symbol::FindSymbolTool;

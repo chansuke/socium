@@ -1,6 +1,6 @@
-use crate::AgentProgress;
 use crate::constants::*;
 use crate::conversation::ToolDefinition;
+use crate::progress::AgentProgress;
 use crate::tool_error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{optional_bool_field, require_string_field};
