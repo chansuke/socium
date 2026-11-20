@@ -21,16 +21,31 @@ The gateway listens on loopback and serves one workspace. Connected clients shar
 
 Start a private HTTPS reverse proxy to the gateway that your device can reach. Append `--mobile-url https://your-socium-host` to the gateway command above, using the proxy's HTTPS origin.
 
+With Tailscale, enable **HTTPS Certificates** in your tailnet's DNS settings and forward HTTPS traffic to the local gateway:
+
+```sh
+sudo tailscale set --operator="$USER"
+tailscale serve --bg 4173
+```
+
+Then pass `--mobile-url https://<host>.<tailnet>.ts.net` to `npm run start:clients`.
+
 1. Sign in to Socium in your browser with the host access token. Select **Pair a phone**, then **Generate QR code**.
 2. Open Socium on the phone, select **Scan QR code**, scan the browser's QR code, and confirm the host address.
 
 Each QR code can be used once within five minutes. A new code replaces the previous unused code. The mobile app saves the paired device token in the operating system's secure storage and removes it when you select **Disconnect**. The gateway issues a new device token when you pair, and those tokens expire when the gateway restarts. Use **Enter manually** to connect with the host access token when you cannot scan a QR code.
 
-For local native development, configure the Android SDK or Xcode, then run:
+For local native development, keep the Android SDK in a persistent directory such as `~/Android/Sdk` (`ANDROID_HOME="$HOME/Android/Sdk"`, `ANDROID_AVD_HOME="$HOME/.android/avd"`) or configure Xcode, then run:
 
 ```sh
 npm run android -w @socium/mobile
 npm run ios -w @socium/mobile
+```
+
+To run the connection smoke test locally on a running Android KVM emulator with Maestro installed:
+
+```sh
+bash scripts/android-emulator-smoke.sh
 ```
 
 ## Run a smoke test on Expo Simulators
