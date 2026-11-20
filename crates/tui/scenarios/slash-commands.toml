@@ -1,0 +1,15 @@
+description = "A slash opens the command list, typing narrows it, and Esc closes it"
+
+[[step]]
+type = "/"
+expect = ["commands · ↑↓ select", "› /help", "/commands", "/model"]
+
+[[step]]
+type = "mo"
+expect = ["› /model", "› /mo"]
+absent = ["Show commands, key bindings"]
+
+[[step]]
+keys = ["Esc"]
+expect = ["› /mo"]
+absent = ["commands · ↑↓ select"]

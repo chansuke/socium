@@ -2301,6 +2301,7 @@ dependencies = [
  "socium-core",
  "tempfile",
  "tokio",
+ "toml",
  "unicode-segmentation",
  "unicode-width",
 ]

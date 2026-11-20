@@ -1,0 +1,10 @@
+description = "Shift+Enter starts a new line in the message instead of sending it"
+
+[[step]]
+type = "first line"
+keys = ["Shift+Enter"]
+expect = ["› first line"]
+
+[[step]]
+type = "second line"
+expect = ["│ › first line", "│   second line"]
