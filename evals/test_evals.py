@@ -148,6 +148,20 @@ class TaskDigest(unittest.TestCase):
             self.assertNotEqual(runner.tree_digest(root), before)
 
 
+class MockSolution(unittest.TestCase):
+    def test_bytecode_in_a_solution_is_not_written(self):
+        import mock_provider
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task, repo = Path(tmp) / "task", Path(tmp) / "repo"
+            (task / "solution" / "tests" / "__pycache__").mkdir(parents=True)
+            repo.mkdir()
+            (task / "solution" / "tests" / "test_wrap.py").write_text("pass\n")
+            (task / "solution" / "tests" / "__pycache__" / "test_wrap.cpython-313.pyc").write_bytes(b"\xf3\r\r\n")
+            calls = mock_provider.solution_calls(task, repo, "solution")
+            self.assertEqual([c["path"] for c in calls], ["tests/test_wrap.py"])
+
+
 class ToolErrors(unittest.TestCase):
     def test_only_calls_that_could_not_run_as_sent_are_argument_errors(self):
         import run as runner
