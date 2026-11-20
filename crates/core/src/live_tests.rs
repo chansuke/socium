@@ -326,3 +326,114 @@ async fn live_web_search() {
         .unwrap();
     assert!(text.contains("https://"), "{text}");
 }
+
+/// Three compactions in a row, each extending the last summary, over a
+/// session where the user corrects a requirement, a long test run fails
+/// at its very end, and the final check is promised but never run. The
+/// summary must keep the newer requirement, the error from the end of the
+/// output, and that the tests have not passed.
+#[tokio::test]
+#[ignore = "calls a paid API; set SOCIUM_LIVE_MODEL and run with --ignored"]
+async fn live_repeated_compaction_keeps_the_latest_correction_and_unverified_checks() {
+    use crate::agent::compaction::{CompactionRequest, summarize_with_llm};
+
+    let (model, provider) = live_target();
+    let client = crate::provider_http_client().unwrap();
+    let call = |id: &str, name: &str, input: serde_json::Value| ContentBlock::ToolUse {
+        id: id.into(),
+        name: name.into(),
+        input,
+    };
+    let result = |id: &str, content: String, is_error: bool| {
+        Message::user_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: id.into(),
+            content,
+            is_error: is_error.then_some(true),
+        }])
+    };
+    let test_output = format!(
+        "{}\nerror[E0308]: mismatched types\n --> src/cli.rs:42:19\nerror: could not compile `app`",
+        (1..=150)
+            .map(|n| format!("   Compiling dep_{n} v0.1.0"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let segments = [
+        vec![
+            Message::user_text("Add a --port flag to src/cli.rs. Its default is 8080.".into()),
+            Message::assistant_blocks(vec![
+                ContentBlock::Text {
+                    text: "Adding the flag with default 8080.".into(),
+                },
+                call(
+                    "e1",
+                    "apply_patch",
+                    serde_json::json!({"patch": "*** Update File: src/cli.rs"}),
+                ),
+            ]),
+            result("e1", "Updated src/cli.rs".into(), false),
+        ],
+        vec![
+            Message::user_text(
+                "Correction: the default port must be 9090, not 8080. Then run cargo test.".into(),
+            ),
+            Message::assistant_blocks(vec![call(
+                "e2",
+                "apply_patch",
+                serde_json::json!({"patch": "*** Update File: src/cli.rs"}),
+            )]),
+            result("e2", "Updated src/cli.rs".into(), false),
+            Message::assistant_blocks(vec![call(
+                "t1",
+                "run_command",
+                serde_json::json!({"command": ["cargo", "test"]}),
+            )]),
+            result("t1", format!("exit 101\nstdout:\n{test_output}"), true),
+        ],
+        vec![
+            Message::user_text("Also document the flag in README.md.".into()),
+            Message::assistant_blocks(vec![
+                ContentBlock::Text {
+                    text: "I will document it, then fix the build and run cargo test again.".into(),
+                },
+                call(
+                    "e3",
+                    "apply_patch",
+                    serde_json::json!({"patch": "*** Update File: README.md"}),
+                ),
+            ]),
+            result("e3", "Updated README.md".into(), false),
+        ],
+    ];
+
+    let mut summary: Option<String> = None;
+    for segment in &segments {
+        let request = CompactionRequest {
+            previous_summary: summary.as_deref(),
+            messages: segment,
+        };
+        let (text, _) = summarize_with_llm(provider.as_ref(), &model.id, &client, &request).await;
+        summary = Some(text.unwrap_or_else(|err| panic!("{}: {err}", model.alias)));
+    }
+    let summary = summary.unwrap();
+    eprintln!("{}:\n{summary}", model.alias);
+    let lower = summary.to_lowercase();
+    assert!(
+        summary.contains("9090"),
+        "{}: lost the correction",
+        model.alias
+    );
+    assert!(
+        summary.contains("E0308"),
+        "{}: lost the error at the end of the output",
+        model.alias
+    );
+    for claim in [
+        "tests pass",
+        "tests passed",
+        "all tests pass",
+        "build succeeded",
+    ] {
+        assert!(!lower.contains(claim), "{}: claims '{claim}'", model.alias);
+    }
+}
