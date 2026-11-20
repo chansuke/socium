@@ -17,7 +17,6 @@ pub(crate) mod text_file;
 pub(crate) mod web_search;
 
 use crate::AgentProgress;
-use crate::constants::TEXT_EDITOR_TOOL_NAME;
 use crate::conversation::ContentBlock;
 use crate::tool_error::ToolError;
 use crate::tools::apply_patch::ApplyPatchTool;
@@ -68,74 +67,6 @@ static BUILTIN_TOOLS: &[&dyn Tool] = &[
     &RunCommandTool,
     &TextEditorTool,
 ];
-
-/// Which built-in tools the model is offered, from `[tools] profile` in
-/// config.toml, so tool sets can be compared. `agent`, `update_plan`, and
-/// `web_search` are offered whatever the profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum ToolProfile {
-    #[default]
-    Full,
-    Basic,
-    Search,
-}
-
-const FULL_PROFILE: &[&str] = &[
-    "read_file",
-    "list_files",
-    "search_text",
-    "apply_patch",
-    "git_branch",
-    "git_status",
-    "git_diff",
-    "git_log",
-    "git_commit",
-    "find_symbol",
-    "run_command",
-    TEXT_EDITOR_TOOL_NAME,
-];
-
-const BASIC_PROFILE: &[&str] = &[
-    "read_file",
-    "apply_patch",
-    TEXT_EDITOR_TOOL_NAME,
-    "run_command",
-    "git_commit",
-];
-
-const SEARCH_PROFILE: &[&str] = &[
-    "read_file",
-    "apply_patch",
-    TEXT_EDITOR_TOOL_NAME,
-    "run_command",
-    "git_commit",
-    "search_text",
-    "find_symbol",
-];
-
-impl ToolProfile {
-    pub(crate) const ALL: [Self; 3] = [Self::Full, Self::Basic, Self::Search];
-
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::Basic => "basic",
-            Self::Search => "search",
-        }
-    }
-
-    pub(crate) fn tools(self) -> &'static [&'static str] {
-        match self {
-            Self::Full => FULL_PROFILE,
-            Self::Basic => BASIC_PROFILE,
-            Self::Search => SEARCH_PROFILE,
-        }
-    }
-
-    pub(crate) fn allows(self, tool: &str) -> bool {
-        self.tools().contains(&tool)
-    }
-}
 
 pub fn default_tools() -> Vec<ToolDefinition> {
     tools_for_model()
@@ -265,12 +196,6 @@ where
     )
 }
 
-/// How a call was authorized, as the turn records it before the call runs.
-pub(crate) const HUMAN_APPROVED: &str = "human-approved";
-pub(crate) const ALLOWED_BY_POLICY: &str = "allowed-by-policy";
-pub(crate) const WORKSPACE_FILE_POLICY: &str = "workspace-file-policy";
-pub(crate) const APPROVALS_SKIPPED: &str = "approvals-skipped";
-
 /// One tool call the model asked for, with what it runs against.
 #[derive(Clone, Copy)]
 pub(crate) struct ToolCall<'a> {
@@ -310,14 +235,14 @@ where
         let gate = crate::approval::gate(name, input, workspace_root, settings, &|grant| {
             control.is_granted(grant)
         })?;
-        let mut authorization = WORKSPACE_FILE_POLICY;
+        let mut authorization = crate::constants::WORKSPACE_FILE_POLICY;
         let restrictions = match gate {
             crate::approval::Gate::Deny(reason) => return Err(reason.into()),
             crate::approval::Gate::Run(restrictions) => {
                 if settings.approval.mode == crate::settings::ApprovalMode::Bypass {
-                    authorization = APPROVALS_SKIPPED;
+                    authorization = crate::constants::APPROVALS_SKIPPED;
                 } else if restrictions.is_some() {
-                    authorization = ALLOWED_BY_POLICY;
+                    authorization = crate::constants::ALLOWED_BY_POLICY;
                 }
                 restrictions
             }
@@ -359,7 +284,7 @@ where
                         "The file changed during approval; edit refused, request it again".into(),
                     );
                 }
-                authorization = HUMAN_APPROVED;
+                authorization = crate::constants::HUMAN_APPROVED;
                 None
             }
         };
@@ -468,6 +393,7 @@ pub(crate) async fn run_tool_call_on_blocking_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::TEXT_EDITOR_TOOL_NAME;
     use crate::test_support::make_temp_dir;
     use serde_json::json;
     use std::fs;

@@ -108,3 +108,13 @@ pub const MAX_CONCURRENT_SUBAGENTS: usize = 4;
 pub const SUBAGENT_FRAMING: &str = "You are a subagent of Socium, a coding agent, working inside the user's current workspace. Another agent delegated one task to you; you cannot see its conversation, and it sees only your final message. If your task names a step of that agent's plan, say in your report whether it is done and what is left.";
 pub const SUBAGENT_EXPLORER_INSTRUCTIONS: &str = "Your tools are read-only: read, list, and search files and inspect Git history, but never try to change anything. Search broadly first, then read what matters; stop as soon as you can answer. Finish with a concise, self-contained report that answers the task, citing exact locations as path:line (for example src/main.rs:42), and say plainly what you could not find or verify.";
 pub const SUBAGENT_WORKER_INSTRUCTIONS: &str = "Do exactly the task you were given and nothing beyond it. Commands and commits still need the user's approval; if one is denied, do not retry it, and report it. Preserve the user's existing changes. Keep temporary files in .socium/scratch/ and remove any you made elsewhere. Finish with a concise, self-contained report: what you changed, with path:line references, how you verified it, and anything left undone or uncertain.";
+
+/// How a call was authorized, as the turn records it before the call runs.
+pub(crate) const HUMAN_APPROVED: &str = "human-approved";
+pub(crate) const ALLOWED_BY_POLICY: &str = "allowed-by-policy";
+pub(crate) const WORKSPACE_FILE_POLICY: &str = "workspace-file-policy";
+pub(crate) const APPROVALS_SKIPPED: &str = "approvals-skipped";
+/// The variable that names the directory of user-defined subagent types.
+pub(crate) const AGENTS_DIR_ENV: &str = "SOCIUM_AGENTS_DIR";
+/// The first line of a tool result whose commit left other changes behind.
+pub(crate) const DIRTY_WORKTREE_WARNING: &str = "Warning: git worktree has uncommitted changes";

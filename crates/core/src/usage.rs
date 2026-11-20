@@ -1,37 +1,23 @@
 //! Token use added up over a session, per model, from the rounds the
 //! Activity pane records (subagent rounds included).
 use crate::activity::{ActivityEvent, ActivityKind};
+use crate::models::Price;
 use crate::providers::TokenUsage;
 use std::collections::BTreeMap;
 
-/// Prices in US dollars per million tokens, as the user writes them in
-/// `models.toml`. Socium ships no prices: they change, and a wrong number
-/// shown as a cost is worse than none.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Price {
-    pub input: f64,
-    pub output: f64,
-    #[serde(default)]
-    pub cache_read: Option<f64>,
-    #[serde(default)]
-    pub cache_write: Option<f64>,
-}
-
-impl Price {
-    fn cost(&self, usage: &TokenUsage) -> f64 {
-        let per_token = |tokens: u32, price: f64| tokens as f64 * price / 1_000_000.0;
-        per_token(usage.input_tokens, self.input)
-            + per_token(usage.output_tokens, self.output)
-            + per_token(
-                usage.cache_read_input_tokens,
-                self.cache_read.unwrap_or(self.input),
-            )
-            + per_token(
-                usage.cache_creation_input_tokens,
-                self.cache_write.unwrap_or(self.input),
-            )
-    }
+/// What `usage` cost at `price`.
+fn cost(price: &Price, usage: &TokenUsage) -> f64 {
+    let per_token = |tokens: u32, price: f64| tokens as f64 * price / 1_000_000.0;
+    per_token(usage.input_tokens, price.input)
+        + per_token(usage.output_tokens, price.output)
+        + per_token(
+            usage.cache_read_input_tokens,
+            price.cache_read.unwrap_or(price.input),
+        )
+        + per_token(
+            usage.cache_creation_input_tokens,
+            price.cache_write.unwrap_or(price.input),
+        )
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -110,7 +96,7 @@ impl SessionUsage {
         }
         self.by_model
             .iter()
-            .map(|(model, usage)| price_of(model).map(|price| price.cost(usage)))
+            .map(|(model, usage)| price_of(model).map(|price| cost(&price, usage)))
             .sum()
     }
 }
