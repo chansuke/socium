@@ -270,13 +270,15 @@ where
     F: FnMut(AgentProgress),
 {
     run_tool_call_checkpointed(
-        workspace_root,
-        tool_use_id,
-        name,
-        input,
-        control,
-        &crate::settings::Settings::default(),
-        None,
+        ToolCall {
+            workspace_root,
+            tool_use_id,
+            name,
+            input,
+            control,
+            settings: &crate::settings::Settings::default(),
+            edit_origin: None,
+        },
         on_progress,
         &mut |_| Ok(()),
     )
@@ -288,21 +290,35 @@ pub(crate) const ALLOWED_BY_POLICY: &str = "allowed-by-policy";
 pub(crate) const WORKSPACE_FILE_POLICY: &str = "workspace-file-policy";
 pub(crate) const APPROVALS_SKIPPED: &str = "approvals-skipped";
 
-#[allow(clippy::too_many_arguments)]
+/// One tool call the model asked for, with what it runs against.
+#[derive(Clone, Copy)]
+pub(crate) struct ToolCall<'a> {
+    pub(crate) workspace_root: &'a Path,
+    pub(crate) tool_use_id: &'a str,
+    pub(crate) name: &'a str,
+    pub(crate) input: &'a Value,
+    pub(crate) control: &'a crate::TaskControl,
+    pub(crate) settings: &'a crate::settings::Settings,
+    pub(crate) edit_origin: Option<&'a crate::tools::edit_history::EditOrigin>,
+}
+
 pub(crate) fn run_tool_call_checkpointed<F>(
-    workspace_root: &Path,
-    tool_use_id: &str,
-    name: &str,
-    input: &Value,
-    control: &crate::TaskControl,
-    settings: &crate::settings::Settings,
-    edit_origin: Option<&crate::tools::edit_history::EditOrigin>,
+    call: ToolCall<'_>,
     on_progress: &mut F,
     before_execute: &mut dyn FnMut(&str) -> std::io::Result<()>,
 ) -> ContentBlock
 where
     F: FnMut(AgentProgress),
 {
+    let ToolCall {
+        workspace_root,
+        tool_use_id,
+        name,
+        input,
+        control,
+        settings,
+        edit_origin,
+    } = call;
     on_progress(AgentProgress::ToolCallStarted {
         name: name.to_string(),
     });
@@ -411,15 +427,8 @@ where
 /// polling everything else, such as the other subagents of a batch, while
 /// the tool works. `on_progress` and `before_execute` still run on the
 /// awaiting task, in the order the call makes them.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_tool_call_on_blocking_thread(
-    workspace_root: &Path,
-    tool_use_id: &str,
-    name: &str,
-    input: &Value,
-    control: &crate::TaskControl,
-    settings: &crate::settings::Settings,
-    edit_origin: Option<&crate::tools::edit_history::EditOrigin>,
+    call: ToolCall<'_>,
     on_progress: &mut (dyn FnMut(AgentProgress) + Send),
     before_execute: &mut (dyn FnMut(&str) -> std::io::Result<()> + Send),
 ) -> ContentBlock {
@@ -429,23 +438,28 @@ pub(crate) async fn run_tool_call_on_blocking_thread(
     }
     let (relay, mut relayed) = tokio::sync::mpsc::unbounded_channel();
     let (root, id, name, input) = (
-        workspace_root.to_path_buf(),
-        tool_use_id.to_string(),
-        name.to_string(),
-        input.clone(),
+        call.workspace_root.to_path_buf(),
+        call.tool_use_id.to_string(),
+        call.name.to_string(),
+        call.input.clone(),
     );
-    let (control, settings, edit_origin) =
-        (control.clone(), settings.clone(), edit_origin.cloned());
+    let (control, settings, edit_origin) = (
+        call.control.clone(),
+        call.settings.clone(),
+        call.edit_origin.cloned(),
+    );
     let call = tokio::task::spawn_blocking(move || {
         let stopped = || std::io::Error::other("the turn stopped waiting for this call");
         run_tool_call_checkpointed(
-            &root,
-            &id,
-            &name,
-            &input,
-            &control,
-            &settings,
-            edit_origin.as_ref(),
+            ToolCall {
+                workspace_root: &root,
+                tool_use_id: &id,
+                name: &name,
+                input: &input,
+                control: &control,
+                settings: &settings,
+                edit_origin: edit_origin.as_ref(),
+            },
             &mut |event| {
                 let _ = relay.send(Relayed::Progress(event));
             },

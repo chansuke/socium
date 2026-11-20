@@ -138,15 +138,11 @@ fn run_command_controlled<F>(
 where
     F: FnMut(AgentProgress),
 {
-    let RunCommandInput {
-        command,
-        cwd,
-        timeout_ms,
-    } = RunCommandInput::parse(input, sandbox.max_command_timeout)?;
-    let resolved_cwd = resolve_workspace_command_cwd(workspace_root, cwd)?;
+    let request = RunCommandInput::parse(input, sandbox.max_command_timeout)?;
+    let resolved_cwd = resolve_workspace_command_cwd(workspace_root, request.cwd)?;
     on_progress(AgentProgress::CommandStarted {
-        command: display_command(&command),
-        cwd: cwd.to_string(),
+        command: display_command(&request.command),
+        cwd: request.cwd.to_string(),
     });
     let mut policy = ExecutionPolicy::new(workspace_root, WorkspaceAccess::Write)
         .map_err(|e| e.to_string())?
@@ -156,10 +152,8 @@ where
         policy.frozen = restrictions.frozen.clone();
     }
     let execution = execute_command(
-        &command,
+        &request,
         &resolved_cwd,
-        cwd,
-        timeout_ms,
         control,
         workspace_root,
         &policy,
@@ -188,12 +182,9 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn execute_command(
-    command: &[String],
+    request: &RunCommandInput,
     cwd: &Path,
-    cwd_display: &str,
-    timeout_ms: u64,
     control: &crate::TaskControl,
     workspace_root: &Path,
     policy: &ExecutionPolicy,
@@ -206,17 +197,16 @@ fn execute_command(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos();
-    let stem = format!(
-        ".socium/outputs/{}-{timestamp}-{}",
+    let name = format!(
+        "outputs/{}-{timestamp}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     );
+    let stem = format!(".socium/{name}");
     let open = |suffix: &str| -> Result<std::fs::File, String> {
-        let path = crate::agent::state::workspace_state_path(
-            workspace_root,
-            &format!("{}.{suffix}", stem.strip_prefix(".socium/").unwrap()),
-        )
-        .map_err(|e| e.to_string())?;
+        let path =
+            crate::agent::state::workspace_state_path(workspace_root, &format!("{name}.{suffix}"))
+                .map_err(|e| e.to_string())?;
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
@@ -245,7 +235,7 @@ fn execute_command(
         }
         Ok(())
     };
-    let output=crate::process::run_observed(command,cwd,Duration::from_millis(timeout_ms),control,&mut observer, policy)
+    let output=crate::process::run_observed(&request.command,cwd,Duration::from_millis(request.timeout_ms),control,&mut observer, policy)
         .map_err(|e|format!("Command failed or output capture failed: {e}; partial artifacts: {stem}.stdout / {stem}.stderr"))?;
     for file in &files {
         file.sync_all()
@@ -286,9 +276,9 @@ fn execute_command(
         artifacts,
         saved_output: stem,
         stop_reason,
-        command_display: display_command(command),
-        cwd_display: cwd_display.to_string(),
-        timeout_ms,
+        command_display: display_command(&request.command),
+        cwd_display: request.cwd.to_string(),
+        timeout_ms: request.timeout_ms,
         timed_out,
         exit_code: output.status.code(),
         stdout,
