@@ -33,14 +33,16 @@ once the money spent plus the dearest run so far would pass the budget. A run
 is stopped at its max_cost_usd, so the budget can be passed by at most one run.
 A run whose model has no price is stopped after its first model call.
 SOCIUM_CONFIG_FILE defaults to evals/config.toml, which lets commands run
-without asking.
+without asking. --tools PROFILE adds `[tools] profile` to it, so the same set
+can be run with each tool profile. The binary is copied before the first run,
+so a rebuild during the set cannot change what is measured.
 
 --self-check judges each task's untouched repository (must fail) and its
 solution (must pass, inside allowed_changes) without any model. --mock PLAY
 runs the real binary against mock_provider.py instead of a model.
 
 usage: run.py [--binary socium] [--only NAME ...] [--repeat N] [--out FILE]
-              [--label NAME] [--comparison controlled|defaults] [--max-cost-usd USD]
+              [--tools full|basic|search] [--label NAME] [--comparison controlled|defaults] [--max-cost-usd USD]
               (--budget-usd USD | --mock solution|nothing|stray | --self-check)
 """
 import argparse
@@ -333,7 +335,7 @@ def run_task(name, task, binary, workdir, env):
     }
 
 
-def mock_env(name, task, workdir, play):
+def mock_env(name, task, workdir, play, config):
     """An environment with nothing from the user's: a loopback model that
     plays the task's solution, priced so the cost path runs."""
     port_file = workdir / "port"
@@ -363,13 +365,13 @@ def mock_env(name, task, workdir, play):
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
         "SOCIUM_MODELS_FILE": str(models),
-        "SOCIUM_CONFIG_FILE": str(HERE / "config.toml"),
+        "SOCIUM_CONFIG_FILE": str(config),
         "MODEL": "mock",
     }
     return env, server
 
 
-def manifest(args, names):
+def manifest(args, names, base_config):
     """What a rerun must hold fixed to repeat this one."""
     try:
         commit = subprocess.run(
@@ -382,7 +384,6 @@ def manifest(args, names):
     except (OSError, subprocess.CalledProcessError):
         commit, dirty = None, None
     binary = args.binary
-    config = os.environ.get("SOCIUM_CONFIG_FILE", str(HERE / "config.toml"))
     models = os.environ.get("SOCIUM_MODELS_FILE") or str(
         Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "socium" / "models.toml")
     return {
@@ -397,7 +398,9 @@ def manifest(args, names):
         "harness_commit": commit,
         "harness_dirty": dirty,
         "binary_sha256": file_digest(binary),
-        "config_sha256": file_digest(HERE / "config.toml" if args.mock else config),
+        "config_sha256": file_digest(base_config),
+        # None leaves the binary's default profile.
+        "tools": args.tools,
         "models_sha256": None if args.mock else file_digest(models),
         "budget_usd": args.budget_usd,
         "max_cost_usd": args.max_cost_usd,
@@ -448,6 +451,7 @@ def main():
     parser.add_argument("--only", nargs="*")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--out", default="results.jsonl")
+    parser.add_argument("--tools", choices=["full", "basic", "search"], help="the tool profile to offer")
     parser.add_argument("--label", default=None, help="a name for this side of a comparison")
     parser.add_argument(
         "--comparison", choices=["controlled", "defaults"], default="controlled",
@@ -475,13 +479,24 @@ def main():
     found = shutil.which(args.binary)
     if not found:
         raise SystemExit(f"no socium binary at {args.binary}")
-    args.binary = str(Path(found).resolve())
+    binary = Path(found).resolve()
     if args.budget_usd is not None and args.budget_usd <= 0:
         raise SystemExit("--budget-usd must be above zero")
 
+    # Kept until the process exits, with the copy of the binary in it.
+    fixed = tempfile.TemporaryDirectory(prefix="socium-eval-set-")
+    args.binary = str(Path(fixed.name) / "socium")
+    shutil.copy2(binary, args.binary)
+    base_config = HERE / "config.toml" if args.mock else Path(
+        os.environ.get("SOCIUM_CONFIG_FILE", HERE / "config.toml"))
+    config = base_config
+    if args.tools:
+        config = Path(fixed.name) / "config.toml"
+        config.write_text(base_config.read_text() + f'\n[tools]\nprofile = "{args.tools}"\n')
+
     spent, dearest, results, halted = 0.0, 0.0, [], None
     with open(args.out, "w") as out:
-        out.write(json.dumps(manifest(args, names)) + "\n")
+        out.write(json.dumps(manifest(args, names, base_config)) + "\n")
         for repetition in range(args.repeat):
             for name in names:
                 if args.budget_usd is not None and spent + dearest > args.budget_usd:
@@ -494,10 +509,9 @@ def main():
                     workdir = Path(workdir)
                     server = None
                     if args.mock:
-                        env, server = mock_env(name, task, workdir, args.mock)
+                        env, server = mock_env(name, task, workdir, args.mock, config)
                     else:
-                        env = dict(os.environ)
-                        env.setdefault("SOCIUM_CONFIG_FILE", str(HERE / "config.toml"))
+                        env = {**os.environ, "SOCIUM_CONFIG_FILE": str(config)}
                     try:
                         result = run_task(name, task, args.binary, workdir, env)
                     finally:

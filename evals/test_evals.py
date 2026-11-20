@@ -98,6 +98,13 @@ class MockRuns(unittest.TestCase):
         self.assertEqual(r["turns_sent"], 1)
         self.assertFalse(r["passed"])
 
+    def test_a_tool_profile_reaches_the_binary(self):
+        records, done = run("--mock", "solution", "--tools", "basic", "--only", "crlf-edit")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(records[0]["tools"], "basic")
+        (r,) = results(records)
+        self.assertTrue(r["passed"])
+
     def test_a_real_model_run_needs_a_budget(self):
         _, done = run("--only", "crlf-edit")
         self.assertEqual(done.returncode, 2)
@@ -193,6 +200,10 @@ class Compare(unittest.TestCase):
         with self.assertRaises(SystemExit) as err:
             self.lines([True], [True], model="other")
         self.assertIn("model", str(err.exception))
+
+    def test_tool_profiles_may_differ_and_are_named(self):
+        out = self.lines([True], [True], tools="basic")
+        self.assertIn("tool profiles: default vs basic", out)
 
     def test_a_changed_task_is_refused(self):
         out = self.lines([True], [True], task_digest="changed")
