@@ -21,3 +21,4 @@
 * [21. find_symbolはRustの宣言行の検索に留めtree-sitterとLSPは入れない](0021-find-symbolはrustの宣言行の検索に留めtree-sitterとlspは入れない.md)
 * [22. GeminiにはAntigravityのログインでなくGemini APIのキーで接続する](0022-geminiにはantigravityのログインでなくgemini-apiのキーで接続する.md)
 * [23. models.devのカタログを利用者が実行するコマンドでmodels.dに書き出す](0023-models-devのカタログを利用者が実行するコマンドでmodels-dに書き出す.md)
+* [24. 追加の拡張は実装済みの範囲に留めskills-session-fork-pluginは入れない](0024-追加の拡張は実装済みの範囲に留めskills-session-fork-pluginは入れない.md)
