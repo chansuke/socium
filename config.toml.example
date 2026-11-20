@@ -60,6 +60,13 @@ deny = [
 # model provider. Setting this replaces the built-in list.
 # sensitive = [".env", ".env.*", "!.env.example", "*.pem", "*.key"]
 
+[tools]
+# Which built-in tools the model is offered, for comparing tool sets.
+# "full" (default): all of them. "basic": read_file, apply_patch, the text
+# editor, run_command, and git_commit. "search": basic plus search_text and
+# find_symbol. agent, update_plan, and web_search are not affected.
+profile = "full"
+
 [web_search]
 # The web_search tool sends the model's queries to DeepSeek's paid Search
 # API with the key in DEEPSEEK_API_KEY; each search with results is billed.

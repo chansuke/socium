@@ -189,6 +189,17 @@ key, the tool is not offered and startup says why. To try it against the real
 API (this costs money), run
 `nix develop -c cargo test -p socium-core live_web_search -- --ignored`.
 
+## Tool profiles
+
+`[tools] profile` in `config.toml` picks which built-in tools the model is
+offered, so you can compare tool sets with the eval harness. `full` (default)
+offers all of them. `basic` offers `read_file`, `apply_patch`, the text editor,
+`run_command`, and `git_commit`, and `search` adds `search_text` and
+`find_symbol`. `agent`, `update_plan`, and `web_search` do not depend on the
+profile. Subagents get only the tools of their type that the profile offers,
+and a call to a tool outside the profile is refused without running. Startup
+names the profile when it is not `full`.
+
 ## Project instructions
 
 Socium reads `AGENTS.md` (or `CLAUDE.md`) in the workspace root into its
