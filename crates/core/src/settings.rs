@@ -361,6 +361,11 @@ pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathB
             paths.push(PathBuf::from(path));
         }
     }
+    // The registry also reads models.d/ beside an explicitly named file,
+    // which a symlink could place elsewhere.
+    if let Some(path) = lookup(crate::models::MODELS_FILE_ENV).filter(|value| !value.is_empty()) {
+        paths.push(crate::models::models_dir_beside(Path::new(&path)));
+    }
     paths
 }
 
@@ -888,6 +893,20 @@ deny = ["git  push"]
         let project = home.path().join("project");
         std::fs::create_dir(&project).unwrap();
         ensure_config_outside(&project, &lookup).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_models_dir_linked_into_the_workspace_is_refused() {
+        let config = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let models_file = config.path().join("models.toml");
+        std::os::unix::fs::symlink(workspace.path(), config.path().join("models.d")).unwrap();
+        let models_file = models_file.to_str().unwrap().to_string();
+        let lookup =
+            move |key: &str| (key == crate::models::MODELS_FILE_ENV).then(|| models_file.clone());
+        let err = ensure_config_outside(workspace.path(), &lookup).unwrap_err();
+        assert!(err.to_string().contains("models.d"), "{err}");
     }
 
     mod properties {
