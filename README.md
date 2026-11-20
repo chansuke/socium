@@ -30,7 +30,9 @@
 </p>
 
 Socium is pre-release software developed by one person. It runs on Linux only
-and expects breaking changes. The first tag is `v0.1.0`.
+and expects breaking changes. The first tag is `v0.1.0`. It is tested on
+Ubuntu 24.04 on x86_64, locally and in CI. Other distributions and aarch64
+have not been tested, and macOS and Windows are not supported.
 
 ## Install
 
@@ -61,6 +63,28 @@ export ANTHROPIC_API_KEY=...   # or register another provider; see Models below
 cd your-project
 socium
 ```
+
+For a provider other than Anthropic, name its key's variable and the model in
+`~/.config/socium/models.toml`, for example DeepSeek:
+
+```toml
+default = "ds-flash"
+
+[providers.deepseek]
+wire = "anthropic"
+base_url = "https://api.deepseek.com/anthropic"
+api_key_env = "DEEPSEEK_API_KEY"
+auth = "bearer"
+
+[[models]]
+alias = "ds-flash"
+provider = "deepseek"
+id = "deepseek-flash"
+context_window = 1000000
+```
+
+Then `export DEEPSEEK_API_KEY=...` and run `socium`. OpenAI, OpenRouter, Z.ai
+and local servers are set up the same way; see Models below.
 
 Ask for something in the composer and press Enter. Commands ask for your
 approval before they run; `/help` lists commands and keys, and `/exit` quits.
