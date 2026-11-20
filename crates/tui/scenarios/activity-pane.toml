@@ -1,0 +1,19 @@
+description = "Ctrl+A focuses the Activity pane of a finished turn, and Esc returns to the composer"
+size = [100, 30]
+fixture = "activity"
+
+[[step]]
+expect = ["activity · Ctrl+A focus", "⚙ read_file", "✎ response · 312 chars"]
+
+[[step]]
+keys = ["Ctrl+a"]
+expect = ["Esc back", "› ✎ response · 312 chars", "Activity: Up/Down select"]
+
+[[step]]
+keys = ["Down"]
+expect = ["› ✎ response · 312 chars"]
+
+[[step]]
+keys = ["Esc"]
+expect = ["activity · Ctrl+A focus", "Ready"]
+absent = ["Esc back"]

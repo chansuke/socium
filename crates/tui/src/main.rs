@@ -11,6 +11,8 @@ mod models_command;
 mod pane_slot;
 mod progress;
 mod rewind_picker;
+#[cfg(test)]
+mod scenario;
 mod session_picker;
 mod slash_command;
 mod subagents;
