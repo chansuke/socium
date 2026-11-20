@@ -248,20 +248,24 @@ pub(crate) fn migrate_legacy_conversation(root: &Path) -> io::Result<Option<Stri
     Ok(Some(id))
 }
 
+/// Moves the subagent records saved before sessions into the session named.
+pub(crate) type AdoptRecords = fn(&Path, &str) -> io::Result<()>;
+
 /// Moves state saved before sessions, and before subagent records belonged
 /// to a session, into sessions: the conversation as
 /// `migrate_legacy_conversation` does, then the subagent records into the
 /// most recently saved session with messages, which is the one `-c`
 /// continues. Records stay in `.socium/agents/` while there is no such
-/// session. Call with the workspace lock held.
-pub(crate) fn migrate_legacy_state(root: &Path) -> io::Result<()> {
+/// session. `adopt_records` moves the records into a session; the agent,
+/// which owns them, passes it in. Call with the workspace lock held.
+pub(crate) fn migrate_legacy_state(root: &Path, adopt_records: AdoptRecords) -> io::Result<()> {
     migrate_legacy_conversation(root)?;
     let sessions = scan_sessions(root)?;
     match sessions
         .iter()
         .find(|session| session.readable && session.message_count > 0)
     {
-        Some(latest) => crate::agent::subagent::record::adopt_legacy_records(root, &latest.id),
+        Some(latest) => adopt_records(root, &latest.id),
         None => Ok(()),
     }
 }
@@ -441,9 +445,12 @@ pub(crate) fn delete_session_dir(root: &Path, id: &str) -> io::Result<()> {
 /// Saved sessions with messages, most recently saved first, for choosing
 /// one to resume. Briefly takes the workspace lock, so it fails while
 /// another Socium runs here.
-pub fn list_sessions(root: &Path) -> io::Result<Vec<SessionSummary>> {
+pub(crate) fn list_sessions(
+    root: &Path,
+    adopt_records: AdoptRecords,
+) -> io::Result<Vec<SessionSummary>> {
     let _lock = lock_workspace(root)?;
-    migrate_legacy_state(root)?;
+    migrate_legacy_state(root, adopt_records)?;
     Ok(scan_sessions(root)?
         .into_iter()
         .filter(|session| session.message_count > 0 || !session.readable)
@@ -453,6 +460,7 @@ pub fn list_sessions(root: &Path) -> io::Result<Vec<SessionSummary>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::subagent::record::adopt_legacy_records;
     use crate::test_support::make_temp_dir;
     use std::time::Duration;
 
@@ -597,7 +605,7 @@ mod tests {
         };
         let old = legacy("old");
         // With no saved conversation to give them to, they stay.
-        migrate_legacy_state(root.path()).unwrap();
+        migrate_legacy_state(root.path(), adopt_legacy_records).unwrap();
         assert!(old.exists());
 
         save_conversation(root.path(), "20261101-000000-0000", &["older"], 100);
@@ -607,7 +615,7 @@ mod tests {
         taken.save(root.path(), "20261102-000000-0000").unwrap();
         let clash = legacy("taken");
 
-        migrate_legacy_state(root.path()).unwrap();
+        migrate_legacy_state(root.path(), adopt_legacy_records).unwrap();
 
         let ids = |session: &str| {
             record::list(root.path(), session)
@@ -655,7 +663,7 @@ mod tests {
             ]
         );
 
-        let listed = list_sessions(root.path()).unwrap();
+        let listed = list_sessions(root.path(), adopt_legacy_records).unwrap();
         assert_eq!(
             listed
                 .iter()
@@ -679,7 +687,7 @@ mod tests {
         .unwrap();
         fs::write(&broken, "{").unwrap();
 
-        let listed = list_sessions(root.path()).unwrap();
+        let listed = list_sessions(root.path(), adopt_legacy_records).unwrap();
         assert_eq!(listed.len(), 2);
         let unreadable = listed.iter().find(|s| !s.readable).unwrap();
         assert!(
@@ -723,7 +731,7 @@ mod tests {
     fn listing_fails_while_another_socium_holds_the_workspace() {
         let root = make_temp_dir("session-locked");
         let _held = lock_workspace(root.path()).unwrap();
-        assert!(list_sessions(root.path()).is_err());
+        assert!(list_sessions(root.path(), adopt_legacy_records).is_err());
     }
 
     #[test]
