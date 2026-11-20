@@ -2050,6 +2050,60 @@ mod tests {
         );
     }
 
+    /// The prompt cache reuses a request's leading bytes, so every round
+    /// and turn must resend the system prompt, the tools and the history
+    /// exactly as before and only add messages after them.
+    #[tokio::test]
+    async fn each_request_starts_with_the_previous_one_unchanged() {
+        let workspace = make_temp_dir("stable_prefix");
+        let root = workspace.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "Root rule.").unwrap();
+        std::fs::write(root.join("src/AGENTS.md"), "Src rule.").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn f() {}\n").unwrap();
+        let read = |id: &str| {
+            Ok(crate::providers::ProviderResponse {
+                message: crate::agent::types::AgentMessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: id.into(),
+                        name: "read_file".into(),
+                        input: json!({"path": "src/lib.rs"}),
+                    }],
+                    ..Default::default()
+                },
+                streamed_text: false,
+                usage: None,
+            })
+        };
+        let provider = ScriptedProvider::new(vec![
+            read("r1"),
+            read("r2"),
+            Ok(text_provider_response("read it", None)),
+            read("r3"),
+            Ok(text_provider_response("again", None)),
+        ]);
+        let requests = provider.recorded_requests.clone();
+        let mut service = service_with_scripted_provider(root, provider, Vec::new(), None);
+        service.refresh_system_prompt();
+
+        service.submit("look at src".into()).await.unwrap();
+        service.submit("and once more".into()).await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        for pair in requests.windows(2) {
+            let (before, after) = (&pair[0], &pair[1]);
+            assert_eq!(after["system"], before["system"]);
+            assert_eq!(after["tools"], before["tools"]);
+            let (old, new) = (
+                before["messages"].as_array().unwrap(),
+                after["messages"].as_array().unwrap(),
+            );
+            assert!(new.len() > old.len());
+            assert_eq!(&new[..old.len()], &old[..], "the history was rewritten");
+        }
+    }
+
     #[tokio::test]
     async fn no_request_is_sent_when_the_output_limit_fills_the_window() {
         let workspace = make_temp_dir("limits_refused");
