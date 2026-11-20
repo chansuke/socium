@@ -7,7 +7,9 @@
     "start": "expo start",
     "typecheck": "tsc -p tsconfig.json",
     "android": "expo run:android",
-    "bundle:android": "expo export --platform android --output-dir dist/android"
+    "bundle:android": "expo export --platform android --output-dir dist/android",
+    "ios": "expo run:ios",
+    "bundle:ios": "expo export --platform ios --output-dir dist/ios"
   },
   "dependencies": {
     "@socium/client": "0.1.0",

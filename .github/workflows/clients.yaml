@@ -29,3 +29,4 @@ jobs:
       - run: npm run test:clients
       - run: npm run build:web
       - run: npm run bundle:android -w @socium/mobile
+      - run: npm run bundle:ios -w @socium/mobile

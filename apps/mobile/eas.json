@@ -1,9 +1,16 @@
 {
-  "cli": { "version": ">=27.11.0" },
+  "cli": {
+    "version": ">=27.11.0"
+  },
   "build": {
     "simulator": {
       "node": "24.22.1",
-      "android": { "buildType": "apk" }
+      "android": {
+        "buildType": "apk"
+      },
+      "ios": {
+        "simulator": true
+      }
     }
   }
 }
