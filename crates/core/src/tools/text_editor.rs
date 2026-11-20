@@ -9,8 +9,8 @@ use crate::tools::list_files::list_files_from_workspace;
 use crate::tools::text_file::{
     apply_view_range, byte_index_after_line, count_lines, read_utf8_file_with_limit,
 };
-use crate::tools::workspace::{resolve_workspace_path, resolve_workspace_path_for_create};
 use crate::tools::{Tool, ToolContext};
+use crate::workspace::{resolve_workspace_path, resolve_workspace_path_for_create};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;

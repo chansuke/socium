@@ -521,7 +521,7 @@ fn lock_child_probe() {
     let Some(root) = std::env::var_os("SOCIUM_TEST_LOCK_ROOT") else {
         return;
     };
-    let err = crate::agent::state::lock_workspace(std::path::Path::new(&root)).unwrap_err();
+    let err = crate::state::lock_workspace(std::path::Path::new(&root)).unwrap_err();
     let owner = std::env::var("SOCIUM_TEST_LOCK_OWNER_PID").unwrap();
     assert!(
         err.to_string()
@@ -533,7 +533,7 @@ fn lock_child_probe() {
 #[test]
 fn session_lock_rejects_a_second_process() {
     let root = tempfile::tempdir().unwrap();
-    let _owner = crate::agent::state::lock_workspace(root.path()).unwrap();
+    let _owner = crate::state::lock_workspace(root.path()).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "reliability_tests::lock_child_probe"])
         .env("SOCIUM_TEST_LOCK_ROOT", root.path())

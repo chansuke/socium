@@ -257,7 +257,7 @@ pub(super) fn command(
     // the parent. The child sees a read-only directory in their place, holding
     // only the writable scratch directory. Creating the state directory here
     // also protects it on the very first run.
-    let scratch = crate::agent::state::scratch_dir(root)?;
+    let scratch = crate::state::scratch_dir(root)?;
     cmd.arg("--tmpfs")
         .arg(root.join(".socium"))
         .arg(if policy.access == WorkspaceAccess::ReadOnly {

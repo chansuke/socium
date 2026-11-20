@@ -1,11 +1,11 @@
 //! The plan through `AgentService`: a turn that records one, the events
 //! the Timeline reads, rewind, compaction, and subagents.
 
-use crate::agent::state::{ConversationSummary, ConversationSummaryState};
 use crate::constants::PLAN_TOOL_NAME;
 use crate::conversation::{AgentMessageResponse, ContentBlock, Message, MessageContent};
 use crate::providers::ProviderResponse;
 use crate::providers::error::ProviderError;
+use crate::state::{ConversationSummary, ConversationSummaryState};
 use crate::test_support::{ScriptedProvider, make_temp_dir, text_provider_response};
 use crate::{ActivityKind, AgentProgress, AgentService, RewindMode};
 use serde_json::{Value, json};
@@ -153,8 +153,8 @@ async fn the_plan_survives_a_restart() {
     ]);
     let mut service = service(workspace.path(), provider);
     service.submit("plan it".into()).await.unwrap();
-    let saved: crate::agent::state::ConversationState =
-        crate::agent::state::load_json_file(&service.conversation_path()).unwrap();
+    let saved: crate::state::ConversationState =
+        crate::state::load_json_file(&service.conversation_path()).unwrap();
 
     let mut reopened = self::service(workspace.path(), ScriptedProvider::new(Vec::new()));
     reopened.messages = saved.messages;

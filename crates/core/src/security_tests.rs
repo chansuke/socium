@@ -1,12 +1,12 @@
 //! Security regressions use only local fixtures and fake credentials.
-use crate::agent::state::{load_json_file, save_json_file, workspace_state_path};
+use crate::state::{load_json_file, save_json_file, workspace_state_path};
 use serde_json::{Value, json};
 use std::fs;
 
 #[cfg(unix)]
 #[test]
 fn file_tools_protect_relocated_git_metadata_and_its_aliases() {
-    use crate::tools::workspace::resolve_workspace_mutation_path;
+    use crate::workspace::resolve_workspace_mutation_path;
     use std::os::unix::fs::symlink;
     let root = tempfile::tempdir().unwrap();
     fs::create_dir(root.path().join("repository-data")).unwrap();

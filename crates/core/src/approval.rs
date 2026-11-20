@@ -343,8 +343,7 @@ fn as_requested(root: &Path, requested: &str) -> String {
 /// an alias cannot dodge a pattern. `None` when it does not resolve; the
 /// tool then reports the error.
 pub(crate) fn relative_target(root: &Path, requested: &str) -> Option<String> {
-    let resolved =
-        crate::tools::workspace::resolve_workspace_path_for_create(root, requested).ok()?;
+    let resolved = crate::workspace::resolve_workspace_path_for_create(root, requested).ok()?;
     let root = root.canonicalize().ok()?;
     let relative = resolved.strip_prefix(&root).ok()?;
     Some(relative.to_string_lossy().replace('\\', "/"))

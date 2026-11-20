@@ -4,8 +4,8 @@ use crate::tool_error::ToolError;
 use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_object_input, require_string_field,
 };
-use crate::tools::workspace::resolve_workspace_path;
 use crate::tools::{Tool, ToolContext};
+use crate::workspace::resolve_workspace_path;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -375,7 +375,7 @@ fn commit_pathspec(canonical_root: &Path, requested: &str) -> Result<String, Too
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        Some(parent) => crate::tools::workspace::resolve_workspace_path_for_create(
+        Some(parent) => crate::workspace::resolve_workspace_path_for_create(
             canonical_root,
             &parent.to_string_lossy(),
         )?,

@@ -1,4 +1,4 @@
-pub use crate::agent::state::{
+pub use crate::state::{
     load_json_file as load_local_state, save_json_file as save_local_state, scratch_dir,
     workspace_state_path,
 };
@@ -15,9 +15,11 @@ pub mod plan;
 mod process;
 mod session;
 mod settings;
+pub mod state;
 mod tool_error;
 mod transcript;
 mod usage;
+mod workspace;
 pub use approval::Grant;
 pub use control::{ApprovalAnswer, TaskControl};
 pub use execution::SANDBOX_DESCRIPTION;
@@ -45,9 +47,6 @@ use crate::agent::context::{
     context_metrics_for_input, history_input_tokens, prepare_context_messages,
     resolve_context_budget,
 };
-use crate::agent::state::{
-    ConversationState, ConversationStateRef, ConversationSummaryState, load_json_file,
-};
 use crate::agent::subagent::catalog::{
     SubagentCatalog, SubagentModel, SubagentType, load_user_types,
 };
@@ -58,6 +57,9 @@ use crate::conversation::{Message, MessageContent, Role};
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, TokenUsage, build_provider};
+use crate::state::{
+    ConversationState, ConversationStateRef, ConversationSummaryState, load_json_file,
+};
 use std::env;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
@@ -288,7 +290,7 @@ pub enum AgentProgress {
 
 pub struct AgentService {
     control: TaskControl,
-    state_lock: Option<crate::agent::state::WorkspaceLock>,
+    state_lock: Option<crate::state::WorkspaceLock>,
     workspace_root: PathBuf,
     /// The conversation saved under `.socium/sessions/<id>/`.
     session_id: String,
@@ -681,7 +683,7 @@ impl AgentService {
         max_tokens_override: Option<u32>,
         client: impl Into<HttpClient>,
     ) -> Result<Self, AgentError> {
-        let state_lock = crate::agent::state::lock_workspace(&workspace_root)?;
+        let state_lock = crate::state::lock_workspace(&workspace_root)?;
         session::migrate_legacy_state(&workspace_root)?;
         let sessions = session::scan_sessions(&workspace_root)?;
         let mut warnings = Vec::new();
@@ -1046,7 +1048,7 @@ impl AgentService {
 
     fn ensure_state_lock(&mut self) -> std::io::Result<()> {
         if self.state_lock.is_none() {
-            self.state_lock = Some(crate::agent::state::lock_workspace(&self.workspace_root)?);
+            self.state_lock = Some(crate::state::lock_workspace(&self.workspace_root)?);
         }
         Ok(())
     }
@@ -2308,8 +2310,8 @@ mod tests {
             "taken once"
         );
         // Saved with the conversation.
-        let saved: crate::agent::state::ConversationState =
-            crate::agent::state::load_json_file(&service.conversation_path()).unwrap();
+        let saved: crate::state::ConversationState =
+            crate::state::load_json_file(&service.conversation_path()).unwrap();
         assert!(
             serde_json::to_string(&saved.messages)
                 .unwrap()
@@ -2403,8 +2405,8 @@ mod tests {
             })
         );
 
-        let persisted: crate::agent::state::ConversationState =
-            crate::agent::state::load_json_file(&service.conversation_path()).unwrap();
+        let persisted: crate::state::ConversationState =
+            crate::state::load_json_file(&service.conversation_path()).unwrap();
         assert_eq!(
             persisted
                 .summary_state
@@ -2546,10 +2548,10 @@ mod tests {
 
     mod thinking_after_compaction {
         use super::*;
-        use crate::agent::state::{ConversationState, load_json_file};
         use crate::conversation::AgentMessageResponse;
         use crate::providers::ProviderResponse;
         use crate::providers::error::ProviderError;
+        use crate::state::{ConversationState, load_json_file};
 
         /// Each turn: a request, a tool call with thinking, its result, and
         /// an answer with thinking. Four messages per turn.

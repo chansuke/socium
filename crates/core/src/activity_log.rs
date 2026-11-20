@@ -2,7 +2,7 @@
 //! Activity pane survives a restart.
 
 use crate::activity::{ActivityEvent, ActivityKind};
-use crate::agent::state::{open_state_append, read_state_bytes, save_state_bytes};
+use crate::state::{open_state_append, read_state_bytes, save_state_bytes};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;

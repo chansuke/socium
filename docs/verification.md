@@ -70,7 +70,7 @@ when its code is gone or a test now catches the mistake on its own.
 
 ### Thinking blocks go back unchanged, and only where they are valid
 
-- Paths: `crates/core/src/agent/types.rs`, `crates/core/src/agent/context.rs`, `crates/core/src/agent/compaction.rs`, `crates/core/src/providers/*`
+- Paths: `crates/core/src/conversation.rs`, `crates/core/src/agent/context.rs`, `crates/core/src/agent/compaction.rs`, `crates/core/src/providers/*`
 - Check: `thinking` and `redacted_thinking` blocks are sent back byte for byte
   to the model that wrote them, and dropped where a summary cut off their
   prefix or the provider cannot read them (ADR 14).

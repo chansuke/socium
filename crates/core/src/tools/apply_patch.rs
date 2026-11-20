@@ -5,10 +5,10 @@ use crate::tool_error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{optional_bool_field, require_string_field};
 use crate::tools::text_file::{read_utf8_file_and_mode, read_utf8_file_with_limit};
-use crate::tools::workspace::{
+use crate::tools::{Tool, ToolContext};
+use crate::workspace::{
     resolve_workspace_mutation_path, resolve_workspace_path, resolve_workspace_path_for_create,
 };
-use crate::tools::{Tool, ToolContext};
 use serde_json::{Value, json};
 #[cfg(test)]
 use std::fs;
