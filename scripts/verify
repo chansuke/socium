@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# One command to check a change. Prints one line per step and keeps the
+# full logs, the TUI frames, and summary.md under target/verify/.
+#
+#   scripts/verify [--base REV]           format, lint, tests, added lines,
+#                                         feature map, and the checklist
+#                                         items the change triggers
+#   scripts/verify full [--base REV]      the above, then the Nix build and
+#                                         the evaluation with a mock model
+#   scripts/verify tui                    the TUI scenarios; every frame is
+#                                         kept in target/verify/tui/
+#   scripts/verify headless               `socium -p` end to end against a
+#                                         loopback model
+#
+# REV defaults to origin/main. Runs inside `nix develop`, which has the
+# pinned toolchain and bubblewrap the sandbox tests need.
+set -euo pipefail
+
+root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+if [ -z "${IN_NIX_SHELL:-}" ]; then
+  exec nix develop "$root" --command "$0" "$@"
+fi
+cd "$root"
+
+mode=check
+base=origin/main
+while (($# > 0)); do
+  case $1 in
+  check | full | tui | headless) mode=$1 ;;
+  --base)
+    base=${2:?--base needs a revision}
+    shift
+    ;;
+  *)
+    sed -n '2,/^set /p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
+    exit 2
+    ;;
+  esac
+  shift
+done
+git rev-parse --verify --quiet "$base^{commit}" >/dev/null || base=main
+
+out=$root/target/verify
+logs=$out/logs
+mkdir -p "$logs"
+summary=$out/summary.md
+failed=0
+rows=()
+
+# step NAME COMMAND...: runs COMMAND with its output in logs/NAME.log.
+step() {
+  local name=$1 log=$logs/$1.log started status=0
+  shift
+  started=$(date +%s)
+  "$@" >"$log" 2>&1 || status=$?
+  local took=$(($(date +%s) - started))s
+  if ((status == 0)); then
+    printf 'pass  %-16s %5s  %s\n' "$name" "$took" "${log#"$root"/}"
+    rows+=("| $name | pass | $took | \`${log#"$root"/}\` |")
+  else
+    printf 'FAIL  %-16s %5s  %s\n' "$name" "$took" "${log#"$root"/}"
+    rows+=("| $name | **fail** | $took | \`${log#"$root"/}\` |")
+    tail -n 30 "$log" | sed 's/^/      /'
+    failed=1
+  fi
+}
+
+case $mode in
+check | full)
+  step fmt cargo fmt --all --check
+  step clippy cargo clippy --locked --all-targets --all-features -- -D warnings
+  step test cargo test --locked --all-targets --all-features
+  step added-lines scripts/check-escape-hatches.sh "$base"
+  step feature-map scripts/check-feature-map.sh
+  if [ "$mode" = full ]; then
+    step nix-build nix build .#default --no-link
+    step evals bash -c 'cargo build --locked && python3 -m unittest evals/test_evals.py'
+  fi
+  scripts/verification-checklist.sh "$base" >"$out/checklist.md"
+  ;;
+tui)
+  rm -rf "$out/tui"
+  step tui env SOCIUM_VERIFY_DIR="$out/tui" \
+    cargo test --locked -p socium-tui --bin socium scenario::
+  ;;
+headless)
+  step headless cargo test --locked -p socium-tui --test headless
+  ;;
+esac
+
+{
+  echo "# Verification"
+  echo
+  echo "Revision $(git rev-parse --short HEAD), compared with $base; mode \`$mode\`."
+  if ! git diff --quiet HEAD --; then
+    echo "The working tree has changes that are not committed."
+  fi
+  echo
+  echo "| Step | Result | Time | Log |"
+  echo "|---|---|---|---|"
+  printf '%s\n' "${rows[@]}"
+  if [ "$mode" = tui ] && [ -d "$out/tui" ]; then
+    echo
+    echo "Frames, one file per scenario:"
+    echo
+    for frames in "$out"/tui/*.txt; do
+      echo "- \`${frames#"$root"/}\`: $(head -n 1 "$frames" | sed 's/^# //')"
+    done
+  fi
+  if [ -s "$out/checklist.md" ] && [ "$mode" != tui ] && [ "$mode" != headless ]; then
+    echo
+    echo "## Checklist items this change triggers"
+    echo
+    echo "Each one needs a check of its own; see docs/verification.md."
+    echo
+    cat "$out/checklist.md"
+  fi
+  if [ "$mode" = check ]; then
+    echo
+    echo "Not run in this mode: the Nix build and the evaluation (\`scripts/verify full\`)."
+  fi
+} >"$summary"
+
+echo "summary: ${summary#"$root"/}"
+exit "$failed"
