@@ -50,6 +50,10 @@ commits a symlink named in `paths` as a link, never the file it points to;
 Socium's state is hidden from all child processes, except
 `.socium/scratch/`, where commands may keep temporary files. What asks and what runs
 without asking is set in [`config.toml`](configuration.md#sandbox-and-approval-settings).
+`socium --dangerously-skip-permissions` runs every call without asking for that
+run, commits and edits to files the host runs included; `deny` rules and the
+sandbox still apply, and the footer shows `approvals skipped`. Use it only in a
+throwaway environment.
 
 ## Files, edits, and command output
 
@@ -177,6 +181,7 @@ JSON each line has the schema version in `v` and a `type`: `started`, then one
 the `error`, and the tokens used.
 
 Nobody can answer an approval there, so a call that needs one is refused and
-the model is told how to allow it; Ctrl+C cancels. The exit status is 0, 1 on
+the model is told how to allow it, unless `--dangerously-skip-permissions` is
+given; Ctrl+C cancels. The exit status is 0, 1 on
 failure, 2 for a usage error, or 130 when cancelled. `-c` and `-r <ID>`
 continue a saved conversation.

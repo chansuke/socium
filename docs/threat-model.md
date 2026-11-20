@@ -50,6 +50,12 @@ runs with the same isolation, and no answer widens it.
 sandbox, not for trust. Choose them for commands whose worst case inside the
 workspace you accept, such as `cargo test`.
 
+`--dangerously-skip-permissions` gives up the reviews as well. The model can then
+edit files the host runs later, such as `.envrc` or `build.rs`, and read likely
+secrets, which reach the model provider. The sandbox still holds while Socium
+runs, but a host tool that later runs an edited file does so outside it. Use
+the flag only where you would throw the workspace away.
+
 ## What Socium does not protect against
 
 - A command you approve damaging workspace files it may write, or reading a

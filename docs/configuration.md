@@ -170,6 +170,9 @@ workspace Socium opens, and startup lists what it adds.
   `credentials.json`, and similar); `protected`
   and `sensitive` replace these lists. Approval has no time limit. A denied call
   tells the model not to retry it.
+- No setting turns every approval off. The `--dangerously-skip-permissions`
+  flag does that for one run: nothing asks and commands get no narrower
+  sandbox, but `deny` prefixes are still refused and the sandbox is unchanged.
 
 See the [Linux sandbox guide](linux-sandbox.md) for the exact filesystem
 policy, environment, toolchain requirements, and restrictions on networked
