@@ -397,10 +397,12 @@ pub(crate) fn ensure_config_outside(
     Ok(())
 }
 
-/// `path` with its longest existing prefix canonicalized.
+/// `path` with its longest existing prefix canonicalized. A link whose
+/// target is missing is followed to where the target would be.
 fn resolve_existing_prefix(path: &Path) -> PathBuf {
     let mut rest = Vec::new();
     let mut current = path.to_path_buf();
+    let mut hops = 0;
     loop {
         if let Ok(canonical) = current.canonicalize() {
             let mut resolved = canonical;
@@ -408,6 +410,16 @@ fn resolve_existing_prefix(path: &Path) -> PathBuf {
                 resolved.push(part);
             }
             return resolved;
+        }
+        if hops < 40
+            && let Ok(target) = std::fs::read_link(&current)
+        {
+            hops += 1;
+            current = match current.parent() {
+                Some(parent) => parent.join(target),
+                None => target,
+            };
+            continue;
         }
         match (current.file_name(), current.parent()) {
             (Some(name), Some(parent)) => {
@@ -853,24 +865,30 @@ deny = ["git  push"]
     /// dotfile managers do.
     #[test]
     fn a_config_file_linked_into_the_workspace_is_refused() {
-        for linked in ["config.toml", "models.toml", "agents/reviewer.md", "agents"] {
-            let home = tempfile::tempdir().unwrap();
-            let workspace = tempfile::tempdir().unwrap();
-            let config = home.path().join(".config/socium");
-            std::fs::create_dir_all(config.join("agents")).unwrap();
-            let target = workspace.path().join("dotfiles");
-            std::fs::create_dir(&target).unwrap();
-            let link = config.join(linked);
-            if link.exists() {
-                std::fs::remove_dir(&link).unwrap();
+        // A link whose target is missing counts too: the workspace can
+        // create the target later.
+        for exists in [true, false] {
+            for linked in ["config.toml", "models.toml", "agents/reviewer.md", "agents"] {
+                let home = tempfile::tempdir().unwrap();
+                let workspace = tempfile::tempdir().unwrap();
+                let config = home.path().join(".config/socium");
+                std::fs::create_dir_all(config.join("agents")).unwrap();
+                let target = workspace.path().join("dotfiles");
+                if exists {
+                    std::fs::create_dir(&target).unwrap();
+                }
+                let link = config.join(linked);
+                if link.exists() {
+                    std::fs::remove_dir(&link).unwrap();
+                }
+                std::os::unix::fs::symlink(&target, &link).unwrap();
+                let home_str = home.path().to_str().unwrap().to_string();
+                let lookup = move |key: &str| (key == "HOME").then(|| home_str.clone());
+                assert!(
+                    ensure_config_outside(workspace.path(), &lookup).is_err(),
+                    "{linked}, target exists: {exists}"
+                );
             }
-            std::os::unix::fs::symlink(&target, &link).unwrap();
-            let home_str = home.path().to_str().unwrap().to_string();
-            let lookup = move |key: &str| (key == "HOME").then(|| home_str.clone());
-            assert!(
-                ensure_config_outside(workspace.path(), &lookup).is_err(),
-                "{linked}"
-            );
         }
     }
 
