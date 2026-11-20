@@ -5,12 +5,15 @@
   "private": true,
   "scripts": {
     "start": "expo start",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "android": "expo run:android",
+    "bundle:android": "expo export --platform android --output-dir dist/android"
   },
   "dependencies": {
     "@socium/client": "0.1.0",
     "expo": "~58.0.26",
     "expo-status-bar": "~58.0.5",
+    "expo-system-ui": "~58.0.7",
     "react": "19.3.0",
     "react-native": "0.88.1",
     "react-native-safe-area-context": "~5.11.1",
