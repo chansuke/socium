@@ -103,10 +103,8 @@ impl WebSearch {
                 Failure::Retryable(_) => {}
             }
             let delay = Duration::from_secs(1 << (attempt - 1));
-            tokio::select! {
-                biased;
-                _ = control.cancelled() => return Err("Search cancelled; no further request was sent".into()),
-                _ = tokio::time::sleep(delay) => {}
+            if !control.pause(delay).await {
+                return Err("Search cancelled; no further request was sent".into());
             }
         }
     }
