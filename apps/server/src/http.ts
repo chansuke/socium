@@ -117,6 +117,18 @@ export function createHttpServer(bridge: Bridge, token: string, webRoot: string,
           json(response, 200, { url: pairing.issue() });
           return;
         }
+        if (request.method === "GET" && url.pathname === "/api/devices") {
+          if (!hostAccess) throw new GatewayError(403, "Use the host access token to manage paired devices.");
+          json(response, 200, { devices: pairing?.devices() ?? [] });
+          return;
+        }
+        const device = /^\/api\/devices\/([\w-]{1,64})$/.exec(url.pathname);
+        if (request.method === "DELETE" && device) {
+          if (!hostAccess) throw new GatewayError(403, "Use the host access token to manage paired devices.");
+          if (!pairing?.revoke(device[1])) throw new GatewayError(404, "This device is not paired.");
+          response.writeHead(204).end();
+          return;
+        }
         if (request.method === "GET" && url.pathname === "/api/state") {
           const state = bridge.snapshot();
           if (url.searchParams.get("after") === state.revision) response.writeHead(204).end();

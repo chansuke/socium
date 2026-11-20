@@ -87,6 +87,15 @@ export interface WorkspaceState {
   turn: Turn | null;
 }
 
+/** A phone paired with the host; its token is never sent back. */
+export interface PairedDevice {
+  id: string;
+  /** ISO 8601. */
+  createdAt: string;
+  /** ISO 8601, to the minute; null until the device first connects. */
+  lastUsedAt: string | null;
+}
+
 export type Command =
   | { action: "new" }
   | { action: "resume"; target: string }
