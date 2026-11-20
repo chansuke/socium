@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod error;
+pub(crate) mod google;
 pub(crate) mod openai_chat;
 pub(crate) mod openai_responses;
 pub(crate) mod sse;
@@ -10,6 +11,7 @@ use crate::agent::types::{AgentMessageRequest, AgentMessageResponse};
 use crate::models::{ModelConfig, ProviderConfig, Wire};
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::error::ProviderError;
+use crate::providers::google::GoogleProvider;
 use crate::providers::openai_chat::OpenAiChatProvider;
 use crate::providers::openai_responses::OpenAiResponsesProvider;
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,7 @@ pub enum ProviderKind {
     Anthropic,
     OpenAiChat,
     OpenAiResponses,
+    Google,
 }
 
 pub(crate) struct ProviderResponse {
@@ -103,6 +106,7 @@ impl fmt::Display for ProviderKind {
             Self::Anthropic => "anthropic",
             Self::OpenAiChat => "openai-chat",
             Self::OpenAiResponses => "openai-responses",
+            Self::Google => "google",
         };
         write!(f, "{name}")
     }
@@ -154,10 +158,9 @@ pub(crate) fn build_provider(
         Wire::OpenAiResponses => Ok(Box::new(OpenAiResponsesProvider::from_config(
             provider, model, lookup,
         )?)),
-        Wire::Google => Err(ProviderError::Api(format!(
-            "{}: the google wire has no provider yet",
-            provider.name
-        ))),
+        Wire::Google => Ok(Box::new(GoogleProvider::from_config(
+            provider, model, lookup,
+        )?)),
     }
 }
 

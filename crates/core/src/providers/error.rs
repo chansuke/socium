@@ -132,8 +132,9 @@ pub(crate) fn api_error_message(
     }
 }
 
-/// `kind: message` from an error object: Anthropic's `type`, or the
-/// `code` that OpenAI-compatible servers send when `type` is absent.
+/// `kind: message` from an error object: Anthropic's `type`, Google's
+/// `status` (such as `RESOURCE_EXHAUSTED`), or the `code` that
+/// OpenAI-compatible servers send when neither is present.
 pub(crate) fn describe_error(error: &serde_json::Value) -> Option<String> {
     let message = error["message"].as_str()?;
     let mut cleaned = message
@@ -148,6 +149,7 @@ pub(crate) fn describe_error(error: &serde_json::Value) -> Option<String> {
     }
     let kind = error["type"]
         .as_str()
+        .or_else(|| error["status"].as_str())
         .map(str::to_string)
         .or_else(|| match &error["code"] {
             serde_json::Value::String(code) => Some(code.clone()),
@@ -191,6 +193,12 @@ mod tests {
         assert_eq!(
             api_error_message("openai", StatusCode::NOT_FOUND, openai),
             "openai API error 404 Not Found: 404: No such model"
+        );
+        let google =
+            br#"{"error":{"code":429,"message":"Quota exceeded","status":"RESOURCE_EXHAUSTED"}}"#;
+        assert_eq!(
+            api_error_message("gemini", StatusCode::TOO_MANY_REQUESTS, google),
+            "gemini API error 429 Too Many Requests: RESOURCE_EXHAUSTED: Quota exceeded"
         );
         let bare = br#"{"error":{"message":"busy"}}"#;
         assert_eq!(
