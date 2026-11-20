@@ -33,7 +33,7 @@ Then pass `--mobile-url https://<host>.<tailnet>.ts.net` to `npm run start:clien
 1. Sign in to Socium in your browser with the host access token. Select **Pair a phone**, then **Generate QR code**.
 2. Open Socium on the phone, select **Scan QR code**, scan the browser's QR code, and confirm the host address.
 
-Each QR code can be used once within five minutes. A new code replaces the previous unused code. The mobile app saves the paired device token in the operating system's secure storage and removes it when you select **Disconnect**. The gateway issues a new device token when you pair, and those tokens expire when the gateway restarts. Use **Enter manually** to connect with the host access token when you cannot scan a QR code.
+Each QR code can be used once within five minutes. A new code replaces the previous unused code. The mobile app saves the paired device token in the operating system's secure storage and removes it when you select **Disconnect**. The gateway issues a new device token when you pair and keeps only its SHA-256 hash in `$XDG_STATE_HOME/socium/paired-devices.json` (`~/.local/state/socium/paired-devices.json` by default; pass `--pairing-store` to use another file), so paired devices stay connected across gateway restarts. With the host access token, `GET /api/devices` lists paired devices and `DELETE /api/devices/<id>` revokes one at once. Use **Enter manually** to connect with the host access token when you cannot scan a QR code.
 
 For local native development, keep the Android SDK in a persistent directory such as `~/Android/Sdk` (`ANDROID_HOME="$HOME/Android/Sdk"`, `ANDROID_AVD_HOME="$HOME/.android/avd"`) or configure Xcode, then run:
 
