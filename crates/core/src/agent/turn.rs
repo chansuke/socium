@@ -8,12 +8,12 @@ use crate::constants::{
 };
 use crate::conversation::ToolDefinition;
 use crate::conversation::{AgentMessageRequest, ContentBlock, Message};
+use crate::dispatch::{ToolCall, run_tool_call_on_blocking_thread};
 use crate::error::AgentError;
 use crate::plan::PlanLedger;
 use crate::progress::AgentProgress;
 use crate::providers::{Provider, ProviderEvent, TokenUsage};
 use crate::tool_error::ToolError;
-use crate::tools::{ToolCall, run_tool_call_on_blocking_thread};
 use serde_json::Value;
 use std::future::Future;
 use std::path::Path;

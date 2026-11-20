@@ -489,8 +489,8 @@ fn failed_execution_intent_after_approval_has_no_side_effects() {
     let root = tempfile::tempdir().unwrap();
     let control = TaskControl::default();
     control.enable_interactive_approval();
-    let result = crate::tools::run_tool_call_checkpointed(
-        crate::tools::ToolCall {
+    let result = crate::dispatch::run_tool_call_checkpointed(
+        crate::dispatch::ToolCall {
             workspace_root: root.path(),
             tool_use_id: "call",
             name: "run_command",
@@ -1063,8 +1063,8 @@ fn run_with_settings(
     input: serde_json::Value,
     on_progress: &mut dyn FnMut(AgentProgress),
 ) -> (bool, String) {
-    match crate::tools::run_tool_call_checkpointed(
-        crate::tools::ToolCall {
+    match crate::dispatch::run_tool_call_checkpointed(
+        crate::dispatch::ToolCall {
             workspace_root: root,
             tool_use_id: "call",
             name,

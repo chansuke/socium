@@ -7,6 +7,7 @@ pub mod activity;
 mod activity_log;
 mod approval;
 mod control;
+mod dispatch;
 mod execution;
 pub mod host;
 mod instructions;
