@@ -24,8 +24,20 @@
     ],
     "ios": {
       "bundleIdentifier": "com.chansuke.socium",
-      "supportsTablet": true
+      "supportsTablet": true,
+      "buildNumber": "2"
     },
-    "owner": "chansuke2027"
+    "owner": "chansuke2027",
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Socium to scan a pairing QR code.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      "expo-secure-store"
+    ]
   }
 }

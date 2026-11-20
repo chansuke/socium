@@ -14,6 +14,7 @@ export const styles = StyleSheet.create({
   flex: { flex: 1 },
   center: { flexGrow: 1, justifyContent: "center", padding: 20 },
   card: { width: "100%", maxWidth: 460, alignSelf: "center", padding: 20, gap: 10, backgroundColor: palette.panel, borderColor: palette.edge, borderWidth: 1, borderRadius: 16 },
+  scanner: { height: 280, borderRadius: 10, overflow: "hidden", backgroundColor: palette.background },
   mark: { color: palette.mint, fontWeight: "800", backgroundColor: "#20382f", alignSelf: "flex-start", padding: 10, borderRadius: 10, fontSize: 19 },
   heading: { color: palette.text, fontSize: 27, fontWeight: "700", letterSpacing: -0.8 },
   title: { color: palette.text, fontSize: 16, fontWeight: "700" },
