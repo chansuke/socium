@@ -2278,10 +2278,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "libc",
+ "proc-macro2",
  "proptest",
  "reqwest",
  "serde",
  "serde_json",
+ "syn 2.0.119",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

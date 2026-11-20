@@ -21,7 +21,9 @@ toml = { version = "1", default-features = false, features = ["parse", "serde"] 
 libc = "0.2"
 
 [dev-dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
 proptest = { version = "1.12", default-features = false, features = ["std"] }
+syn = { version = "2", default-features = false, features = ["full", "visit", "parsing", "printing"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "test-util"] }
 
