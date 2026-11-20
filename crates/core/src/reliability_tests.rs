@@ -486,13 +486,15 @@ fn failed_execution_intent_after_approval_has_no_side_effects() {
     let control = TaskControl::default();
     control.enable_interactive_approval();
     let result = crate::tools::run_tool_call_checkpointed(
-        root.path(),
-        "call",
-        "run_command",
-        &json!({"command":["touch","must-not-exist"]}),
-        &control,
-        &crate::settings::Settings::default(),
-        None,
+        crate::tools::ToolCall {
+            workspace_root: root.path(),
+            tool_use_id: "call",
+            name: "run_command",
+            input: &json!({"command":["touch","must-not-exist"]}),
+            control: &control,
+            settings: &crate::settings::Settings::default(),
+            edit_origin: None,
+        },
         &mut |e| {
             if let AgentProgress::ApprovalRequested { request_id, .. } = e {
                 control.answer_approval(request_id, true);
@@ -1058,13 +1060,15 @@ fn run_with_settings(
     on_progress: &mut dyn FnMut(AgentProgress),
 ) -> (bool, String) {
     match crate::tools::run_tool_call_checkpointed(
-        root,
-        "call",
-        name,
-        &input,
-        control,
-        settings,
-        None,
+        crate::tools::ToolCall {
+            workspace_root: root,
+            tool_use_id: "call",
+            name,
+            input: &input,
+            control,
+            settings,
+            edit_origin: None,
+        },
         &mut |event| on_progress(event),
         &mut |_| Ok(()),
     ) {

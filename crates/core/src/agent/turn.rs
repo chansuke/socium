@@ -13,7 +13,7 @@ use crate::plan::PlanLedger;
 use crate::providers::{Provider, ProviderEvent, TokenUsage};
 use crate::tools::ToolDefinition;
 use crate::tools::error::ToolError;
-use crate::tools::run_tool_call_on_blocking_thread;
+use crate::tools::{ToolCall, run_tool_call_on_blocking_thread};
 use serde_json::Value;
 use std::future::Future;
 use std::path::Path;
@@ -592,13 +592,15 @@ where
                 }
             } else {
                 run_tool_call_on_blocking_thread(
-                    ctx.workspace_root,
-                    &id,
-                    &name,
-                    &input,
-                    ctx.control,
-                    ctx.settings,
-                    ctx.edit_origin,
+                    ToolCall {
+                        workspace_root: ctx.workspace_root,
+                        tool_use_id: &id,
+                        name: &name,
+                        input: &input,
+                        control: ctx.control,
+                        settings: ctx.settings,
+                        edit_origin: ctx.edit_origin,
+                    },
                     &mut tool_progress,
                     &mut |authorization| {
                         // The input is already in the message; the event
