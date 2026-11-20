@@ -50,6 +50,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -71,6 +72,12 @@ CHECK_TIMEOUT = 600
 # build or bytecode caches from running the tests.
 IGNORED = [".socium/", "__pycache__/", "*.pyc", "target/", ".pytest_cache/"]
 REPLY_FILE = "reply.txt"
+# Socium's messages for a call it could not run as sent: a tool it was not
+# offered, arguments that were not JSON, or a field of the wrong type.
+ARGUMENT_ERROR = re.compile(
+    r"^Unsupported tool: |were not valid JSON|requires an? (object input|string field|boolean field"
+    r"|integer field|array field|non-empty array field|string array items)|must be between 1 and"
+)
 
 
 def git(repo, *args):
@@ -271,11 +278,12 @@ def measure(records):
         for key, value in (record.get("usage") or {}).items():
             usage[key] = usage.get(key, 0) + value
         costs.append(record.get("cost_usd"))
-    tool_errors = sum(1 for e in activity if e.get("type") == "tool_finished" and e.get("is_error"))
+    failed = [e for e in activity if e.get("type") == "tool_finished" and e.get("is_error")]
     return {
         "rounds": sum(1 for e in activity if e.get("type") == "round_finished" and not e.get("agent")),
         "tools": [e.get("name") for e in activity if e.get("type") == "tool_finished"],
-        "tool_errors": tool_errors,
+        "tool_errors": len(failed),
+        "tool_argument_errors": sum(1 for e in failed if ARGUMENT_ERROR.search(e.get("summary") or "")),
         "provider_retries": sum(
             1 for e in activity if e.get("type") == "warning" and "retrying in" in e.get("message", "")
         ),

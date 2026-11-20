@@ -141,9 +141,28 @@ class TaskDigest(unittest.TestCase):
             self.assertNotEqual(runner.tree_digest(root), before)
 
 
-def side(path, label, passes, model="m", task_digest="t"):
+class ToolErrors(unittest.TestCase):
+    def test_only_calls_that_could_not_run_as_sent_are_argument_errors(self):
+        import run as runner
+
+        def finished(summary, is_error=True):
+            return {"type": "activity", "event": {"type": "tool_finished", "is_error": is_error,
+                                                  "summary": summary}}
+
+        metrics = runner.measure([
+            finished("Unsupported tool: git_log"),
+            finished("The arguments of this read_file call were not valid JSON (EOF); nothing ran."),
+            finished("read_file requires a string field: path"),
+            finished("No match for old_str in src/lib.rs"),
+            finished("Unsupported tool: git_log", is_error=False),
+        ])
+        self.assertEqual(metrics["tool_errors"], 4)
+        self.assertEqual(metrics["tool_argument_errors"], 3)
+
+
+def side(path, label, passes, model="m", task_digest="t", tools=None):
     with open(path, "w") as f:
-        f.write(json.dumps({"type": "manifest", "label": label, "comparison": "controlled",
+        f.write(json.dumps({"type": "manifest", "label": label, "comparison": "controlled", "tools": tools,
                             "mode": "model", "model": model, "budget_usd": 1.0,
                             "tasks": {"a": task_digest, "b": "t"}}) + "\n")
         for passed in passes:
