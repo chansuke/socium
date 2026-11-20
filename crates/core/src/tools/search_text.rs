@@ -8,8 +8,8 @@ use crate::tools::input::{
 use crate::tools::ripgrep::{
     SearchExecution, SearchMode, format_search_results, search_with_ripgrep,
 };
-use crate::tools::workspace::resolve_workspace_path;
 use crate::tools::{Tool, ToolContext};
+use crate::workspace::resolve_workspace_path;
 use serde_json::{Value, json};
 use std::path::Path;
 

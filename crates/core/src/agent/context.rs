@@ -1,4 +1,3 @@
-use crate::agent::state::{ConversationSummary, ConversationSummaryState};
 use crate::agent::turn::extract_text;
 use crate::constants::{
     DEFAULT_CONTEXT_WINDOW_TOKENS, MAX_SUMMARY_CHARACTERS, MAX_SUMMARY_LINE_CHARACTERS,
@@ -8,6 +7,7 @@ use crate::conversation::ToolDefinition;
 use crate::conversation::{
     AgentMessageRequest, ContentBlock, Message, MessageContent, Role, strip_thinking,
 };
+use crate::state::{ConversationSummary, ConversationSummaryState};
 use std::io::{self, Error, ErrorKind};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -675,8 +675,8 @@ fn truncate_summary_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ContextBudget, context_metrics_for_input, prepare_context_with_budget};
-    use crate::agent::state::ConversationSummaryState;
     use crate::conversation::{ContentBlock, Message};
+    use crate::state::ConversationSummaryState;
     use crate::tools::default_tools;
     use serde_json::json;
 
@@ -859,7 +859,7 @@ mod tests {
             .map(|index| Message::user_text(format!("message {index}")))
             .collect::<Vec<_>>();
         let existing = ConversationSummaryState {
-            summary: Some(crate::agent::state::ConversationSummary {
+            summary: Some(crate::state::ConversationSummary {
                 covered_messages: 2,
                 text: "1. User request: keep this LLM summary".to_string(),
                 thinking_valid_from: Some(2),
@@ -887,7 +887,7 @@ mod tests {
             .map(|index| Message::user_text(format!("message {index}")))
             .collect::<Vec<_>>();
         let existing = ConversationSummaryState {
-            summary: Some(crate::agent::state::ConversationSummary {
+            summary: Some(crate::state::ConversationSummary {
                 covered_messages: 6,
                 text: "persisted compaction summary".to_string(),
                 thinking_valid_from: Some(10),
@@ -997,7 +997,7 @@ mod tests {
     fn extending_a_full_summary_keeps_the_new_corrections_within_the_limit() {
         let mut messages = vec![Message::user_text("original request".into())];
         let mut summary = ConversationSummaryState {
-            summary: Some(crate::agent::state::ConversationSummary {
+            summary: Some(crate::state::ConversationSummary {
                 covered_messages: 1,
                 text: format!(
                     "1. User request: ship the parser{}\n5. Immediate next step: run tests",

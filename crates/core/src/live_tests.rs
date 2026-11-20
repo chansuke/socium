@@ -171,7 +171,7 @@ async fn live_tool_result_round_trip_completes_the_turn() {
 #[tokio::test]
 #[ignore = "calls a paid API; set SOCIUM_LIVE_MODEL and run with --ignored"]
 async fn live_request_after_a_summary_is_accepted() {
-    use crate::agent::state::{ConversationSummary, ConversationSummaryState};
+    use crate::state::{ConversationSummary, ConversationSummaryState};
     let (model, provider) = live_target();
     let tools = tools_for_model();
     let client = crate::provider_http_client().unwrap();

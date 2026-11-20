@@ -13,7 +13,7 @@ const MAX_INSTRUCTION_BYTES: usize = 32 * 1024;
 /// warning when one exists but cannot be used.
 pub(crate) fn project_instructions(root: &Path) -> Result<Option<String>, String> {
     for name in INSTRUCTION_FILES {
-        let Ok(path) = crate::tools::workspace::resolve_workspace_path(root, name) else {
+        let Ok(path) = crate::workspace::resolve_workspace_path(root, name) else {
             continue;
         };
         if !path.is_file() {
@@ -67,7 +67,7 @@ pub(crate) fn nested_instructions(
         else {
             continue;
         };
-        let text = match crate::tools::workspace::resolve_workspace_path(root, &name)
+        let text = match crate::workspace::resolve_workspace_path(root, &name)
             .map_err(|err| err.to_string())
             .and_then(|path| {
                 crate::tools::text_file::read_utf8_file_with_limit(

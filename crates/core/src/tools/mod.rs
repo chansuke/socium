@@ -15,7 +15,6 @@ pub(crate) mod search_text;
 pub(crate) mod text_editor;
 pub(crate) mod text_file;
 pub(crate) mod web_search;
-pub(crate) mod workspace;
 
 use crate::AgentProgress;
 use crate::constants::TEXT_EDITOR_TOOL_NAME;

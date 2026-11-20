@@ -1,5 +1,4 @@
 use crate::agent::context::{extend_summary_text, summarize_messages};
-use crate::agent::state::{ConversationSummary, ConversationSummaryState};
 use crate::agent::turn::extract_text;
 use crate::constants::{
     COMPACTION_MAX_OUTPUT_TOKENS, COMPACTION_RETAIN_RECENT_MESSAGES,
@@ -11,6 +10,7 @@ use crate::conversation::{AgentMessageRequest, ContentBlock, Message, MessageCon
 use crate::error::AgentError;
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, ProviderEvent, TokenUsage};
+use crate::state::{ConversationSummary, ConversationSummaryState};
 
 /// Heads a summary written without the compaction model.
 const FALLBACK_SUMMARY_NOTE: &str = "(Line-by-line summary: the summarizer was unavailable, so decisions, open issues and verification results may be missing. Check before relying on it.)";
