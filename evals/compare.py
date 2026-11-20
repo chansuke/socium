@@ -106,6 +106,8 @@ def compare(path_a, path_b, out=print):
     out(f"{ma['comparison']} comparison: {names[0]} ({ma['mode']}) vs {names[1]} ({mb['mode']})")
     if ma.get("tools") != mb.get("tools"):
         out(f"  tool profiles: {ma.get('tools') or 'default'} vs {mb.get('tools') or 'default'}")
+    if ma.get("prompt_cache") != mb.get("prompt_cache"):
+        out(f"  prompt cache: {ma.get('prompt_cache') or 'default'} vs {mb.get('prompt_cache') or 'default'}")
     if differs:
         out(f"  differs by design: {', '.join(differs)}")
     for name, halted in ((names[0], ha), (names[1], hb)):

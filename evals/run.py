@@ -211,6 +211,53 @@ def price_of(env, alias):
     return model.get("price") if model else None
 
 
+def toml_key(key):
+    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
+
+
+def toml_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(v) for v in value) + "]"
+    return "{ " + ", ".join(f"{toml_key(k)} = {toml_value(v)}" for k, v in value.items()) + " }"
+
+
+def toml_table(path, table):
+    """`table` as TOML lines: plain values first, then its tables and arrays
+    of tables under `path`. Enough for models.toml, not TOML in general."""
+    nested = lambda v: isinstance(v, dict) or (isinstance(v, list) and v and all(isinstance(i, dict) for i in v))
+    lines = [f"{toml_key(k)} = {toml_value(v)}" for k, v in table.items() if not nested(v)]
+    for key, value in table.items():
+        if not nested(value):
+            continue
+        inner = path + [toml_key(key)]
+        for item in value if isinstance(value, list) else [value]:
+            header = ".".join(inner)
+            lines += ["", f"[[{header}]]" if isinstance(value, list) else f"[{header}]"]
+            lines += toml_table(inner, item)
+    return lines
+
+
+def without_prompt_caching(text, alias):
+    """The models.toml `text` with prompt_caching taken out of `alias`'s
+    features, so the same model runs without asking for a cached prefix.
+    No `alias` means the registry's default model."""
+    registry = tomllib.loads(text)
+    alias = alias or registry.get("default")
+    model = next((m for m in registry.get("models", []) if m.get("alias") == alias), None)
+    if model is None:
+        raise SystemExit(f"--prompt-cache off needs {alias} listed in models.toml")
+    if "prompt_caching" not in model.get("features", []):
+        raise SystemExit(f"{alias} does not list prompt_caching, so it already runs without it")
+    model["features"] = [f for f in model["features"] if f != "prompt_caching"]
+    return "\n".join(toml_table([], registry)) + "\n"
+
+
 def round_cost(usage, price):
     """Dollars for one round, with cache reads and writes at their own prices
     as Socium counts them (both default to the input price)."""
@@ -401,6 +448,8 @@ def manifest(args, names, base_config):
         "config_sha256": file_digest(base_config),
         # None leaves the binary's default profile.
         "tools": args.tools,
+        # None leaves the models file as it is.
+        "prompt_cache": args.prompt_cache,
         "models_sha256": None if args.mock else file_digest(models),
         "budget_usd": args.budget_usd,
         "max_cost_usd": args.max_cost_usd,
@@ -452,6 +501,8 @@ def main():
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--out", default="results.jsonl")
     parser.add_argument("--tools", choices=["full", "basic", "search"], help="the tool profile to offer")
+    parser.add_argument("--prompt-cache", choices=["off"],
+                        help="run MODEL without the prompt_caching feature its models.toml entry lists")
     parser.add_argument("--label", default=None, help="a name for this side of a comparison")
     parser.add_argument(
         "--comparison", choices=["controlled", "defaults"], default="controlled",
@@ -494,6 +545,13 @@ def main():
         config = Path(fixed.name) / "config.toml"
         config.write_text(base_config.read_text() + f'\n[tools]\nprofile = "{args.tools}"\n')
 
+    models = None
+    if args.prompt_cache:
+        if args.mock:
+            raise SystemExit("--prompt-cache needs a real model")
+        models = Path(fixed.name) / "models.toml"
+        models.write_text(without_prompt_caching(models_file(os.environ).read_text(), os.environ.get("MODEL")))
+
     spent, dearest, results, halted = 0.0, 0.0, [], None
     with open(args.out, "w") as out:
         out.write(json.dumps(manifest(args, names, base_config)) + "\n")
@@ -512,6 +570,8 @@ def main():
                         env, server = mock_env(name, task, workdir, args.mock, config)
                     else:
                         env = {**os.environ, "SOCIUM_CONFIG_FILE": str(config)}
+                        if models:
+                            env["SOCIUM_MODELS_FILE"] = str(models)
                     try:
                         result = run_task(name, task, args.binary, workdir, env)
                     finally:
