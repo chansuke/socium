@@ -1,0 +1,14 @@
+description = "Typing in the composer, Esc to leave editing, and E to come back"
+
+[[step]]
+type = "hello"
+expect = ["› hello", "idle"]
+
+[[step]]
+keys = ["Esc"]
+expect = ["› hello", "Press E to resume typing"]
+
+[[step]]
+keys = ["e"]
+expect = ["› hello", "Ready"]
+absent = ["Press E to resume typing"]

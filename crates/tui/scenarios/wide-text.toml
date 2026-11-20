@@ -1,0 +1,6 @@
+description = "Japanese text and emoji in a narrow terminal stay whole in the composer"
+size = [40, 16]
+
+[[step]]
+type = "日本語の入力と絵文字🙂を試す"
+expect = ["│ › 日本語の入力と絵文字🙂を試す"]
