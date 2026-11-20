@@ -27,7 +27,7 @@ pub struct TranscriptEntry {
 
 /// The tool calls that ran after a human approved them, as the turn
 /// records them at the execution boundary.
-const HUMAN_APPROVED: &[&str] = &[crate::tools::HUMAN_APPROVED, "human-approved-once"];
+const HUMAN_APPROVED: &[&str] = &[crate::constants::HUMAN_APPROVED, "human-approved-once"];
 
 /// One tool call and its result. `approved` marks a call that ran after
 /// the human allowed it.

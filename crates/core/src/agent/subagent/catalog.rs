@@ -28,7 +28,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-pub(crate) const AGENTS_DIR_ENV: &str = "SOCIUM_AGENTS_DIR";
+use crate::constants::AGENTS_DIR_ENV;
 const MAX_DEFINITION_BYTES: u64 = 64 * 1024;
 const MAX_DEFINITIONS: usize = 32;
 const MAX_NAME_CHARS: usize = 32;
