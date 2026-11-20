@@ -286,6 +286,7 @@ where
 pub(crate) const HUMAN_APPROVED: &str = "human-approved";
 pub(crate) const ALLOWED_BY_POLICY: &str = "allowed-by-policy";
 pub(crate) const WORKSPACE_FILE_POLICY: &str = "workspace-file-policy";
+pub(crate) const APPROVALS_SKIPPED: &str = "approvals-skipped";
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_tool_call_checkpointed<F>(
@@ -316,7 +317,9 @@ where
         let restrictions = match gate {
             crate::approval::Gate::Deny(reason) => return Err(reason.into()),
             crate::approval::Gate::Run(restrictions) => {
-                if restrictions.is_some() {
+                if settings.approval.mode == crate::settings::ApprovalMode::Bypass {
+                    authorization = APPROVALS_SKIPPED;
+                } else if restrictions.is_some() {
                     authorization = ALLOWED_BY_POLICY;
                 }
                 restrictions

@@ -19,7 +19,7 @@ pub use approval::Grant;
 pub use control::{ApprovalAnswer, TaskControl};
 pub use execution::SANDBOX_DESCRIPTION;
 pub use session::{SessionStart, SessionSummary, list_sessions};
-pub use settings::Settings;
+pub use settings::{ApprovalMode, Settings};
 pub use transcript::{TranscriptEntry, TranscriptRole};
 pub use usage::SessionUsage;
 pub mod agent;
@@ -1497,10 +1497,19 @@ impl AgentService {
         )
     }
 
-    /// Whether sandboxed commands run without asking
-    /// (`approval.commands = "auto"`).
-    pub fn commands_run_without_asking(&self) -> bool {
-        self.settings.approval.commands == settings::CommandApproval::Auto
+    /// Which tool calls run without asking.
+    pub fn approval_mode(&self) -> ApprovalMode {
+        self.settings.approval.mode
+    }
+
+    /// Lets every tool call run without asking for the rest of this
+    /// process (`--dangerously-skip-permissions`); deny rules and the
+    /// sandbox still apply.
+    pub fn skip_approvals(&mut self) {
+        Arc::make_mut(&mut self.settings).approval.mode = ApprovalMode::Bypass;
+        self.warnings.push(
+            "--dangerously-skip-permissions: nothing asks for approval, commits and edits to files host tools run included; deny rules and the sandbox still apply".into(),
+        );
     }
 
     /// Tolerated configuration problems to show once at startup.

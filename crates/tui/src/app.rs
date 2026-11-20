@@ -15,7 +15,7 @@ use ratatui::{
     DefaultTerminal,
     crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
 };
-use socium_core::{AgentService, ContextMetrics, providers::TokenUsage};
+use socium_core::{AgentService, ApprovalMode, ContextMetrics, providers::TokenUsage};
 use std::{
     env,
     path::PathBuf,
@@ -39,8 +39,8 @@ pub(crate) struct App {
     pub(crate) status: Option<String>,
     pub(crate) workspace_label: String,
     pub(crate) model_label: String,
-    /// `approval.commands = "auto"`: shown in the footer.
-    pub(crate) commands_run_without_asking: bool,
+    /// Which tool calls run without asking, shown in the footer.
+    pub(crate) approval_mode: ApprovalMode,
     pub(crate) context_metrics: ContextMetrics,
     /// Tokens this conversation used, and their cost when priced.
     pub(crate) session_usage: (TokenUsage, Option<f64>),
@@ -80,7 +80,7 @@ impl App {
         let model_label = model_label(&agent.active_model());
         let workspace_label = format_workspace_path(env::current_dir().ok());
         let warnings = agent.startup_warnings();
-        let commands_run_without_asking = agent.commands_run_without_asking();
+        let approval_mode = agent.approval_mode();
         let history_path =
             socium_core::workspace_state_path(&env::current_dir()?, INPUT_HISTORY_FILE_NAME)?;
         let input_history = input_history::InputSession::load(history_path)?;
@@ -98,7 +98,7 @@ impl App {
             status: None,
             workspace_label,
             model_label,
-            commands_run_without_asking,
+            approval_mode,
             context_metrics: ContextMetrics::default(),
             session_usage: Default::default(),
             unreported_calls: 0,
@@ -174,7 +174,7 @@ impl App {
             status: None,
             workspace_label: "test".into(),
             model_label: "test".into(),
-            commands_run_without_asking: false,
+            approval_mode: ApprovalMode::Ask,
             context_metrics: Default::default(),
             session_usage: Default::default(),
             unreported_calls: 0,

@@ -14,7 +14,7 @@
 //!
 //! Diagnostics go to standard error. No one can answer an approval here, so
 //! a call that needs one is refused with a message that says how to allow
-//! it. Ctrl+C, or standard output closing, cancels the turn.
+//! it, unless `--dangerously-skip-permissions` lets every call run. Ctrl+C, or standard output closing, cancels the turn.
 use crate::cli::{OutputFormat, Print};
 use serde_json::{Value, json};
 use socium_core::{AgentError, AgentProgress, AgentService, SessionStart};
@@ -24,7 +24,7 @@ pub(crate) const SCHEMA_VERSION: u32 = 1;
 
 /// Exit status: 0 when the turn finished, 1 when it failed, 2 for a usage
 /// error, and 130 when it was cancelled.
-pub(crate) async fn main(start: SessionStart, print: Print) -> i32 {
+pub(crate) async fn main(start: SessionStart, print: Print, skip_permissions: bool) -> i32 {
     let mut stdin = String::new();
     if !std::io::stdin().is_terminal()
         && let Err(err) = std::io::stdin().read_to_string(&mut stdin)
@@ -40,7 +40,12 @@ pub(crate) async fn main(start: SessionStart, print: Print) -> i32 {
     let mut agent = match AgentService::from_current_dir(start)
         .and_then(|mut agent| agent.wait_for_sandbox().map(|()| agent))
     {
-        Ok(agent) => agent,
+        Ok(mut agent) => {
+            if skip_permissions {
+                agent.skip_approvals();
+            }
+            agent
+        }
         Err(err) => {
             eprintln!("socium: {err}");
             return 1;

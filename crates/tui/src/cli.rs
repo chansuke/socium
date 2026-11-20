@@ -7,6 +7,8 @@ pub(crate) struct Args {
     pub(crate) launch: Launch,
     /// `-p`: run one turn without the terminal UI.
     pub(crate) print: Option<Print>,
+    /// `--dangerously-skip-permissions`: no tool call asks for approval.
+    pub(crate) skip_permissions: bool,
 }
 
 /// `-p [PROMPT] [--output-format FMT]`.
@@ -53,11 +55,16 @@ pub(crate) fn usage(program: &str) -> String {
                               ID may be any unique prefix.\n  \
            -p, --print        Run PROMPT as one turn without the terminal UI and\n                     \
                               print the reply. Piped standard input comes before\n                     \
-                              PROMPT. Calls that need approval are refused.\n      \
+                              PROMPT. Calls that need approval are refused,\n                     \
+                              unless --dangerously-skip-permissions is given.\n      \
                --output-format FMT\n                     \
                               With -p: text (the reply, the default), json (the\n                     \
                               final result), or stream-json (progress and result\n                     \
-                              as JSON Lines)\n  \
+                              as JSON Lines)\n      \
+               --dangerously-skip-permissions\n                     \
+                              Run every tool call without asking, commits and\n                     \
+                              edits to files host tools run included. Deny\n                     \
+                              rules and the sandbox still apply.\n  \
            -h, --help         Show this help\n  \
            -V, --version      Show the version"
     )
@@ -70,6 +77,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, Stri
         return Ok(Args {
             launch: Launch::Version,
             print: None,
+            skip_permissions: false,
         });
     }
     let mut args = args.into_iter().peekable();
@@ -77,6 +85,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, Stri
     let mut print = false;
     let mut prompt = None;
     let mut format = None;
+    let mut skip_permissions = false;
     let set = |next: Launch, launch: &mut Option<Launch>| match launch {
         Some(Launch::Help) => Ok(()),
         Some(_) if next != Launch::Help => {
@@ -96,6 +105,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, Stri
                 set(Launch::Resume(id), &mut launch)?;
             }
             "-p" | "--print" => print = true,
+            "--dangerously-skip-permissions" => skip_permissions = true,
             "--output-format" => {
                 let value = args
                     .next()
@@ -125,6 +135,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, Stri
         return Ok(Args {
             launch,
             print: None,
+            skip_permissions,
         });
     }
     if launch == Launch::Resume(None) {
@@ -134,6 +145,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, Stri
     Ok(Args {
         launch,
         print: Some(Print { prompt, format }),
+        skip_permissions,
     })
 }
 
@@ -189,6 +201,7 @@ mod tests {
             Ok(Args {
                 launch: Launch::New,
                 print,
+                skip_permissions: false,
             })
         };
         assert_eq!(
@@ -204,7 +217,8 @@ mod tests {
             printed(&["-c", "-p", "go on"]),
             Ok(Args {
                 launch: Launch::Continue,
-                print: print(Some("go on"), OutputFormat::Text)
+                print: print(Some("go on"), OutputFormat::Text),
+                skip_permissions: false,
             })
         );
         assert_eq!(
@@ -242,6 +256,18 @@ mod tests {
             printed(&["--output-format", "json"])
                 .unwrap_err()
                 .contains("--print")
+        );
+    }
+
+    #[test]
+    fn skipping_permissions_works_with_and_without_print() {
+        let skips = |args: &[&str]| printed(args).map(|args| args.skip_permissions);
+        assert_eq!(skips(&[]), Ok(false));
+        assert_eq!(skips(&["--dangerously-skip-permissions"]), Ok(true));
+        assert_eq!(skips(&["-c", "--dangerously-skip-permissions"]), Ok(true));
+        assert_eq!(
+            skips(&["-p", "q", "--dangerously-skip-permissions"]),
+            Ok(true)
         );
     }
 

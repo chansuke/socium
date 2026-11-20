@@ -217,6 +217,37 @@ fn a_call_that_needs_approval_is_refused_and_the_model_is_told_why() {
 }
 
 #[test]
+fn skipping_permissions_runs_a_call_that_would_need_approval() {
+    let (port, bodies) = serve(vec![
+        tool_reply(
+            "str_replace_based_edit_tool",
+            json!({"command": "create", "path": "build.rs", "file_text": "fn main() {}\n"}),
+        ),
+        text_reply("done"),
+    ]);
+    let fixture = fixture(port);
+    let output = command(
+        &fixture,
+        &["-p", "add a build script", "--dangerously-skip-permissions"],
+    )
+    .output()
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains("--dangerously-skip-permissions"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("build.rs")).unwrap(),
+        "fn main() {}\n"
+    );
+    let result = bodies.lock().unwrap()[1]["messages"][2]["content"][0].clone();
+    assert_eq!(result["type"], "tool_result");
+    assert_ne!(result["is_error"], true, "{result}");
+}
+
+#[test]
 fn an_interrupt_cancels_the_turn_and_still_reports_it() {
     let (port, _) = serve(vec![Reply::Stall]);
     let fixture = fixture(port);

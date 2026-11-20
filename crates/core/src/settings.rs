@@ -140,9 +140,9 @@ impl SandboxSettings {
     }
 }
 
-/// When sandboxed commands run without asking.
+/// Which tool calls run without asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum CommandApproval {
+pub enum ApprovalMode {
     /// Every command asks, unless an allow rule or a session grant covers
     /// it (Claude Code's default mode).
     #[default]
@@ -151,11 +151,17 @@ pub(crate) enum CommandApproval {
     /// workspace-write sandbox with on-request approval, Claude Code's
     /// sandbox auto-allow). Deny rules still apply.
     Auto,
+    /// Nothing asks: commits, edits to files host tools run, and reads of
+    /// likely secrets run too, and commands get no narrower sandbox.
+    /// Deny rules and the sandbox still apply. Only the command line sets
+    /// it (`--dangerously-skip-permissions`, after Claude Code's flag), so
+    /// the model cannot turn it on by editing a file.
+    Bypass,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ApprovalSettings {
-    pub(crate) commands: CommandApproval,
+    pub(crate) mode: ApprovalMode,
     /// Commands that run without asking, as argument prefixes.
     pub(crate) allow: Vec<Vec<String>>,
     /// Commands that never run, as argument prefixes.
@@ -167,7 +173,7 @@ pub(crate) struct ApprovalSettings {
 impl Default for ApprovalSettings {
     fn default() -> Self {
         Self {
-            commands: CommandApproval::Ask,
+            mode: ApprovalMode::Ask,
             allow: Vec::new(),
             deny: Vec::new(),
             protected: PathPatterns::new(DEFAULT_PROTECTED),
@@ -557,9 +563,9 @@ impl Settings {
                 })
                 .collect()
         };
-        let commands = match raw.approval.commands.as_deref() {
-            None | Some("ask") => CommandApproval::Ask,
-            Some("auto") => CommandApproval::Auto,
+        let mode = match raw.approval.commands.as_deref() {
+            None | Some("ask") => ApprovalMode::Ask,
+            Some("auto") => ApprovalMode::Auto,
             Some(other) => {
                 return Err(format!(
                     "approval.commands must be \"ask\" or \"auto\"; got '{other}'"
@@ -567,7 +573,7 @@ impl Settings {
             }
         };
         let approval = ApprovalSettings {
-            commands,
+            mode,
             allow: parse_rules("allow", &raw.approval.allow)?,
             deny: parse_rules("deny", &raw.approval.deny)?,
             protected: raw
@@ -629,7 +635,7 @@ impl Settings {
                 mount.source.display()
             ));
         }
-        if self.approval.commands == CommandApproval::Auto {
+        if self.approval.mode == ApprovalMode::Auto {
             lines
                 .push("approval.commands = \"auto\": sandboxed commands run without asking".into());
         }
@@ -840,7 +846,7 @@ deny = ["git  push"]
             settings.sandbox.max_command_timeout,
             Duration::from_secs(600)
         );
-        assert_eq!(settings.approval.commands, CommandApproval::Auto);
+        assert_eq!(settings.approval.mode, ApprovalMode::Auto);
         assert_eq!(settings.approval.allow, [vec!["cargo", "test"]]);
         assert_eq!(settings.approval.deny, [vec!["git", "push"]]);
         assert_eq!(warnings.len(), 2, "{warnings:?}");

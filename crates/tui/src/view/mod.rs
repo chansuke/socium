@@ -18,6 +18,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Clear, Paragraph},
 };
+use socium_core::ApprovalMode;
 use socium_core::activity::Phase;
 use socium_core::providers::TokenUsage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -665,17 +666,19 @@ impl App {
     /// context, latency, and usage at the right.
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
         let muted = |text: String| Span::styled(text, Style::default().fg(MUTED));
-        let approval = if self.commands_run_without_asking {
-            "commands run without asking"
-        } else {
-            "ask before commands"
+        let approval = match self.approval_mode {
+            ApprovalMode::Ask => muted(" · ask before commands".into()),
+            ApprovalMode::Auto => muted(" · commands run without asking".into()),
+            ApprovalMode::Bypass => {
+                Span::styled(" · approvals skipped", Style::default().fg(ERROR))
+            }
         };
         let left = Line::from(vec![
             Span::styled(
                 self.status.clone().unwrap_or_else(|| "idle".to_string()),
                 Style::default().fg(TEXT),
             ),
-            muted(format!(" · {approval}")),
+            approval,
         ]);
 
         let latency = self
@@ -1198,9 +1201,12 @@ mod tests {
         );
         assert!(footer(&app).trim_end().ends_with("in 0 out 0"));
 
-        app.commands_run_without_asking = true;
+        app.approval_mode = socium_core::ApprovalMode::Auto;
         app.status = Some("running cargo test".into());
         assert!(footer(&app).starts_with(" running cargo test · commands run without asking"));
+
+        app.approval_mode = socium_core::ApprovalMode::Bypass;
+        assert!(footer(&app).starts_with(" running cargo test · approvals skipped"));
     }
 
     #[test]

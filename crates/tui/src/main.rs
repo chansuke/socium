@@ -35,7 +35,11 @@ async fn main() -> Result<()> {
     if args == ["--client-bridge"] {
         return client_bridge::run().await;
     }
-    let cli::Args { launch, print } = match cli::parse(args) {
+    let cli::Args {
+        launch,
+        print,
+        skip_permissions,
+    } = match cli::parse(args) {
         Ok(cli::Args {
             launch: Launch::Help,
             ..
@@ -65,9 +69,12 @@ async fn main() -> Result<()> {
         Launch::Resume(None) => (SessionStart::New, true),
     };
     if let Some(print) = print {
-        std::process::exit(headless::main(start, print).await);
+        std::process::exit(headless::main(start, print, skip_permissions).await);
     }
-    let agent = AgentService::from_current_dir(start).map_err(|err| eyre!(err.to_string()))?;
+    let mut agent = AgentService::from_current_dir(start).map_err(|err| eyre!(err.to_string()))?;
+    if skip_permissions {
+        agent.skip_approvals();
+    }
     let mut app = App::new(agent)?;
     if pick_session {
         app.open_session_picker();
