@@ -9,14 +9,8 @@ use std::{
     process::{Command, Stdio},
 };
 
-// These are public runtime installations, not arbitrary user PATH directories.
-// In particular, never mount $HOME, /etc, /run, or the host /tmp wholesale.
-const RUNTIMES: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/nix/store"];
+use crate::host::{RUNTIME_ROOTS, is_runtime_path};
 const HOME: &str = "/socium-home";
-
-pub(super) fn runtime_path(path: &Path) -> bool {
-    RUNTIMES.iter().any(|root| path.starts_with(root))
-}
 
 /// System runtime directories from the launcher's PATH. Only these can
 /// provide the sandbox backend itself.
@@ -27,7 +21,7 @@ fn system_search_path() -> Vec<PathBuf> {
     {
         if path.is_absolute()
             && let Ok(path) = path.canonicalize()
-            && runtime_path(&path)
+            && is_runtime_path(&path)
             && !paths.contains(&path)
         {
             paths.push(path);
@@ -41,7 +35,7 @@ fn system_search_path() -> Vec<PathBuf> {
 fn search_path(policy: &ExecutionPolicy) -> Vec<PathBuf> {
     let mut paths = system_search_path();
     for path in &policy.path {
-        if (runtime_path(path) || mounted_read_only(policy, path)) && !paths.contains(path) {
+        if (is_runtime_path(path) || mounted_read_only(policy, path)) && !paths.contains(path) {
             paths.push(path.clone());
         }
     }
@@ -184,7 +178,9 @@ pub(super) fn command(
         &cwd,
         &paths,
     )?;
-    if !program.starts_with(root) && !runtime_path(&program) && !mounted_read_only(policy, &program)
+    if !program.starts_with(root)
+        && !is_runtime_path(&program)
+        && !mounted_read_only(policy, &program)
     {
         return Err(io::Error::other(
             "executable is outside the workspace, the system runtimes and sandbox.read_only",
@@ -198,7 +194,7 @@ pub(super) fn command(
             "Linux sandbox requires bubblewrap (bwrap): {e}; no host fallback"
         ))
     })?;
-    if !runtime_path(&backend) {
+    if !is_runtime_path(&backend) {
         return Err(io::Error::other("bubblewrap is not in a system runtime"));
     }
     verify_backend(&backend)?;
@@ -213,14 +209,14 @@ pub(super) fn command(
         "--cap-drop",
         "ALL",
     ]);
-    for runtime in RUNTIMES {
+    for runtime in RUNTIME_ROOTS {
         let path = Path::new(runtime);
         // On a merged-/usr system /bin, /lib and the rest link into /usr.
         // The same link costs no mount, and each mount adds about a
         // millisecond to every command.
         if let Ok(target) = fs::read_link(path)
             && let Ok(resolved) = path.canonicalize()
-            && RUNTIMES.iter().any(|other| {
+            && RUNTIME_ROOTS.iter().any(|other| {
                 resolved.starts_with(other)
                     && fs::symlink_metadata(other).is_ok_and(|meta| meta.is_dir())
             })
@@ -409,7 +405,7 @@ fn linked_worktree_common_dir(root: &Path, gitfile: &Path) -> io::Result<PathBuf
         return Err(refused("its metadata is inside the worktree"));
     }
     if overlaps_reserved(&common)
-        || RUNTIMES
+        || RUNTIME_ROOTS
             .iter()
             .any(|runtime| common.starts_with(runtime) || Path::new(runtime).starts_with(&common))
     {
@@ -422,7 +418,7 @@ fn linked_worktree_common_dir(root: &Path, gitfile: &Path) -> io::Result<PathBuf
 /// runtime or isolation mounts, or expose an entire host tree through an
 /// ancestor.
 fn workspace_refusal(root: &Path) -> Option<&'static str> {
-    for reserved in RUNTIMES.iter().copied().chain(["/proc", "/dev", HOME]) {
+    for reserved in RUNTIME_ROOTS.iter().copied().chain(["/proc", "/dev", HOME]) {
         let reserved = Path::new(reserved);
         if root.starts_with(reserved) || reserved.starts_with(root) {
             return Some("workspace overlaps a reserved sandbox path");
@@ -524,7 +520,7 @@ fn network_filter() -> io::Result<fs::File> {
 
 #[cfg(test)]
 mod properties {
-    use super::{HOME, RUNTIMES, overlaps_reserved, workspace_refusal};
+    use super::{HOME, RUNTIME_ROOTS, overlaps_reserved, workspace_refusal};
     use proptest::prelude::*;
     use std::path::{Path, PathBuf};
 
@@ -550,7 +546,7 @@ mod properties {
     /// Paths the sandbox fills itself: the runtimes, its own /proc, /dev,
     /// private HOME and fresh /tmp.
     fn sandbox_paths() -> Vec<&'static Path> {
-        RUNTIMES
+        RUNTIME_ROOTS
             .iter()
             .chain(&["/proc", "/dev", HOME, "/tmp"])
             .map(Path::new)

@@ -786,7 +786,7 @@ fn git_relative_path(workspace_root: &Path, requested_path: &str) -> Result<Stri
     Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
-pub(crate) const DIRTY_WORKTREE_WARNING: &str = "Warning: git worktree has uncommitted changes";
+use crate::constants::DIRTY_WORKTREE_WARNING;
 
 pub(crate) fn maybe_prepend_dirty_worktree_warning(
     workspace_root: &Path,

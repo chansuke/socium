@@ -1,8 +1,8 @@
 //! Structured record of what the model and the agent did during a turn,
 //! for the Activity pane, headless output, and replay.
 
+use crate::constants::DIRTY_WORKTREE_WARNING;
 use crate::providers::{BlockKind, ProviderEvent, TokenUsage};
-use crate::tools::git::DIRTY_WORKTREE_WARNING;
 
 mod signals;
 use serde::{Deserialize, Serialize};
