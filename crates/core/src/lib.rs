@@ -26,7 +26,7 @@ mod workspace;
 pub use access::Grant;
 pub use control::{ApprovalAnswer, TaskControl};
 pub use execution::SANDBOX_DESCRIPTION;
-pub use session::{SessionStart, SessionSummary, list_sessions};
+pub use session::{SessionStart, SessionSummary};
 pub use settings::{ApprovalMode, Settings};
 pub use transcript::{TranscriptEntry, TranscriptRole};
 pub use usage::SessionUsage;
@@ -54,6 +54,7 @@ use crate::agent::context::{
 use crate::agent::subagent::catalog::{
     SubagentCatalog, SubagentModel, SubagentType, load_user_types,
 };
+use crate::agent::subagent::record::adopt_legacy_records;
 use crate::agent::turn::{TurnContext, run_agent_turn};
 use crate::constants::*;
 use crate::conversation::ToolDefinition;
@@ -329,6 +330,13 @@ fn provider_http_client() -> Result<reqwest::Client, ProviderError> {
         Duration::from_secs(30),
         crate::providers::error::IDLE_TIMEOUT,
     )
+}
+
+/// Saved sessions with messages, most recently saved first, for choosing
+/// one to resume. Briefly takes the workspace lock, so it fails while
+/// another Socium runs here.
+pub fn list_sessions(root: &std::path::Path) -> std::io::Result<Vec<SessionSummary>> {
+    session::list_sessions(root, adopt_legacy_records)
 }
 
 /// Loading the system's CA certificates takes a few milliseconds, so startup
@@ -610,7 +618,7 @@ impl AgentService {
         client: impl Into<HttpClient>,
     ) -> Result<Self, AgentError> {
         let state_lock = crate::state::lock_workspace(&workspace_root)?;
-        session::migrate_legacy_state(&workspace_root)?;
+        session::migrate_legacy_state(&workspace_root, adopt_legacy_records)?;
         let sessions = session::scan_sessions(&workspace_root)?;
         let mut warnings = Vec::new();
         let resumed = match &start {
@@ -984,7 +992,7 @@ impl AgentService {
     #[cfg(test)]
     fn restore_state(&mut self) -> std::io::Result<()> {
         self.ensure_state_lock()?;
-        session::migrate_legacy_state(&self.workspace_root)?;
+        session::migrate_legacy_state(&self.workspace_root, adopt_legacy_records)?;
         if let Some(latest) = session::scan_sessions(&self.workspace_root)?.first() {
             self.session_id = latest.id.clone();
         }
