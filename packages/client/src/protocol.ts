@@ -28,6 +28,7 @@ export interface Turn {
 
 export interface WorkspaceState {
   revision: string;
+  mobilePairing?: boolean;
   workspace: string;
   session: string;
   title: string | null;

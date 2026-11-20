@@ -94,6 +94,12 @@ export function createClient(base: string, token: string, fetchRequest = fetch) 
         active?.abort();
       };
     },
+    async mobilePairingUrl() {
+      const response = await request("pairing", { method: "POST", signal: AbortSignal.timeout(10_000) });
+      const { url } = await response.json();
+      if (typeof url !== "string") throw new Error("The host did not send a pairing link.");
+      return url;
+    },
     async send(command: Command) {
       const workspace = status.workspace;
       if (!workspace || status.sending || status.connectionError) return false;
@@ -134,4 +140,43 @@ export function mobileEndpoint(value: string): string {
     throw new Error("Enter an HTTPS host URL, such as https://socium.example.com.");
   }
   return url.origin;
+}
+
+export function readPairingUrl(value: string) {
+  const error = "Scan a Socium pairing QR code.";
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error(error);
+  }
+  const code = url.hash.slice(1);
+  if (url.protocol !== "https:" || url.username || url.password ||
+      url.pathname !== "/pair" || url.search || !/^[\w-]{43}$/.test(code)) {
+    throw new Error(error);
+  }
+  return { origin: url.origin, code };
+}
+
+export async function redeemPairing(pairing: ReturnType<typeof readPairingUrl>, signal: AbortSignal) {
+  let response: Response;
+  try {
+    response = await fetch(`${pairing.origin}/api/pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: pairing.code }),
+      redirect: "error",
+      signal,
+    });
+  } catch {
+    throw new Error("Cannot reach the Socium host.");
+  }
+  if (response.status === 401) {
+    throw new Error("This QR code is invalid, expired, or already used. Generate a new code on the host.");
+  }
+  const data = response.ok ? await response.json().catch(() => null) : null;
+  if (typeof data?.token !== "string" || !/^[\w-]{43}$/.test(data.token)) {
+    throw new Error("The host did not confirm pairing.");
+  }
+  return createClient(pairing.origin, data.token);
 }
