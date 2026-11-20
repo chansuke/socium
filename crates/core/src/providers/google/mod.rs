@@ -10,7 +10,7 @@
 
 mod stream;
 
-use crate::agent::types::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
+use crate::conversation::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
 use crate::models::{AuthScheme, ModelConfig, ModelFeatures, ProviderConfig};
 use crate::providers::anthropic::request_options::RequestOptions;
 use crate::providers::error::{ProviderError, api_error};
@@ -116,7 +116,7 @@ impl Provider for GoogleProvider {
     }
 
     /// Thought signatures go back only to the model that wrote them.
-    fn reads_thinking_from(&self, origin: Option<&crate::agent::types::Origin>) -> bool {
+    fn reads_thinking_from(&self, origin: Option<&crate::conversation::Origin>) -> bool {
         origin.is_some_and(|origin| origin.provider == self.name && origin.model == self.model)
     }
 
@@ -386,7 +386,7 @@ fn user_parts(blocks: &[ContentBlock], calls: &HashMap<String, SentCall>) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::types::Origin;
+    use crate::conversation::Origin;
     use crate::models::ModelRegistry;
     use crate::providers::test_server::serve_once;
     use crate::tools::tools_for_model;

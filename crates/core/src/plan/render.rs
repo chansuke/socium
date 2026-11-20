@@ -13,7 +13,7 @@ use super::{
 };
 use super::{Plan, PlanRow, PlanView, TaskStatus};
 use crate::constants::PLAN_TOOL_NAME;
-use crate::tools::ToolDefinition;
+use crate::conversation::ToolDefinition;
 use serde_json::{Value, json};
 
 /// Open tasks a receipt lists before "+N more".

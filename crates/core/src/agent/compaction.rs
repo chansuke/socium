@@ -1,13 +1,13 @@
 use crate::agent::context::{extend_summary_text, summarize_messages};
 use crate::agent::state::{ConversationSummary, ConversationSummaryState};
 use crate::agent::turn::extract_text;
-use crate::agent::types::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
 use crate::constants::{
     COMPACTION_MAX_OUTPUT_TOKENS, COMPACTION_RETAIN_RECENT_MESSAGES,
     COMPACTION_RETAIN_RECENT_TOKENS, COMPACTION_SOURCE_MESSAGE_MAX_CHARACTERS,
     COMPACTION_SYSTEM_PROMPT, COMPACTION_TRANSCRIPT_MAX_CHARACTERS, COMPACTION_TRIGGER_RATIO,
     COMPACTION_USER_MESSAGE_MAX_CHARACTERS, DEFAULT_COMPACT_AT_TOKENS,
 };
+use crate::conversation::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
 use crate::error::AgentError;
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, ProviderEvent, TokenUsage};
@@ -266,7 +266,7 @@ fn render_transcript_for_compaction(messages: &[Message]) -> String {
             lines.push(format!("{label}: {detail}"));
         }
     }
-    crate::agent::context::elide_tool_output(
+    crate::conversation::elide_tool_output(
         &lines.join("\n"),
         COMPACTION_TRANSCRIPT_MAX_CHARACTERS,
         "from the middle of the transcript",
@@ -334,8 +334,8 @@ fn truncate_for_transcript(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{CompactionRequest, render_transcript_for_compaction, summarize_with_llm};
-    use crate::agent::types::{ContentBlock, Message};
     use crate::constants::{COMPACTION_SYSTEM_PROMPT, DEFAULT_COMPACTION_MODEL};
+    use crate::conversation::{ContentBlock, Message};
     use crate::test_support::{ScriptedProvider, text_provider_response};
     use serde_json::json;
 

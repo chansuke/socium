@@ -1,10 +1,11 @@
 use crate::AgentProgress;
 use crate::constants::*;
+use crate::conversation::ToolDefinition;
 use crate::execution::{ExecutionPolicy, WorkspaceAccess};
 use crate::tools::error::ToolError;
 use crate::tools::input::{optional_string_field, optional_timeout_ms, require_string_array_field};
 use crate::tools::workspace::resolve_workspace_command_cwd;
-use crate::tools::{Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -389,7 +390,7 @@ fn display_command(command: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TaskControl, agent::types::ContentBlock, tools::run_tool_call_controlled};
+    use crate::{TaskControl, conversation::ContentBlock, tools::run_tool_call_controlled};
     #[test]
     fn forged_approval_is_denied_and_human_approval_is_single_use() {
         let workspace = tempfile::tempdir().unwrap();

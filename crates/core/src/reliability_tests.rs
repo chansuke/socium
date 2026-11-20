@@ -4,7 +4,7 @@
     reason = "scenarios read the test environment and give a racing peer a head start"
 )]
 use super::*;
-use crate::agent::types::{AgentMessageResponse, ContentBlock, MessageContent};
+use crate::conversation::{AgentMessageResponse, ContentBlock, MessageContent};
 use crate::providers::{ProviderCapabilities, ProviderEvent, ProviderKind, ProviderResponse};
 use crate::test_support::{ScriptedProvider, git_stdout, init_git_repo, text_provider_response};
 use serde_json::json;
@@ -216,7 +216,7 @@ impl Provider for WaitingProvider {
     async fn send_message(
         &self,
         _: &reqwest::Client,
-        _: &crate::agent::types::AgentMessageRequest<'_>,
+        _: &crate::conversation::AgentMessageRequest<'_>,
         _: &mut (dyn FnMut(ProviderEvent) + Send),
     ) -> Result<ProviderResponse, ProviderError> {
         std::future::pending().await
@@ -964,7 +964,7 @@ fn resume_applies_the_sessions_model_or_stays_and_keeps_thinking_unsent() {
     // The saved history keeps the block; it has no recorded origin, so no
     // provider is sent it.
     assert!(saved.to_string().contains("\"thinking\""));
-    let sent = crate::agent::types::readable_thinking(&agent.messages, &|origin| {
+    let sent = crate::conversation::readable_thinking(&agent.messages, &|origin| {
         agent.provider.reads_thinking_from(origin)
     })
     .unwrap();

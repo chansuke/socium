@@ -26,6 +26,7 @@ pub use transcript::{TranscriptEntry, TranscriptRole};
 pub use usage::SessionUsage;
 pub mod agent;
 pub mod constants;
+pub mod conversation;
 pub mod error;
 pub mod providers;
 pub mod tools;
@@ -50,12 +51,12 @@ use crate::agent::subagent::catalog::{
     SubagentCatalog, SubagentModel, SubagentType, load_user_types,
 };
 use crate::agent::turn::{TurnContext, run_agent_turn};
-use crate::agent::types::{Message, MessageContent, Role};
 use crate::constants::*;
+use crate::conversation::ToolDefinition;
+use crate::conversation::{Message, MessageContent, Role};
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, TokenUsage, build_provider};
-use crate::tools::ToolDefinition;
 use std::env;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
@@ -1882,8 +1883,8 @@ mod plan_tests;
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::types::{ContentBlock, Message, MessageContent};
     use crate::constants::CONVERSATION_STATE_FILE_NAME;
+    use crate::conversation::{ContentBlock, Message, MessageContent};
     use crate::providers::TokenUsage;
     use crate::providers::anthropic::AnthropicProvider;
     use crate::test_support::{ScriptedProvider, make_temp_dir, text_provider_response};
@@ -1994,7 +1995,7 @@ mod tests {
         std::fs::write(root.join("crates/tui/app.rs"), "fn main() {}\n").unwrap();
         let read = |id: &str| {
             Ok(crate::providers::ProviderResponse {
-                message: crate::agent::types::AgentMessageResponse {
+                message: crate::conversation::AgentMessageResponse {
                     content: vec![ContentBlock::ToolUse {
                         id: id.into(),
                         name: "read_file".into(),
@@ -2081,7 +2082,7 @@ mod tests {
         std::fs::write(root.join("src/lib.rs"), "fn f() {}\n").unwrap();
         let read = |id: &str| {
             Ok(crate::providers::ProviderResponse {
-                message: crate::agent::types::AgentMessageResponse {
+                message: crate::conversation::AgentMessageResponse {
                     content: vec![ContentBlock::ToolUse {
                         id: id.into(),
                         name: "read_file".into(),
@@ -2146,7 +2147,7 @@ mod tests {
         std::fs::write(workspace.path().join("notes.txt"), "needle\n").unwrap();
         let provider = ScriptedProvider::new(vec![
             Ok(crate::providers::ProviderResponse {
-                message: crate::agent::types::AgentMessageResponse {
+                message: crate::conversation::AgentMessageResponse {
                     content: vec![ContentBlock::ToolUse {
                         id: "s1".into(),
                         name: "search_text".into(),
@@ -2187,7 +2188,7 @@ mod tests {
         let workspace = make_temp_dir("web_search");
         let provider = ScriptedProvider::new(vec![
             Ok(crate::providers::ProviderResponse {
-                message: crate::agent::types::AgentMessageResponse {
+                message: crate::conversation::AgentMessageResponse {
                     content: vec![ContentBlock::ToolUse {
                         id: "s1".into(),
                         name: "web_search".into(),
@@ -2247,7 +2248,7 @@ mod tests {
         let workspace = make_temp_dir("steering");
         let provider = ScriptedProvider::new(vec![
             Ok(crate::providers::ProviderResponse {
-                message: crate::agent::types::AgentMessageResponse {
+                message: crate::conversation::AgentMessageResponse {
                     content: vec![ContentBlock::ToolUse {
                         id: "l1".into(),
                         name: "list_files".into(),
@@ -2545,7 +2546,7 @@ mod tests {
     mod thinking_after_compaction {
         use super::*;
         use crate::agent::state::{ConversationState, load_json_file};
-        use crate::agent::types::AgentMessageResponse;
+        use crate::conversation::AgentMessageResponse;
         use crate::providers::ProviderResponse;
         use crate::providers::error::ProviderError;
 
@@ -3083,7 +3084,7 @@ max_output_tokens = 32000
                             text: "answer".into(),
                         },
                     ],
-                    crate::agent::types::Origin {
+                    crate::conversation::Origin {
                         provider: "anthropic".into(),
                         model: "claude-sonnet-5-5".into(),
                     },
@@ -3093,7 +3094,7 @@ max_output_tokens = 32000
 
         /// Whether the next request to the current model carries thinking.
         fn sends_thinking(service: &AgentService) -> bool {
-            let sent = crate::agent::types::readable_thinking(&service.messages, &|origin| {
+            let sent = crate::conversation::readable_thinking(&service.messages, &|origin| {
                 service.provider.reads_thinking_from(origin)
             })
             .unwrap_or_else(|| service.messages.clone());
@@ -3153,7 +3154,7 @@ max_output_tokens = 32000
             let mut service = open(root.path(), &KEYS);
             service.switch_model("ds-flash").unwrap();
             service.messages = thinking_turn();
-            service.messages[1].origin = Some(crate::agent::types::Origin {
+            service.messages[1].origin = Some(crate::conversation::Origin {
                 provider: "deepseek".into(),
                 model: "deepseek-flash".into(),
             });

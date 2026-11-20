@@ -1,4 +1,4 @@
-use crate::agent::types::{AgentMessageRequest, AgentMessageResponse, ContentBlock};
+use crate::conversation::{AgentMessageRequest, AgentMessageResponse, ContentBlock};
 use crate::providers::error::ProviderError;
 use crate::providers::{
     Provider, ProviderCapabilities, ProviderEvent, ProviderKind, ProviderResponse, TokenUsage,
@@ -52,7 +52,7 @@ impl Provider for ScriptedProvider {
     }
 
     /// Tests script their own histories; every block goes back.
-    fn reads_thinking_from(&self, _: Option<&crate::agent::types::Origin>) -> bool {
+    fn reads_thinking_from(&self, _: Option<&crate::conversation::Origin>) -> bool {
         true
     }
 

@@ -18,10 +18,10 @@ use crate::agent::context::{
 use crate::agent::subagent::record::{SubagentRecord, SubagentStatus};
 use crate::agent::turn::repair_incomplete_tools;
 use crate::agent::turn::{TurnContext, extract_text, run_agent_turn};
-use crate::agent::types::{Message, Role};
 use crate::constants::{
     AGENT_TOOL_NAME, MAX_SUBAGENT_REPORT_CHARACTERS, MAX_TOOL_ROUNDS, SUBAGENT_FRAMING,
 };
+use crate::conversation::{Message, Role};
 use crate::error::AgentError;
 use crate::providers::TokenUsage;
 use crate::tools::error::ToolError;
@@ -427,7 +427,7 @@ impl RunStats {
 
 /// Text of the newest assistant message, which on success is the report.
 fn last_assistant_text(messages: &[Message]) -> String {
-    use crate::agent::types::{MessageContent, Role};
+    use crate::conversation::{MessageContent, Role};
     messages
         .iter()
         .rev()
@@ -459,11 +459,11 @@ fn bounded_report(mut report: String) -> String {
 #[cfg(test)]
 mod tests {
     use crate::agent::subagent::catalog::MAIN_AGENT_TOOLS;
-    use crate::agent::types::{AgentMessageResponse, ContentBlock};
     use crate::constants::{
         DEFAULT_COMPACTION_MODEL, DEFAULT_SYSTEM_PROMPT, SUBAGENT_EXPLORER_INSTRUCTIONS,
         SUBAGENT_FRAMING, SUBAGENT_WORKER_INSTRUCTIONS,
     };
+    use crate::conversation::{AgentMessageResponse, ContentBlock};
     use crate::providers::error::ProviderError;
     use crate::providers::{ProviderResponse, TokenUsage};
     use crate::test_support::{ScriptedProvider, make_temp_dir, text_provider_response};
@@ -1561,7 +1561,7 @@ mod tests {
     #[tokio::test]
     async fn resuming_a_subagent_whose_history_no_longer_fits_summarizes_it_first() {
         use super::record::{SubagentRecord, SubagentStatus};
-        use crate::agent::types::Message;
+        use crate::conversation::Message;
         let workspace = make_temp_dir("subagent_resume_full");
         let mut saved = SubagentRecord::new("agent-1".into(), "explorer", "d", "test");
         saved.messages = vec![
@@ -1683,7 +1683,7 @@ mod tests {
         async fn send_message(
             &self,
             client: &reqwest::Client,
-            request: &crate::agent::types::AgentMessageRequest<'_>,
+            request: &crate::conversation::AgentMessageRequest<'_>,
             on_delta: &mut (dyn FnMut(crate::providers::ProviderEvent) + Send),
         ) -> Result<ProviderResponse, ProviderError> {
             let value = serde_json::to_value(request)?;
@@ -1799,7 +1799,7 @@ mod tests {
         async fn send_message(
             &self,
             client: &reqwest::Client,
-            request: &crate::agent::types::AgentMessageRequest<'_>,
+            request: &crate::conversation::AgentMessageRequest<'_>,
             on_delta: &mut (dyn FnMut(crate::providers::ProviderEvent) + Send),
         ) -> Result<ProviderResponse, ProviderError> {
             use std::sync::atomic::Ordering::SeqCst;
@@ -1997,7 +1997,7 @@ mod tests {
         async fn send_message(
             &self,
             client: &reqwest::Client,
-            request: &crate::agent::types::AgentMessageRequest<'_>,
+            request: &crate::conversation::AgentMessageRequest<'_>,
             on_delta: &mut (dyn FnMut(crate::providers::ProviderEvent) + Send),
         ) -> Result<ProviderResponse, ProviderError> {
             let value = serde_json::to_value(request)?;
@@ -2099,7 +2099,7 @@ mod tests {
         async fn send_message(
             &self,
             client: &reqwest::Client,
-            request: &crate::agent::types::AgentMessageRequest<'_>,
+            request: &crate::conversation::AgentMessageRequest<'_>,
             on_delta: &mut (dyn FnMut(crate::providers::ProviderEvent) + Send),
         ) -> Result<ProviderResponse, ProviderError> {
             let value = serde_json::to_value(request)?;
