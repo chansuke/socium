@@ -371,4 +371,132 @@ mod tests {
     async fn a_pause_that_runs_out_reports_no_cancel() {
         assert!(TaskControl::default().pause(Duration::from_secs(60)).await);
     }
+
+    /// `TaskControl` against a model of what it must do: a request asks
+    /// only while the task is not cancelled, only an allow approves, only
+    /// "allow for the session" keeps the grant it offered, grants outlive
+    /// cancellation, and an answer to a settled request changes nothing.
+    mod model {
+        use super::*;
+        use crate::access::grants_cover;
+        use crate::progress::AgentProgress;
+        use proptest::prelude::*;
+
+        #[derive(Debug, Clone)]
+        enum Op {
+            /// Ask, offering `grant`; the user gives `answer`, or cancels
+            /// the task while it waits when there is none.
+            Ask {
+                grant: Option<Grant>,
+                answer: Option<ApprovalAnswer>,
+            },
+            Cancel,
+            Reset,
+            /// Whether `TaskControl` covers this grant now.
+            Probe(Grant),
+            /// Answers the last request again, after it was settled.
+            AnswerAgain(ApprovalAnswer),
+        }
+
+        fn words(choices: &'static [&'static str]) -> impl Strategy<Value = Vec<String>> {
+            prop::collection::vec(prop::sample::select(choices), 1..3)
+                .prop_map(|words| words.into_iter().map(String::from).collect())
+        }
+
+        fn grant() -> impl Strategy<Value = Grant> {
+            const ARGS: &[&str] = &["cargo", "test", "build", "-q"];
+            const PATHS: &[&str] = &["a.rs", "b.rs", ".env"];
+            prop_oneof![
+                words(ARGS).prop_map(Grant::Command),
+                words(PATHS).prop_map(Grant::Edit),
+                words(PATHS).prop_map(Grant::Read),
+            ]
+        }
+
+        fn answer() -> impl Strategy<Value = ApprovalAnswer> {
+            prop_oneof![
+                Just(ApprovalAnswer::AllowOnce),
+                Just(ApprovalAnswer::AllowForSession),
+                Just(ApprovalAnswer::Deny),
+            ]
+        }
+
+        fn op() -> impl Strategy<Value = Op> {
+            prop_oneof![
+                4 => (prop::option::of(grant()), prop::option::weighted(0.85, answer()))
+                    .prop_map(|(grant, answer)| Op::Ask { grant, answer }),
+                1 => Just(Op::Cancel),
+                2 => Just(Op::Reset),
+                3 => grant().prop_map(Op::Probe),
+                1 => answer().prop_map(Op::AnswerAgain),
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn approvals_follow_the_model_of_answers_grants_and_cancellation(
+                ops in prop::collection::vec(op(), 1..40)
+            ) {
+                let control = TaskControl::default();
+                control.enable_interactive_approval();
+                let mut cancelled = false;
+                let mut grants: Vec<Grant> = Vec::new();
+                let mut last_request = None;
+                for op in ops {
+                    match op {
+                        Op::Ask { grant, answer } => {
+                            let answering = control.clone();
+                            let mut asked = None;
+                            let approved = control.approve(
+                                "run_command",
+                                &serde_json::json!({}),
+                                grant.clone(),
+                                &mut |event| {
+                                    if let AgentProgress::ApprovalRequested { request_id, .. } = event {
+                                        asked = Some(request_id);
+                                        match answer {
+                                            Some(answer) => {
+                                                answering.answer(request_id, answer);
+                                            }
+                                            None => answering.cancel(),
+                                        }
+                                    }
+                                },
+                            );
+                            prop_assert_eq!(asked.is_some(), !cancelled, "asks only while not cancelled");
+                            let allowed = matches!(
+                                answer,
+                                Some(ApprovalAnswer::AllowOnce | ApprovalAnswer::AllowForSession)
+                            );
+                            prop_assert_eq!(approved, !cancelled && allowed);
+                            if approved && answer == Some(ApprovalAnswer::AllowForSession) {
+                                grants.extend(grant);
+                            }
+                            if !cancelled && answer.is_none() {
+                                cancelled = true;
+                            }
+                            last_request = asked.or(last_request);
+                        }
+                        Op::Cancel => {
+                            control.cancel();
+                            cancelled = true;
+                        }
+                        Op::Reset => {
+                            control.reset_cancellation();
+                            cancelled = false;
+                        }
+                        Op::Probe(wanted) => {
+                            prop_assert_eq!(control.is_granted(&wanted), grants_cover(&grants, &wanted));
+                        }
+                        Op::AnswerAgain(answer) => {
+                            if let Some(id) = last_request {
+                                prop_assert!(!control.answer(id, answer), "a settled request takes no answer");
+                            }
+                        }
+                    }
+                    prop_assert_eq!(control.is_cancelled(), cancelled);
+                }
+            }
+        }
+    }
 }
