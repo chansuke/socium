@@ -35,9 +35,13 @@ fn text_reply(text: &str) -> Reply {
 }
 
 fn tool_reply(name: &str, input: Value) -> Reply {
+    tool_call_reply("call-1", name, input)
+}
+
+fn tool_call_reply(id: &str, name: &str, input: Value) -> Reply {
     Reply::Events(vec![
         json!({"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
-        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call-1", "name": name, "input": {}}}),
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": id, "name": name, "input": {}}}),
         json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": input.to_string()}}),
         json!({"type": "content_block_stop", "index": 0}),
         json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}}),
@@ -104,6 +108,11 @@ struct Fixture {
 }
 
 fn fixture(port: u16) -> Fixture {
+    fixture_with_models(port, "")
+}
+
+/// `extra` is appended to models.toml, such as more `[[models]]`.
+fn fixture_with_models(port: u16, extra: &str) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -111,7 +120,7 @@ fn fixture(port: u16) -> Fixture {
     std::fs::write(
         root.path().join("models.toml"),
         format!(
-            "default = \"local\"\n[providers.local]\nwire = \"anthropic\"\nbase_url = \"http://127.0.0.1:{port}\"\napi_key_env = \"LOCAL_KEY\"\n[[models]]\nalias = \"local\"\nprovider = \"local\"\nid = \"local-model\"\n"
+            "default = \"local\"\n[providers.local]\nwire = \"anthropic\"\nbase_url = \"http://127.0.0.1:{port}\"\napi_key_env = \"LOCAL_KEY\"\n[[models]]\nalias = \"local\"\nprovider = \"local\"\nid = \"local-model\"\n{extra}"
         ),
     )
     .unwrap();
@@ -524,6 +533,80 @@ fn version_prints_the_package_version() {
     );
 }
 
+/// `socium --client-bridge` with JSON Lines on its stdin and stdout.
+struct Bridge {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    records: std::sync::mpsc::Receiver<Value>,
+    reader: Option<thread::JoinHandle<()>>,
+}
+
+impl Bridge {
+    fn start(fixture: &Fixture) -> Self {
+        let mut child = command(fixture, &["--client-bridge"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let (send, records) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || {
+            for line in stdout.lines() {
+                let record: Value = serde_json::from_str(&line.unwrap()).unwrap();
+                if send.send(record).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            stdin,
+            records,
+            reader: Some(reader),
+        }
+    }
+
+    fn send(&mut self, request: Value) {
+        writeln!(self.stdin.as_mut().unwrap(), "{request}").unwrap();
+    }
+
+    /// Every record up to and including the next one of type `kind`.
+    fn until(&self, kind: &str) -> Vec<Value> {
+        let mut seen = Vec::new();
+        loop {
+            let record = self
+                .records
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or_else(|error| panic!("waiting for {kind} after {seen:#?}: {error}"));
+            let done = record["type"] == kind;
+            seen.push(record);
+            if done {
+                break seen;
+            }
+        }
+    }
+
+    fn next(&self, kind: &str) -> Value {
+        self.until(kind).pop().unwrap()
+    }
+
+    /// Sends a request and returns the error of its response.
+    fn request(&mut self, request: Value) -> Value {
+        let id = request["id"].clone();
+        self.send(request);
+        let response = self.next("response");
+        assert_eq!(response["id"], id);
+        response["error"].clone()
+    }
+
+    /// Closes stdin and expects a clean exit.
+    fn finish(mut self) {
+        drop(self.stdin.take());
+        assert!(self.child.wait().unwrap().success());
+        self.reader.take().unwrap().join().unwrap();
+    }
+}
+
 #[test]
 fn client_bridge_keeps_approval_and_persisted_conversations_in_core() {
     let (port, _) = serve(vec![
@@ -531,56 +614,20 @@ fn client_bridge_keeps_approval_and_persisted_conversations_in_core() {
         text_reply("Done."),
     ]);
     let fixture = fixture(port);
-    let mut child = command(&fixture, &["--client-bridge"])
-        .stdin(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let stdout = BufReader::new(child.stdout.take().unwrap());
-    let (send, receive) = std::sync::mpsc::channel();
-    let reader = thread::spawn(move || {
-        for line in stdout.lines() {
-            let record: Value = serde_json::from_str(&line.unwrap()).unwrap();
-            if send.send(record).is_err() {
-                break;
-            }
-        }
-    });
-    let next = |kind: &str| {
-        loop {
-            let record = receive
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap_or_else(|error| panic!("waiting for {kind}: {error}"));
-            if record["type"] == kind {
-                break record;
-            }
-        }
-    };
-    let initial = next("session");
+    let mut bridge = Bridge::start(&fixture);
+    let initial = bridge.next("session");
     let session = initial["session"].as_str().unwrap();
-    writeln!(
-        stdin,
-        "{}",
-        json!({"id": "turn-1", "action": "prompt", "text": "Create a file."})
-    )
-    .unwrap();
-    assert_eq!(next("running")["turn"], "turn-1");
-    let approval = next("approval");
+    bridge.send(json!({"id": "turn-1", "action": "prompt", "text": "Create a file."}));
+    assert_eq!(bridge.next("running")["turn"], "turn-1");
+    let approval = bridge.next("approval");
     assert_eq!(approval["tool"], "run_command");
     assert!(!fixture.workspace.join("created").exists());
-    writeln!(
-        stdin,
-        "{}",
-        json!({
-            "id": "answer", "action": "approve", "request": approval["request"], "allow": true,
-        })
-    )
-    .unwrap();
-    let response = next("response");
-    assert_eq!(response["id"], "answer");
-    assert_eq!(response["error"], Value::Null);
-    assert_eq!(next("delta")["text"], "Done.");
-    let finished = next("session");
+    let error = bridge.request(json!({
+        "id": "answer", "action": "approve", "request": approval["request"], "allow": true,
+    }));
+    assert_eq!(error, Value::Null);
+    assert_eq!(bridge.next("delta")["text"], "Done.");
+    let finished = bridge.next("session");
     assert_eq!(finished["session"], session);
     assert!(fixture.workspace.join("created").is_file());
     assert_eq!(
@@ -588,20 +635,150 @@ fn client_bridge_keeps_approval_and_persisted_conversations_in_core() {
         "Done."
     );
 
-    writeln!(stdin, "{}", json!({"id": "fresh", "action": "new"})).unwrap();
-    let fresh = next("session");
+    bridge.send(json!({"id": "fresh", "action": "new"}));
+    let fresh = bridge.next("session");
     assert_ne!(fresh["session"], session);
     assert_eq!(fresh["sessions"][0]["id"], session);
-    writeln!(
-        stdin,
-        "{}",
-        json!({"id": "reopen", "action": "resume", "session": session})
-    )
-    .unwrap();
-    let resumed = next("session");
+    bridge.send(json!({"id": "reopen", "action": "resume", "session": session}));
+    let resumed = bridge.next("session");
     assert_eq!(resumed["session"], session);
     assert_eq!(resumed["messages"], finished["messages"]);
-    drop(stdin);
-    assert!(child.wait().unwrap().success());
-    reader.join().unwrap();
+    bridge.finish();
+}
+
+#[test]
+fn client_bridge_switches_models_only_between_turns() {
+    let (port, bodies) = serve(vec![Reply::Stall]);
+    let fixture = fixture_with_models(
+        port,
+        "[[models]]\nalias = \"spare\"\nprovider = \"local\"\nid = \"spare-model\"\ndescription = \"Second model\"\n",
+    );
+    let mut bridge = Bridge::start(&fixture);
+    let initial = bridge.next("session");
+    assert_eq!(initial["model"], "local");
+    let models = initial["models"].as_array().unwrap();
+    let model = |alias: &str| {
+        models
+            .iter()
+            .find(|m| m["alias"] == alias)
+            .unwrap_or_else(|| panic!("{alias} in {models:#?}"))
+    };
+    assert_eq!(model("spare")["description"], "Second model");
+    assert_eq!(model("spare")["unavailable"], Value::Null);
+    // Built-in models need a key this environment does not have.
+    assert!(model("opus")["unavailable"].is_string());
+
+    assert_ne!(
+        bridge.request(json!({"id": "unknown", "action": "set_model", "model": "missing"})),
+        Value::Null
+    );
+    bridge.send(json!({"id": "switch", "action": "set_model", "model": "spare"}));
+    let switched = bridge.until("response");
+    let session = switched
+        .iter()
+        .find(|r| r["type"] == "session")
+        .unwrap_or_else(|| panic!("{switched:#?}"));
+    assert_eq!(session["model"], "spare");
+    assert_eq!(switched.last().unwrap()["error"], Value::Null);
+
+    assert_eq!(
+        bridge.request(json!({"id": "turn-1", "action": "prompt", "text": "Hello."})),
+        Value::Null
+    );
+    // The turn holds the stalled request open until it is stopped.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while bodies.lock().unwrap().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no model request");
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(bodies.lock().unwrap()[0]["model"], "spare-model");
+    let error = bridge.request(json!({"id": "busy", "action": "set_model", "model": "local"}));
+    assert_eq!(error, "Finish or stop the current turn first.");
+    assert_eq!(
+        bridge.request(json!({"id": "stop", "action": "cancel"})),
+        Value::Null
+    );
+    assert_eq!(bridge.next("session")["model"], "spare");
+    bridge.finish();
+}
+
+#[test]
+fn client_bridge_allows_what_a_request_offers_for_the_session() {
+    let touch = json!({"command": ["touch", "created"]});
+    let (port, _) = serve(vec![
+        tool_call_reply("call-1", "run_command", touch.clone()),
+        tool_call_reply("call-2", "run_command", touch),
+        text_reply("Done."),
+    ]);
+    let fixture = fixture(port);
+    let mut bridge = Bridge::start(&fixture);
+    bridge.next("session");
+    bridge.send(json!({"id": "turn-1", "action": "prompt", "text": "Touch twice."}));
+    let approval = bridge.next("approval");
+    let offered = approval["sessionOption"].as_str().unwrap();
+    assert!(offered.contains("touch created"), "{offered}");
+    let error = bridge.request(json!({
+        "id": "answer", "action": "approve", "request": approval["request"],
+        "allow": true, "scope": "session",
+    }));
+    assert_eq!(error, Value::Null);
+    let rest = bridge.until("session");
+    assert_eq!(of_type(&rest, "approval"), Vec::<&Value>::new());
+    let commands = rest
+        .iter()
+        .filter(|r| r["type"] == "activity" && r["phase"] == "command")
+        .count();
+    assert_eq!(commands, 2, "{rest:#?}");
+    assert_eq!(
+        rest.last().unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["text"],
+        "Done."
+    );
+    bridge.finish();
+}
+
+#[test]
+fn client_bridge_streams_the_plan_and_what_the_agent_is_doing() {
+    let (port, _) = serve(vec![
+        tool_reply(
+            "update_plan",
+            json!({"goal": "Fix the parser", "tasks": [
+                {"id": "repro", "title": "Reproduce", "status": "done"},
+                {"id": "fix", "title": "Fix it", "status": "active"}
+            ]}),
+        ),
+        text_reply("planned"),
+    ]);
+    let fixture = fixture(port);
+    let mut bridge = Bridge::start(&fixture);
+    assert_eq!(bridge.next("session")["plan"], Value::Null);
+    bridge.send(json!({"id": "turn-1", "action": "prompt", "text": "Fix the parser."}));
+    let records = bridge.until("session");
+    let plan = &of_type(&records, "plan")
+        .first()
+        .unwrap_or_else(|| panic!("{records:#?}"))["plan"];
+    assert_eq!(plan["goal"], "Fix the parser");
+    assert_eq!(plan["done"], 500);
+    assert_eq!(plan["tasks"][1]["id"], "fix");
+    assert_eq!(plan["tasks"][1]["status"], "active");
+    assert_eq!(records.last().unwrap()["plan"], *plan);
+    let phases = of_type(&records, "activity")
+        .into_iter()
+        .map(|r| (r["phase"].as_str().unwrap(), r["detail"].as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(phases.first(), Some(&("requesting", Some("local"))));
+    assert!(
+        phases.contains(&("tool", Some("update_plan"))),
+        "{phases:?}"
+    );
+    assert_eq!(phases.last(), Some(&("responding", None)));
+    // Repeated progress of the same kind is one activity line.
+    assert!(
+        phases.windows(2).all(|pair| pair[0] != pair[1]),
+        "{phases:?}"
+    );
+    bridge.finish();
 }
