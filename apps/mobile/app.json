@@ -17,6 +17,14 @@
         "foregroundImage": "./assets/android-foreground.png",
         "backgroundColor": "#101417"
       }
+    },
+    "platforms": [
+      "android",
+      "ios"
+    ],
+    "ios": {
+      "bundleIdentifier": "com.chansuke.socium",
+      "supportsTablet": true
     }
   }
 }
