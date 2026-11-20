@@ -232,11 +232,7 @@ where
                         ),
                     },
                 );
-                tokio::select! {
-                    biased;
-                    _ = ctx.control.cancelled() => {}
-                    _ = tokio::time::sleep(delay) => {}
-                }
+                ctx.control.pause(delay).await;
                 if ctx.control.is_cancelled() {
                     break Err(AgentError::Cancelled);
                 }
