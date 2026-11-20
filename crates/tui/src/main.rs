@@ -7,6 +7,7 @@ mod client_bridge;
 mod headless;
 mod input_history;
 mod model_picker;
+mod models_command;
 mod pane_slot;
 mod progress;
 mod rewind_picker;
@@ -62,6 +63,7 @@ async fn main() -> Result<()> {
     };
 
     let (start, pick_session) = match launch {
+        Launch::ModelsImport(command) => std::process::exit(models_command::main(command).await),
         Launch::New | Launch::Help | Launch::Version => (SessionStart::New, false),
         Launch::Continue => (SessionStart::Continue, false),
         Launch::Resume(Some(id)) => (SessionStart::Resume(id), false),
