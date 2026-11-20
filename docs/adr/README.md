@@ -18,3 +18,4 @@
 * [18. エージェントの計画を会話の履歴から導きActivity欄の第二の表示に示す](0018-エージェントの計画を会話の履歴から導きactivity欄の第二の表示に示す.md)
 * [19. socium -pの既定を返答の本文にしstdinと出力形式の選択をclaude -pに揃える](0019-socium-pの既定を返答の本文にしstdinと出力形式の選択をclaude-pに揃える.md)
 * [20. --dangerously-skip-permissionsで承認をすべて省く実行を起動の引数に限って許す](0020-dangerously-skip-permissionsで承認をすべて省く実行を起動の引数に限って許す.md)
+* [21. find_symbolはRustの宣言行の検索に留めtree-sitterとLSPは入れない](0021-find-symbolはrustの宣言行の検索に留めtree-sitterとlspは入れない.md)

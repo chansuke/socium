@@ -203,6 +203,15 @@ profile. Subagents get only the tools of their type that the profile offers,
 and a call to a tool outside the profile is refused without running. Startup
 names the profile when it is not `full`.
 
+`find_symbol` is a quick search for Rust declarations, not a symbol index. It
+reads only `.rs` files and matches lines that start a declaration (`fn`,
+`struct`, `enum`, `trait`, `type`, `mod`, `const`, `static`, or an `impl`
+naming the type), so it also returns such lines in comments and strings,
+misses a declaration split across lines, and cannot tell same-named items
+apart or find references. For other languages the model uses `search_text`.
+[ADR 21](adr/0021-find-symbolはrustの宣言行の検索に留めtree-sitterとlspは入れない.md)
+records why there is no parser-based backend.
+
 ## Project instructions
 
 Socium reads `AGENTS.md` (or `CLAUDE.md`) in the workspace root into its
