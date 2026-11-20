@@ -1,7 +1,7 @@
 //! Model registry: the models `/model` can select and how to reach them.
-//! Built-in Anthropic entries are overlaid with the user's `models.toml`
-//! (ADR 6). API keys never appear here, only the names of the environment
-//! variables that hold them.
+//! Built-in Anthropic entries are overlaid with the files in `models.d/`
+//! and then the user's `models.toml` (ADR 6). API keys never appear here, only
+//! the names of the environment variables that hold them.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;

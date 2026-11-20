@@ -6,6 +6,10 @@
 # always available; entries below are added to them, and an entry with a
 # built-in alias replaces it. Model IDs were checked against each
 # provider's documentation on 2026-11-13.
+#
+# Files in models.d/ next to this file are read before it, in file-name
+# order; `socium models import <provider>` writes them from models.dev.
+# Entries here replace theirs, and only this file may set default.
 
 # Model selected when neither /model nor MODEL chose one.
 default = "opus"

@@ -172,6 +172,32 @@ show the session's cost; Socium ships no prices.
 To check a registered model against its real API (this costs money), run
 `SOCIUM_LIVE_MODEL=<alias> nix develop -c cargo test -p socium-core live_ -- --ignored`.
 
+### Importing from models.dev
+
+`socium models import <provider>...` registers the models of providers listed
+on [models.dev](https://models.dev), the catalog OpenCode uses. It downloads
+`https://models.dev/api.json` (or reads a saved copy with `--from FILE`) and
+writes `models.d/<provider>.toml` next to `models.toml`. Running it again
+overwrites the file. Without a provider, it lists the providers and how many
+of their models it can import.
+
+Socium reads the built-in models first, then every `*.toml` in `models.d/` in
+file-name order, then `models.toml`. A later entry with the same alias
+replaces an earlier one, so put your own changes in `models.toml`. Only
+`models.toml` may set `default`, and two files in `models.d/` may not define
+the same provider.
+
+Aliases look like `opencode/claude-haiku-5-5`. A provider whose models use
+several API formats, such as OpenCode Zen, becomes one provider per wire
+(`opencode`, `opencode-anthropic`, `opencode-openai-responses`, and so on),
+all with the same key. Deprecated models, models that do not answer in text,
+and providers that need OAuth, cloud credentials, or an unsupported SDK are
+skipped, and the command says why.
+
+The catalog is read only when you run the command, never at startup. Your API
+key is sent to each provider's `base_url`, so read the base URLs the command
+prints, and the file it writes, before you set the key.
+
 ## Sandbox and approval settings
 
 `~/.config/socium/config.toml` (or `$XDG_CONFIG_HOME/socium/config.toml`, or the
