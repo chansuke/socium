@@ -14,7 +14,7 @@
 use crate::TaskControl;
 use crate::conversation::ToolDefinition;
 use crate::settings::WebSearchSettings;
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;

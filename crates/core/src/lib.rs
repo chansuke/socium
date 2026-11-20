@@ -15,6 +15,7 @@ pub mod plan;
 mod process;
 mod session;
 mod settings;
+mod tool_error;
 mod transcript;
 mod usage;
 pub use approval::Grant;

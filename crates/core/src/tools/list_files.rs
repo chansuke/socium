@@ -1,7 +1,7 @@
 use crate::AgentProgress;
 use crate::constants::*;
 use crate::conversation::ToolDefinition;
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use crate::tools::input::{optional_bool_field, optional_string_field};
 use crate::tools::ripgrep::glob_matches;
 use crate::tools::workspace::resolve_workspace_path;

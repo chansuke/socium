@@ -2,7 +2,7 @@ use crate::AgentProgress;
 use crate::constants::*;
 use crate::conversation::ToolDefinition;
 use crate::execution::{ExecutionPolicy, WorkspaceAccess};
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use crate::tools::input::{optional_string_field, optional_timeout_ms, require_string_array_field};
 use crate::tools::workspace::resolve_workspace_command_cwd;
 use crate::tools::{Tool, ToolContext};

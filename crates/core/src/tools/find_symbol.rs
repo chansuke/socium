@@ -1,7 +1,7 @@
 use crate::AgentProgress;
 use crate::constants::*;
 use crate::conversation::ToolDefinition;
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_string_field,
 };

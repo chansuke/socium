@@ -1,7 +1,7 @@
 use crate::AgentProgress;
 use crate::constants::*;
 use crate::conversation::ToolDefinition;
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use crate::tools::text_file::read_utf8_file_with_limit;
 use crate::tools::workspace::resolve_workspace_path;
 use crate::tools::{Tool, ToolContext};
