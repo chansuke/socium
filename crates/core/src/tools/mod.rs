@@ -20,6 +20,7 @@ pub(crate) mod workspace;
 
 use crate::AgentProgress;
 use crate::agent::types::ContentBlock;
+use crate::constants::TEXT_EDITOR_TOOL_NAME;
 use crate::tools::apply_patch::ApplyPatchTool;
 use crate::tools::error::ToolError;
 use crate::tools::find_symbol::FindSymbolTool;
@@ -87,6 +88,74 @@ static BUILTIN_TOOLS: &[&dyn Tool] = &[
     &TextEditorTool,
 ];
 
+/// Which built-in tools the model is offered, from `[tools] profile` in
+/// config.toml, so tool sets can be compared. `agent`, `update_plan`, and
+/// `web_search` are offered whatever the profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ToolProfile {
+    #[default]
+    Full,
+    Basic,
+    Search,
+}
+
+const FULL_PROFILE: &[&str] = &[
+    "read_file",
+    "list_files",
+    "search_text",
+    "apply_patch",
+    "git_branch",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_commit",
+    "find_symbol",
+    "run_command",
+    TEXT_EDITOR_TOOL_NAME,
+];
+
+const BASIC_PROFILE: &[&str] = &[
+    "read_file",
+    "apply_patch",
+    TEXT_EDITOR_TOOL_NAME,
+    "run_command",
+    "git_commit",
+];
+
+const SEARCH_PROFILE: &[&str] = &[
+    "read_file",
+    "apply_patch",
+    TEXT_EDITOR_TOOL_NAME,
+    "run_command",
+    "git_commit",
+    "search_text",
+    "find_symbol",
+];
+
+impl ToolProfile {
+    pub(crate) const ALL: [Self; 3] = [Self::Full, Self::Basic, Self::Search];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Basic => "basic",
+            Self::Search => "search",
+        }
+    }
+
+    pub(crate) fn tools(self) -> &'static [&'static str] {
+        match self {
+            Self::Full => FULL_PROFILE,
+            Self::Basic => BASIC_PROFILE,
+            Self::Search => SEARCH_PROFILE,
+        }
+    }
+
+    pub(crate) fn allows(self, tool: &str) -> bool {
+        self.tools().contains(&tool)
+    }
+}
+
 pub fn default_tools() -> Vec<ToolDefinition> {
     tools_for_model()
 }
@@ -98,10 +167,12 @@ pub(crate) fn tools_for_model() -> Vec<ToolDefinition> {
     tools_with_settings(&crate::settings::Settings::default())
 }
 
-/// As `tools_for_model`, with the command time limit the user set.
+/// As `tools_for_model`, with the tool profile and command time limit the
+/// user set.
 pub(crate) fn tools_with_settings(settings: &crate::settings::Settings) -> Vec<ToolDefinition> {
     BUILTIN_TOOLS
         .iter()
+        .filter(|tool| settings.tools.allows(tool.name()))
         .map(|tool| match tool.definition() {
             _ if tool.name() == "run_command" => {
                 run_command::definition(settings.sandbox.max_command_timeout)
@@ -399,10 +470,59 @@ pub(crate) async fn run_tool_call_on_blocking_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::TEXT_EDITOR_TOOL_NAME;
     use crate::test_support::make_temp_dir;
     use serde_json::json;
     use std::fs;
+
+    fn offered(config: &str) -> Vec<String> {
+        let (settings, _) = crate::settings::Settings::from_toml(config, None).unwrap();
+        tools_with_settings(&settings)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect()
+    }
+
+    #[test]
+    fn the_default_profile_offers_every_built_in_tool() {
+        let mut expected = BUILTIN_TOOLS
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(expected.len(), 12);
+        expected.extend(["agent".to_string(), "update_plan".to_string()]);
+        assert_eq!(offered(""), expected);
+        assert_eq!(offered("[tools]\nprofile = \"full\""), expected);
+    }
+
+    #[test]
+    fn a_tool_profile_offers_only_its_built_in_tools() {
+        assert_eq!(
+            offered("[tools]\nprofile = \"basic\""),
+            [
+                "read_file",
+                "apply_patch",
+                "git_commit",
+                "run_command",
+                "str_replace_based_edit_tool",
+                "agent",
+                "update_plan",
+            ]
+        );
+        assert_eq!(
+            offered("[tools]\nprofile = \"search\""),
+            [
+                "read_file",
+                "search_text",
+                "apply_patch",
+                "git_commit",
+                "find_symbol",
+                "run_command",
+                "str_replace_based_edit_tool",
+                "agent",
+                "update_plan",
+            ]
+        );
+    }
 
     #[test]
     fn run_tool_call_returns_success_for_list_files_without_path() {

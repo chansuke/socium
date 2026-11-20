@@ -2069,6 +2069,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tool_outside_the_profile_is_refused_without_running() {
+        let workspace = make_temp_dir("tool_profile");
+        std::fs::write(workspace.path().join("notes.txt"), "needle\n").unwrap();
+        let provider = ScriptedProvider::new(vec![
+            Ok(crate::providers::ProviderResponse {
+                message: crate::agent::types::AgentMessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "s1".into(),
+                        name: "search_text".into(),
+                        input: json!({"pattern": "needle"}),
+                    }],
+                    ..Default::default()
+                },
+                streamed_text: false,
+                usage: None,
+            }),
+            Ok(text_provider_response("No search here.", None)),
+        ]);
+        let requests = provider.recorded_requests.clone();
+        let mut service =
+            service_with_scripted_provider(workspace.path(), provider, Vec::new(), None);
+        let (settings, _) =
+            crate::Settings::from_toml("[tools]\nprofile = \"basic\"", None).unwrap();
+        service.install_settings(settings);
+
+        service.submit("find the needle".into()).await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        let offered = requests[0]["tools"].as_array().unwrap();
+        assert!(offered.iter().any(|tool| tool["name"] == "read_file"));
+        assert!(!offered.iter().any(|tool| tool["name"] == "search_text"));
+        let result = &requests[1]["messages"][2]["content"][0];
+        assert_eq!(result["is_error"], true, "{result}");
+        assert_eq!(result["content"], "Unsupported tool: search_text");
+    }
+
+    #[tokio::test]
     async fn the_agent_loop_searches_the_web_when_the_user_turned_it_on() {
         let (base_url, _server) = crate::providers::test_server::serve_once(
             "200 OK",
