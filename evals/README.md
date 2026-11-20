@@ -51,6 +51,7 @@ repetition:
 | `check_passed`, `check_output` | the check alone, and its last output |
 | `changed`, `unintended_changes` | paths changed, and those outside `allowed_changes` |
 | `tool_errors`, `provider_retries`, `recovered` | failures during the run, and whether it passed anyway |
+| `tool_argument_errors` | tool errors for a call that could not run as sent: a tool not offered, or arguments of the wrong shape |
 | `approvals_refused`, `interventions` | calls that needed a person |
 | `usage`, `cost_usd`, `unreported_calls` | tokens and cost; with unreported calls they are lower bounds |
 | `seconds`, `rounds`, `tools`, `turns_sent`, `stopped` | time and shape of the run |

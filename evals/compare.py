@@ -71,6 +71,7 @@ def summary(results):
         "passed": sum(r["passed"] for r in results),
         "runs": len(results),
         "unintended": sum(bool(r["unintended_changes"]) for r in results),
+        "argument_errors": sum(r.get("tool_argument_errors", 0) for r in results),
         "cost": middle([r["cost_usd"] for r in results]),
         "seconds": middle([r["seconds"] for r in results]),
     }
@@ -79,6 +80,7 @@ def summary(results):
 def describe(s):
     cost = "?" if s["cost"] is None else f"${s['cost']:.4f}"
     return (f"{s['passed']}/{s['runs']} passed, {s['unintended']} with unintended changes, "
+            f"{s['argument_errors']} tool argument errors, "
             f"median {cost} and {s['seconds']}s")
 
 
