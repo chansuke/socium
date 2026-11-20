@@ -53,6 +53,18 @@ bash ../../scripts/expo-simulator-smoke.sh ios IOS_BUILD_ID
 
 To check the full mobile flow interactively, connect the app to a test workspace through a reachable HTTPS host. Send a prompt, check that the reply arrives, review a tool approval, and verify that a saved conversation can be reopened. [Expo Simulators documentation](https://docs.expo.dev/eas/simulators/get-started/).
 
+## Build for a physical iPhone
+
+From `apps/mobile`, register the test iPhone with `npx --yes eas-cli@27.11.0 device:create`. Sign in with your Apple Developer account, choose **Website**, and open the registration URL in Safari on that iPhone.
+
+Build and sign the app with the `ios-device` profile:
+
+```sh
+npx --yes eas-cli@27.11.0 build --platform ios --profile ios-device
+```
+
+Include the test iPhone when EAS prompts for devices. After the build finishes, open the EAS build page on the iPhone and tap **Install**. This profile bundles JavaScript so the app can launch without Metro. [Expo internal distribution documentation](https://docs.expo.dev/build/internal-distribution/).
+
 ## Architecture
 
 The apps share the client protocol and subscription state in `packages/client`. The Node gateway starts the Rust bridge in the chosen workspace. The bridge uses the same `AgentService`, session persistence, and approval checks as the terminal UI.
