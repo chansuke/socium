@@ -25,6 +25,7 @@
     "ios": {
       "bundleIdentifier": "com.chansuke.socium",
       "supportsTablet": true
-    }
+    },
+    "owner": "chansuke2027"
   }
 }
