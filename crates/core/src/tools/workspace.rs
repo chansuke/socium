@@ -1,4 +1,4 @@
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};

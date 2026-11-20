@@ -10,7 +10,7 @@
 //! `--dangerously-skip-permissions` lets them run unasked.
 
 use crate::settings::{ApprovalMode, PathPatterns, Settings};
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -1,8 +1,8 @@
 use crate::AgentProgress;
 use crate::constants::*;
 use crate::conversation::ToolDefinition;
+use crate::tool_error::ToolError;
 use crate::tools::edit_history::{EditOrigin, Mutation, apply_changes, describe, undo};
-use crate::tools::error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{require_i64_field, require_string_field};
 use crate::tools::list_files::list_files_from_workspace;

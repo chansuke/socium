@@ -24,7 +24,7 @@ use crate::constants::{
 use crate::conversation::{Message, Role};
 use crate::error::AgentError;
 use crate::providers::TokenUsage;
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use crate::tools::input::{optional_string_field, require_object_input, require_string_field};
 use serde_json::Value;
 use std::future::Future;
