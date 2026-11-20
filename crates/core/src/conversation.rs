@@ -258,8 +258,8 @@ pub(crate) fn elide_tool_output(text: &str, keep: usize, why: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{AgentMessageRequest, ContentBlock, Message, MessageContent, strip_thinking};
+    use crate::agent::default_tools;
     use crate::constants::DEFAULT_SYSTEM_PROMPT;
-    use crate::tools::default_tools;
 
     #[test]
     fn agent_message_request_serializes_default_system_prompt() {

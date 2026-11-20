@@ -15,13 +15,13 @@
 //! You review changes for correctness bugs. ...
 //! ```
 
+use crate::agent::tools_for_model;
 use crate::constants::{
     AGENT_TOOL_NAME, PLAN_TOOL_NAME, SUBAGENT_EXPLORER_INSTRUCTIONS, SUBAGENT_WORKER_INSTRUCTIONS,
 };
 use crate::conversation::ToolDefinition;
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::Provider;
-use crate::tools::tools_for_model;
 use serde::Deserialize;
 use serde_json::json;
 use std::fs;

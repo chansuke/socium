@@ -210,7 +210,7 @@ fn after_compaction_the_summary_carries_the_plan_at_the_cut() {
 
 #[test]
 fn only_the_main_agent_is_offered_update_plan() {
-    let tools = crate::tools::tools_for_model();
+    let tools = crate::agent::tools_for_model();
     assert!(tools.iter().any(|tool| tool.name() == PLAN_TOOL_NAME));
     let catalog = crate::agent::subagent::catalog::SubagentCatalog::builtin();
     assert!(!catalog.names().is_empty());
