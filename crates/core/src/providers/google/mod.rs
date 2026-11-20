@@ -472,7 +472,7 @@ features = ["effort"]
         let tools = tools_for_model();
         let request = AgentMessageRequest::new("gemini-4-carbon", 1000, &messages, &tools);
         let built = provider(GEMINI, Some("max"))
-            .build_request(&reqwest::Client::new(), &request)
+            .build_request(&crate::test_support::http_client(), &request)
             .unwrap()
             .build()
             .unwrap();
@@ -509,7 +509,7 @@ features = ["effort"]
     fn a_bearer_provider_sends_the_key_as_a_bearer_token() {
         let request = AgentMessageRequest::new("m", 10, &[], &[]);
         let built = local("https://opencode.ai/inference/google", "auth = \"bearer\"")
-            .build_request(&reqwest::Client::new(), &request)
+            .build_request(&crate::test_support::http_client(), &request)
             .unwrap()
             .build()
             .unwrap();

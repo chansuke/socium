@@ -5,6 +5,10 @@
 //! `SOCIUM_LIVE_MODEL=ds-flash cargo test -p socium-core live_ -- --ignored`
 //!
 //! The registry and keys come from the real environment, as at startup.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "live tests read the real provider key and model from the environment"
+)]
 
 use crate::agent::types::{AgentMessageRequest, ContentBlock, Message};
 use crate::constants::TEXT_EDITOR_TOOL_NAME;

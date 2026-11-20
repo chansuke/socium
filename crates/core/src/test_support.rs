@@ -245,6 +245,12 @@ pub(crate) fn git_stdout(path: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+/// The client production builds, so tests send through the same redirect
+/// policy and timeouts.
+pub(crate) fn http_client() -> reqwest::Client {
+    crate::provider_http_client().expect("the provider HTTP client builds")
+}
+
 #[cfg(test)]
 mod request_checks {
     use super::check_request;

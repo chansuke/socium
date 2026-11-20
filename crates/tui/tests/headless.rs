@@ -2,6 +2,10 @@
 //! speaks the Anthropic streaming format. The environment is cleared, so no
 //! provider key or user configuration is read, and nothing leaves the host.
 #![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the runner's PATH and stall the fake server on purpose"
+)]
+#![expect(
     clippy::unwrap_used,
     reason = "fixture helpers outside #[test] functions fail the test by panicking"
 )]

@@ -1,5 +1,9 @@
 //! Enforcement tests must run on Linux with working user namespaces and bwrap.
 //! Missing enforcement is a failure, never a reason to skip the suite.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the probe reads the sandbox environment, and one test outlives a timeout on purpose"
+)]
 use super::*;
 use crate::{
     TaskControl,
