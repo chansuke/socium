@@ -19,7 +19,12 @@ The gateway listens on loopback and serves one workspace. Connected clients shar
 
 ## Connect Android and iOS
 
-Start a private HTTPS reverse proxy to the gateway that your device can reach. Enter the proxy's HTTPS origin and the gateway's access token in the mobile app. The access token grants access to the workspace transcript and its approval controls. The clients keep it in memory until you disconnect or close the app.
+Start a private HTTPS reverse proxy to the gateway that your device can reach. Append `--mobile-url https://your-socium-host` to the gateway command above, using the proxy's HTTPS origin.
+
+1. Sign in to Socium in your browser with the host access token. Select **Pair a phone**, then **Generate QR code**.
+2. Open Socium on the phone, select **Scan QR code**, scan the browser's QR code, and confirm the host address.
+
+Each QR code can be used once within five minutes. A new code replaces the previous unused code. The mobile app saves the paired device token in the operating system's secure storage and removes it when you select **Disconnect**. The gateway issues a new device token when you pair, and those tokens expire when the gateway restarts. Use **Enter manually** to connect with the host access token when you cannot scan a QR code.
 
 For local native development, configure the Android SDK or Xcode, then run:
 

@@ -1,34 +1,64 @@
+import { CameraView, useCameraPermissions } from "expo-camera";
 import { StatusBar } from "expo-status-bar";
-import { useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
-  FlatList, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView,
+  FlatList, Keyboard, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView,
   Text, TextInput, View,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { createClient, mobileEndpoint } from "@socium/client";
+import { createClient, mobileEndpoint, readPairingUrl, redeemPairing } from "@socium/client";
 import type { Client } from "@socium/client";
 import { maxPromptLength } from "@socium/client/protocol";
 import type { Message, WorkspaceState } from "@socium/client/protocol";
+import { loadPairedHost, savePairedHost } from "./pairedHost";
+import type { PairedHost } from "./pairedHost";
 import { palette, styles } from "./styles";
 
 export function App() {
-  const [client, setClient] = useState<Client | null>(null);
+  const [client, setClient] = useState<Client | null | undefined>(undefined);
+  const storage = useRef(Promise.resolve());
+
+  useEffect(() => {
+    let mounted = true;
+    void loadPairedHost().then((host) => {
+      if (mounted) setClient(host ? createClient(host.origin, host.token) : null);
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  function updateSavedHost(host: PairedHost | null) {
+    storage.current = storage.current.then(() => savePairedHost(host)).catch(() => {});
+  }
+
+  function connectPaired(host: PairedHost) {
+    updateSavedHost(host);
+    setClient(createClient(host.origin, host.token));
+  }
+
+  function disconnect() {
+    updateSavedHost(null);
+    setClient(null);
+  }
 
   return (
     <SafeAreaProvider>
       <StatusBar style="light" />
       <SafeAreaView style={styles.screen}>
         <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-          {client
-            ? <Connection client={client} disconnect={() => setClient(null)} />
-            : <ConnectForm connect={setClient} />}
+          {client === undefined ? null : client
+            ? <Connection client={client} disconnect={disconnect} />
+            : <ConnectForm connect={setClient} connectPaired={connectPaired} />}
         </KeyboardAvoidingView>
       </SafeAreaView>
     </SafeAreaProvider>
   );
 }
 
-function ConnectForm({ connect }: { connect: (client: Client) => void }) {
+function ConnectForm({ connect, connectPaired }: {
+  connect: (client: Client) => void;
+  connectPaired: (host: PairedHost) => void;
+}) {
+  const [mode, setMode] = useState<"choose" | "scan" | "manual">("choose");
   const [address, setAddress] = useState("");
   const [token, setToken] = useState("");
   const [error, setError] = useState("");
@@ -45,39 +75,142 @@ function ConnectForm({ connect }: { connect: (client: Client) => void }) {
     connect(createClient(endpoint, token.trim()));
   }
 
+  if (mode === "scan") return <ScanPairing connect={connectPaired} back={() => setMode("choose")} />;
+
   return (
     <ScrollView contentContainerStyle={styles.center} keyboardShouldPersistTaps="handled">
       <View style={styles.card}>
         <Text accessibilityLabel="Socium" style={styles.mark}>{">_"}</Text>
         <Text accessibilityRole="header" style={styles.heading}>Connect to Socium</Text>
-        <Text style={styles.muted}>Enter your Socium host address and the access token shown on that host.</Text>
-        <Text style={styles.label}>Host address</Text>
-        <TextInput
-          accessibilityLabel="Host address"
-          style={styles.input}
-          value={address}
-          onChangeText={setAddress}
-          placeholder="https://socium.example.com"
-          placeholderTextColor={palette.muted}
-          keyboardType="url"
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-        <Text style={styles.label}>Access token</Text>
-        <TextInput
-          accessibilityLabel="Access token"
-          style={styles.input}
-          value={token}
-          onChangeText={setToken}
-          placeholder="Token from your host"
-          placeholderTextColor={palette.muted}
-          autoCapitalize="none"
-          autoCorrect={false}
-          secureTextEntry
-          autoComplete="off"
-        />
-        {error ? <Text accessibilityRole="alert" style={styles.notice}>{error}</Text> : null}
-        <Button label="Connect" primary disabled={!address.trim() || !token.trim()} onPress={submit} />
+        {mode === "choose" ? (
+          <>
+            <Text style={styles.muted}>Open Socium on your computer and choose Pair a phone to get a QR code.</Text>
+            <Button label="Scan QR code" primary onPress={() => setMode("scan")} />
+            <Button label="Enter manually" onPress={() => setMode("manual")} />
+          </>
+        ) : (
+          <>
+            <Text style={styles.muted}>Enter your Socium host address and the access token shown on that host.</Text>
+            <Text style={styles.label}>Host address</Text>
+            <TextInput
+              accessibilityLabel="Host address"
+              style={styles.input}
+              value={address}
+              onChangeText={setAddress}
+              placeholder="https://socium.example.com"
+              placeholderTextColor={palette.muted}
+              keyboardType="url"
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <Text style={styles.label}>Access token</Text>
+            <TextInput
+              accessibilityLabel="Access token"
+              style={styles.input}
+              value={token}
+              onChangeText={setToken}
+              placeholder="Token from your host"
+              placeholderTextColor={palette.muted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry
+              autoComplete="off"
+            />
+            {error ? <Text accessibilityRole="alert" style={styles.notice}>{error}</Text> : null}
+            <Button label="Connect" primary disabled={!address.trim() || !token.trim()} onPress={submit} />
+            <Button label="Back" onPress={() => setMode("choose")} />
+          </>
+        )}
+      </View>
+    </ScrollView>
+  );
+}
+
+function ScanPairing({ connect, back }: { connect: (host: PairedHost) => void; back: () => void }) {
+  const [permission, requestPermission] = useCameraPermissions();
+  const [candidate, setCandidate] = useState<ReturnType<typeof readPairingUrl> | null>(null);
+  const [error, setError] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const scanned = useRef(false);
+  const pending = useRef<AbortController | null>(null);
+
+  function readCode(value: string) {
+    if (scanned.current) return;
+    scanned.current = true;
+    try {
+      setCandidate(readPairingUrl(value));
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Scan a Socium pairing QR code.");
+    }
+  }
+
+  async function pair() {
+    if (!candidate || pending.current) return;
+    const controller = new AbortController();
+    pending.current = controller;
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    setError("");
+    setConnecting(true);
+    try {
+      const host = await redeemPairing(candidate, controller.signal);
+      if (pending.current === controller) connect(host);
+    } catch (error) {
+      if (pending.current === controller) {
+        setError(error instanceof Error ? error.message : "Could not pair with this host.");
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (pending.current === controller) {
+        pending.current = null;
+        setConnecting(false);
+      }
+    }
+  }
+
+  function cancel() {
+    const controller = pending.current;
+    pending.current = null;
+    controller?.abort();
+    back();
+  }
+
+  return (
+    <ScrollView contentContainerStyle={styles.center} keyboardShouldPersistTaps="handled">
+      <View style={styles.card}>
+        <Text accessibilityRole="header" style={styles.heading}>{candidate ? "Connect to this host?" : "Scan a Socium QR code"}</Text>
+        {candidate ? (
+          <>
+            <Text style={styles.muted}>{candidate.origin}</Text>
+            <Button label={connecting ? "Connecting…" : "Pair with host"} primary disabled={connecting} onPress={pair} />
+          </>
+        ) : permission?.granted && !error ? (
+          <View style={styles.scanner}>
+            <CameraView
+              style={styles.flex}
+              facing="back"
+              barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+              onBarcodeScanned={({ data }) => readCode(data)}
+              onMountError={() => setError("Could not open the camera.")}
+            />
+          </View>
+        ) : permission && !permission.granted ? (
+          <>
+            <Text style={styles.muted}>Allow camera access to scan the QR code shown on your Socium host.</Text>
+            <Button label={permission.canAskAgain ? "Allow camera" : "Open settings"} primary onPress={() => {
+              const action = permission.canAskAgain ? requestPermission() : Linking.openSettings();
+              void action.catch(() => setError("Could not open camera permissions."));
+            }} />
+          </>
+        ) : null}
+        {error && <Text accessibilityRole="alert" style={styles.notice}>{error}</Text>}
+        {(candidate || (error && permission?.granted)) && (
+          <Button label="Scan again" disabled={connecting} onPress={() => {
+            scanned.current = false;
+            setCandidate(null);
+            setError("");
+          }} />
+        )}
+        <Button label="Back to connection" onPress={cancel} />
       </View>
     </ScrollView>
   );

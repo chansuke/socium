@@ -178,5 +178,5 @@ export async function redeemPairing(pairing: ReturnType<typeof readPairingUrl>, 
   if (typeof data?.token !== "string" || !/^[\w-]{43}$/.test(data.token)) {
     throw new Error("The host did not confirm pairing.");
   }
-  return createClient(pairing.origin, data.token);
+  return { origin: pairing.origin, token: data.token as string };
 }
