@@ -1,4 +1,4 @@
-use crate::agent::types::{AgentMessageResponse, ContentBlock};
+use crate::conversation::{AgentMessageResponse, ContentBlock};
 use crate::providers::error::ProviderError;
 use crate::providers::{BlockKind, ProviderEvent, TokenUsage};
 use serde::Deserialize;

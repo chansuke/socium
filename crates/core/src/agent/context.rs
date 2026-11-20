@@ -1,13 +1,13 @@
 use crate::agent::state::{ConversationSummary, ConversationSummaryState};
 use crate::agent::turn::extract_text;
-use crate::agent::types::{
-    AgentMessageRequest, ContentBlock, Message, MessageContent, Role, strip_thinking,
-};
 use crate::constants::{
     DEFAULT_CONTEXT_WINDOW_TOKENS, MAX_SUMMARY_CHARACTERS, MAX_SUMMARY_LINE_CHARACTERS,
     MAX_SUMMARY_LINES, MIN_SHRUNK_TOOL_RESULT_CHARACTERS, TARGET_RECENT_CONTEXT_MESSAGES,
 };
-use crate::tools::ToolDefinition;
+use crate::conversation::ToolDefinition;
+use crate::conversation::{
+    AgentMessageRequest, ContentBlock, Message, MessageContent, Role, strip_thinking,
+};
 use std::io::{self, Error, ErrorKind};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -316,7 +316,8 @@ pub(crate) fn shrink_tool_results(blocks: &mut [ContentBlock], excess: usize) ->
         if keep + MARKER >= length {
             break;
         }
-        *content = elide_tool_output(content, keep, "to fit the context window");
+        *content =
+            crate::conversation::elide_tool_output(content, keep, "to fit the context window");
         let shortened = content.chars().count();
         if shortened >= length {
             break;
@@ -324,23 +325,6 @@ pub(crate) fn shrink_tool_results(blocks: &mut [ContentBlock], excess: usize) ->
         removed += length - shortened;
     }
     removed
-}
-
-/// Keeps the head and tail of a tool output within about `keep`
-/// characters, saying how much was left out and why.
-pub(crate) fn elide_tool_output(text: &str, keep: usize, why: &str) -> String {
-    let length = text.chars().count();
-    if length <= keep {
-        return text.to_string();
-    }
-    let head = keep / 2;
-    let tail = keep - head;
-    let start = text.chars().take(head).collect::<String>();
-    let end = text.chars().skip(length - tail).collect::<String>();
-    format!(
-        "{start}\n[... {} characters omitted {why}; ask for a narrower range to see them ...]\n{end}",
-        length - keep
-    )
 }
 
 fn compose_context(
@@ -692,7 +676,7 @@ fn truncate_summary_text(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::{ContextBudget, context_metrics_for_input, prepare_context_with_budget};
     use crate::agent::state::ConversationSummaryState;
-    use crate::agent::types::{ContentBlock, Message};
+    use crate::conversation::{ContentBlock, Message};
     use crate::tools::default_tools;
     use serde_json::json;
 
@@ -776,7 +760,7 @@ mod tests {
         assert!(matches!(
             prepared.messages.first(),
             Some(Message {
-                role: crate::agent::types::Role::User,
+                role: crate::conversation::Role::User,
                 ..
             })
         ));
@@ -955,8 +939,8 @@ mod tests {
         messages
             .iter()
             .filter_map(|message| match &message.content {
-                crate::agent::types::MessageContent::Blocks(blocks) => Some(blocks),
-                crate::agent::types::MessageContent::Text(_) => None,
+                crate::conversation::MessageContent::Blocks(blocks) => Some(blocks),
+                crate::conversation::MessageContent::Text(_) => None,
             })
             .flatten()
             .filter_map(|block| match block {

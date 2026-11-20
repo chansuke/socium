@@ -2,8 +2,8 @@
 //! the Timeline reads, rewind, compaction, and subagents.
 
 use crate::agent::state::{ConversationSummary, ConversationSummaryState};
-use crate::agent::types::{AgentMessageResponse, ContentBlock, Message, MessageContent};
 use crate::constants::PLAN_TOOL_NAME;
+use crate::conversation::{AgentMessageResponse, ContentBlock, Message, MessageContent};
 use crate::providers::ProviderResponse;
 use crate::providers::error::ProviderError;
 use crate::test_support::{ScriptedProvider, make_temp_dir, text_provider_response};

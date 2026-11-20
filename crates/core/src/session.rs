@@ -7,8 +7,8 @@ use crate::agent::state::{
     ConversationStateRef, check_state_file, load_json_file, lock_workspace, save_json_file,
     workspace_state_path,
 };
-use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
 use crate::constants::{CONVERSATION_STATE_FILE_NAME, STATE_DIR_NAME};
+use crate::conversation::{ContentBlock, Message, MessageContent, Role};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Error, ErrorKind};

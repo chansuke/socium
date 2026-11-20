@@ -8,7 +8,7 @@
 //! of that part, so the request side can put it back in the same place.
 
 use super::{encode_signature, generated_call_id};
-use crate::agent::types::{AgentMessageResponse, ContentBlock};
+use crate::conversation::{AgentMessageResponse, ContentBlock};
 use crate::providers::error::{ProviderError, describe_error};
 use crate::providers::{BlockKind, ProviderEvent, ProviderResponse, TokenUsage};
 use serde_json::Value;

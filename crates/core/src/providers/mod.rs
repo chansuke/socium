@@ -7,7 +7,7 @@ pub(crate) mod sse;
 #[cfg(test)]
 pub(crate) mod test_server;
 
-use crate::agent::types::{AgentMessageRequest, AgentMessageResponse};
+use crate::conversation::{AgentMessageRequest, AgentMessageResponse};
 use crate::models::{ModelConfig, ProviderConfig, Wire};
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::error::ProviderError;
@@ -130,7 +130,7 @@ pub(crate) trait Provider: Send + Sync {
     /// Whether this provider accepts thinking that `origin` wrote; `None`
     /// is history saved before origins were recorded. By default only its
     /// own, from any of its models.
-    fn reads_thinking_from(&self, origin: Option<&crate::agent::types::Origin>) -> bool {
+    fn reads_thinking_from(&self, origin: Option<&crate::conversation::Origin>) -> bool {
         origin.is_some_and(|origin| origin.provider == self.label())
     }
     async fn send_message(

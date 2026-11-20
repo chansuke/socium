@@ -1,10 +1,11 @@
 use crate::AgentProgress;
+use crate::conversation::ToolDefinition;
 use crate::tools::error::ToolError;
 use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_object_input, require_string_field,
 };
 use crate::tools::workspace::resolve_workspace_path;
-use crate::tools::{Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -806,7 +807,7 @@ fn git_worktree_is_dirty(workspace_root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::types::ContentBlock;
+    use crate::conversation::ContentBlock;
     use crate::test_support::{git_stdout, init_git_repo, make_temp_dir};
     use serde_json::json;
     use std::fs;

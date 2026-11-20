@@ -1,4 +1,4 @@
-use serde::Serialize;
+use crate::conversation::ToolDefinition;
 use serde_json::Value;
 
 pub(crate) mod apply_patch;
@@ -19,8 +19,8 @@ pub(crate) mod web_search;
 pub(crate) mod workspace;
 
 use crate::AgentProgress;
-use crate::agent::types::ContentBlock;
 use crate::constants::TEXT_EDITOR_TOOL_NAME;
+use crate::conversation::ContentBlock;
 use crate::tools::apply_patch::ApplyPatchTool;
 use crate::tools::error::ToolError;
 use crate::tools::find_symbol::FindSymbolTool;
@@ -31,23 +31,6 @@ use crate::tools::run_command::RunCommandTool;
 use crate::tools::search_text::SearchTextTool;
 use crate::tools::text_editor::TextEditorTool;
 use std::path::Path;
-
-/// A tool as every provider is offered it: a name, a description, and a
-/// JSON Schema for the input. A provider with a built-in form of a tool,
-/// such as Anthropic's text editor, swaps it in when the request is built;
-/// core never holds a provider's wire format.
-#[derive(Debug, Serialize, Clone)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    pub input_schema: Value,
-}
-
-impl ToolDefinition {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-}
 
 pub(crate) struct ToolContext<'a> {
     pub(crate) workspace_root: &'a Path,
