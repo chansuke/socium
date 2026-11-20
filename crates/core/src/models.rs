@@ -286,99 +286,141 @@ impl ModelRegistry {
         }
     }
 
-    /// Reads the registry file named by `SOCIUM_MODELS_FILE`, or the XDG
-    /// default. A missing default file means the built-in registry; a
-    /// missing explicitly named file is an error.
+    /// Reads the registry: the built-in entries, then every `*.toml` in
+    /// `models.d/` beside the models file in file-name order, then the
+    /// models file named by `SOCIUM_MODELS_FILE` or the XDG default. A
+    /// missing default file or directory adds nothing; a missing
+    /// explicitly named file is an error.
     pub(crate) fn load(lookup: &dyn Fn(&str) -> Option<String>) -> io::Result<Self> {
-        let explicit = lookup(MODELS_FILE_ENV).filter(|value| !value.is_empty());
-        let Some(path) = explicit
-            .as_ref()
-            .map(PathBuf::from)
-            .or_else(|| default_models_file(lookup))
-        else {
+        let Some((path, explicit)) = models_file(lookup) else {
             return Ok(Self::builtin());
         };
+        let mut layers = read_models_dir(&models_dir_beside(&path))?;
         match fs::read_to_string(&path) {
-            Ok(text) => Self::from_toml(&text).map_err(|message| {
-                Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("{}: {message}", path.display()),
-                )
+            Ok(text) => layers.push(Layer {
+                source: Some(path.display().to_string()),
+                text,
+                kind: LayerKind::ModelsFile,
             }),
-            Err(err) if err.kind() == ErrorKind::NotFound && explicit.is_none() => {
-                Ok(Self::builtin())
+            Err(err) if err.kind() == ErrorKind::NotFound && !explicit => {}
+            Err(err) => {
+                return Err(Error::new(
+                    err.kind(),
+                    format!("Cannot read {}: {err}", path.display()),
+                ));
             }
-            Err(err) => Err(Error::new(
-                err.kind(),
-                format!("Cannot read {}: {err}", path.display()),
-            )),
         }
+        Self::from_layers(&layers).map_err(|message| Error::new(ErrorKind::InvalidInput, message))
     }
 
     /// Overlays a `models.toml` on the built-in registry. Entries with a
     /// built-in name replace it in place.
+    #[cfg(test)]
     pub(crate) fn from_toml(text: &str) -> Result<Self, String> {
-        let raw: RawFile = toml::from_str(text).map_err(|err| err.to_string())?;
+        Self::from_layers(&[Layer {
+            source: None,
+            text: text.to_string(),
+            kind: LayerKind::ModelsFile,
+        }])
+    }
+
+    /// Overlays each layer on the built-in registry in order: a later
+    /// provider or alias replaces an earlier one of the same name.
+    /// Validation runs once, on the merged result, and an error names the
+    /// file the offending entry came from.
+    fn from_layers(layers: &[Layer]) -> Result<Self, String> {
         let mut registry = Self::builtin();
-        for (name, provider) in raw.providers {
-            let config = parse_provider(&name, provider)
-                .map_err(|message| format!("provider '{name}': {message}"))?;
-            registry.providers.insert(name, config);
-        }
-        let mut seen = Vec::new();
-        for model in raw.models {
-            let alias = model.alias.clone();
-            if seen.contains(&alias) {
-                return Err(format!("model alias '{alias}' is defined more than once"));
+        let mut origins = BTreeMap::<String, Option<&str>>::new();
+        let mut dir_providers = BTreeMap::<String, &str>::new();
+        let mut default_origin = None;
+        for layer in layers {
+            let source = layer.source.as_deref();
+            let at = |message: String| match source {
+                Some(source) => format!("{source}: {message}"),
+                None => message,
+            };
+            let raw: RawFile = toml::from_str(&layer.text).map_err(|err| at(err.to_string()))?;
+            if let Some(default) = raw.default {
+                if layer.kind == LayerKind::ModelsDir {
+                    return Err(at("default is only allowed in models.toml".into()));
+                }
+                registry.default = default;
+                default_origin = source;
             }
-            let config =
-                parse_model(model).map_err(|message| format!("model '{alias}': {message}"))?;
-            match registry.models.iter_mut().find(|m| m.alias == alias) {
-                Some(existing) => *existing = config,
-                None => registry.models.push(config),
+            for (name, provider) in raw.providers {
+                let config = parse_provider(&name, provider)
+                    .map_err(|message| at(format!("provider '{name}': {message}")))?;
+                if layer.kind == LayerKind::ModelsDir {
+                    let this = source.unwrap_or_default();
+                    if let Some(first) = dir_providers.insert(name.clone(), this) {
+                        return Err(format!(
+                            "provider '{name}' is defined in both {first} and {this}"
+                        ));
+                    }
+                }
+                registry.providers.insert(name, config);
             }
-            seen.push(alias);
+            let mut seen = Vec::new();
+            for model in raw.models {
+                let alias = model.alias.clone();
+                if seen.contains(&alias) {
+                    return Err(at(format!(
+                        "model alias '{alias}' is defined more than once"
+                    )));
+                }
+                let config = parse_model(model)
+                    .map_err(|message| at(format!("model '{alias}': {message}")))?;
+                match registry.models.iter_mut().find(|m| m.alias == alias) {
+                    Some(existing) => *existing = config,
+                    None => registry.models.push(config),
+                }
+                origins.insert(alias.clone(), source);
+                seen.push(alias);
+            }
         }
-        if let Some(default) = raw.default {
-            registry.default = default;
+        let at = |source: Option<&str>, message: String| match source {
+            Some(source) => format!("{source}: {message}"),
+            None => message,
+        };
+        for model in &registry.models {
+            registry
+                .validate_model(model)
+                .map_err(|message| at(origins.get(&model.alias).copied().flatten(), message))?;
         }
-        registry.validate()?;
+        if registry.find(&registry.default).is_none() {
+            return Err(at(
+                default_origin,
+                format!("default '{}' is not a registered alias", registry.default),
+            ));
+        }
         Ok(registry)
     }
 
-    fn validate(&self) -> Result<(), String> {
-        for model in &self.models {
-            let Some(provider) = self.providers.get(&model.provider) else {
-                return Err(format!(
-                    "model '{}': unknown provider '{}'",
-                    model.alias, model.provider
-                ));
-            };
-            let features = model.features;
-            if provider.wire != Wire::Anthropic
-                && (features.adaptive_thinking
-                    || features.eager_input_streaming
-                    || features.anthropic_text_editor)
-            {
-                return Err(format!(
-                    "model '{}': only the effort feature applies to the {} wire",
-                    model.alias,
-                    provider.wire.name()
-                ));
-            }
-            if let Some(compact) = &model.compact_model
-                && self.find(compact).is_none()
-            {
-                return Err(format!(
-                    "model '{}': compact_model '{compact}' is not a registered alias",
-                    model.alias
-                ));
-            }
-        }
-        if self.find(&self.default).is_none() {
+    fn validate_model(&self, model: &ModelConfig) -> Result<(), String> {
+        let Some(provider) = self.providers.get(&model.provider) else {
             return Err(format!(
-                "default '{}' is not a registered alias",
-                self.default
+                "model '{}': unknown provider '{}'",
+                model.alias, model.provider
+            ));
+        };
+        let features = model.features;
+        if provider.wire != Wire::Anthropic
+            && (features.adaptive_thinking
+                || features.eager_input_streaming
+                || features.anthropic_text_editor)
+        {
+            return Err(format!(
+                "model '{}': only the effort feature applies to the {} wire",
+                model.alias,
+                provider.wire.name()
+            ));
+        }
+        if let Some(compact) = &model.compact_model
+            && self.find(compact).is_none()
+        {
+            return Err(format!(
+                "model '{}': compact_model '{compact}' is not a registered alias",
+                model.alias
             ));
         }
         Ok(())
@@ -413,16 +455,70 @@ impl ModelRegistry {
     }
 }
 
-fn default_models_file(lookup: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    let config_home = lookup("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| {
-            lookup("HOME")
-                .filter(|home| !home.is_empty())
-                .map(|home| Path::new(&home).join(".config"))
-        })?;
-    Some(config_home.join("socium").join("models.toml"))
+/// Directory of extra registry files, read before `models.toml`.
+pub(crate) const MODELS_DIR_NAME: &str = "models.d";
+
+/// One registry file to overlay.
+struct Layer {
+    /// The path shown in errors; `None` for text given directly.
+    source: Option<String>,
+    text: String,
+    kind: LayerKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerKind {
+    /// `models.toml`, the only file that may set `default`.
+    ModelsFile,
+    /// A file in `models.d/`.
+    ModelsDir,
+}
+
+/// The models file and whether `SOCIUM_MODELS_FILE` named it.
+fn models_file(lookup: &dyn Fn(&str) -> Option<String>) -> Option<(PathBuf, bool)> {
+    if let Some(explicit) = lookup(MODELS_FILE_ENV).filter(|value| !value.is_empty()) {
+        return Some((PathBuf::from(explicit), true));
+    }
+    Some((
+        crate::settings::config_dir(lookup)?.join("models.toml"),
+        false,
+    ))
+}
+
+/// `models.d/` beside a models file.
+pub(crate) fn models_dir_beside(models_file: &Path) -> PathBuf {
+    models_file.with_file_name(MODELS_DIR_NAME)
+}
+
+/// The `*.toml` files of `dir` in file-name order; none when it is missing.
+fn read_models_dir(dir: &Path) -> io::Result<Vec<Layer>> {
+    let cannot_read = |path: &Path, err: Error| {
+        Error::new(err.kind(), format!("Cannot read {}: {err}", path.display()))
+    };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(cannot_read(dir, err)),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|err| cannot_read(dir, err))?.path();
+        if path.extension().is_some_and(|ext| ext == "toml") && path.is_file() {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let text = fs::read_to_string(&path).map_err(|err| cannot_read(&path, err))?;
+            Ok(Layer {
+                source: Some(path.display().to_string()),
+                text,
+                kind: LayerKind::ModelsDir,
+            })
+        })
+        .collect()
 }
 
 fn parse_provider(name: &str, raw: RawProvider) -> Result<ProviderConfig, String> {
@@ -888,6 +984,126 @@ context_window = 1000000
         fs::create_dir_all(dir.path().join("socium")).unwrap();
         fs::write(dir.path().join("socium/models.toml"), DEEPSEEK).unwrap();
         assert_eq!(ModelRegistry::load(&lookup).unwrap().default, "ds-flash");
+    }
+
+    /// A config home holding `files` (relative path, text) under `socium/`.
+    fn config_home(files: &[(&str, &str)]) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in files {
+            let path = dir.path().join("socium").join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        let home = dir.path().to_str().unwrap().to_string();
+        (dir, home)
+    }
+
+    fn load_from(home: &str) -> io::Result<ModelRegistry> {
+        ModelRegistry::load(&|key: &str| (key == "XDG_CONFIG_HOME").then(|| home.to_string()))
+    }
+
+    const LOCAL_A: &str = "[providers.a]\nwire = \"openai-chat\"\nbase_url = \"http://localhost:1/v1\"\n[[models]]\nalias = \"m\"\nprovider = \"a\"\nid = \"from-a\"\n[[models]]\nalias = \"only-a\"\nprovider = \"a\"\nid = \"a\"";
+    const LOCAL_B: &str = "[providers.b]\nwire = \"openai-chat\"\nbase_url = \"http://localhost:2/v1\"\n[[models]]\nalias = \"m\"\nprovider = \"b\"\nid = \"from-b\"";
+
+    #[test]
+    fn models_dir_files_load_in_name_order_under_models_toml() {
+        let (_dir, home) = config_home(&[
+            ("models.d/20-b.toml", LOCAL_B),
+            ("models.d/10-a.toml", LOCAL_A),
+            ("models.d/notes.txt", "not toml"),
+        ]);
+        let registry = load_from(&home).unwrap();
+        assert_eq!(registry.find("m").unwrap().id, "from-b");
+        assert_eq!(registry.find("only-a").unwrap().provider, "a");
+        assert!(registry.find("opus").is_some());
+
+        let (_dir, home) = config_home(&[
+            ("models.d/10-a.toml", LOCAL_A),
+            (
+                "models.toml",
+                "default = \"m\"\n[[models]]\nalias = \"m\"\nprovider = \"a\"\nid = \"from-file\"",
+            ),
+        ]);
+        let registry = load_from(&home).unwrap();
+        assert_eq!(registry.default_model().id, "from-file");
+        assert_eq!(registry.models.iter().filter(|m| m.alias == "m").count(), 1);
+    }
+
+    #[test]
+    fn models_toml_may_replace_a_provider_from_models_dir() {
+        let (_dir, home) = config_home(&[
+            ("models.d/a.toml", LOCAL_A),
+            (
+                "models.toml",
+                "[providers.a]\nwire = \"openai-chat\"\nbase_url = \"http://localhost:9/v1\"",
+            ),
+        ]);
+        let registry = load_from(&home).unwrap();
+        assert_eq!(
+            registry.provider("a").unwrap().base_url,
+            "http://localhost:9/v1"
+        );
+    }
+
+    #[test]
+    fn models_dir_errors_name_the_file() {
+        type Case<'a> = (&'a [(&'a str, &'a str)], &'a [&'a str]);
+        let cases: [Case; 5] = [
+            (
+                &[("models.d/x.toml", LOCAL_A), ("models.d/y.toml", LOCAL_A)],
+                &["provider 'a' is defined in both", "x.toml", "y.toml"],
+            ),
+            (
+                &[("models.d/x.toml", "default = \"opus\"")],
+                &["x.toml: default is only allowed in models.toml"],
+            ),
+            (
+                &[(
+                    "models.d/x.toml",
+                    "[[models]]\nalias = \"m\"\nprovider = \"anthropic\"\nid = \"1\"\n[[models]]\nalias = \"m\"\nprovider = \"anthropic\"\nid = \"2\"",
+                )],
+                &["x.toml: model alias 'm' is defined more than once"],
+            ),
+            (
+                &[(
+                    "models.d/x.toml",
+                    "[[models]]\nalias = \"m\"\nprovider = \"nowhere\"\nid = \"1\"",
+                )],
+                &["x.toml: model 'm': unknown provider 'nowhere'"],
+            ),
+            (
+                &[
+                    ("models.d/x.toml", LOCAL_A),
+                    ("models.toml", "default = \"missing\""),
+                ],
+                &["models.toml: default 'missing' is not a registered alias"],
+            ),
+        ];
+        for (files, expected) in cases {
+            let (_dir, home) = config_home(files);
+            let err = load_from(&home).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            for part in expected {
+                assert!(err.to_string().contains(part), "{files:?}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn models_dir_sits_beside_an_explicit_models_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("models.d")).unwrap();
+        fs::write(dir.path().join("models.d/a.toml"), LOCAL_A).unwrap();
+        let file = dir.path().join("custom.toml");
+        fs::write(&file, "").unwrap();
+        let file = file.to_str().unwrap().to_string();
+        let lookup = |key: &str| (key == MODELS_FILE_ENV).then(|| file.clone());
+        assert!(
+            ModelRegistry::load(&lookup)
+                .unwrap()
+                .find("only-a")
+                .is_some()
+        );
     }
 
     #[test]
