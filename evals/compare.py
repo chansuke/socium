@@ -62,6 +62,9 @@ def side_name(manifest, fallback):
     return manifest.get("label") or (manifest.get("harness_commit") or fallback)[:10]
 
 
+INPUT_KINDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
 def summary(results):
     def middle(values):
         values = [v for v in values if v is not None]
@@ -73,15 +76,21 @@ def summary(results):
         "unintended": sum(bool(r["unintended_changes"]) for r in results),
         "argument_errors": sum(r.get("tool_argument_errors", 0) for r in results),
         "cost": middle([r["cost_usd"] for r in results]),
+        # Unknown when any run's cost is.
+        "total_cost": None if any(r["cost_usd"] is None for r in results) else sum(r["cost_usd"] for r in results),
+        "cache_read": sum(r.get("usage", {}).get("cache_read_input_tokens", 0) for r in results),
+        "input": sum(sum(r.get("usage", {}).get(k, 0) for k in INPUT_KINDS) for r in results),
         "seconds": middle([r["seconds"] for r in results]),
     }
 
 
 def describe(s):
-    cost = "?" if s["cost"] is None else f"${s['cost']:.4f}"
+    dollars = lambda value: "?" if value is None else f"${value:.4f}"
+    cached = f"{100 * s['cache_read'] / s['input']:.0f}%" if s["input"] else "none"
     return (f"{s['passed']}/{s['runs']} passed, {s['unintended']} with unintended changes, "
             f"{s['argument_errors']} tool argument errors, "
-            f"median {cost} and {s['seconds']}s")
+            f"median {dollars(s['cost'])} and {s['seconds']}s, {cached} of input read from cache, "
+            f"{dollars(s['total_cost'])} in all")
 
 
 def compare(path_a, path_b, out=print):

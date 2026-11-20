@@ -69,7 +69,8 @@ A `halted` line records why a set stopped early.
 the two pass rates do not overlap. With a few runs per task that rarely
 happens, and it reports "no clear difference" with the counts. It refuses
 tasks whose files changed between the runs and lists tasks run on one side
-only.
+only. Each side also shows the share of its input tokens read from the
+prompt cache and its total cost.
 
 Run each side with `--comparison controlled` (the default) to compare
 harnesses or changes with the same model, endpoint, budget, and per-run cost cap;
