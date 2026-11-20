@@ -22,7 +22,7 @@ pub(super) fn runtime_path(path: &Path) -> bool {
 /// provide the sandbox backend itself.
 fn system_search_path() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    for path in env::split_paths(&env::var_os("PATH").unwrap_or_default())
+    for path in env::split_paths(&crate::host::search_path().unwrap_or_default())
         .chain([PathBuf::from("/usr/bin"), PathBuf::from("/bin")])
     {
         if path.is_absolute()
