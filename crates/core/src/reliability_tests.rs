@@ -1,4 +1,8 @@
 //! Offline acceptance scenarios for everyday work, not provider-quality evals.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "scenarios read the test environment and give a racing peer a head start"
+)]
 use super::*;
 use crate::agent::types::{AgentMessageResponse, ContentBlock, MessageContent};
 use crate::providers::{ProviderCapabilities, ProviderEvent, ProviderKind, ProviderResponse};
@@ -32,7 +36,7 @@ fn service(
         Box::new(ScriptedProvider::new(responses)),
         "test".into(),
         1000,
-        reqwest::Client::new(),
+        crate::test_support::http_client(),
     )
 }
 
@@ -226,7 +230,7 @@ async fn http_wait_is_cancellable_and_user_request_survives() {
         Box::new(WaitingProvider),
         "test".into(),
         1000,
-        reqwest::Client::new(),
+        crate::test_support::http_client(),
     );
     let c = agent.task_control();
     let worker = std::thread::spawn(move || {
@@ -653,7 +657,7 @@ fn open_session(root: &std::path::Path, start: SessionStart) -> Result<AgentServ
         crate::models::ModelRegistry::builtin(),
         Arc::new(|key| (key == "ANTHROPIC_API_KEY").then(|| "test".to_string())),
         None,
-        reqwest::Client::new(),
+        crate::test_support::http_client(),
     )
 }
 
@@ -1178,7 +1182,7 @@ async fn overload_and_rate_limits_are_retried_before_any_output() {
         Box::new(provider),
         "test".into(),
         1000,
-        reqwest::Client::new(),
+        crate::test_support::http_client(),
     );
     let mut warnings = Vec::new();
     let reply = agent
@@ -1213,7 +1217,7 @@ async fn invalid_requests_fail_at_once_and_retries_stop_after_four_attempts() {
             Box::new(provider),
             "test".into(),
             1000,
-            reqwest::Client::new(),
+            crate::test_support::http_client(),
         );
         assert!(agent.submit("hi".into()).await.is_err());
         assert_eq!(requests.lock().unwrap().len(), attempts);
@@ -1236,7 +1240,7 @@ async fn a_call_with_unparsable_arguments_is_reported_and_never_runs() {
         Box::new(provider),
         "test".into(),
         1000,
-        reqwest::Client::new(),
+        crate::test_support::http_client(),
     );
     assert_eq!(
         agent.submit("edit".into()).await.unwrap().text,
@@ -1256,7 +1260,7 @@ async fn a_reply_cut_at_the_output_limit_ends_the_turn_with_a_notice() {
         Box::new(ScriptedProvider::new(vec![Ok(cut)])),
         "test".into(),
         1000,
-        reqwest::Client::new(),
+        crate::test_support::http_client(),
     );
     let reply = agent.submit("long".into()).await.unwrap();
     assert_eq!(reply.text, "partial answer");
@@ -1294,7 +1298,7 @@ fn scripted_agent(
         Box::new(provider),
         "test".into(),
         max_tokens,
-        reqwest::Client::new(),
+        crate::test_support::http_client(),
     );
     (agent, requests)
 }
