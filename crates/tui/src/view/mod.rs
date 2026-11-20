@@ -1282,6 +1282,61 @@ mod tests {
         );
     }
 
+    /// A failed command buried in output: at 80x24, expanding it in the
+    /// focused pane shows the error from stderr and where the whole output
+    /// was saved, though stdout came first and ran far past the preview.
+    #[test]
+    fn at_80x24_a_failed_command_shows_its_stderr_and_where_its_output_was_saved() {
+        use socium_core::ActivityKind;
+        let event = crate::activity::tests::event;
+        let mut app = App::for_test();
+        app.push_message(crate::transcript::Speaker::User, "run the tests");
+        app.activity.apply(event(1, 0, ActivityKind::TurnStarted));
+        app.activity.apply(event(
+            1,
+            1,
+            ActivityKind::ToolStarted {
+                call_id: "c1".into(),
+                name: "run_command".into(),
+                input_summary: "cargo test".into(),
+            },
+        ));
+        app.activity
+            .attach_command_output(crate::transcript::CommandOutputState {
+                command: "cargo test".into(),
+                exit_code: Some(101),
+                timed_out: false,
+                truncated: true,
+                saved_output: Some(".socium/outputs/7-1-0".into()),
+                stdout_preview: (1..=500)
+                    .map(|n| format!("test case_{n} ... ok"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                stderr_preview: "error: test failed, to rerun pass `--lib`".into(),
+            });
+        app.activity.apply(event(
+            1,
+            1,
+            ActivityKind::ToolFinished {
+                call_id: "c1".into(),
+                name: "run_command".into(),
+                is_error: true,
+                elapsed_ms: 900,
+                summary: "exit 101".into(),
+                truncated: true,
+            },
+        ));
+        app.slot.focused = true;
+        app.slot.fullscreen = true;
+        app.activity.toggle_expanded();
+
+        let rows = render_at(&app, 80, 24);
+        let screen = rows.join("\n");
+        assert!(screen.contains("error: test failed"), "{screen}");
+        assert!(screen.contains(".socium/outputs/7-1-0.stdout"), "{screen}");
+        assert!(screen.contains("cut"), "{screen}");
+    }
+
     #[test]
     fn layouts_survive_tiny_terminals() {
         for (width, height) in [(1, 1), (20, 5), (80, 8), (200, 3)] {
