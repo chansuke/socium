@@ -1,9 +1,9 @@
 # Contributing
 
-Socium is an early Rust coding agent. It speaks three wire formats: Anthropic
+Socium is an early Rust coding agent. It speaks four wire formats: Anthropic
 Messages (Anthropic and compatible endpoints such as DeepSeek and Z.ai), OpenAI
-Chat Completions, and the OpenAI Responses API. Web search through DeepSeek is
-off unless turned on in `config.toml`.
+Chat Completions, the OpenAI Responses API, and Google's Gemini API. Web search
+through DeepSeek is off unless turned on in `config.toml`.
 
 Use Linux with Rust, Git, ripgrep, bubblewrap 0.12+, and working unprivileged user
 namespaces. The pinned Nix development shell supplies the compiler and native

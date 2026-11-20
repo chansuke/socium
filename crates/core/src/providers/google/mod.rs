@@ -6,7 +6,7 @@
 //! Gemini returns thought signatures on response parts and validates the
 //! ones on function calls in the current turn, so they are kept in the
 //! history as thinking blocks and put back on the same parts
-//! (https://ai.google.dev/gemini-api/docs/thought-signatures).
+//! (https://aistudio.google.com/docs/thought-signatures?generate-content=true).
 
 mod stream;
 
