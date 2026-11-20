@@ -1,5 +1,6 @@
 use crate::AgentProgress;
 use crate::constants::*;
+use crate::conversation::ToolDefinition;
 use crate::tools::error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{optional_bool_field, require_string_field};
@@ -7,7 +8,7 @@ use crate::tools::text_file::{read_utf8_file_and_mode, read_utf8_file_with_limit
 use crate::tools::workspace::{
     resolve_workspace_mutation_path, resolve_workspace_path, resolve_workspace_path_for_create,
 };
-use crate::tools::{Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext};
 use serde_json::{Value, json};
 #[cfg(test)]
 use std::fs;
@@ -549,7 +550,7 @@ fn find_hunk_position(lines: &[&str], needle: &[&str], search_start: usize) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::types::ContentBlock;
+    use crate::conversation::ContentBlock;
     use crate::test_support::{init_git_repo, make_temp_dir};
     use crate::tools::run_tool_call;
     use serde_json::json;

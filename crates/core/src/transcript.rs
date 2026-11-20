@@ -3,7 +3,7 @@
 //! with its result, and failed turns.
 
 use crate::activity::{summarize_tool_input, summarize_tool_result};
-use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
+use crate::conversation::{ContentBlock, Message, MessageContent, Role};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 

@@ -1,5 +1,6 @@
 use crate::AgentProgress;
 use crate::constants::*;
+use crate::conversation::ToolDefinition;
 use crate::tools::error::ToolError;
 use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_string_field,
@@ -8,7 +9,7 @@ use crate::tools::ripgrep::{
     SearchExecution, SearchMode, escape_regex, format_search_results, search_with_ripgrep,
 };
 use crate::tools::workspace::resolve_workspace_path;
-use crate::tools::{Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext};
 use serde_json::{Value, json};
 use std::path::Path;
 

@@ -6,7 +6,7 @@
 
 mod stream;
 
-use crate::agent::types::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
+use crate::conversation::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
 use crate::models::{ModelConfig, ModelFeatures, ProviderConfig};
 use crate::providers::anthropic::request_options::RequestOptions;
 use crate::providers::error::{ProviderError, api_error};
@@ -87,7 +87,7 @@ impl Provider for OpenAiResponsesProvider {
     }
 
     /// Encrypted reasoning items go back only to the model that wrote them.
-    fn reads_thinking_from(&self, origin: Option<&crate::agent::types::Origin>) -> bool {
+    fn reads_thinking_from(&self, origin: Option<&crate::conversation::Origin>) -> bool {
         origin.is_some_and(|origin| origin.provider == self.name && origin.model == self.model)
     }
 

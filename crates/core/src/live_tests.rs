@@ -10,8 +10,8 @@
     reason = "live tests read the real provider key and model from the environment"
 )]
 
-use crate::agent::types::{AgentMessageRequest, ContentBlock, Message};
 use crate::constants::TEXT_EDITOR_TOOL_NAME;
+use crate::conversation::{AgentMessageRequest, ContentBlock, Message};
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::{Provider, ProviderResponse, build_provider};
 use crate::tools::tools_for_model;
