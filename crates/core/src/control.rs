@@ -196,6 +196,10 @@ impl TaskControl {
     }
     /// Waits `delay` on purpose, such as a retry backoff, and ends early when
     /// the task is cancelled. Returns `false` when it was cancelled.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one deliberate delay, and it ends on cancellation"
+    )]
     pub(crate) async fn pause(&self, delay: Duration) -> bool {
         tokio::select! {
             biased;
@@ -286,6 +290,10 @@ mod tests {
         ])));
         assert!(!c.is_granted(&Grant::Command(vec!["cargo".into(), "build".into()])));
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the answer arrives late on purpose"
+    )]
     #[test]
     fn a_pending_request_waits_past_the_old_deadline_until_answered() {
         let c = TaskControl::default();

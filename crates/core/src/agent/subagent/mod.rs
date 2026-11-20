@@ -514,7 +514,7 @@ mod tests {
             Box::new(provider),
             "test".into(),
             1000,
-            reqwest::Client::new(),
+            crate::test_support::http_client(),
         );
         (service, requests)
     }
@@ -1724,7 +1724,7 @@ mod tests {
             Box::new(provider),
             "test".into(),
             1000,
-            reqwest::Client::new(),
+            crate::test_support::http_client(),
         );
         let mut finished = Vec::new();
 
@@ -1792,6 +1792,10 @@ mod tests {
             }
         }
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "each reply takes a while, so parallel subagents overlap"
+        )]
         async fn send_message(
             &self,
             client: &reqwest::Client,
@@ -1845,7 +1849,7 @@ mod tests {
             Box::new(provider),
             "test".into(),
             1000,
-            reqwest::Client::new(),
+            crate::test_support::http_client(),
         );
 
         let reply = service.submit("Look at all".into()).await.unwrap();
@@ -2034,7 +2038,7 @@ mod tests {
             Box::new(provider),
             "test".into(),
             1000,
-            reqwest::Client::new(),
+            crate::test_support::http_client(),
         );
         conversation.set(service.conversation_path()).unwrap();
         service.submit("Look around".into()).await.unwrap();
@@ -2149,7 +2153,7 @@ mod tests {
             Box::new(provider),
             "test".into(),
             1000,
-            reqwest::Client::new(),
+            crate::test_support::http_client(),
         );
         let mut seen = Vec::new();
 

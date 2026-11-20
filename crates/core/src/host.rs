@@ -2,6 +2,10 @@
 //! are read through the `EnvLookup` an `AgentService` is built with, which
 //! starts from [`process_env`]; the rest of this module is the host's own
 //! locations.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the one module that reads the process environment"
+)]
 
 use std::ffi::OsString;
 use std::path::PathBuf;

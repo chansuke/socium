@@ -27,6 +27,17 @@ pub(crate) fn run(
     run_observed(command, cwd, timeout, control, &mut |_, _| Ok(()), &policy)
 }
 
+/// Both pipes are closed but the process has not exited yet, and no
+/// descriptor reports its exit, so `run_observed` checks again shortly.
+#[cfg(unix)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "no descriptor reports the exit of a child whose pipes are closed"
+)]
+fn wait_briefly_for_exit() {
+    std::thread::sleep(Duration::from_millis(1));
+}
+
 #[cfg(unix)]
 pub(crate) fn run_observed(
     command: &[String],
@@ -182,8 +193,7 @@ pub(crate) fn run_observed(
         })
         .collect();
         if fds.is_empty() {
-            // Both pipes closed but the process has not exited yet.
-            std::thread::sleep(Duration::from_millis(1));
+            wait_briefly_for_exit();
         } else {
             // SAFETY: `fds` holds live descriptors owned by the pipes above.
             unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 10) };

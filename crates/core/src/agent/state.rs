@@ -378,6 +378,16 @@ fn atomic_write_impl(
 const LOCK_RELEASE_WAIT: Duration = Duration::from_secs(2);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
+/// The lock's holder is a child this process started that has not run its
+/// program yet, and nothing reports when it lets go of the lock.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "no event reports when a child releases its copy of the lock"
+)]
+fn wait_before_retrying_lock() {
+    std::thread::sleep(LOCK_RETRY_INTERVAL);
+}
+
 /// Lock files this process holds. A process another thread starts keeps a
 /// copy of every open file descriptor from fork until exec, and the lock
 /// with it, so a released lock can still look held for that moment.
@@ -437,7 +447,7 @@ pub(crate) fn lock_workspace(root: &Path) -> io::Result<WorkspaceLock> {
                 if owner != Some(std::process::id()) || Instant::now() >= deadline {
                     return Err(in_use(owner));
                 }
-                std::thread::sleep(LOCK_RETRY_INTERVAL);
+                wait_before_retrying_lock();
             }
             Err(fs::TryLockError::Error(e)) => {
                 return Err(Error::other(format!(
@@ -504,6 +514,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the child holds its copy of the lock for a while on purpose"
+    )]
     fn the_lock_can_be_taken_again_while_a_child_started_under_it_has_not_run_yet() {
         use std::os::unix::process::CommandExt;
         let root = make_temp_dir("lock-child");

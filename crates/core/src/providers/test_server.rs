@@ -1,4 +1,8 @@
 //! A one-shot loopback HTTP server for provider tests.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the server paces its reply to test the client's idle timeout"
+)]
 
 /// How long a test server waits for its client before failing the test, so
 /// a client that never connects or never finishes its request cannot hang
