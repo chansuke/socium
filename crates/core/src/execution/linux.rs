@@ -176,6 +176,18 @@ pub(super) fn command(
                 ));
             }
         }
+        // The workspace, its state and its secrets are masked only at their
+        // canonical path, so a second path to the same directory would show
+        // them unmasked.
+        if let Some(alias) = &mount.alias
+            && (root.starts_with(&mount.source) || mount.source.starts_with(root))
+        {
+            return Err(io::Error::other(format!(
+                "sandbox.read_only lists {} through a symlink, and its target {} overlaps the workspace; list the target instead",
+                alias.display(),
+                mount.source.display()
+            )));
+        }
     }
     let paths = search_path(policy);
     let program = resolve(
@@ -330,9 +342,14 @@ pub(super) fn command(
     // Intentionally no inherited environment, including credentials, proxies,
     // agent sockets, loader variables and Git execution/configuration overrides.
     // The user's own sandbox.env settings are the only additions; settings
-    // validation keeps them away from PATH, HOME, TMPDIR and GIT_*.
-    for (name, value) in &policy.env {
-        cmd.env(name, value);
+    // validation keeps them away from PATH, HOME, TMPDIR and GIT_*. bwrap sets
+    // them in the child, so a loader variable such as LD_PRELOAD never reaches
+    // bwrap itself, which runs on the host before any isolation exists. They
+    // are read from a descriptor, not argv, because any user on the host can
+    // read a process's command line but not its environment.
+    let env_args = user_env_args(&policy.env)?;
+    if let Some(file) = &env_args {
+        cmd.arg("--args").arg(file.as_raw_fd().to_string());
     }
     cmd.arg("--seccomp")
         .arg(filter.as_raw_fd().to_string())
@@ -343,17 +360,50 @@ pub(super) fn command(
         .arg("--")
         .arg(program)
         .args(&argv[1..]);
-    // SAFETY: only async-signal-safe fcntl is used after fork. The owned filter
-    // stays alive with Command until spawn and bubblewrap closes it after use.
+    // SAFETY: only async-signal-safe fcntl is used after fork. The owned files
+    // stay alive with Command until spawn and bubblewrap closes them after use.
     unsafe {
         cmd.pre_exec(move || {
-            if libc::fcntl(filter.as_raw_fd(), libc::F_SETFD, 0) < 0 {
-                return Err(io::Error::last_os_error());
+            for fd in
+                std::iter::once(filter.as_raw_fd()).chain(env_args.as_ref().map(AsRawFd::as_raw_fd))
+            {
+                if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
             }
             Ok(())
         });
     }
     Ok(cmd)
+}
+
+/// `--setenv` arguments for the user's `sandbox.env`, NUL-separated in an
+/// anonymous file for bwrap's `--args`; `None` when there are none.
+fn user_env_args(env: &[(String, String)]) -> io::Result<Option<fs::File>> {
+    use std::io::{Seek, Write};
+    if env.is_empty() {
+        return Ok(None);
+    }
+    let mut args = Vec::new();
+    for (name, value) in env {
+        if name.contains('\0') || value.contains('\0') {
+            return Err(io::Error::other("sandbox.env cannot contain a NUL byte"));
+        }
+        for part in ["--setenv", name, value] {
+            args.extend_from_slice(part.as_bytes());
+            args.push(0);
+        }
+    }
+    // SAFETY: static nul-terminated name; a successful syscall returns a
+    // newly owned descriptor. No host pathname holds the values.
+    let fd = unsafe { libc::memfd_create(c"socium-env".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    file.write_all(&args)?;
+    file.rewind()?;
+    Ok(Some(file))
 }
 
 /// The main checkout's Git directory for a linked worktree at `root`, after

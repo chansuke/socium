@@ -33,7 +33,7 @@ What Socium protects, from whom, and what it leaves to you. The
 | Host home and credentials (`~/.ssh`, cloud and Git credentials, keyrings) | A command reads them and the model sends them on | Commands run in bubblewrap with a private HOME and only the workspace, system runtimes, and the directories you list in `sandbox.read_only`. The home directory itself cannot be listed. |
 | Provider API keys | A command or the model reads them | Keys stay in the parent process. Children get a fixed environment, never inherited variables. |
 | The network | A command exfiltrates data or fetches code | Network namespace and seccomp deny all sockets except connected stream and seqpacket pairs, which reach only their own peer. Datagram pairs, which could reach host pathname sockets, are denied. |
-| The host itself | An edit makes the host run code later: direnv loads `.envrc`, rust-analyzer runs `build.rs` and the build scripts and proc macros of the crates `Cargo.toml` and `Cargo.lock` pick, CI and hook managers run their files | Edits to these files always ask for approval, with the diff (`approval.protected`). Commands nobody reviewed run with them read-only. |
+| The host itself | An edit makes the host run code later: direnv loads `.envrc`, rust-analyzer runs `build.rs` and the build scripts and proc macros of the crates `Cargo.toml` and `Cargo.lock` pick, CI and hook managers run their files | Edits to these files always ask for approval, with the diff (`approval.protected`). Commands nobody reviewed run with them read-only, and a protected file such a command creates or replaces is moved to `.socium/quarantine`, or removed, when it ends. |
 | Secrets in the workspace (`.env`, keys) | The model reads them and they reach the provider | Reads by file tools, and searches and diffs that name them, always ask (`approval.sensitive`). Wider searches and diffs leave them out and say which. Commands nobody reviewed see them as empty files. An approved command can still read them. |
 | Git history and metadata | A command rewrites history, hooks, or config; the model reads credentials in `.git/config` | `.git` is read-only except during `git_commit`, which always asks and shows the diff, the new files, and the author. A linked worktree's main Git directory is mounted only after its back links are checked. |
 | Socium's own state (`.socium/`) | A command forges history, approvals, or settings; the model reads past sessions and sends them on | Hidden from every child process. File tools read only saved command output and `.socium/scratch`. |
@@ -62,11 +62,11 @@ workspace you accept, such as `cargo test`.
   `Cargo.toml`) runs on the host when the editor loads it. Only `build.rs` and
   `Cargo.toml` ask. Turn off rust-analyzer's build scripts and proc macros, or
   review such edits, in a workspace you do not trust.
-- A command that runs without asking creating a protected file that did not
-  exist when it started, such as a new crate's `Cargo.toml` or `build.rs`.
-  Existing protected files are read-only to it; new ones are not. Nor is the
-  file a protected name links to, such as `manifest.toml` behind a
-  `Cargo.toml` link.
+- A command that runs without asking changing the file a protected name links
+  to, such as `manifest.toml` behind a `Cargo.toml` link. A protected file it
+  creates or replaces is moved to `.socium/quarantine` only when it ends, so a
+  host tool watching the workspace can still run it while the command runs.
+  A protected file your editor saves while such a command runs is moved too.
 - Instructions planted in the workspace that persuade the model to propose
   harmful but sandboxed work. Read approval requests before answering.
 - Hardlinks into the workspace, a compromised kernel, hostile processes running
