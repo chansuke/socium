@@ -12,3 +12,9 @@
 .socium/
 *.bak
 __pycache__/
+node_modules/
+**/dist/
+.expo/
+.env.eas-simulator
+/apps/mobile/android/
+/apps/mobile/ios/
