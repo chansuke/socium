@@ -239,6 +239,10 @@ mod tests {
             Some((SlashAction::Model, Some("ds-flash")))
         );
         assert!(find("/models").is_none());
+        assert_eq!(
+            parsed("/model opencode/claude-haiku-5-5"),
+            Some((SlashAction::Model, Some("opencode/claude-haiku-5-5")))
+        );
     }
 
     #[test]
