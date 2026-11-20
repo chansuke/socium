@@ -1,5 +1,5 @@
-use crate::agent::state::{atomic_write_with_mode, load_json_file, save_json_file};
-use crate::tools::workspace::{resolve_workspace_mutation_path, resolve_workspace_path_for_create};
+use crate::state::{atomic_write_with_mode, load_json_file, save_json_file};
+use crate::workspace::{resolve_workspace_mutation_path, resolve_workspace_path_for_create};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -90,7 +90,7 @@ impl EditRecord {
 }
 
 fn history_path(root: &Path) -> Result<PathBuf, String> {
-    crate::agent::state::workspace_state_path(root, "edit_history.json").map_err(|e| e.to_string())
+    crate::state::workspace_state_path(root, "edit_history.json").map_err(|e| e.to_string())
 }
 
 fn load_history(root: &Path) -> Result<(PathBuf, EditHistoryState), String> {
