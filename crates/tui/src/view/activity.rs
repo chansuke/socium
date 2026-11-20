@@ -81,9 +81,14 @@ pub(crate) fn activity_lines(
     }
 
     let max_start = lines.len().saturating_sub(height);
-    let start = match (model.selected, selected_range) {
+    // Following the newest item shows the end, unless it was expanded: what
+    // it says first (a command's status and stderr) matters more than its
+    // last lines.
+    let head_first = model.selected.is_some()
+        || selected.is_some_and(|index| model.items.get(index).is_some_and(|item| item.expanded));
+    let start = match (head_first, selected_range) {
         // Keep the head of the selected item visible, with some context above.
-        (Some(_), Some((first, end))) => {
+        (true, Some((first, end))) => {
             let preferred = first.saturating_sub(height / 3);
             let fits_end = end.saturating_sub(height);
             preferred.max(fits_end.min(first)).min(max_start)
