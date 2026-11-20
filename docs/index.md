@@ -11,6 +11,7 @@ Start with the [README](../README.md) for installation, then [Using Socium](usag
 - [Threat model](threat-model.md): what is trusted, what is protected and how, and what is not.
 - [Security policy](../SECURITY.md): trust boundaries and private vulnerability reporting.
 - [Contributing](../CONTRIBUTING.md): development and verification.
+- [Feature map](feature-map.md): each feature, how a user reaches it, its code, and what checks it.
 - [Verification checklist](verification.md): checks a diff triggers, each from a bug fixed here before.
 - [Benchmark](../bench/README.md): what a run costs apart from the model, compared with the parent commit in CI.
 - [Evaluation](../evals/README.md): fixed tasks with hidden checks, run against a real model within a budget.
