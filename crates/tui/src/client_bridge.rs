@@ -3,12 +3,12 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use socium_core::plan::PlanView;
 use socium_core::{
-    ActivityEvent, ActivityKind, AgentError, AgentProgress, AgentService, ApprovalAnswer,
-    SessionStart, TranscriptEntry, TranscriptRole,
+    ActivityKind, AgentError, AgentProgress, AgentService, ApprovalAnswer, SessionStart,
+    TranscriptEntry, TranscriptRole,
 };
 use std::io::{self, BufRead, Write};
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 #[derive(Deserialize)]
@@ -29,14 +29,35 @@ enum Command {
         text: String,
     },
     Cancel,
-    /// With `forSession`, an allow also allows what the request offered
-    /// (`sessionOption`) until Socium exits.
     Approve {
         request: u64,
         allow: bool,
-        #[serde(default, rename = "forSession")]
-        for_session: bool,
+        #[serde(default)]
+        scope: ApprovalScope,
     },
+    SetModel {
+        model: String,
+    },
+}
+
+/// How far an allow reaches; a denial ignores it.
+#[derive(Deserialize, Default, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum ApprovalScope {
+    #[default]
+    Once,
+    /// What the request offered as its session option, until Socium exits.
+    Session,
+}
+
+impl ApprovalScope {
+    fn answer(self, allow: bool) -> ApprovalAnswer {
+        match (allow, self) {
+            (false, _) => ApprovalAnswer::Deny,
+            (true, Self::Once) => ApprovalAnswer::AllowOnce,
+            (true, Self::Session) => ApprovalAnswer::AllowForSession,
+        }
+    }
 }
 
 #[expect(
@@ -76,6 +97,12 @@ pub(crate) async fn run() -> color_eyre::Result<()> {
                 let result = match command {
                     Command::New => agent.clear().map_err(AgentError::from),
                     Command::Resume { session } => agent.resume_session(&session).map(|_| ()),
+                    Command::SetModel { model } => agent.switch_model(&model).map(|switch| {
+                        // The gateway shows these with the session that follows.
+                        if !switch.warnings.is_empty() {
+                            emit(json!({"type": "outcome", "notices": switch.warnings}));
+                        }
+                    }),
                     _ => Err(io::Error::other("There is no active turn.").into()),
                 };
                 if result.is_ok() {
@@ -95,24 +122,14 @@ async fn run_turn(
 ) -> color_eyre::Result<AgentService> {
     let control = agent.task_control();
     control.reset_cancellation();
-    // Warnings of the turn, such as an MCP server that did not start or a
-    // renewed token that could not be saved, end up in its notices.
-    let warnings = Arc::new(Mutex::new(Vec::new()));
-    let collected = warnings.clone();
     let mut task = tokio::spawn(async move {
+        let mut publisher = ProgressPublisher::default();
         let result = agent
-            .submit_with_progress(text, move |progress| match forward(progress) {
-                Forward::Event(event) => emit(event),
-                Forward::Warning(message) => collected
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner())
-                    .push(message),
-                Forward::Nothing => {}
-            })
+            .submit_with_progress(text, |progress| publisher.publish(progress))
             .await;
-        (agent, result)
+        (agent, result, publisher.warnings)
     });
-    let (mut agent, result) = loop {
+    let (mut agent, result, warnings) = loop {
         tokio::select! {
             result = &mut task => break result?,
             request = receive.recv() => {
@@ -125,8 +142,12 @@ async fn run_turn(
                         control.cancel();
                         Ok(())
                     }
-                    Command::Approve { request, allow, for_session } if !control.is_cancelled() => {
-                        if control.answer(request, approval_answer(allow, for_session)) {
+                    Command::Approve {
+                        request,
+                        allow,
+                        scope,
+                    } if !control.is_cancelled() => {
+                        if control.answer(request, scope.answer(allow)) {
                             Ok(())
                         } else {
                             Err(io::Error::other("This approval request has already closed.").into())
@@ -144,7 +165,6 @@ async fn run_turn(
         Err(AgentError::Cancelled) => vec!["Turn stopped.".to_string()],
         Err(error) => vec![error.to_string()],
     };
-    let warnings = std::mem::take(&mut *warnings.lock().unwrap_or_else(|err| err.into_inner()));
     emit(json!({"type": "outcome", "notices": turn_notices(warnings, outcome)}));
     publish_session(&mut agent)?;
     Ok(agent)
@@ -162,6 +182,18 @@ fn publish_session(agent: &mut AgentService) -> io::Result<()> {
             })
         })
         .collect::<Vec<_>>();
+    let models = agent
+        .available_models()
+        .into_iter()
+        .map(|model| {
+            json!({
+                "alias": model.alias,
+                "provider": model.provider,
+                "description": model.description,
+                "unavailable": model.unavailable,
+            })
+        })
+        .collect::<Vec<_>>();
     let messages = agent
         .transcript_entries()
         .into_iter()
@@ -172,6 +204,8 @@ fn publish_session(agent: &mut AgentService) -> io::Result<()> {
         "session": agent.session_id(),
         "title": agent.session_name(),
         "model": agent.active_model().alias,
+        "models": models,
+        "plan": agent.plan().map(compact_plan),
         "sessions": sessions,
         "messages": messages,
         "warnings": agent.startup_warnings(),
@@ -190,43 +224,114 @@ fn entry(entry: TranscriptEntry) -> Value {
     json!({"role": role, "text": entry.text})
 }
 
-/// What one progress event becomes for the gateway.
-enum Forward {
-    Event(Value),
-    /// A warning, which goes into the turn's notices.
-    Warning(String),
-    Nothing,
+/// The plan without per-task history, which clients do not show.
+fn compact_plan(plan: PlanView) -> Value {
+    let tasks = plan
+        .rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "depth": row.depth,
+                "title": row.title,
+                "status": row.status,
+                "group": row.is_group,
+                "note": row.note,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "goal": plan.goal,
+        "revision": plan.revision,
+        "done": plan.progress.done,
+        "tasks": tasks,
+    })
 }
 
-fn forward(progress: AgentProgress) -> Forward {
-    Forward::Event(match progress {
-        AgentProgress::AssistantText { text } => json!({"type": "delta", "text": text}),
-        AgentProgress::ToolCallRecorded(tool) => json!({"type": "tool", "message": entry(tool)}),
-        AgentProgress::ApprovalRequested {
-            request_id,
-            tool,
-            summary,
-            input,
-            requested_by,
-            session_option,
-        } => json!({
-            "type": "approval",
-            "request": request_id,
-            "tool": tool,
-            "summary": summary,
-            "input": input,
-            "requestedBy": requested_by,
-            "sessionOption": session_option,
-        }),
-        AgentProgress::ApprovalResolved { request_id, .. } => {
-            json!({"type": "approval_resolved", "request": request_id})
+/// Longest activity detail sent to clients, in characters.
+const MAX_ACTIVITY_DETAIL: usize = 120;
+
+/// Forwards progress as client events. Activity is one line of what the
+/// agent does now, sent only when it changes.
+#[derive(Default)]
+struct ProgressPublisher {
+    activity: Option<(&'static str, Option<String>)>,
+    /// Warnings of the turn, such as an MCP server that did not start or a
+    /// renewed token that could not be saved, which end up in its notices.
+    warnings: Vec<String>,
+}
+
+impl ProgressPublisher {
+    fn publish(&mut self, progress: AgentProgress) {
+        let event = match progress {
+            AgentProgress::AssistantText { text } => {
+                self.activity("responding", None);
+                json!({"type": "delta", "text": text})
+            }
+            AgentProgress::ToolCallRecorded(tool) => {
+                json!({"type": "tool", "message": entry(tool)})
+            }
+            AgentProgress::ApprovalRequested {
+                request_id,
+                tool,
+                summary,
+                input,
+                requested_by,
+                session_option,
+            } => {
+                self.activity("approval", Some(&tool));
+                json!({
+                    "type": "approval",
+                    "request": request_id,
+                    "tool": tool,
+                    "summary": summary,
+                    "input": input,
+                    "requestedBy": requested_by,
+                    "sessionOption": session_option,
+                })
+            }
+            AgentProgress::ApprovalResolved { request_id, .. } => {
+                // The call goes on (or reports its refusal) after the answer.
+                if let Some(("approval", tool)) = self.activity.clone() {
+                    self.activity("tool", tool.as_deref());
+                }
+                json!({"type": "approval_resolved", "request": request_id})
+            }
+            AgentProgress::Activity(event) => match event.kind {
+                ActivityKind::PlanUpdated { plan } => {
+                    json!({"type": "plan", "plan": compact_plan(plan)})
+                }
+                ActivityKind::Warning { message } => {
+                    self.warnings.push(message);
+                    return;
+                }
+                _ => return,
+            },
+            AgentProgress::ModelRequestStarted { provider, .. } => {
+                return self.activity("requesting", Some(&provider));
+            }
+            AgentProgress::ThinkingText { .. } => return self.activity("thinking", None),
+            AgentProgress::ToolCallStarted { name } => return self.activity("tool", Some(&name)),
+            AgentProgress::CommandStarted { command, .. } => {
+                return self.activity("command", Some(&command));
+            }
+            AgentProgress::CompactionStarted => return self.activity("compacting", None),
+            _ => return,
+        };
+        emit(event);
+    }
+
+    fn activity(&mut self, phase: &'static str, detail: Option<&str>) {
+        let detail = detail.map(|text| text.chars().take(MAX_ACTIVITY_DETAIL).collect::<String>());
+        let next = Some((phase, detail));
+        if self.activity == next {
+            return;
         }
-        AgentProgress::Activity(ActivityEvent {
-            kind: ActivityKind::Warning { message },
-            ..
-        }) => return Forward::Warning(message),
-        _ => return Forward::Nothing,
-    })
+        self.activity = next;
+        if let Some((phase, detail)) = &self.activity {
+            emit(json!({"type": "activity", "phase": phase, "detail": detail}));
+        }
+    }
 }
 
 /// The turn's warnings, each once, then what its outcome says.
@@ -238,16 +343,6 @@ fn turn_notices(warnings: Vec<String>, outcome: Vec<String>) -> Vec<String> {
         }
     }
     notices
-}
-
-/// The answer to an approval request: allowing for the session only
-/// with `allow`.
-fn approval_answer(allow: bool, for_session: bool) -> ApprovalAnswer {
-    match (allow, for_session) {
-        (false, _) => ApprovalAnswer::Deny,
-        (true, false) => ApprovalAnswer::AllowOnce,
-        (true, true) => ApprovalAnswer::AllowForSession,
-    }
 }
 
 fn respond(id: &str, result: Result<(), AgentError>) {
@@ -263,36 +358,27 @@ fn emit(value: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use socium_core::ActivityEvent;
 
-    fn warning(message: &str) -> AgentProgress {
+    fn activity(kind: ActivityKind) -> AgentProgress {
         AgentProgress::Activity(ActivityEvent {
             turn_id: 1,
             round: 0,
             at_ms: 0,
             agent: None,
-            kind: ActivityKind::Warning {
-                message: message.into(),
-            },
+            kind,
         })
     }
 
     #[test]
     fn warnings_of_a_turn_reach_its_notices() {
         let text = "MCP server github needs you to log in: run socium mcp login github";
-        let Forward::Warning(message) = forward(warning(text)) else {
-            panic!("a warning is forwarded");
-        };
-        assert_eq!(message, text);
-        assert!(matches!(
-            forward(AgentProgress::Activity(ActivityEvent {
-                turn_id: 1,
-                round: 0,
-                at_ms: 0,
-                agent: None,
-                kind: ActivityKind::TurnStarted,
-            })),
-            Forward::Nothing
-        ));
+        let mut publisher = ProgressPublisher::default();
+        publisher.publish(activity(ActivityKind::Warning {
+            message: text.into(),
+        }));
+        publisher.publish(activity(ActivityKind::TurnStarted));
+        assert_eq!(publisher.warnings, [text]);
         assert_eq!(
             turn_notices(
                 vec![text.into(), "saved token".into(), text.into()],
@@ -303,49 +389,30 @@ mod tests {
     }
 
     #[test]
-    fn an_approval_offers_and_takes_the_session_option() {
-        let Forward::Event(event) = forward(AgentProgress::ApprovalRequested {
-            request_id: 7,
-            tool: "mcp__github__create_issue".into(),
-            summary: String::new(),
-            input: "Details".into(),
-            requested_by: None,
-            session_option: Some("`create_issue` of github".into()),
-        }) else {
-            panic!("an approval is an event");
-        };
-        assert_eq!(event["sessionOption"], "`create_issue` of github");
-        assert_eq!(event["request"], 7);
-
-        let request: Request = serde_json::from_str(
-            r#"{"id": "a", "action": "approve", "request": 7, "allow": true, "forSession": true}"#,
-        )
-        .unwrap();
-        let Command::Approve {
-            request,
-            allow,
-            for_session,
-        } = request.command
-        else {
-            panic!("an approval answer");
+    fn an_approval_answer_reaches_as_far_as_its_scope() {
+        let answer = |line: &str| {
+            let request: Request = serde_json::from_str(line).unwrap();
+            let Command::Approve { allow, scope, .. } = request.command else {
+                panic!("an approval answer");
+            };
+            scope.answer(allow)
         };
         assert_eq!(
-            (request, approval_answer(allow, for_session)),
-            (7, ApprovalAnswer::AllowForSession)
+            answer(
+                r#"{"id": "a", "action": "approve", "request": 7, "allow": true, "scope": "session"}"#
+            ),
+            ApprovalAnswer::AllowForSession
         );
-        // Older clients send no `forSession`.
-        let request: Request = serde_json::from_str(
-            r#"{"id": "a", "action": "approve", "request": 7, "allow": true}"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            request.command,
-            Command::Approve {
-                for_session: false,
-                ..
-            }
-        ));
-        assert_eq!(approval_answer(false, true), ApprovalAnswer::Deny);
-        assert_eq!(approval_answer(true, false), ApprovalAnswer::AllowOnce);
+        // Older clients send no scope.
+        assert_eq!(
+            answer(r#"{"id": "a", "action": "approve", "request": 7, "allow": true}"#),
+            ApprovalAnswer::AllowOnce
+        );
+        assert_eq!(
+            answer(
+                r#"{"id": "a", "action": "approve", "request": 7, "allow": false, "scope": "session"}"#
+            ),
+            ApprovalAnswer::Deny
+        );
     }
 }
