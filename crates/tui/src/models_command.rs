@@ -7,6 +7,10 @@ use std::io::Write;
 use std::path::Path;
 use std::time::SystemTime;
 
+#[expect(
+    clippy::print_stderr,
+    reason = "socium models import reports errors on stderr and has no terminal UI"
+)]
 pub(crate) async fn main(command: ModelsImport) -> i32 {
     let (text, source) = match &command.from {
         Some(path) => match std::fs::read_to_string(path) {

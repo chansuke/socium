@@ -49,9 +49,11 @@ pub(crate) fn run_observed(
     fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
         // SAFETY: the pipe owns a live descriptor throughout both fcntl calls.
         let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
-        if flags < 0
-            || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-        {
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: as above.
+        if unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
@@ -204,7 +206,8 @@ pub(crate) fn run_observed(
     ))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     fn shell(script: &str, timeout: u64, control: &TaskControl) -> ProcessOutput {

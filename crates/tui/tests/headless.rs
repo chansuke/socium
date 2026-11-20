@@ -1,6 +1,10 @@
 //! `socium -p` end to end: the real binary against a local server that
 //! speaks the Anthropic streaming format. The environment is cleared, so no
 //! provider key or user configuration is read, and nothing leaves the host.
+#![expect(
+    clippy::unwrap_used,
+    reason = "fixture helpers outside #[test] functions fail the test by panicking"
+)]
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};

@@ -509,6 +509,8 @@ fn network_filter() -> io::Result<fs::File> {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: `fd` is the descriptor memfd_create just returned, owned by
+        // nothing else.
         let mut file = unsafe { fs::File::from_raw_fd(fd) };
         for (code, jt, jf, k) in instructions {
             file.write_all(&code.to_ne_bytes())?;

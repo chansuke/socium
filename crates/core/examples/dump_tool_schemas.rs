@@ -1,4 +1,6 @@
-fn main() {
+#[expect(clippy::print_stdout, reason = "the example prints the schemas")]
+fn main() -> serde_json::Result<()> {
     let tools = socium_core::tools::default_tools();
-    println!("{}", serde_json::to_string_pretty(&tools).unwrap());
+    println!("{}", serde_json::to_string_pretty(&tools)?);
+    Ok(())
 }

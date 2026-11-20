@@ -24,6 +24,10 @@ pub(crate) const SCHEMA_VERSION: u32 = 1;
 
 /// Exit status: 0 when the turn finished, 1 when it failed, 2 for a usage
 /// error, and 130 when it was cancelled.
+#[expect(
+    clippy::print_stderr,
+    reason = "socium -p reports errors on stderr and has no terminal UI"
+)]
 pub(crate) async fn main(start: SessionStart, print: Print, skip_permissions: bool) -> i32 {
     let mut stdin = String::new();
     if !std::io::stdin().is_terminal()
