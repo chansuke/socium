@@ -2295,6 +2295,7 @@ name = "socium-tui"
 version = "0.1.0"
 dependencies = [
  "color-eyre",
+ "proptest",
  "ratatui",
  "serde",
  "serde_json",

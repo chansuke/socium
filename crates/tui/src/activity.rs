@@ -1384,4 +1384,297 @@ pub(crate) mod tests {
         model.selected = Some(1);
         assert!(model.open_raw_view().is_ok());
     }
+
+    /// The states a tool row goes through, as `(from, event, to)`. `start`
+    /// is a row that does not exist yet. The property below checks that the
+    /// events core sends, in any order it can send them, make exactly these
+    /// moves; `scripts/verify diagrams` draws them.
+    pub(crate) const TOOL_TRANSITIONS: &[(&str, &str, &str)] = &[
+        ("start", "ToolIntentStarted", "Composing"),
+        ("Composing", "ToolIntentFinished", "Ready"),
+        ("Ready", "ToolStarted", "Running"),
+        ("start", "ToolStarted", "Running"),
+        ("Running", "ToolFinished", "Finished"),
+    ];
+
+    /// The same for the approval a tool row shows.
+    pub(crate) const APPROVAL_TRANSITIONS: &[(&str, &str, &str)] = &[
+        ("none", "ApprovalWaiting", "Waiting"),
+        ("Waiting", "ApprovalResolved", "Resolved"),
+    ];
+
+    /// The transitions as a Mermaid state diagram.
+    pub(crate) fn mermaid(transitions: &[(&str, &str, &str)], start: &str) -> String {
+        let mut text = String::from("stateDiagram-v2\n");
+        for (from, event, to) in transitions {
+            let from = if *from == start { "[*]" } else { from };
+            text.push_str(&format!("    {from} --> {to}: {event}\n"));
+        }
+        text
+    }
+
+    mod tool_states {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        /// Moves seen, as `(from, event, to)`.
+        type Moves = BTreeSet<(String, String, String)>;
+
+        /// What core sends for one call, in its order: the stream may show
+        /// the call being written, cut or finished; a call that runs then
+        /// starts, may wait for approval and report output, and finishes.
+        #[derive(Debug, Clone)]
+        struct Call {
+            streamed: bool,
+            stream_finished: bool,
+            runs: bool,
+            asks: bool,
+            outputs: usize,
+        }
+
+        fn call() -> impl Strategy<Value = Call> {
+            (
+                any::<bool>(),
+                any::<bool>(),
+                any::<bool>(),
+                any::<bool>(),
+                0..3usize,
+            )
+                .prop_map(|(streamed, stream_finished, runs, asks, outputs)| Call {
+                    streamed,
+                    stream_finished,
+                    // A call is run only once the stream has finished it.
+                    runs: runs && (!streamed || stream_finished),
+                    asks,
+                    outputs,
+                })
+        }
+
+        fn events_of(index: usize, call: &Call) -> Vec<ActivityKind> {
+            let id = format!("call-{index}");
+            let mut events = Vec::new();
+            if call.streamed {
+                events.push(ActivityKind::ToolIntentStarted {
+                    block: index,
+                    call_id: id.clone(),
+                    name: "run_command".into(),
+                });
+                if call.stream_finished {
+                    events.push(ActivityKind::ToolIntentFinished { block: index });
+                }
+            }
+            if call.runs {
+                events.push(ActivityKind::ToolStarted {
+                    call_id: id.clone(),
+                    name: "run_command".into(),
+                    input_summary: "cargo test".into(),
+                });
+                if call.asks {
+                    events.push(ActivityKind::ApprovalWaiting {
+                        call_id: id.clone(),
+                        tool: "run_command".into(),
+                    });
+                    events.push(ActivityKind::ApprovalResolved {
+                        call_id: id.clone(),
+                        approved: true,
+                        waited_ms: 5,
+                    });
+                }
+                for _ in 0..call.outputs {
+                    events.push(ActivityKind::CommandOutput {
+                        call_id: id.clone(),
+                        stdout_bytes: 10,
+                        stderr_bytes: 0,
+                    });
+                }
+                events.push(ActivityKind::ToolFinished {
+                    call_id: id,
+                    name: "run_command".into(),
+                    is_error: false,
+                    elapsed_ms: 7,
+                    summary: "ok".into(),
+                    truncated: false,
+                });
+            }
+            events
+        }
+
+        fn kind_name(kind: &ActivityKind) -> &'static str {
+            match kind {
+                ActivityKind::ToolIntentStarted { .. } => "ToolIntentStarted",
+                ActivityKind::ToolIntentDelta { .. } => "ToolIntentDelta",
+                ActivityKind::ToolIntentFinished { .. } => "ToolIntentFinished",
+                ActivityKind::ToolStarted { .. } => "ToolStarted",
+                ActivityKind::ApprovalWaiting { .. } => "ApprovalWaiting",
+                ActivityKind::ApprovalResolved { .. } => "ApprovalResolved",
+                ActivityKind::CommandOutput { .. } => "CommandOutput",
+                ActivityKind::ToolFinished { .. } => "ToolFinished",
+                _ => "other",
+            }
+        }
+
+        /// Each tool row's state and approval, by call ID.
+        fn states(model: &ActivityModel) -> BTreeMap<String, (&'static str, &'static str)> {
+            model
+                .items
+                .iter()
+                .filter_map(|item| match &item.kind {
+                    ItemKind::Tool(tool) => Some((
+                        tool.call_id.clone(),
+                        (
+                            match tool.state {
+                                ToolState::Composing => "Composing",
+                                ToolState::Ready => "Ready",
+                                ToolState::Running => "Running",
+                                ToolState::Finished { .. } => "Finished",
+                            },
+                            match tool.approval {
+                                None => "none",
+                                Some(ApprovalState::Waiting) => "Waiting",
+                                Some(ApprovalState::Resolved { .. }) => "Resolved",
+                            },
+                        ),
+                    )),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Interleaves the calls' events, keeping each call's own order,
+        /// as a batch of concurrent tools does.
+        fn interleave(mut queues: Vec<Vec<ActivityKind>>, picks: &[usize]) -> Vec<ActivityKind> {
+            let mut out = Vec::new();
+            let mut pick = picks.iter().cycle();
+            while queues.iter().any(|queue| !queue.is_empty()) {
+                let live: Vec<usize> = (0..queues.len())
+                    .filter(|i| !queues[*i].is_empty())
+                    .collect();
+                let chosen = live[pick.next().copied().unwrap_or(0) % live.len()];
+                out.push(queues[chosen].remove(0));
+            }
+            out
+        }
+
+        fn observe(calls: &[Call], picks: &[usize]) -> (Moves, Moves, ActivityModel) {
+            let mut model = ActivityModel::default();
+            let event = |kind| socium_core::ActivityEvent {
+                turn_id: 1,
+                round: 1,
+                at_ms: 0,
+                agent: None,
+                kind,
+            };
+            model.apply(event(ActivityKind::TurnStarted));
+            model.apply(event(ActivityKind::RoundStarted { model: "m".into() }));
+            let queues = calls
+                .iter()
+                .enumerate()
+                .map(|(i, call)| events_of(i, call))
+                .collect();
+            let mut tools = BTreeSet::new();
+            let mut approvals = BTreeSet::new();
+            for kind in interleave(queues, picks) {
+                let name = kind_name(&kind);
+                let before = states(&model);
+                model.apply(event(kind));
+                for (id, (state, approval)) in states(&model) {
+                    let (old_state, old_approval) =
+                        before.get(&id).copied().unwrap_or(("start", "none"));
+                    if old_state != state {
+                        tools.insert((old_state.to_string(), name.to_string(), state.to_string()));
+                    }
+                    if old_approval != approval {
+                        approvals.insert((
+                            old_approval.to_string(),
+                            name.to_string(),
+                            approval.to_string(),
+                        ));
+                    }
+                }
+            }
+            (tools, approvals, model)
+        }
+
+        fn table(transitions: &[(&str, &str, &str)]) -> Moves {
+            transitions
+                .iter()
+                .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+                .collect()
+        }
+
+        proptest! {
+            #[test]
+            fn tool_rows_move_only_as_the_transition_table_says(
+                calls in prop::collection::vec(call(), 1..4),
+                picks in prop::collection::vec(0..4usize, 1..12),
+            ) {
+                let (tools, approvals, model) = observe(&calls, &picks);
+                prop_assert!(tools.is_subset(&table(TOOL_TRANSITIONS)), "{tools:?}");
+                prop_assert!(approvals.is_subset(&table(APPROVAL_TRANSITIONS)), "{approvals:?}");
+                for (id, (state, approval)) in states(&model) {
+                    let index: usize = id.trim_start_matches("call-").parse().unwrap();
+                    let call = &calls[index];
+                    let expected = match (call.runs, call.streamed, call.stream_finished) {
+                        (true, _, _) => "Finished",
+                        (false, true, true) => "Ready",
+                        (false, true, false) => "Composing",
+                        (false, false, _) => unreachable!("a call that neither streams nor runs has no row"),
+                    };
+                    prop_assert_eq!(state, expected, "{:?}", call);
+                    prop_assert_eq!(approval, if call.runs && call.asks { "Resolved" } else { "none" });
+                }
+            }
+        }
+
+        /// Every move in the tables happens for some calls, so the drawn
+        /// diagram has no edge the app never takes.
+        #[test]
+        fn every_listed_transition_happens() {
+            let all = [
+                Call {
+                    streamed: true,
+                    stream_finished: true,
+                    runs: true,
+                    asks: true,
+                    outputs: 1,
+                },
+                Call {
+                    streamed: false,
+                    stream_finished: false,
+                    runs: true,
+                    asks: false,
+                    outputs: 0,
+                },
+            ];
+            let (tools, approvals, _) = observe(&all, &[0]);
+            assert_eq!(tools, table(TOOL_TRANSITIONS));
+            assert_eq!(approvals, table(APPROVAL_TRANSITIONS));
+        }
+
+        /// `scripts/verify diagrams` sets `SOCIUM_VERIFY_DIR` to keep the
+        /// diagrams; a plain `cargo test` writes nothing.
+        #[test]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the verify script names the output directory through the environment"
+        )]
+        fn the_state_diagrams_are_written_for_review() {
+            let Some(dir) = std::env::var_os("SOCIUM_VERIFY_DIR") else {
+                return;
+            };
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("tool-state.mmd"),
+                mermaid(TOOL_TRANSITIONS, "start"),
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("tool-approval.mmd"),
+                mermaid(APPROVAL_TRANSITIONS, "none"),
+            )
+            .unwrap();
+        }
+    }
 }
