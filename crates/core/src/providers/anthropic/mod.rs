@@ -210,9 +210,9 @@ fn native_text_editor(body: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tools_for_model;
     use crate::conversation::Message;
     use crate::models::ModelRegistry;
-    use crate::tools::tools_for_model;
 
     fn built_request(registry: &ModelRegistry, alias: &str) -> reqwest::Request {
         let model = registry.find(alias).unwrap();
