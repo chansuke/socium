@@ -87,6 +87,6 @@ Include the test iPhone when EAS prompts for devices. After the build finishes, 
 
 ## Architecture
 
-The apps share the client protocol and subscription state in `packages/client`. The Node gateway starts the Rust bridge in the chosen workspace. The bridge uses the same `AgentService`, session persistence, and approval checks as the terminal UI.
+The apps share the client protocol and subscription state in `packages/client`. Clients receive workspace updates as Server-Sent Events from `GET /api/events` and poll `GET /api/state` instead where the platform cannot read a streamed response, such as React Native, or where a proxy buffers the stream. The Node gateway starts the Rust bridge in the chosen workspace. The bridge uses the same `AgentService`, session persistence, and approval checks as the terminal UI.
 
 T3 Code's [shared client runtime](https://github.com/pingdotgg/t3code/tree/4d5bf2d5579f10a521e0ab4899fcef96de5e4b41/packages/client-runtime/src), [mobile connection commands](https://github.com/pingdotgg/t3code/blob/4d5bf2d5579f10a521e0ab4899fcef96de5e4b41/apps/mobile/src/connection/onboarding.ts), and [Web subscriptions](https://github.com/pingdotgg/t3code/blob/4d5bf2d5579f10a521e0ab4899fcef96de5e4b41/apps/web/src/hooks/useMediaQuery.ts) informed the split between platform UIs, transport, and shared state.

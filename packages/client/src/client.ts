@@ -1,4 +1,4 @@
-import type { Command, WorkspaceState } from "./protocol.ts";
+import type { Command, PairedDevice, WorkspaceState } from "./protocol.ts";
 
 class RequestError extends Error {
   readonly status: number;
@@ -9,11 +9,15 @@ class RequestError extends Error {
   }
 }
 
+/** How updates arrive: a Server-Sent Event stream, or polling where streams are unavailable. */
+export type Transport = "events" | "polling";
+
 interface ClientStatus {
   workspace: WorkspaceState | null;
   connectionError: string | null;
   commandError: string | null;
   sending: boolean;
+  transport: Transport | null;
 }
 
 const initialStatus: ClientStatus = {
@@ -21,12 +25,88 @@ const initialStatus: ClientStatus = {
   connectionError: null,
   commandError: null,
   sending: false,
+  transport: null,
 };
 
-export function createClient(base: string, token: string, fetchRequest = fetch) {
+export interface ClientOptions {
+  /** Set false to poll without trying the event stream. */
+  events?: boolean;
+  /** Reconnect after this long without a byte; the gateway sends a keepalive every 15 seconds. */
+  idleTimeout?: number;
+  /** Wait before reconnecting after a connection error. */
+  retryDelay?: number;
+  /** Wait between polls, and before reopening a stream the gateway ended. */
+  pollDelay?: number;
+}
+
+/** Streams that connected but sent nothing, in a row, before falling back to polling. */
+const maxSilentStreams = 2;
+
+/**
+ * Whether `next` is a later state than `current`. Revisions are
+ * `<instance>:<counter>`; a different instance is a restarted worker, whose
+ * state replaces the old one.
+ */
+function supersedes(next: WorkspaceState, current: WorkspaceState | null) {
+  if (!current) return true;
+  const split = (revision: string) => {
+    const at = revision.lastIndexOf(":");
+    return [revision.slice(0, at), Number(revision.slice(at + 1))] as const;
+  };
+  const [nextInstance, nextCount] = split(next.revision);
+  const [currentInstance, currentCount] = split(current.revision);
+  if (nextInstance !== currentInstance || !Number.isInteger(nextCount) || !Number.isInteger(currentCount)) {
+    return next.revision !== current.revision;
+  }
+  return nextCount > currentCount;
+}
+
+/**
+ * A reader for the response body, or null where the platform cannot read a
+ * streamed response, such as React Native's fetch.
+ */
+function bodyReader(response: Response) {
+  const body = (response as { body?: ReadableStream<Uint8Array> | null }).body;
+  if (!body || typeof body.getReader !== "function" || typeof TextDecoder !== "function") return null;
+  return body.getReader();
+}
+
+/** Calls `onData` with each event's data and `onBytes` for every chunk, keepalives included. */
+async function readEvents(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  onBytes: () => void,
+  onData: (data: string) => void,
+) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let data: string[] = [];
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    onBytes();
+    buffer += decoder.decode(value, { stream: true });
+    let end: number;
+    while ((end = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, end).replace(/\r$/, "");
+      buffer = buffer.slice(end + 1);
+      if (line === "") {
+        if (data.length) onData(data.join("\n"));
+        data = [];
+      } else if (line.startsWith("data:")) {
+        data.push(line.slice(5).replace(/^ /, ""));
+      }
+    }
+  }
+}
+
+export function createClient(base: string, token: string, fetchRequest = fetch, options: ClientOptions = {}) {
+  const { idleTimeout = 45_000, retryDelay = 2500, pollDelay = 650 } = options;
   let status = initialStatus;
+  let transport: Transport = options.events === false ? "polling" : "events";
+  let silentStreams = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let poll: AbortController | undefined;
+  let stream: AbortController | undefined;
   const listeners = new Set<() => void>();
 
   function update(changes: Partial<ClientStatus>) {
@@ -34,10 +114,21 @@ export function createClient(base: string, token: string, fetchRequest = fetch) 
     for (const listener of listeners) listener();
   }
 
+  /** Shows `workspace` unless a later state, such as a command's reply, is already shown. */
+  function receive(workspace: WorkspaceState) {
+    if (supersedes(workspace, status.workspace)) update({ workspace, connectionError: null });
+    else if (status.connectionError) update({ connectionError: null });
+  }
+
+  function connectionError(error: unknown) {
+    return error instanceof RequestError ? error.message : "Cannot reach the Socium host.";
+  }
+
   async function request(path: string, options?: RequestInit) {
     const response = await fetchRequest(`${base}/api/${path}`, {
       ...options,
       headers: {
+        ...(options?.headers as Record<string, string> | undefined),
         Authorization: `Bearer ${token}`,
         ...(options?.body ? { "Content-Type": "application/json" } : {}),
       },
@@ -50,8 +141,96 @@ export function createClient(base: string, token: string, fetchRequest = fetch) 
     return response;
   }
 
+  /** `request` with a deadline, without `AbortSignal.timeout`, which React Native lacks. */
+  async function requestWithin(path: string, options: RequestInit, milliseconds = 10_000) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), milliseconds);
+    try {
+      return await request(path, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  function connect() {
+    if (transport === "events") void listen();
+    else void refresh();
+  }
+
+  function disconnect() {
+    clearTimeout(timer);
+    timer = undefined;
+    const active = [poll, stream];
+    poll = undefined;
+    stream = undefined;
+    for (const controller of active) controller?.abort();
+  }
+
+  function fallBackToPolling() {
+    transport = "polling";
+    update({ transport });
+    void refresh();
+  }
+
+  async function listen() {
+    if (stream || poll || listeners.size === 0) return;
+    const controller = new AbortController();
+    stream = controller;
+    let idle: ReturnType<typeof setTimeout> | undefined;
+    const keepAlive = () => {
+      clearTimeout(idle);
+      idle = setTimeout(() => controller.abort(), idleTimeout);
+    };
+    keepAlive();
+    let next: "reconnect" | "poll" | "stop" = "reconnect";
+    let connected = false;
+    let received = false;
+    try {
+      const revision = status.workspace?.revision ?? "";
+      const response = await request(`events?after=${encodeURIComponent(revision)}`, {
+        headers: { Accept: "text/event-stream" },
+        signal: controller.signal,
+      });
+      const reader = bodyReader(response);
+      if (!reader) {
+        next = "poll";
+        return;
+      }
+      connected = true;
+      if (stream === controller) update({ transport: "events", connectionError: null });
+      await readEvents(reader, () => {
+        received = true;
+        keepAlive();
+      }, (data) => {
+        if (stream === controller) receive(JSON.parse(data));
+      });
+    } catch (error) {
+      if (stream !== controller) return;
+      if (error instanceof RequestError && error.status === 404) {
+        // A gateway without the event stream.
+        next = "poll";
+      } else {
+        if (error instanceof RequestError && error.status === 401) next = "stop";
+        update({ connectionError: connectionError(error) });
+      }
+    } finally {
+      clearTimeout(idle);
+      if (stream === controller) {
+        stream = undefined;
+        controller.abort();
+        // A proxy that buffers the stream lets nothing through.
+        silentStreams = received ? 0 : silentStreams + Number(connected);
+        if (next === "reconnect" && silentStreams >= maxSilentStreams) next = "poll";
+        if (listeners.size && next === "poll") fallBackToPolling();
+        else if (listeners.size && next === "reconnect") {
+          timer = setTimeout(listen, status.connectionError ? retryDelay : pollDelay);
+        }
+      }
+    }
+  }
+
   async function refresh() {
-    if (poll || listeners.size === 0) return;
+    if (poll || stream || listeners.size === 0) return;
     const controller = new AbortController();
     poll = controller;
     const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -61,20 +240,21 @@ export function createClient(base: string, token: string, fetchRequest = fetch) 
       const response = await request(`state?after=${encodeURIComponent(revision)}`, { signal: controller.signal });
       if (response.status !== 204) {
         const workspace: WorkspaceState = await response.json();
-        if (poll === controller) update({ workspace, connectionError: null });
+        if (poll === controller) receive(workspace);
       } else if (poll === controller && status.connectionError) {
         update({ connectionError: null });
       }
+      if (poll === controller && status.transport !== "polling") update({ transport: "polling" });
     } catch (error) {
       if (poll !== controller) return;
       retry = !(error instanceof RequestError && error.status === 401);
-      update({ connectionError: error instanceof RequestError ? error.message : "Cannot reach the Socium host." });
+      update({ connectionError: connectionError(error) });
     } finally {
       clearTimeout(timeout);
       if (poll === controller) {
         poll = undefined;
         if (retry && listeners.size) {
-          timer = setTimeout(refresh, status.connectionError ? 2500 : 650);
+          timer = setTimeout(refresh, status.connectionError ? retryDelay : pollDelay);
         }
       }
     }
@@ -84,21 +264,28 @@ export function createClient(base: string, token: string, fetchRequest = fetch) 
     getSnapshot: () => status,
     subscribe(listener: () => void) {
       listeners.add(listener);
-      if (listeners.size === 1) void refresh();
+      if (listeners.size === 1) connect();
       return () => {
         listeners.delete(listener);
-        if (listeners.size) return;
-        clearTimeout(timer);
-        const active = poll;
-        poll = undefined;
-        active?.abort();
+        if (!listeners.size) disconnect();
       };
     },
     async mobilePairingUrl() {
-      const response = await request("pairing", { method: "POST", signal: AbortSignal.timeout(10_000) });
+      const response = await requestWithin("pairing", { method: "POST" });
       const { url } = await response.json();
       if (typeof url !== "string") throw new Error("The host did not send a pairing link.");
       return url;
+    },
+    /** Devices paired with the host, oldest first. Needs the host access token. */
+    async listDevices(): Promise<PairedDevice[]> {
+      const response = await requestWithin("devices", {});
+      const { devices } = await response.json();
+      if (!Array.isArray(devices)) throw new Error("The host did not send its paired devices.");
+      return devices;
+    },
+    /** Revokes a paired device; its token stops working at once. Needs the host access token. */
+    async revokeDevice(id: string) {
+      await requestWithin(`devices/${encodeURIComponent(id)}`, { method: "DELETE" });
     },
     async send(command: Command) {
       const workspace = status.workspace;
@@ -113,13 +300,15 @@ export function createClient(base: string, token: string, fetchRequest = fetch) 
           signal: controller.signal,
         });
         const next: WorkspaceState = await response.json();
-        // A GET begun before this mutation may carry a superseded workspace.
-        clearTimeout(timer);
-        const active = poll;
-        poll = undefined;
-        active?.abort();
-        update({ workspace: next });
-        void refresh();
+        if (transport === "polling") {
+          // A GET begun before this mutation may carry a superseded workspace.
+          disconnect();
+          receive(next);
+          void refresh();
+        } else {
+          // The stream stays open; `receive` drops states older than this one.
+          receive(next);
+        }
         return true;
       } catch (error) {
         update({ commandError: error instanceof RequestError ? error.message : "The host did not confirm the change." });
