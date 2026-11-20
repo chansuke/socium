@@ -43,7 +43,8 @@ documentation when behavior changes.
 
 `nix develop -c pre-commit install` runs the checks above before each commit.
 It also checks each commit message, because links to coding-agent sessions do
-not belong in the history. The Commit metadata workflow checks the commits of
+not belong in the history, and the lines a commit adds, which may not put off
+a fix (`TODO`, "workaround") or switch a check off without a reason. The Commit metadata workflow checks the commits of
 each pull request the same way.
 
 Local sessions, `.env` files, Nix `result` links, and research checkouts must not

@@ -21,6 +21,12 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: escape-hatches
+        name: escape hatches in added lines
+        entry: scripts/check-escape-hatches.sh --staged
+        language: system
+        pass_filenames: false
+
       - id: commit-metadata
         name: commit metadata
         entry: scripts/check-commit-metadata.sh --message
