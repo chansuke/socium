@@ -7,6 +7,7 @@ mod activity_log;
 mod approval;
 mod control;
 mod execution;
+pub mod host;
 mod instructions;
 pub mod model_import;
 mod models;
@@ -556,7 +557,7 @@ impl AgentService {
     pub fn from_env(workspace_root: PathBuf, start: SessionStart) -> Result<Self, AgentError> {
         let sandbox = SandboxCheck::start(workspace_root.clone());
         let client = HttpClient::start();
-        let lookup: EnvLookup = Arc::new(|key| env::var(key).ok());
+        let lookup: EnvLookup = Arc::new(host::process_env);
         let registry = ModelRegistry::load(lookup.as_ref())?;
         // Read from the same lookup as the other limits, in `new`.
         let max_tokens_override = None;

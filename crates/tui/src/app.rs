@@ -977,7 +977,7 @@ fn format_workspace_path(path: Option<PathBuf>) -> String {
         return "~".to_string();
     };
 
-    let home = env::var_os("HOME").map(PathBuf::from);
+    let home = socium_core::host::home_dir();
     if let Some(home) = home
         && let Ok(stripped) = path.strip_prefix(&home)
     {
