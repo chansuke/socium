@@ -188,7 +188,9 @@ def side(path, label, passes, model="m", task_digest="t", tools=None):
                             "tasks": {"a": task_digest, "b": "t"}}) + "\n")
         for passed in passes:
             f.write(json.dumps({"type": "result", "task": "a", "passed": passed,
-                                "unintended_changes": [], "cost_usd": 0.1, "seconds": 1}) + "\n")
+                                "unintended_changes": [], "cost_usd": 0.1, "seconds": 1,
+                                "usage": {"input_tokens": 100, "cache_read_input_tokens": 300,
+                                          "cache_creation_input_tokens": 100}}) + "\n")
 
 
 class Compare(unittest.TestCase):
@@ -218,6 +220,10 @@ class Compare(unittest.TestCase):
     def test_tool_profiles_may_differ_and_are_named(self):
         out = self.lines([True], [True], tools="basic")
         self.assertIn("tool profiles: default vs basic", out)
+
+    def test_the_share_of_input_read_from_the_cache_and_the_total_cost_are_shown(self):
+        out = self.lines([True, True], [True])
+        self.assertIn("60% of input read from cache, $0.2000 in all", out)
 
     def test_a_changed_task_is_refused(self):
         out = self.lines([True], [True], task_digest="changed")
