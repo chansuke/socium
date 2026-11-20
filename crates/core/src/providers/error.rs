@@ -41,15 +41,16 @@ pub(crate) const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 
 impl ProviderError {
     /// Whether another attempt can succeed: rate limits, overload, server
-    /// errors, and connections that failed or stalled. The caller retries
-    /// only before any output was shown.
+    /// errors, and connections that failed, stalled, or closed before the
+    /// response, as a server does to a kept-alive connection it already
+    /// gave up. The caller retries only before any output was shown.
     pub(crate) fn is_retryable(&self) -> bool {
         match self {
             Self::Status { status, .. } => {
                 matches!(status, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 529)
             }
             Self::Transient(_) | Self::Stalled(_) => true,
-            Self::Http(err) => err.is_connect() || err.is_timeout(),
+            Self::Http(err) => err.is_connect() || err.is_timeout() || err.is_request(),
             _ => false,
         }
     }

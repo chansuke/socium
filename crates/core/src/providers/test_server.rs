@@ -54,6 +54,24 @@ pub(crate) async fn serve_once(
     (base_url, handle)
 }
 
+/// Reads one request and closes the connection without a response, as a
+/// server does to a kept-alive connection it already gave up. Returns the
+/// base URL.
+pub(crate) async fn serve_hang_up() -> String {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut socket, _) = tokio::time::timeout(WATCHDOG, listener.accept())
+            .await
+            .expect("the client never connected to the test server")
+            .unwrap();
+        let mut buffer = [0u8; 65536];
+        let _ = socket.read(&mut buffer).await;
+    });
+    base_url
+}
+
 /// Serves one SSE response whose events arrive with the given delays, then
 /// closes. Returns the base URL.
 pub(crate) async fn serve_paced(events: Vec<(std::time::Duration, String)>) -> String {

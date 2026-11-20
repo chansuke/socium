@@ -389,6 +389,14 @@ mod timeout_tests {
     }
 
     #[tokio::test]
+    async fn a_connection_closed_before_any_response_is_retried() {
+        let base_url = crate::providers::test_server::serve_hang_up().await;
+        let client = crate::http_client(Duration::from_secs(5), Duration::from_secs(1)).unwrap();
+        let err = send(&base_url, &client).await.err().unwrap();
+        assert!(err.is_retryable(), "{err}");
+    }
+
+    #[tokio::test]
     async fn a_stalled_reply_fails_with_a_plain_message() {
         let base_url = serve_paced(reply(&[Duration::ZERO, Duration::from_secs(3)])).await;
         let client = crate::http_client(Duration::from_secs(5), Duration::from_secs(1)).unwrap();
