@@ -309,17 +309,26 @@ fn render_blocks_for_transcript(blocks: &[ContentBlock]) -> String {
     parts.join(" ")
 }
 
+/// `text` on one line within `max_chars`, keeping its start and, with
+/// twice the room, its end: a command's failure, a test's error or a
+/// closing requirement usually comes last.
 fn truncate_for_transcript(text: &str, max_chars: usize) -> String {
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.chars().count() <= max_chars {
+    let length = normalized.chars().count();
+    if length <= max_chars {
         return normalized;
     }
-    let mut truncated = normalized
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
-    truncated.push('…');
-    truncated
+    let marker = |omitted: usize| format!(" … {omitted} characters omitted … ");
+    let room = max_chars.saturating_sub(marker(length).chars().count());
+    let head = room / 3;
+    let tail = room - head;
+    let chars = normalized.chars().collect::<Vec<_>>();
+    format!(
+        "{}{}{}",
+        chars[..head].iter().collect::<String>(),
+        marker(length - head - tail),
+        chars[length - tail..].iter().collect::<String>()
+    )
 }
 
 #[cfg(test)]
@@ -444,9 +453,31 @@ mod tests {
 
         assert!(lines[0].ends_with("keep the public API unchanged."));
         assert!(lines[1].chars().count() < 700);
-        assert!(lines[1].ends_with('…'));
+        assert!(lines[1].contains("characters omitted"), "{}", lines[1]);
         assert!(lines[2].chars().count() < 8_100);
-        assert!(lines[2].ends_with('…'));
+        assert!(lines[2].contains("characters omitted"));
+    }
+
+    #[test]
+    fn a_long_tool_result_keeps_the_error_at_its_end() {
+        let output = format!(
+            "{}\nerror[E0308]: mismatched types --> src/cli.rs:42:19",
+            "   Compiling dep v0.1.0\n".repeat(150)
+        );
+        let messages = vec![Message::user_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "t1".into(),
+            content: output,
+            is_error: Some(true),
+        }])];
+
+        let rendered = render_transcript_for_compaction(&messages);
+
+        assert!(
+            rendered.contains("error[E0308]: mismatched types --> src/cli.rs:42:19"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("[tool_error Compiling dep"), "{rendered}");
+        assert!(rendered.chars().count() < 700, "{rendered}");
     }
 
     #[tokio::test]
