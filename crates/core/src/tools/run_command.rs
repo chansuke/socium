@@ -74,6 +74,8 @@ pub(crate) fn definition(max_timeout: Duration) -> ToolDefinition {
 
 struct CommandExecution {
     artifacts: String,
+    /// The saved streams' path without its `.stdout` or `.stderr`.
+    saved_output: String,
     stop_reason: String,
     command_display: String,
     cwd_display: String,
@@ -169,6 +171,7 @@ where
         exit_code: execution.exit_code,
         timed_out: execution.timed_out,
         truncated: cut(&execution.stdout) || cut(&execution.stderr),
+        saved_output: execution.saved_output.clone(),
         stdout_preview: format_command_stream(&execution.stdout)
             .trim_end_matches('\n')
             .to_string(),
@@ -281,6 +284,7 @@ fn execute_command(
 
     Ok(CommandExecution {
         artifacts,
+        saved_output: stem,
         stop_reason,
         command_display: display_command(command),
         cwd_display: cwd_display.to_string(),
@@ -450,6 +454,28 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn the_finished_event_names_the_files_that_hold_both_streams() {
+        let workspace = crate::test_support::make_temp_dir("saved_output");
+        let mut saved = None;
+        run_command_from_workspace_with_progress(
+            workspace.path(),
+            &json!({"command":["sh","-c","echo out; echo err >&2; exit 3"]}),
+            &mut |event| {
+                if let AgentProgress::CommandFinished { saved_output, .. } = event {
+                    saved = Some(saved_output);
+                }
+            },
+        )
+        .unwrap_err();
+        let saved = workspace.path().join(saved.unwrap());
+        let read = |suffix: &str| {
+            std::fs::read_to_string(format!("{}.{suffix}", saved.display())).unwrap()
+        };
+        assert_eq!(read("stdout"), "out\n");
+        assert_eq!(read("stderr"), "err\n");
     }
 
     #[test]

@@ -32,6 +32,19 @@ pub(crate) fn command_output_preview_lines(
             }
         },
     ];
+    // Previews keep only each stream's end, so say where all of it is.
+    if let Some(saved) = &output.saved_output {
+        let what = if output.truncated {
+            "output cut; all of it is in"
+        } else {
+            "saved in"
+        };
+        lines.extend(wrap_multiline(
+            &format!("{what} {saved}.stdout and .stderr"),
+            wrap_width,
+            wrap_width,
+        ));
+    }
 
     // A failure leads with stderr, where the reason usually is. Each stream
     // gets half the room it can use and keeps its end, so a long stdout can
@@ -377,6 +390,8 @@ mod tests {
             command: "cargo test".to_string(),
             exit_code: Some(101),
             timed_out: false,
+            truncated: false,
+            saved_output: None,
             stdout_preview: (1..=60)
                 .map(|n| format!("test case_{n} ... ok"))
                 .collect::<Vec<_>>()
@@ -409,11 +424,38 @@ mod tests {
     }
 
     #[test]
+    fn the_preview_names_the_saved_streams_and_says_when_they_were_cut() {
+        let mut output = CommandOutputState {
+            command: "make".to_string(),
+            exit_code: Some(0),
+            timed_out: false,
+            truncated: false,
+            saved_output: Some(".socium/outputs/1-2-3".to_string()),
+            stdout_preview: "ok".to_string(),
+            stderr_preview: String::new(),
+        };
+        let lines = command_output_preview_lines(&output, 80, 10);
+        assert_eq!(
+            lines[2],
+            "saved in .socium/outputs/1-2-3.stdout and .stderr"
+        );
+
+        output.truncated = true;
+        let lines = command_output_preview_lines(&output, 80, 10);
+        assert_eq!(
+            lines[2],
+            "output cut; all of it is in .socium/outputs/1-2-3.stdout and .stderr"
+        );
+    }
+
+    #[test]
     fn command_output_preview_lines_include_status_and_streams() {
         let output = CommandOutputState {
             command: "cargo test".to_string(),
             exit_code: Some(0),
             timed_out: false,
+            truncated: false,
+            saved_output: None,
             stdout_preview: "ok".to_string(),
             stderr_preview: "(empty)".to_string(),
         };

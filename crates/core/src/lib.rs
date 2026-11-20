@@ -269,6 +269,9 @@ pub enum AgentProgress {
         /// Whether either stream was cut in the result; the saved
         /// artifacts hold what was left out.
         truncated: bool,
+        /// Where both streams were saved in full, relative to the
+        /// workspace: add `.stdout` or `.stderr`.
+        saved_output: String,
         stdout_preview: String,
         stderr_preview: String,
     },
