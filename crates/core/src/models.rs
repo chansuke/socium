@@ -23,6 +23,9 @@ pub(crate) enum Wire {
     OpenAiChat,
     /// OpenAI Responses, which keeps reasoning across tool calls.
     OpenAiResponses,
+    /// Google's Gemini API (`streamGenerateContent`), also served by
+    /// OpenCode Zen's Gemini endpoint.
+    Google,
 }
 
 impl Wire {
@@ -31,6 +34,7 @@ impl Wire {
             Self::Anthropic => "anthropic",
             Self::OpenAiChat => "openai-chat",
             Self::OpenAiResponses => "openai-responses",
+            Self::Google => "google",
         }
     }
 
@@ -39,8 +43,9 @@ impl Wire {
             "anthropic" => Ok(Self::Anthropic),
             "openai-chat" => Ok(Self::OpenAiChat),
             "openai-responses" => Ok(Self::OpenAiResponses),
+            "google" => Ok(Self::Google),
             other => Err(format!(
-                "unknown wire '{other}'; expected anthropic, openai-chat, or openai-responses"
+                "unknown wire '{other}'; expected anthropic, openai-chat, openai-responses, or google"
             )),
         }
     }
@@ -53,6 +58,8 @@ pub(crate) enum AuthScheme {
     ApiKeyHeader,
     /// `Authorization: Bearer <key>`
     Bearer,
+    /// `x-goog-api-key: <key>`, how the Gemini API takes its keys.
+    GoogApiKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,13 +445,24 @@ fn parse_provider(name: &str, raw: RawProvider) -> Result<ProviderConfig, String
     }
     let auth = match (wire, raw.auth.as_deref()) {
         (Wire::Anthropic, None | Some("x-api-key")) => AuthScheme::ApiKeyHeader,
+        (Wire::Google, None | Some("x-goog-api-key")) => AuthScheme::GoogApiKey,
         (_, Some("bearer")) | (Wire::OpenAiChat | Wire::OpenAiResponses, None) => {
             AuthScheme::Bearer
         }
-        (Wire::OpenAiChat | Wire::OpenAiResponses, Some("x-api-key")) => {
+        (Wire::OpenAiChat | Wire::OpenAiResponses, Some("x-api-key" | "x-goog-api-key")) => {
             return Err(format!("auth must be bearer for the {} wire", wire.name()));
         }
-        (_, Some(other)) => return Err(format!("auth must be x-api-key or bearer; got '{other}'")),
+        (Wire::Anthropic, Some("x-goog-api-key")) => {
+            return Err("auth must be x-api-key or bearer for the anthropic wire".into());
+        }
+        (Wire::Google, Some("x-api-key")) => {
+            return Err("auth must be x-goog-api-key or bearer for the google wire".into());
+        }
+        (_, Some(other)) => {
+            return Err(format!(
+                "auth must be x-api-key, x-goog-api-key, or bearer; got '{other}'"
+            ));
+        }
     };
     Ok(ProviderConfig {
         name: name.to_string(),
@@ -681,7 +699,23 @@ context_window = 1000000
             ),
             (
                 "[providers.x]\nwire = \"anthropic\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"\nauth = \"basic\"",
-                "auth must be x-api-key or bearer",
+                "auth must be x-api-key, x-goog-api-key, or bearer",
+            ),
+            (
+                "[providers.x]\nwire = \"google\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"\nauth = \"x-api-key\"",
+                "auth must be x-goog-api-key or bearer for the google wire",
+            ),
+            (
+                "[providers.x]\nwire = \"anthropic\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"\nauth = \"x-goog-api-key\"",
+                "auth must be x-api-key or bearer for the anthropic wire",
+            ),
+            (
+                "[providers.x]\nwire = \"openai-chat\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"\nauth = \"x-goog-api-key\"",
+                "auth must be bearer for the openai-chat wire",
+            ),
+            (
+                "[providers.x]\nwire = \"google\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"\n[[models]]\nalias = \"m\"\nprovider = \"x\"\nid = \"y\"\nfeatures = [\"anthropic_text_editor\"]",
+                "only the effort feature applies to the google wire",
             ),
             (
                 "[[models]]\nalias = \"m\"\nprovider = \"nowhere\"\nid = \"x\"",
@@ -752,6 +786,33 @@ context_window = 1000000
             assert_eq!(provider.auth, AuthScheme::Bearer);
             assert!(registry.find("gpt").unwrap().features.effort);
         }
+    }
+
+    #[test]
+    fn google_providers_default_to_the_goog_api_key_header() {
+        let google = |auth: &str| {
+            ModelRegistry::from_toml(&format!(
+                "[providers.gemini]\nwire = \"google\"\nbase_url = \"https://generativelanguage.googleapis.com/v1beta/\"\napi_key_env = \"GEMINI_API_KEY\"\n{auth}\n[[models]]\nalias = \"gemini\"\nprovider = \"gemini\"\nid = \"gemini-4-carbon\"\nfeatures = [\"effort\"]"
+            ))
+            .unwrap()
+        };
+        let registry = google("");
+        let provider = registry.provider("gemini").unwrap();
+        assert_eq!(provider.wire, Wire::Google);
+        assert_eq!(
+            provider.base_url,
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+        assert_eq!(provider.auth, AuthScheme::GoogApiKey);
+        assert!(registry.find("gemini").unwrap().features.effort);
+        let named = google("auth = \"x-goog-api-key\"");
+        assert_eq!(
+            named.provider("gemini").unwrap().auth,
+            AuthScheme::GoogApiKey
+        );
+        // OpenCode Zen takes the key as a bearer token.
+        let bearer = google("auth = \"bearer\"");
+        assert_eq!(bearer.provider("gemini").unwrap().auth, AuthScheme::Bearer);
     }
 
     #[test]
