@@ -37,7 +37,6 @@ button, input, textarea { color: inherit; }
 .rail nav h2 { margin: 0 9px 6px; color: var(--muted); font-size: 12px; font-weight: 600; }
 .session { width: 100%; justify-content: flex-start; text-align: left; color: var(--muted); }
 .session.selected { background: #263237; color: #ebf2f3; }
-.disconnect { margin-top: auto; align-self: flex-start; color: var(--muted); }
 
 .main { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
 .topbar { display: flex; align-items: center; gap: 12px; min-height: 65px; border-bottom: 1px solid var(--edge); padding: 12px 24px; }
@@ -101,3 +100,11 @@ pre { overflow: auto; padding: 11px; border-radius: 7px; background: #101417; fo
   .conversation.empty { padding-bottom: 25px; }
   .starters { margin-top: 16px; }
 }
+
+.rail-actions { display: grid; justify-items: start; gap: 4px; margin-top: auto; color: var(--muted); }
+.pairing-dialog { width: min(400px, calc(100% - 30px)); padding: 22px; color: inherit; background: var(--panel); border: 1px solid var(--edge); border-radius: 14px; }
+.pairing-dialog::backdrop { background: #0009; }
+.pairing-dialog h2 { margin: 0; font-size: 20px; }
+.pairing-dialog p { color: var(--muted); font-size: 14px; line-height: 1.45; }
+.pairing-dialog canvas { display: block; width: min(100%, 256px); height: auto; margin: 14px auto; border-radius: 6px; }
+.pairing-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

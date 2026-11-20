@@ -1,12 +1,13 @@
 import { StrictMode, useCallback, useRef, useState, useSyncExternalStore } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { ArrowUp, ChevronLeft, CircleDot, Folder, Menu, MessageSquare, Plus, Square, Terminal, Unplug } from "lucide-react";
+import { ArrowUp, ChevronLeft, CircleDot, Folder, Menu, MessageSquare, Plus, QrCode, Square, Terminal, Unplug } from "lucide-react";
 import Markdown from "react-markdown";
 import { createClient } from "@socium/client";
 import type { Client } from "@socium/client";
 import { maxPromptLength } from "@socium/client/protocol";
 import type { Message, WorkspaceState } from "@socium/client/protocol";
+import { PairingDialog } from "./PairingDialog";
 import "./styles.css";
 
 const starters = [
@@ -79,11 +80,13 @@ function Workspace({
   disconnect: () => void;
 }) {
   const [showSessions, setShowSessions] = useState(false);
+  const [pairing, setPairing] = useState(false);
   const locked = disabled || Boolean(state.turn);
   const currentTitle = state.title || state.messages.find(({ role }) => role === "user")?.text.split("\n")[0] || state.turn?.messages[0]?.text.split("\n")[0] || "New conversation";
 
   return (
     <div className="layout">
+      {pairing && <PairingDialog client={client} close={() => setPairing(false)} />}
       {showSessions && <button className="scrim" aria-label="Close conversations" onClick={() => setShowSessions(false)} />}
       <aside className={showSessions ? "rail rail-open" : "rail"}>
         <Brand />
@@ -104,7 +107,13 @@ function Workspace({
             </button>
           ))}
         </nav>
-        <button className="quiet disconnect" onClick={disconnect}><Unplug size={16} /> Disconnect</button>
+        <div className="rail-actions">
+          {state.mobilePairing && <button className="quiet" onClick={() => {
+            setShowSessions(false);
+            setPairing(true);
+          }}><QrCode size={16} /> Pair a phone</button>}
+          <button className="quiet" onClick={disconnect}><Unplug size={16} /> Disconnect</button>
+        </div>
       </aside>
       <main className="main">
         <header className="topbar">
