@@ -5,10 +5,11 @@
 //! user gave for this session, or `"auto"` lets a sandboxed command run
 //! unasked. A command that runs unasked gets a narrower sandbox: files that
 //! may hold secrets are hidden and files host tools run on their own are
-//! read-only. Commits always ask. Edits to those host-run files and reads of
-//! likely secrets ask in every mode.
+//! read-only. Commits, edits to those host-run files, and reads of likely
+//! secrets ask in every mode the config can set; only
+//! `--dangerously-skip-permissions` lets them run unasked.
 
-use crate::settings::{CommandApproval, PathPatterns, Settings};
+use crate::settings::{ApprovalMode, PathPatterns, Settings};
 use crate::tools::error::ToolError;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -100,6 +101,15 @@ pub(crate) fn gate(
     granted: &dyn Fn(&Grant) -> bool,
 ) -> Result<Gate, ToolError> {
     let approval = &settings.approval;
+    if approval.mode == ApprovalMode::Bypass {
+        let denied = command_argv(input)
+            .filter(|_| name == "run_command")
+            .and_then(|argv| approval.deny.iter().find(|rule| argv.starts_with(rule)));
+        return Ok(match denied {
+            Some(rule) => Gate::Deny(denied_by(rule)),
+            None => Gate::Run(None),
+        });
+    }
     match name {
         "git_commit" => Ok(Gate::Ask(Ask {
             reason: "A commit changes the repository history.".into(),
@@ -112,15 +122,12 @@ pub(crate) fn gate(
                 return Ok(Gate::Run(None));
             };
             if let Some(rule) = approval.deny.iter().find(|rule| argv.starts_with(rule)) {
-                return Ok(Gate::Deny(format!(
-                    "`{}` is denied by approval.deny in Socium's config.toml; do not retry it",
-                    rule.join(" ")
-                )));
+                return Ok(Gate::Deny(denied_by(rule)));
             }
             let suggested = suggest_prefix(&argv);
             let allowed = approval.allow.iter().any(|rule| argv.starts_with(rule))
                 || granted(&Grant::Command(argv.clone()))
-                || approval.commands == CommandApproval::Auto;
+                || approval.mode == ApprovalMode::Auto;
             if allowed {
                 match restrictions(root, approval) {
                     Ok(restrictions) => return Ok(Gate::Run(Some(restrictions))),
@@ -177,6 +184,13 @@ pub(crate) fn gate(
             Ok(Gate::Run(None))
         }
     }
+}
+
+fn denied_by(rule: &[String]) -> String {
+    format!(
+        "`{}` is denied by approval.deny in Socium's config.toml; do not retry it",
+        rule.join(" ")
+    )
 }
 
 /// Whether a search or diff of `named` leaves out the contents of `path`,
@@ -580,6 +594,38 @@ mod tests {
     }
 
     #[test]
+    fn skipping_approvals_runs_every_call_but_deny_rules_still_refuse() {
+        let root = tempfile::tempdir().unwrap();
+        crate::test_support::init_git_repo(root.path());
+        std::fs::write(root.path().join("tracked.txt"), "changed\n").unwrap();
+        std::fs::write(root.path().join(".env"), "TOKEN=fake\n").unwrap();
+        let (mut bypass, _) = Settings::from_toml("[approval]\ndeny = [\"rm\"]", None).unwrap();
+        bypass.approval.mode = ApprovalMode::Bypass;
+        let decide = |name: &str, input: Value| decide(root.path(), &bypass, name, input);
+        for (name, input) in [
+            ("run_command", json!({"command": ["make"]})),
+            (
+                "git_commit",
+                json!({"message": "m", "paths": ["tracked.txt"]}),
+            ),
+            (
+                crate::constants::TEXT_EDITOR_TOOL_NAME,
+                json!({"command": "create", "path": "build.rs", "file_text": "x"}),
+            ),
+            ("read_file", json!({"path": ".env"})),
+        ] {
+            assert!(
+                matches!(decide(name, input.clone()), Gate::Run(None)),
+                "{name} {input}"
+            );
+        }
+        assert!(matches!(
+            decide("run_command", json!({"command": ["rm", "-rf", "."]})),
+            Gate::Deny(_)
+        ));
+    }
+
+    #[test]
     fn a_protected_edit_shows_its_diff_for_approval() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("build.rs"), "fn main() {}\n").unwrap();
@@ -601,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_edits_and_sensitive_reads_ask_in_every_mode() {
+    fn protected_edits_and_sensitive_reads_ask_in_every_configured_mode() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join(".env"), "TOKEN=fake\n").unwrap();
         std::fs::write(root.path().join(".env.example"), "TOKEN=\n").unwrap();
@@ -820,10 +866,10 @@ mod tests {
         fn settings(auto: bool, allow: Vec<Vec<String>>, deny: Vec<Vec<String>>) -> Settings {
             Settings {
                 approval: ApprovalSettings {
-                    commands: if auto {
-                        CommandApproval::Auto
+                    mode: if auto {
+                        ApprovalMode::Auto
                     } else {
-                        CommandApproval::Ask
+                        ApprovalMode::Ask
                     },
                     allow,
                     deny,
