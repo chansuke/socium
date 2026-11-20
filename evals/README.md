@@ -31,6 +31,11 @@ price after its first call. The budget can
 therefore be passed by at most one run. Runs that were not started are
 counted as not run, never as failures or passes.
 
+`--tools full|basic|search` runs the set with that tool profile, added to the
+config as `[tools] profile`; the manifest records it as `tools`, and
+`compare.py` names the profiles when they differ. The binary is copied before
+the first run, so rebuilding it while a set runs does not change the result.
+
 It uses Socium's normal environment (`MODEL`, keys, `models.toml`) and,
 unless `SOCIUM_CONFIG_FILE` is set, `evals/config.toml`, which lets commands
 run without asking. Nobody can answer an approval in `-p`, so `interventions`
@@ -40,7 +45,7 @@ is always 0 and work that needed a person shows as `approvals_refused`.
 
 The first line of the output is a manifest with what a rerun must keep
 fixed: the harness commit and whether it had local changes, the binary,
-config and models file hashes, the model, the budget, the per-run cost cap, the
+config and models file hashes, the tool profile, the model, the budget, the per-run cost cap, the
 repeat count, and a hash of every task directory. Socium sends no sampling
 seed, so repetitions stand in for one. Each result line holds, per task and
 repetition:
