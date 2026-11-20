@@ -100,7 +100,8 @@ reopen saved conversations. See the [client setup guide](docs/clients.md).
 ## Configure
 
 - [Models](docs/configuration.md#models): Claude by default; register DeepSeek,
-  Z.ai, OpenAI, OpenRouter, or a local server in `~/.config/socium/models.toml`.
+  Z.ai, OpenAI, Gemini, OpenRouter, or a local server in
+  `~/.config/socium/models.toml`.
 - [Sandbox and approvals](docs/configuration.md#sandbox-and-approval-settings):
   which host directories commands may read, and which commands run without
   asking.

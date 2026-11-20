@@ -829,6 +829,28 @@ context_window = 1000000
     }
 
     #[test]
+    fn the_commented_gemini_example_parses_once_uncommented() {
+        let example = include_str!("../../../models.toml.example");
+        let block = |start: &str| {
+            let from = example.find(start).unwrap();
+            example[from..]
+                .lines()
+                .take_while(|line| line.starts_with("# "))
+                .map(|line| &line[2..])
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let text = format!(
+            "{}\n{}",
+            block("# [providers.gemini]"),
+            block("# [[models]]\n# alias = \"gemini\"")
+        );
+        let registry = ModelRegistry::from_toml(&text).unwrap();
+        assert_eq!(registry.provider("gemini").unwrap().wire, Wire::Google);
+        assert_eq!(registry.find("gemini").unwrap().id, "gemini-4-carbon");
+    }
+
+    #[test]
     fn plain_http_is_allowed_only_on_loopback() {
         for url in [
             "http://localhost:11434",

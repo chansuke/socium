@@ -111,6 +111,29 @@ max_output_tokens = 32000
 against the DeepSeek and Z.ai documentation on 2026-11-13; DeepSeek rejects
 unknown non-Claude names with 400.
 
+Gemini models use the Gemini API with a key from Google AI Studio
+(https://aistudio.google.com/apikey). `base_url` includes the API version:
+
+```toml
+[providers.gemini]
+wire = "google"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+api_key_env = "GEMINI_API_KEY"
+
+[[models]]
+alias = "gemini"
+provider = "gemini"
+id = "gemini-4-carbon"
+description = "Gemini 4 Carbon for complex coding"
+features = ["effort"]
+context_window = 1048576
+max_output_tokens = 65536
+```
+
+The model ID and limits were checked against https://aistudio.google.com/docs/models
+on 2026-11-20. OpenCode Zen serves Gemini models on the same wire at
+`https://opencode.ai/inference/google/v1beta`; set `auth = "bearer"` for it.
+
 `compact_at_tokens` sets the prompt size at which a model's history is
 compacted (default 200000, or 80% of the input budget if that is lower), and
 `price` gives its US dollar prices per million tokens so the status line can
@@ -138,6 +161,13 @@ show the session's cost; Socium ships no prices.
   are shown in the Activity pane, `EFFORT` is sent as `reasoning.effort`, and
   its encrypted reasoning is sent back with the next request so it carries
   across tool calls. Nothing is stored on the server (`store: false`).
+- `wire = "google"` speaks Google's Gemini API (`streamGenerateContent`).
+  The key goes in the `x-goog-api-key` header by default; `auth = "bearer"`
+  sends it as a Bearer token instead. Only the `effort` feature applies. It
+  marks a thinking model: its thought summaries are shown in the Activity
+  pane, and `EFFORT` is sent as `thinkingLevel` (`max` becomes `xhigh`).
+  Gemini returns thought signatures that it needs back on later requests,
+  so they are kept in the history and sent back to the same model.
 
 To check a registered model against its real API (this costs money), run
 `SOCIUM_LIVE_MODEL=<alias> nix develop -c cargo test -p socium-core live_ -- --ignored`.
