@@ -484,3 +484,85 @@ fn version_prints_the_package_version() {
         format!("socium {}\n", env!("CARGO_PKG_VERSION"))
     );
 }
+
+#[test]
+fn client_bridge_keeps_approval_and_persisted_conversations_in_core() {
+    let (port, _) = serve(vec![
+        tool_reply("run_command", json!({"command": ["touch", "created"]})),
+        text_reply("Done."),
+    ]);
+    let fixture = fixture(port);
+    let mut child = command(&fixture, &["--client-bridge"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in stdout.lines() {
+            let record: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            if send.send(record).is_err() {
+                break;
+            }
+        }
+    });
+    let next = |kind: &str| {
+        loop {
+            let record = receive
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or_else(|error| panic!("waiting for {kind}: {error}"));
+            if record["type"] == kind {
+                break record;
+            }
+        }
+    };
+    let initial = next("session");
+    let session = initial["session"].as_str().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"id": "turn-1", "action": "prompt", "text": "Create a file."})
+    )
+    .unwrap();
+    assert_eq!(next("running")["turn"], "turn-1");
+    let approval = next("approval");
+    assert_eq!(approval["tool"], "run_command");
+    assert!(!fixture.workspace.join("created").exists());
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "id": "answer", "action": "approve", "request": approval["request"], "allow": true,
+        })
+    )
+    .unwrap();
+    let response = next("response");
+    assert_eq!(response["id"], "answer");
+    assert_eq!(response["error"], Value::Null);
+    assert_eq!(next("delta")["text"], "Done.");
+    let finished = next("session");
+    assert_eq!(finished["session"], session);
+    assert!(fixture.workspace.join("created").is_file());
+    assert_eq!(
+        finished["messages"].as_array().unwrap().last().unwrap()["text"],
+        "Done."
+    );
+
+    writeln!(stdin, "{}", json!({"id": "fresh", "action": "new"})).unwrap();
+    let fresh = next("session");
+    assert_ne!(fresh["session"], session);
+    assert_eq!(fresh["sessions"][0]["id"], session);
+    writeln!(
+        stdin,
+        "{}",
+        json!({"id": "reopen", "action": "resume", "session": session})
+    )
+    .unwrap();
+    let resumed = next("session");
+    assert_eq!(resumed["session"], session);
+    assert_eq!(resumed["messages"], finished["messages"]);
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+}
