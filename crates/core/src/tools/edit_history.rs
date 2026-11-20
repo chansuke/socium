@@ -708,4 +708,85 @@ mod tests {
             "before"
         );
     }
+
+    /// Any series of edits, undone newest first, leaves every file as it
+    /// was: the same bytes, line endings included, the same mode, and no
+    /// file that was not there.
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::PermissionsExt;
+
+        const FILES: &[&str] = &["a.txt", "dir/b.txt", "run.sh"];
+        const TEXTS: &[&str] = &[
+            "one\n",
+            "two\r\nlines\r\n",
+            "",
+            "no newline",
+            "mixed\nend\r\n",
+        ];
+
+        /// The files under the workspace, outside `.socium`, with their
+        /// text and permission bits.
+        fn snapshot(root: &Path) -> BTreeMap<String, (String, u32)> {
+            FILES
+                .iter()
+                .filter_map(|name| {
+                    let path = root.join(name);
+                    let text = std::fs::read_to_string(&path).ok()?;
+                    let mode = std::fs::metadata(&path).ok()?.permissions().mode() & 0o777;
+                    Some((name.to_string(), (text, mode)))
+                })
+                .collect()
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(48))]
+            #[test]
+            fn undoing_every_edit_restores_the_files_as_they_were(
+                edits in prop::collection::vec(
+                    (0..FILES.len(), prop::option::weighted(0.8, prop::sample::select(TEXTS))),
+                    1..8,
+                )
+            ) {
+                let workspace = crate::test_support::make_temp_dir("undo_property");
+                let root = workspace.path();
+                std::fs::create_dir_all(root.join("dir")).unwrap();
+                std::fs::write(root.join("a.txt"), "first\r\n").unwrap();
+                std::fs::write(root.join("run.sh"), "#!/bin/sh\n").unwrap();
+                std::fs::set_permissions(root.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+                let before = snapshot(root);
+
+                let mut applied = 0;
+                for (file, after) in edits {
+                    let name = FILES[file];
+                    let current = std::fs::read_to_string(root.join(name)).ok();
+                    let after = after.map(String::from);
+                    if current == after || (current.is_none() && after.is_none()) {
+                        continue;
+                    }
+                    apply_changes(
+                        root,
+                        vec![Mutation {
+                            path: name.to_string(),
+                            before: current,
+                            after,
+                            before_mode: None,
+                            after_mode: None,
+                        }],
+                        None,
+                    )
+                    .unwrap();
+                    applied += 1;
+                }
+                for _ in 0..applied {
+                    undo_last(root).unwrap();
+                }
+
+                prop_assert_eq!(snapshot(root), before);
+                prop_assert_eq!(undo_last(root).unwrap_err(), "No edit to undo");
+            }
+        }
+    }
 }
