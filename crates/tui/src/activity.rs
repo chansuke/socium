@@ -1344,6 +1344,8 @@ pub(crate) mod tests {
             command: "cargo build".into(),
             exit_code: Some(0),
             timed_out: false,
+            truncated: false,
+            saved_output: None,
             stdout_preview: "built".into(),
             stderr_preview: String::new(),
         });

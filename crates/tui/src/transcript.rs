@@ -22,6 +22,11 @@ pub(crate) struct CommandOutputState {
     pub(crate) command: String,
     pub(crate) exit_code: Option<i32>,
     pub(crate) timed_out: bool,
+    /// Either stream was cut in what the model got; the saved files hold
+    /// all of it.
+    pub(crate) truncated: bool,
+    /// The saved streams' path without `.stdout` or `.stderr`.
+    pub(crate) saved_output: Option<String>,
     pub(crate) stdout_preview: String,
     pub(crate) stderr_preview: String,
 }
