@@ -512,11 +512,8 @@ fn commit_identity(root: &Path) -> Result<Vec<(String, String)>, ToolError> {
 /// outside any repository, so nothing from the workspace is loaded and no
 /// helper runs.
 fn host_git_identity(key: &str) -> Option<String> {
-    host_git_config(
-        key,
-        &std::env::var_os("HOME")?,
-        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
-    )
+    let home = crate::host::home_dir()?;
+    host_git_config(key, home.as_os_str(), crate::host::config_home().as_deref())
 }
 
 fn host_git_config(
@@ -524,7 +521,7 @@ fn host_git_config(
     home: &std::ffi::OsStr,
     config_home: Option<&std::ffi::OsStr>,
 ) -> Option<String> {
-    let git = std::env::split_paths(&std::env::var_os("PATH")?)
+    let git = std::env::split_paths(&crate::host::search_path()?)
         .map(|dir| dir.join("git"))
         .find(|path| path.is_absolute() && path.is_file())?;
     let mut command = std::process::Command::new(git);
