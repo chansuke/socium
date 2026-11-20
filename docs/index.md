@@ -17,6 +17,7 @@ Start with the [README](../README.md) for installation, then [Using Socium](usag
 
 ## Design decisions
 
+- [Architecture](architecture.md): the crates, the layers of `socium-core` and the check that keeps them, and APIs with one entry point.
 - [Architecture decision records](adr/README.md): decisions and the options they were weighed against.
 - [Activity stream design](design-agent-activity-stream.md): showing model reasoning and agent execution in the Activity pane.
 
