@@ -394,6 +394,11 @@ mod timeout_tests {
         let client = crate::http_client(Duration::from_secs(5), Duration::from_secs(1)).unwrap();
         let err = send(&base_url, &client).await.err().unwrap();
         assert!(err.is_retryable(), "{err}");
+        assert!(
+            err.to_string()
+                .ends_with(": connection closed before message completed"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
