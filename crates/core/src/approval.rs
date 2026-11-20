@@ -65,10 +65,43 @@ pub(crate) struct Restrictions {
     /// start are kept to find any the command created or replaced.
     protected: PathPatterns,
     before: BTreeMap<String, FileId>,
+    /// Directory symlinks at the start, so the listing after the command
+    /// follows the ones it made or changed.
+    links: BTreeMap<String, FileId>,
 }
 
-/// A path's device and inode, so a file replaced at the same path shows.
-type FileId = (u64, u64);
+/// A path's device, inode and change time, so a file replaced at the same
+/// path shows even when the new one gets the old inode.
+type FileId = (u64, u64, i64, i64);
+
+fn file_id(metadata: &std::fs::Metadata) -> FileId {
+    use std::os::unix::fs::MetadataExt;
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    )
+}
+
+/// What a listing found.
+#[derive(Default)]
+struct Listed {
+    /// Matching files and symlinks, by the path host tools find them at.
+    files: Vec<ListedFile>,
+    /// Every directory symlink.
+    links: BTreeMap<String, FileId>,
+    /// Followed directory symlinks with too much behind them to list.
+    unlisted_links: Vec<String>,
+}
+
+struct ListedFile {
+    path: String,
+    id: FileId,
+    /// The directory symlink the file was reached through: it, not the
+    /// file behind it, is what the workspace holds.
+    through: Option<String>,
+}
 
 impl Restrictions {
     /// Moves protected files the command created or replaced into
@@ -76,17 +109,28 @@ impl Restrictions {
     /// reaches them, and says what it moved and what is gone. `None` when
     /// the command left them as they were.
     pub(crate) fn withhold_changes(&self, root: &Path) -> Result<Option<String>, String> {
-        let after =
-            find_matching_files(root, &|path| self.protected.matches(path), Listing::After)?;
-        let changed = after
-            .iter()
-            .filter(|(path, id)| self.before.get(path) != Some(id))
-            .map(|(path, _)| path.clone())
-            .collect::<Vec<_>>();
+        let after = find_matching_files(
+            root,
+            &|path| self.protected.matches(path),
+            Listing::After(&self.links),
+        )?;
+        let mut changed = BTreeMap::new();
+        for file in &after.files {
+            if self.before.get(&file.path) != Some(&file.id) {
+                let (path, id) = match &file.through {
+                    Some(link) => (link, after.links[link]),
+                    None => (&file.path, file.id),
+                };
+                changed.insert(path.clone(), Some(id));
+            }
+        }
+        for link in &after.unlisted_links {
+            changed.insert(link.clone(), None);
+        }
         let missing = self
             .before
             .keys()
-            .filter(|path| !after.iter().any(|(kept, _)| kept == *path))
+            .filter(|path| !after.files.iter().any(|kept| kept.path == **path))
             .cloned()
             .collect::<Vec<_>>();
         if changed.is_empty() && missing.is_empty() {
@@ -98,7 +142,7 @@ impl Restrictions {
             .as_nanos();
         let mut moved = Vec::new();
         let mut removed = Vec::new();
-        for path in &changed {
+        for (path, id) in &changed {
             let source = root.join(path);
             let parent = source.parent().unwrap_or(root);
             let quarantined = with_owner_access(parent, || {
@@ -111,7 +155,13 @@ impl Restrictions {
             if quarantined.is_ok() {
                 moved.push(path.as_str());
             } else {
-                // Such as on a full disk or another file system.
+                // Such as on a full disk or another file system. Only the
+                // file that was listed is removed, not one saved since.
+                let unchanged = std::fs::symlink_metadata(&source)
+                    .is_ok_and(|metadata| id.is_none_or(|id| file_id(&metadata) == id));
+                if !unchanged {
+                    return Err(format!("{path} changed while Socium checked it"));
+                }
                 with_owner_access(parent, || std::fs::remove_file(&source)).map_err(|err| {
                     format!("{path} could not be moved out of the workspace or removed ({err})")
                 })?;
@@ -429,17 +479,33 @@ fn restrictions(
     root: &Path,
     approval: &crate::settings::ApprovalSettings,
 ) -> Result<Restrictions, String> {
-    let candidates = find_matching_files(
+    let listed = find_matching_files(
         root,
         &|path| approval.protected.matches(path) || approval.sensitive.matches(path),
         Listing::Before,
     )?;
+    if let Some(link) = listed.unlisted_links.first() {
+        return Err(format!("{link} links to more files than can be listed"));
+    }
     let mut restrictions = Restrictions {
         protected: approval.protected.clone(),
+        links: listed.links,
         ..Restrictions::default()
     };
     let mut frozen_dirs: Vec<String> = Vec::new();
-    for (file, id) in candidates {
+    for ListedFile {
+        path: file,
+        id,
+        through,
+    } in listed.files
+    {
+        if through.is_some() {
+            // The sandbox withholds the file at its own path.
+            if approval.protected.matches(&file) {
+                restrictions.before.insert(file, id);
+            }
+            continue;
+        }
         if approval.sensitive.matches(&file) {
             restrictions.hidden.push(root.join(&file));
         }
@@ -511,69 +577,118 @@ fn shallowest_matching_dir(file: &str, patterns: &PathPatterns) -> Option<String
         .find(|dir| patterns.matches(dir))
 }
 
+/// Most entries a listing reads behind followed directory symlinks.
+const MAX_LINKED_ENTRIES: usize = 10_000;
+
 /// Whether a listing runs before a command or after it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Listing {
+#[derive(Clone, Copy)]
+enum Listing<'a> {
     /// May give up, since the command then asks instead.
     Before,
-    /// Must see all the command left, so it never gives up, and it takes
-    /// back the access the command took away from a directory.
-    After,
+    /// Must see all the command left, so it never gives up, gives back the
+    /// owner access the command took from a directory, and follows the
+    /// directory symlinks that are not among these from before.
+    After(&'a BTreeMap<String, FileId>),
 }
 
 /// Workspace files and symlinks whose path `wanted` matches, with their
 /// identity, ignored and hidden files included. `.git` and `.socium`
-/// directories are skipped, and symlinks are listed, not followed: direnv
-/// or Cargo would follow a linked `.envrc` or `build.rs` all the same.
+/// directories are skipped. A directory symlink is followed when it leads
+/// into `.socium/scratch`, which commands may change, or after a command
+/// that made or changed it: Cargo would take a crate linked into
+/// `crates/` as its own.
 fn find_matching_files(
     root: &Path,
     wanted: &dyn Fn(&str) -> bool,
     listing: Listing,
-) -> Result<Vec<(String, FileId)>, String> {
-    use std::os::unix::fs::MetadataExt;
+) -> Result<Listed, String> {
     #[cfg(test)]
     let timeout = tests::TIMEOUT.get().unwrap_or(LIST_TIMEOUT);
     #[cfg(not(test))]
     let timeout = LIST_TIMEOUT;
     let deadline = Instant::now() + timeout;
     let unlisted = |err: std::io::Error| format!("protected files could not be listed ({err})");
-    // Commands run as the user, so they can read what the user cannot list.
-    fn access<T>(
-        listing: Listing,
-        dir: &Path,
-        op: impl Fn() -> std::io::Result<T>,
-    ) -> std::io::Result<T> {
-        match listing {
-            Listing::Before => op(),
-            Listing::After => with_owner_access(dir, op),
-        }
-    }
-    let mut found = Vec::new();
-    let mut dirs = vec![PathBuf::new()];
-    while let Some(dir) = dirs.pop() {
-        if listing == Listing::Before && Instant::now() >= deadline {
-            return Err("protected files could not be listed in time".into());
-        }
+    let canonical_root = root.canonicalize().map_err(unlisted)?;
+    let scratch = canonical_root.join(".socium/scratch");
+    let mut visited = std::collections::HashSet::from([canonical_root]);
+    let mut linked_entries = 0;
+    let mut listed = Listed::default();
+    let mut dirs: Vec<(PathBuf, Option<String>)> = vec![(PathBuf::new(), None)];
+    while let Some((dir, through)) = dirs.pop() {
         let full = root.join(&dir);
-        let entries = access(listing, &full, || std::fs::read_dir(&full)).map_err(unlisted)?;
+        if matches!(listing, Listing::After(_)) && through.is_none() {
+            // Commands run as the user, so a directory the user cannot
+            // list still holds files they can reach.
+            give_owner_listing(&full).map_err(unlisted)?;
+        }
+        let entries = match (std::fs::read_dir(&full), &through) {
+            (Ok(entries), _) => entries,
+            (Err(_), Some(link)) => {
+                listed.unlisted_links.push(link.clone());
+                continue;
+            }
+            (Err(err), None) => return Err(unlisted(err)),
+        };
         for entry in entries {
+            if matches!(listing, Listing::Before) && Instant::now() >= deadline {
+                return Err("protected files could not be listed in time".into());
+            }
+            if let Some(link) = &through {
+                linked_entries += 1;
+                if linked_entries > MAX_LINKED_ENTRIES {
+                    listed.unlisted_links.push(link.clone());
+                    break;
+                }
+            }
             let entry = entry.map_err(unlisted)?;
             let relative = dir.join(entry.file_name());
-            if entry.file_type().map_err(unlisted)?.is_dir() {
+            let file_type = entry.file_type().map_err(unlisted)?;
+            if file_type.is_dir() {
                 if entry.file_name() != ".git" && entry.file_name() != ".socium" {
-                    dirs.push(relative);
+                    dirs.push((relative, through.clone()));
                 }
                 continue;
             }
-            let path = relative.to_string_lossy();
+            let path = relative.to_string_lossy().into_owned();
+            let id = file_id(&entry.metadata().map_err(unlisted)?);
+            if file_type.is_symlink()
+                && let Ok(target) = root.join(&relative).canonicalize()
+                && target.is_dir()
+            {
+                listed.links.insert(path.clone(), id);
+                let made =
+                    matches!(listing, Listing::After(before) if before.get(&path) != Some(&id));
+                if made || target.starts_with(&scratch) {
+                    let link = through.clone().unwrap_or(path.clone());
+                    if visited.insert(target) {
+                        dirs.push((relative, Some(link)));
+                    } else if made {
+                        // A loop, or a second way to files already listed.
+                        listed.unlisted_links.push(link);
+                    }
+                }
+            }
             if wanted(&path) {
-                let metadata = access(listing, &full, || entry.metadata()).map_err(unlisted)?;
-                found.push((path.into_owned(), (metadata.dev(), metadata.ino())));
+                listed.files.push(ListedFile {
+                    path,
+                    id,
+                    through: through.clone(),
+                });
             }
         }
     }
-    found.sort();
-    Ok(found)
+    listed.files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(listed)
+}
+
+/// Gives the owner of `dir` read and search access if a command took it.
+fn give_owner_listing(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::symlink_metadata(dir)?.permissions().mode();
+    if mode & 0o500 != 0o500 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode | 0o500))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -849,6 +964,7 @@ mod tests {
     fn only_the_listing_before_a_command_gives_up_in_time() {
         let root = tempfile::tempdir().unwrap();
         let settings = auto();
+        std::fs::write(root.path().join("notes.txt"), "x").unwrap();
         let restrictions = restrictions(root.path(), &settings.approval).unwrap();
         TIMEOUT.set(Some(Duration::ZERO));
         let gate = decide(
@@ -863,6 +979,20 @@ mod tests {
         assert!(matches!(gate, Gate::Ask(_)));
         assert!(withheld.unwrap().unwrap().contains(".envrc"));
         assert!(root.path().join(".envrc").symlink_metadata().is_err());
+    }
+
+    /// A file can come back with the inode of the one it replaced.
+    #[test]
+    fn a_protected_file_put_back_in_place_counts_as_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        let envrc = root.path().join(".envrc");
+        std::fs::write(&envrc, "x").unwrap();
+        let restrictions = restrictions(root.path(), &auto().approval).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::rename(&envrc, root.path().join("aside")).unwrap();
+        std::fs::rename(root.path().join("aside"), &envrc).unwrap();
+        let note = restrictions.withhold_changes(root.path()).unwrap();
+        assert!(note.is_some_and(|note| note.contains(".envrc")));
     }
 
     #[test]

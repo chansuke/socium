@@ -449,6 +449,10 @@ mod tests {
                 "mkdir -p crates/d && echo 'fn main() {}' > crates/d/build.rs && chmod 555 crates/d",
                 "crates/d/build.rs",
             ),
+            (
+                "mkdir -p crates/e/sub && echo 'fn main() {}' > crates/e/sub/build.rs && chmod 400 crates/e",
+                "crates/e/sub/build.rs",
+            ),
         ] {
             let root = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(root.path().join(".github/workflows")).unwrap();
@@ -537,6 +541,63 @@ mod tests {
         assert!(message.contains("output capture failed"), "{message}");
         assert!(message.contains(".envrc"), "{message}");
         assert!(root.path().join(".envrc").symlink_metadata().is_err());
+    }
+
+    /// Cargo takes a crate linked into `crates/` as a member, so a new
+    /// link to one is a new build script, though no file behind it changed.
+    #[test]
+    fn a_command_cannot_link_a_crate_into_the_workspace() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("build.rs"), "fn main() {}\n").unwrap();
+        let outside = outside.path().display();
+        for (script, links) in [
+            ("ln -s ../fixtures/evil crates/evil", vec!["crates/evil"]),
+            (
+                &format!("ln -s {outside} crates/outside"),
+                vec!["crates/outside"],
+            ),
+            (
+                "ln -s ../fixtures/evil crates/a && ln -s ../fixtures/evil crates/b",
+                vec!["crates/a", "crates/b"],
+            ),
+            ("ln -s ../fixtures crates/nest", vec!["crates/nest"]),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("fixtures/evil")).unwrap();
+            std::fs::create_dir_all(root.path().join("crates")).unwrap();
+            std::fs::write(root.path().join("fixtures/evil/build.rs"), "fn main() {}\n").unwrap();
+            let message = run_unreviewed(root.path(), script)
+                .expect_err(script)
+                .to_string();
+            for link in links {
+                assert!(message.contains(link), "{script}: {message}");
+                assert!(
+                    root.path().join(link).symlink_metadata().is_err(),
+                    "{script} left {link}"
+                );
+            }
+            assert!(root.path().join("fixtures/evil/build.rs").exists());
+        }
+    }
+
+    /// Commands may change `.socium/scratch`, which the listing skips, so a
+    /// link into it is followed every time.
+    #[test]
+    fn a_link_into_scratch_cannot_bring_a_build_script_later() {
+        let root = tempfile::tempdir().unwrap();
+        run_unreviewed(
+            root.path(),
+            "mkdir .socium/scratch/s && ln -s .socium/scratch/s s",
+        )
+        .unwrap();
+        let message = run_unreviewed(
+            root.path(),
+            "echo 'fn main() {}' > .socium/scratch/s/build.rs",
+        )
+        .expect_err("a build script behind a link")
+        .to_string();
+        assert!(message.contains("s"), "{message}");
+        assert!(root.path().join("s").symlink_metadata().is_err());
     }
 
     #[test]

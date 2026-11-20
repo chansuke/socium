@@ -66,6 +66,7 @@ workspace you accept, such as `cargo test`.
   to, such as `manifest.toml` behind a `Cargo.toml` link. A protected file it
   creates or replaces is moved to `.socium/quarantine` only when it ends, so a
   host tool watching the workspace can still run it while the command runs.
+  A protected file your editor saves while such a command runs is moved too.
 - Instructions planted in the workspace that persuade the model to propose
   harmful but sandboxed work. Read approval requests before answering.
 - Hardlinks into the workspace, a compromised kernel, hostile processes running
