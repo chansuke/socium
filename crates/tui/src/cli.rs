@@ -1,5 +1,5 @@
-//! Command-line flags: which session to open, and whether to run one
-//! prompt without the terminal UI.
+//! Command-line flags: which session to open, whether to run one prompt
+//! without the terminal UI, and the `models import` subcommand.
 
 /// The parsed command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -41,13 +41,30 @@ pub(crate) enum Launch {
     Resume(Option<String>),
     Help,
     Version,
+    /// `models import [--from FILE] [PROVIDER...]`.
+    ModelsImport(ModelsImport),
+}
+
+/// Writes registry files for models.dev providers, or lists the providers.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ModelsImport {
+    /// Catalog provider IDs; none lists them instead.
+    pub(crate) providers: Vec<String>,
+    /// A saved copy of the catalog to read instead of downloading it.
+    pub(crate) from: Option<String>,
 }
 
 pub(crate) fn usage(program: &str) -> String {
     format!(
-        "Usage: {program} [-c | -r [ID]] [-p [PROMPT] [--output-format FMT]]\n\
+        "Usage: {program} [-c | -r [ID]] [-p [PROMPT] [--output-format FMT]]\n       \
+                {program} models import [--from FILE] [PROVIDER...]\n\
          \n\
          Starts a new conversation in the current directory.\n\
+         \n\
+         models import writes models.d/PROVIDER.toml in the config directory for\n\
+         each models.dev provider, from https://models.dev/api.json or a saved copy\n\
+         (--from FILE). Without PROVIDER it lists the providers. Review the base\n\
+         URLs it prints: API keys are sent there.\n\
          \n\
          Options:\n  \
            -c, --continue     Continue the most recently saved conversation\n  \
@@ -76,6 +93,13 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, Stri
     if args.iter().any(|arg| arg == "-V" || arg == "--version") {
         return Ok(Args {
             launch: Launch::Version,
+            print: None,
+            skip_permissions: false,
+        });
+    }
+    if args.first().is_some_and(|arg| arg == "models") {
+        return parse_models(&args[1..]).map(|launch| Args {
+            launch,
             print: None,
             skip_permissions: false,
         });
@@ -147,6 +171,41 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, Stri
         print: Some(Print { prompt, format }),
         skip_permissions,
     })
+}
+
+/// `models import [--from FILE] [PROVIDER...]`, after `models`.
+fn parse_models(args: &[String]) -> Result<Launch, String> {
+    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+        return Ok(Launch::Help);
+    }
+    let Some((subcommand, rest)) = args.split_first() else {
+        return Err("models needs a subcommand: import".into());
+    };
+    if subcommand != "import" {
+        return Err(format!(
+            "Unknown models subcommand '{subcommand}'; use import"
+        ));
+    }
+    let mut import = ModelsImport {
+        providers: Vec::new(),
+        from: None,
+    };
+    let mut rest = rest.iter();
+    while let Some(arg) = rest.next() {
+        let from = match arg.as_str() {
+            "--from" => Some(rest.next().ok_or("--from needs a file")?.as_str()),
+            _ => arg.strip_prefix("--from="),
+        };
+        match from {
+            Some("") => return Err("--from needs a file".into()),
+            Some(_) if import.from.is_some() => return Err("--from is given twice".into()),
+            Some(path) => import.from = Some(path.to_string()),
+            None if arg.starts_with('-') => return Err(format!("Unexpected argument '{arg}'")),
+            None if !import.providers.contains(arg) => import.providers.push(arg.clone()),
+            None => {}
+        }
+    }
+    Ok(Launch::ModelsImport(import))
 }
 
 fn output_format(value: &str) -> Result<OutputFormat, String> {
@@ -287,6 +346,47 @@ mod tests {
         );
         assert_eq!(parsed(&["--resume", "-h"]), Ok(Launch::Help));
         assert_eq!(parsed(&["-h", "-c"]), Ok(Launch::Help));
+    }
+
+    #[test]
+    fn models_import_takes_provider_ids_and_a_saved_catalog() {
+        let import = |providers: &[&str], from: Option<&str>| {
+            Ok(Launch::ModelsImport(ModelsImport {
+                providers: providers.iter().map(|id| id.to_string()).collect(),
+                from: from.map(str::to_string),
+            }))
+        };
+        assert_eq!(parsed(&["models", "import"]), import(&[], None));
+        assert_eq!(
+            parsed(&["models", "import", "opencode", "anthropic", "opencode"]),
+            import(&["opencode", "anthropic"], None)
+        );
+        assert_eq!(
+            parsed(&["models", "import", "--from", "api.json", "groq"]),
+            import(&["groq"], Some("api.json"))
+        );
+        assert_eq!(
+            parsed(&["models", "import", "groq", "--from=api.json"]),
+            import(&["groq"], Some("api.json"))
+        );
+        assert_eq!(parsed(&["models", "import", "-h"]), Ok(Launch::Help));
+        assert_eq!(parsed(&["models", "-V"]), Ok(Launch::Version));
+        for (args, error) in [
+            (&["models"][..], "needs a subcommand"),
+            (&["models", "list"], "Unknown models subcommand 'list'"),
+            (&["models", "import", "--from"], "--from needs a file"),
+            (&["models", "import", "--from="], "--from needs a file"),
+            (&["models", "import", "--from", "a", "--from", "b"], "twice"),
+            (&["models", "import", "-c"], "Unexpected argument '-c'"),
+        ] {
+            let err = parsed(args).unwrap_err();
+            assert!(err.contains(error), "{args:?}: {err}");
+        }
+        // Only the first word selects the subcommand; elsewhere it is a prompt.
+        assert_eq!(
+            printed(&["-p", "models"]).unwrap().print.unwrap().prompt,
+            Some("models".into())
+        );
     }
 
     #[test]
