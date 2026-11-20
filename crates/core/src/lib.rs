@@ -8,6 +8,7 @@ mod approval;
 mod control;
 mod execution;
 mod instructions;
+pub mod model_import;
 mod models;
 pub mod plan;
 mod process;
