@@ -1,4 +1,4 @@
-use crate::approval::{Grant, grants_cover};
+use crate::access::{Grant, grants_cover};
 use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},

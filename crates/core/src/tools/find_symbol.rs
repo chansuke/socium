@@ -137,13 +137,13 @@ fn find_symbol_controlled(
         status_code,
         ..
     } = execution;
-    let named = crate::approval::relative_target(workspace_root, path).unwrap_or_default();
+    let named = crate::access::relative_target(workspace_root, path).unwrap_or_default();
     let mut withheld = Vec::new();
     let matches = matches
         .into_iter()
         .filter(|entry| looks_like_rust_symbol_declaration(&entry.text, symbol))
         .filter(|entry| {
-            let keep = !crate::approval::withholds(sensitive, &entry.path, &named);
+            let keep = !crate::access::withholds(sensitive, &entry.path, &named);
             if !keep && !withheld.contains(&entry.path) {
                 withheld.push(entry.path.clone());
             }
@@ -159,7 +159,7 @@ fn find_symbol_controlled(
     }
     if !withheld.is_empty() {
         formatted.push('\n');
-        formatted.push_str(&crate::approval::withheld_note(&withheld));
+        formatted.push_str(&crate::access::withheld_note(&withheld));
     }
 
     if let Some(note) = note {
