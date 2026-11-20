@@ -3,7 +3,9 @@
 /// Display output is user-visible; never include credentials or raw HTTP bodies.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
-    #[error(transparent)]
+    /// reqwest's own message names only the step, such as "error sending
+    /// request"; the innermost cause says what went wrong.
+    #[error("{}", with_cause(.0))]
     Http(#[from] reqwest::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -33,6 +35,18 @@ pub enum ProviderError {
     /// No data arrived for the idle limit.
     #[error("No data from the provider for {} seconds; the connection was closed", .0.as_secs())]
     Stalled(std::time::Duration),
+}
+
+fn with_cause(err: &reqwest::Error) -> String {
+    let mut cause: &dyn std::error::Error = err;
+    while let Some(source) = cause.source() {
+        cause = source;
+    }
+    if std::ptr::addr_eq(cause, err) {
+        err.to_string()
+    } else {
+        format!("{err}: {cause}")
+    }
 }
 
 /// How long the provider may send nothing before the request is given up.
