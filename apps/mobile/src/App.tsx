@@ -96,7 +96,10 @@ function ConnectForm({ connect, connectPaired }: {
               accessibilityLabel="Host address"
               style={styles.input}
               value={address}
-              onChangeText={setAddress}
+              onChangeText={(value) => {
+                setAddress(value);
+                if (error) setError("");
+              }}
               placeholder="https://socium.example.com"
               placeholderTextColor={palette.muted}
               keyboardType="url"
@@ -118,7 +121,10 @@ function ConnectForm({ connect, connectPaired }: {
             />
             {error ? <Text accessibilityRole="alert" style={styles.notice}>{error}</Text> : null}
             <Button label="Connect" primary disabled={!address.trim() || !token.trim()} onPress={submit} />
-            <Button label="Back" onPress={() => setMode("choose")} />
+            <Button label="Back" onPress={() => {
+              setError("");
+              setMode("choose");
+            }} />
           </>
         )}
       </View>
@@ -133,6 +139,12 @@ function ScanPairing({ connect, back }: { connect: (host: PairedHost) => void; b
   const [connecting, setConnecting] = useState(false);
   const scanned = useRef(false);
   const pending = useRef<AbortController | null>(null);
+
+  useEffect(() => () => {
+    const controller = pending.current;
+    pending.current = null;
+    controller?.abort();
+  }, []);
 
   function readCode(value: string) {
     if (scanned.current) return;
