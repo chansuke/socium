@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 016290b7023504cc798996781ae45014dace9610aca9ab8b2395464eaae59369 # shrinks to calls = [Call { streamed: true, stream_finished: true, runs: false, asks: false, outputs: 0 }], picks = [0]

@@ -11,6 +11,8 @@
 #                                         kept in target/verify/tui/
 #   scripts/verify headless               `socium -p` end to end against a
 #                                         loopback model
+#   scripts/verify diagrams               the state diagrams of tool rows, as
+#                                         Mermaid in target/verify/diagrams/
 #
 # REV defaults to origin/main. Runs inside `nix develop`, which has the
 # pinned toolchain and bubblewrap the sandbox tests need.
@@ -26,7 +28,7 @@ mode=check
 base=origin/main
 while (($# > 0)); do
   case $1 in
-  check | full | tui | headless) mode=$1 ;;
+  check | full | tui | headless | diagrams) mode=$1 ;;
   --base)
     base=${2:?--base needs a revision}
     shift
@@ -86,6 +88,11 @@ tui)
 headless)
   step headless cargo test --locked -p socium-tui --test headless
   ;;
+diagrams)
+  rm -rf "$out/diagrams"
+  step diagrams env SOCIUM_VERIFY_DIR="$out/diagrams" \
+    cargo test --locked -p socium-tui --bin socium activity::tests::tool_states::
+  ;;
 esac
 
 {
@@ -99,6 +106,18 @@ esac
   echo "| Step | Result | Time | Log |"
   echo "|---|---|---|---|"
   printf '%s\n' "${rows[@]}"
+  if [ "$mode" = diagrams ] && [ -d "$out/diagrams" ]; then
+    echo
+    echo "Diagrams, drawn from the transition tables the tests check:"
+    for diagram in "$out"/diagrams/*.mmd; do
+      echo
+      echo "\`${diagram#"$root"/}\`:"
+      echo
+      echo '```mermaid'
+      cat "$diagram"
+      echo '```'
+    done
+  fi
   if [ "$mode" = tui ] && [ -d "$out/tui" ]; then
     echo
     echo "Frames, one file per scenario:"
@@ -107,7 +126,7 @@ esac
       echo "- \`${frames#"$root"/}\`: $(head -n 1 "$frames" | sed 's/^# //')"
     done
   fi
-  if [ -s "$out/checklist.md" ] && [ "$mode" != tui ] && [ "$mode" != headless ]; then
+  if [ -s "$out/checklist.md" ] && { [ "$mode" = check ] || [ "$mode" = full ]; }; then
     echo
     echo "## Checklist items this change triggers"
     echo

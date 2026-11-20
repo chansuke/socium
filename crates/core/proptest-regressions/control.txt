@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9f33618c6c02fc780bb47ff96bcc1602be51cc0905747b78276a5d89df1add74 # shrinks to ops = [Ask { grant: Some(Read(["b.rs"])), answer: Some(AllowOnce) }, Probe(Read(["b.rs"]))]
