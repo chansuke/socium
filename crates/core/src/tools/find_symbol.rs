@@ -22,14 +22,14 @@ impl Tool for FindSymbolTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "find_symbol".to_string(),
-            description: "Find declaration-like Rust symbol references for quick navigation. Returns line-addressable matches in the form path:line:text."
+            description: "Find lines that look like a Rust declaration of a name (fn, struct, enum, trait, type, mod, const, static, or an impl naming it) in .rs files only; other languages are not searched, so use search_text for them. It matches line by line, not by parsing: a declaration mentioned in a comment or a string is returned, one split across lines is missed, and same-named items in different modules all come back. It does not find references. Returns matches as path:line:text."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "symbol": {
                         "type": "string",
-                        "description": "Rust symbol name to search for."
+                        "description": "The name to find, without a path (Widget, not crate::Widget)."
                     },
                     "path": {
                         "type": "string",
@@ -60,6 +60,11 @@ impl Tool for FindSymbolTool {
         )
     }
 }
+
+/// Added to an empty result, which could otherwise read as "not declared
+/// anywhere" in a project written in another language.
+const ONLY_RUST_NOTE: &str =
+    "find_symbol reads only Rust (.rs) files; for other languages, use search_text.";
 
 struct FindSymbolInput<'a> {
     symbol: &'a str,
@@ -144,8 +149,13 @@ fn find_symbol_controlled(
             keep
         })
         .collect::<Vec<_>>();
+    let found = !matches.is_empty();
     let mut formatted =
         format_search_results("Symbol", symbol, path, Some("*.rs"), max_results, matches);
+    if !found {
+        formatted.push('\n');
+        formatted.push_str(ONLY_RUST_NOTE);
+    }
     if !withheld.is_empty() {
         formatted.push('\n');
         formatted.push_str(&crate::approval::withheld_note(&withheld));
@@ -236,6 +246,60 @@ mod tests {
         assert!(output.contains("lib.rs:1"), "{output}");
         assert!(!output.contains("sk-secret"), "{output}");
         assert!(output.contains(".env.rs"), "{output}");
+    }
+
+    /// What a line-by-line heuristic cannot tell apart, kept as it is so
+    /// a change to it is a decision: a declaration named in a comment or a
+    /// string counts, two `build`s in different modules both come back with
+    /// nothing to choose between them, and a declaration split over lines
+    /// is missed.
+    #[test]
+    fn the_limits_of_matching_declarations_line_by_line() {
+        let workspace = make_temp_dir("symbol_limits");
+        fs::write(
+            workspace.path().join("lib.rs"),
+            "// fn build was removed; see make\n\
+             const HELP: &str = \"fn build is gone\";\n\
+             pub fn\n\
+             \x20   build() {}\n\
+             mod a { pub fn build() {} }\n\
+             mod b { pub fn build() {} }\n",
+        )
+        .unwrap();
+
+        let output =
+            find_symbol_in_workspace(workspace.path(), &json!({"symbol": "build"})).unwrap();
+
+        for line in ["lib.rs:1:", "lib.rs:2:", "lib.rs:5:", "lib.rs:6:"] {
+            assert!(output.contains(line), "{line} missing: {output}");
+        }
+        for line in ["lib.rs:3:", "lib.rs:4:"] {
+            assert!(!output.contains(line), "{line} found: {output}");
+        }
+    }
+
+    #[test]
+    fn other_languages_are_not_searched_and_an_empty_result_says_so() {
+        let workspace = make_temp_dir("symbol_languages");
+        fs::write(
+            workspace.path().join("widget.py"),
+            "class Widget:\n    pass\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("widget.ts"),
+            "export class Widget {}\n",
+        )
+        .unwrap();
+
+        let output =
+            find_symbol_in_workspace(workspace.path(), &json!({"symbol": "Widget"})).unwrap();
+
+        assert!(output.contains("(no matches)"), "{output}");
+        assert!(
+            output.contains("only Rust (.rs) files") && output.contains("search_text"),
+            "{output}"
+        );
     }
 
     #[test]
