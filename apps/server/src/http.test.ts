@@ -8,20 +8,30 @@ import type { WorkerCommand } from "./bridge.ts";
 import { createHttpServer } from "./http.ts";
 import { createPairing } from "./pairing.ts";
 
-test("gateway gates commands by access token, conversation, turn, and exact approval", async (context) => {
-  const token = "client-gateway-test-token";
-  const state: WorkspaceState = {
+function workspaceState(changes: Partial<WorkspaceState> = {}): WorkspaceState {
+  return {
     revision: "revision-1",
     workspace: "workspace",
     session: "session-1",
     title: null,
     model: "mock",
+    models: [
+      { alias: "mock", provider: "local", description: null, unavailable: null },
+      { alias: "spare", provider: "local", description: "Second model", unavailable: null },
+    ],
+    plan: null,
     sessions: [],
     messages: [],
     warnings: [],
     notices: [],
     turn: null,
+    ...changes,
   };
+}
+
+test("gateway gates commands by access token, conversation, turn, and exact approval", async (context) => {
+  const token = "client-gateway-test-token";
+  const state = workspaceState();
   const commands: WorkerCommand[] = [];
   const server = createHttpServer({
     snapshot: () => state,
@@ -54,39 +64,36 @@ test("gateway gates commands by access token, conversation, turn, and exact appr
   assert.equal((await send({ action: "prompt", text: "hello" }, { ...auth, "Content-Type": "text/plain" })).status, 415);
   assert.equal((await send({ action: "prompt", text: " hello " }, { ...auth, "Content-Type": "Application/JSON ; charset=utf-8" })).status, 200);
   assert.deepEqual(commands, [{ action: "prompt", text: "hello" }]);
+  assert.equal((await send({ action: "set_model", model: "missing" })).status, 404);
+  assert.equal((await send({ action: "set_model", model: 7 })).status, 400);
+  assert.equal((await send({ action: "set_model", model: "spare" })).status, 200);
+  assert.deepEqual(commands.at(-1), { action: "set_model", model: "spare" });
 
   state.turn = {
     id: "turn-2",
     messages: [],
     draft: "",
     approval: { request: 1, tool: "example", summary: "", input: "Details", requestedBy: null, sessionOption: null },
+    activity: { phase: "approval", detail: "example" },
   };
   assert.equal((await send({ action: "new" })).status, 409);
+  assert.equal((await send({ action: "set_model", model: "spare" })).status, 409);
   assert.equal((await send({ action: "approve", turn: "turn-1", request: 1, allow: true })).status, 409);
   assert.equal((await send({ action: "approve", turn: "turn-2", request: 2, allow: true })).status, 409);
+  assert.equal((await send({ action: "approve", turn: "turn-2", request: 1, allow: true, scope: "session" })).status, 409);
   assert.equal((await send({ action: "approve", turn: "turn-2", request: 1, allow: false })).status, 200);
-  assert.deepEqual(commands.at(-1), { action: "approve", request: 1, allow: false, forSession: false });
-  // Allowing for the session needs a request that offers it.
-  assert.equal((await send({ action: "approve", turn: "turn-2", request: 1, allow: true, forSession: true })).status, 400);
-  assert.equal((await send({ action: "approve", turn: "turn-2", request: 1, allow: true, forSession: "yes" })).status, 400);
-  state.turn.approval = { request: 1, tool: "mcp__github__create_issue", summary: "", input: "Details", requestedBy: null, sessionOption: "`create_issue` of github" };
-  assert.equal((await send({ action: "approve", turn: "turn-2", request: 1, allow: true, forSession: true })).status, 200);
-  assert.deepEqual(commands.at(-1), { action: "approve", request: 1, allow: true, forSession: true });
+  assert.deepEqual(commands.at(-1), { action: "approve", request: 1, allow: false, scope: "once" });
+
+  state.turn.approval = { request: 2, tool: "run_command", summary: "cargo test", input: "", requestedBy: null, sessionOption: "`cargo test` commands" };
+  const approve = (answer: object) => send({ action: "approve", turn: "turn-2", request: 2, ...answer });
+  assert.equal((await approve({ allow: true, scope: "forever" })).status, 400);
+  assert.equal((await approve({ allow: false, scope: "session" })).status, 400);
+  assert.equal((await approve({ allow: true, scope: "session" })).status, 200);
+  assert.deepEqual(commands.at(-1), { action: "approve", request: 2, allow: true, scope: "session" });
 });
 
 test("pairing codes are issued by the host and exchanged once for a device token", async (context) => {
-  const state: WorkspaceState = {
-    revision: "revision",
-    workspace: "workspace",
-    session: "session",
-    title: null,
-    model: "mock",
-    sessions: [],
-    messages: [],
-    warnings: [],
-    notices: [],
-    turn: null,
-  };
+  const state = workspaceState();
   let time = 0;
   const token = "host-access-token";
   const server = createHttpServer({

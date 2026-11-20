@@ -11,14 +11,56 @@ export interface Session {
   readable: boolean;
 }
 
+export interface ModelOption {
+  alias: string;
+  provider: string;
+  description: string | null;
+  /** Why the host cannot switch to this model now, such as a missing key. */
+  unavailable: string | null;
+}
+
+/** How far an allow reaches: this call, or what the request offers until Socium exits. */
+export type ApprovalScope = "once" | "session";
+
 export interface Approval {
   request: number;
   tool: string;
   summary: string;
   input: string;
   requestedBy: string | null;
-  /** What an allow for the session covers; null when only once is offered. */
+  /** What "allow for this session" would allow, such as "`cargo test` commands"; null when not offered. */
   sessionOption: string | null;
+}
+
+export type PlanTaskStatus = "pending" | "active" | "blocked" | "done" | "dropped";
+
+export interface PlanTask {
+  id: string;
+  /** 0 for a top-level task. */
+  depth: number;
+  title: string;
+  status: PlanTaskStatus;
+  /** A group's status comes from its children. */
+  group: boolean;
+  note: string;
+}
+
+export interface Plan {
+  goal: string;
+  revision: number;
+  /** Completion of the whole plan, in permille. */
+  done: number;
+  /** Tree order: each task follows its parent. */
+  tasks: PlanTask[];
+}
+
+export type ActivityPhase = "requesting" | "thinking" | "responding" | "tool" | "command" | "approval" | "compacting";
+
+/** What the agent is doing now, such as running a command. */
+export interface Activity {
+  phase: ActivityPhase;
+  /** The provider, tool, or command; null when the phase says it all. */
+  detail: string | null;
 }
 
 export interface Turn {
@@ -26,6 +68,7 @@ export interface Turn {
   messages: Message[];
   draft: string;
   approval: Approval | null;
+  activity: Activity | null;
 }
 
 export interface WorkspaceState {
@@ -35,6 +78,8 @@ export interface WorkspaceState {
   session: string;
   title: string | null;
   model: string;
+  models: ModelOption[];
+  plan: Plan | null;
   sessions: Session[];
   messages: Message[];
   warnings: string[];
@@ -47,6 +92,7 @@ export type Command =
   | { action: "resume"; target: string }
   | { action: "prompt"; text: string }
   | { action: "cancel"; turn: string }
-  | { action: "approve"; turn: string; request: number; allow: boolean; forSession?: boolean };
+  | { action: "approve"; turn: string; request: number; allow: boolean; scope?: ApprovalScope }
+  | { action: "set_model"; model: string };
 
 export const maxPromptLength = 16_000;

@@ -52,18 +52,19 @@ function workerCommand(body: Record<string, unknown>, state: WorkspaceState): Wo
       throw new GatewayError(409, "This turn has already closed.");
     }
     if (action === "cancel") return { action };
-    const { allow, request } = body;
-    const forSession = body.forSession ?? false;
-    if (typeof allow !== "boolean" || typeof request !== "number" || typeof forSession !== "boolean") {
+    const { allow, request, scope = "once" } = body;
+    if (typeof allow !== "boolean" || typeof request !== "number" ||
+        (scope !== "once" && scope !== "session") || (scope === "session" && !allow)) {
       throw new GatewayError(400, "Invalid approval answer.");
     }
-    if (request !== state.turn.approval?.request) {
+    const approval = state.turn.approval;
+    if (request !== approval?.request) {
       throw new GatewayError(409, "This approval request has already closed.");
     }
-    if (forSession && allow && state.turn.approval.sessionOption === null) {
-      throw new GatewayError(400, "This request can only be allowed once.");
+    if (scope === "session" && approval.sessionOption === null) {
+      throw new GatewayError(409, "This request cannot be allowed for the session.");
     }
-    return { action, request, allow, forSession: forSession && allow };
+    return { action, request, allow, scope };
   }
 
   if (state.turn) throw new GatewayError(409, "Finish or stop the current turn first.");
@@ -72,6 +73,11 @@ function workerCommand(body: Record<string, unknown>, state: WorkspaceState): Wo
     const session = state.sessions.find(({ id, readable }) => id === body.target && readable);
     if (!session) throw new GatewayError(404, "This conversation is unavailable.");
     return { action, session: session.id };
+  }
+  if (action === "set_model" && typeof body.model === "string") {
+    const model = state.models.find(({ alias }) => alias === body.model);
+    if (!model) throw new GatewayError(404, "This model is unavailable.");
+    return { action, model: model.alias };
   }
   if (action === "prompt" && typeof body.text === "string") {
     const text = body.text.trim();

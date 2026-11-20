@@ -2,9 +2,9 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { createInterface } from "node:readline";
-import type { Approval, Message, WorkspaceState } from "@socium/client/protocol";
+import type { Activity, Approval, ApprovalScope, Message, Plan, WorkspaceState } from "@socium/client/protocol";
 
-type Session = Pick<WorkspaceState, "session" | "title" | "model" | "sessions" | "messages" | "warnings">;
+type Session = Pick<WorkspaceState, "session" | "title" | "model" | "models" | "plan" | "sessions" | "messages" | "warnings">;
 
 type Event =
   | ({ type: "session" } & Session)
@@ -13,6 +13,8 @@ type Event =
   | { type: "delta"; text: string }
   | { type: "tool"; message: Message }
   | { type: "approval_resolved"; request: number }
+  | { type: "plan"; plan: Plan }
+  | ({ type: "activity" } & Activity)
   | { type: "outcome"; notices: string[] }
   | { type: "response"; id: string; error: string | null };
 
@@ -21,7 +23,8 @@ export type WorkerCommand =
   | { action: "resume"; session: string }
   | { action: "prompt"; text: string }
   | { action: "cancel" }
-  | { action: "approve"; request: number; allow: boolean; forSession: boolean };
+  | { action: "approve"; request: number; allow: boolean; scope: ApprovalScope }
+  | { action: "set_model"; model: string };
 
 export class GatewayError extends Error {
   readonly status: number;
@@ -67,17 +70,20 @@ export function createBridge(binary: string, workspace: string) {
     }
     switch (event.type) {
       case "session": {
-        const { session, title, model, sessions, messages, warnings } = event;
+        const { session, title, model, models, plan, sessions, messages, warnings } = event;
         state = {
           revision: `${instance}:${++revision}`,
-          workspace: basename(workspace), session, title, model, sessions, messages, warnings, notices, turn: null,
+          workspace: basename(workspace),
+          session, title, model, models, plan, sessions, messages, warnings, notices, turn: null,
         };
         notices = [];
         break;
       }
       case "running":
         update({
-          turn: { id: event.turn, messages: [{ role: "user", text: event.text }], draft: "", approval: null },
+          turn: {
+            id: event.turn, messages: [{ role: "user", text: event.text }], draft: "", approval: null, activity: null,
+          },
           notices: [],
         });
         break;
@@ -93,9 +99,15 @@ export function createBridge(binary: string, workspace: string) {
         break;
       case "approval": {
         const { request, tool, summary, input, requestedBy, sessionOption } = event;
-        updateTurn({ approval: { request, tool, summary, input, requestedBy, sessionOption: sessionOption ?? null } });
+        updateTurn({ approval: { request, tool, summary, input, requestedBy, sessionOption } });
         break;
       }
+      case "plan":
+        update({ plan: event.plan });
+        break;
+      case "activity":
+        updateTurn({ activity: { phase: event.phase, detail: event.detail } });
+        break;
       case "approval_resolved":
         if (state?.turn?.approval?.request === event.request) updateTurn({ approval: null });
         break;
