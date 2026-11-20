@@ -6,6 +6,7 @@
 //! The config directory must lie outside the workspace, so neither the
 //! model's file tools nor its commands can change these settings.
 
+use crate::tools::ToolProfile;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -80,6 +81,7 @@ pub(crate) const DEFAULT_SENSITIVE: &[&str] = &[
 pub struct Settings {
     pub(crate) sandbox: SandboxSettings,
     pub(crate) approval: ApprovalSettings,
+    pub(crate) tools: ToolProfile,
     /// The `web_search` tool, which sends the model's queries to DeepSeek's
     /// paid Search API; `None` unless the user turned it on.
     pub(crate) web_search: Option<WebSearchSettings>,
@@ -292,7 +294,15 @@ struct RawFile {
     #[serde(default)]
     approval: RawApproval,
     #[serde(default)]
+    tools: RawTools,
+    #[serde(default)]
     web_search: RawWebSearch,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawTools {
+    profile: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -571,6 +581,19 @@ impl Settings {
                 .map(|patterns| PathPatterns::new(&patterns))
                 .unwrap_or_else(|| PathPatterns::new(DEFAULT_SENSITIVE)),
         };
+        let tools = match raw.tools.profile.as_deref() {
+            None => ToolProfile::Full,
+            Some(name) => ToolProfile::ALL
+                .into_iter()
+                .find(|profile| profile.name() == name)
+                .ok_or_else(|| {
+                    let names = ToolProfile::ALL.map(|profile| format!("\"{}\"", profile.name()));
+                    format!(
+                        "tools.profile must be one of {}; got '{name}'",
+                        names.join(", ")
+                    )
+                })?,
+        };
         let web_search = raw
             .web_search
             .enabled
@@ -589,6 +612,7 @@ impl Settings {
             Self {
                 sandbox,
                 approval,
+                tools,
                 web_search,
                 source: None,
             },
@@ -608,6 +632,13 @@ impl Settings {
         if self.approval.commands == CommandApproval::Auto {
             lines
                 .push("approval.commands = \"auto\": sandboxed commands run without asking".into());
+        }
+        if self.tools != ToolProfile::Full {
+            lines.push(format!(
+                "tools.profile = \"{}\": the built-in tools offered are {}",
+                self.tools.name(),
+                self.tools.tools().join(", ")
+            ));
         }
         lines
     }
@@ -695,6 +726,19 @@ mod tests {
         assert!(
             err.starts_with("web_search.base_url must use https"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn a_tool_profile_other_than_full_is_listed_at_startup() {
+        let (full, _) = Settings::from_toml("[tools]\nprofile = \"full\"", None).unwrap();
+        assert!(full.summary().is_empty(), "{:?}", full.summary());
+        let (basic, _) = Settings::from_toml("[tools]\nprofile = \"basic\"", None).unwrap();
+        assert_eq!(
+            basic.summary(),
+            [
+                "tools.profile = \"basic\": the built-in tools offered are read_file, apply_patch, str_replace_based_edit_tool, run_command, git_commit"
+            ]
         );
     }
 
@@ -818,6 +862,11 @@ deny = ["git  push"]
             ("[approval]\ncommands = \"never\"", "ask"),
             ("[approval]\nallow = [\" \"]", "empty"),
             ("[sandbox]\nread_olny = []", "unknown field"),
+            (
+                "[tools]\nprofile = \"tiny\"",
+                "tools.profile must be one of \"full\", \"basic\", \"search\"",
+            ),
+            ("[tools]\nprofle = \"basic\"", "unknown field"),
         ] {
             let err = Settings::from_toml(text, Some(home_str)).unwrap_err();
             assert!(err.contains(expected), "{text}: {err}");
