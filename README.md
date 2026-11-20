@@ -91,6 +91,12 @@ approval before they run; `/help` lists commands and keys, and `/exit` quits.
 To let builds see your toolchains and caches, copy
 [`config.toml.example`](config.toml.example) to `~/.config/socium/config.toml`.
 
+## Web and mobile
+
+Connect from a browser, Android, or iOS to a Socium workspace on a Linux
+host. The clients let you send prompts, review approvals, stop turns, and
+reopen saved conversations. See the [client setup guide](docs/clients.md).
+
 ## Configure
 
 - [Models](docs/configuration.md#models): Claude by default; register DeepSeek,

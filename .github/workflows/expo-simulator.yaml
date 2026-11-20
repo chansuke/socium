@@ -1,0 +1,44 @@
+name: Expo Simulator smoke
+on:
+  workflow_dispatch:
+    inputs:
+      android_build_id:
+        description: Completed EAS Android APK build ID
+        required: true
+        type: string
+      ios_build_id:
+        description: Completed EAS iOS Simulator build ID
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [android, ios]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Run connection smoke test
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          PLATFORM: ${{ matrix.platform }}
+          BUILD_ID: ${{ matrix.platform == 'android' && inputs.android_build_id || inputs.ios_build_id }}
+        run: bash ../../scripts/expo-simulator-smoke.sh "$PLATFORM" "$BUILD_ID" "$RUNNER_TEMP/socium-$PLATFORM.png"
+      - name: Save screenshot
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: socium-${{ matrix.platform }}
+          path: ${{ runner.temp }}/socium-${{ matrix.platform }}.png
+          if-no-files-found: error

@@ -1,0 +1,6 @@
+appId: com.chansuke.socium
+---
+- launchApp
+- assertVisible: "Connect to Socium"
+- assertVisible: "Host address"
+- assertVisible: "Access token"
