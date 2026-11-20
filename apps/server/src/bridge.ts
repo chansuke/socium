@@ -26,6 +26,8 @@ export type WorkerCommand =
   | { action: "approve"; request: number; allow: boolean; scope: ApprovalScope }
   | { action: "set_model"; model: string };
 
+export type StateListener = (state: WorkspaceState | null) => void;
+
 export class GatewayError extends Error {
   readonly status: number;
 
@@ -50,6 +52,11 @@ export function createBridge(binary: string, workspace: string) {
   let notices: string[] = [];
   let stopped = false;
   let pending: { id: string; finish(error?: GatewayError): void } | undefined;
+  const listeners = new Set<StateListener>();
+
+  function notify() {
+    for (const listener of listeners) listener(state);
+  }
 
   function update(changes: Partial<WorkspaceState>) {
     if (state) state = { ...state, ...changes, revision: `${instance}:${++revision}` };
@@ -60,6 +67,16 @@ export function createBridge(binary: string, workspace: string) {
   }
 
   lines.on("line", (line) => {
+    const previous = state;
+    try {
+      apply(line);
+    } finally {
+      // `stop` has told listeners already.
+      if (state !== previous && !stopped) notify();
+    }
+  });
+
+  function apply(line: string) {
     let event: Event;
     try {
       event = JSON.parse(line);
@@ -120,12 +137,14 @@ export function createBridge(binary: string, workspace: string) {
         }
         break;
     }
-  });
+  }
 
   function stop(error: GatewayError) {
+    if (stopped) return;
     stopped = true;
     state = null;
     pending?.finish(error);
+    notify();
   }
 
   worker.on("error", (error) => {
@@ -155,6 +174,13 @@ export function createBridge(binary: string, workspace: string) {
   return {
     snapshot,
     close,
+    /** Calls `listener` after every state change, and with null once the worker stops. */
+    subscribe(listener: StateListener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
     async send(command: WorkerCommand) {
       if (pending) throw new GatewayError(409, "Another client is updating this workspace.");
       snapshot();

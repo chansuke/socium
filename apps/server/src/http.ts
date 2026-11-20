@@ -87,11 +87,73 @@ function workerCommand(body: Record<string, unknown>, state: WorkspaceState): Wo
   throw new GatewayError(400, "Invalid command.");
 }
 
-export function createHttpServer(bridge: Bridge, token: string, webRoot: string, pairing?: Pairing) {
+export interface GatewayTimeouts {
+  /** Longest time to receive a whole request; event streams are exempt once open. */
+  requestTimeout?: number;
+  /** How often the server looks for requests over that limit. */
+  connectionsCheckingInterval?: number;
+  /** How often an idle event stream sends a comment, so proxies keep it open. */
+  keepaliveInterval?: number;
+}
+
+export function createHttpServer(
+  bridge: Bridge,
+  token: string,
+  webRoot: string,
+  pairing?: Pairing,
+  { requestTimeout = 15_000, connectionsCheckingInterval = 30_000, keepaliveInterval = 15_000 }: GatewayTimeouts = {},
+) {
   const expected = digest(`Bearer ${token}`);
   const clientState = (state: WorkspaceState) => ({ ...state, mobilePairing: Boolean(pairing) });
 
-  return createServer({ headersTimeout: 5000, requestTimeout: 15_000 }, async (request, response) => {
+  /**
+   * Sends each new workspace state as a Server-Sent Event. A burst of
+   * changes is sent as its latest state, and a slow client gets the latest
+   * state once it has drained instead of every state in between.
+   */
+  function streamEvents(request: IncomingMessage, response: ServerResponse, after: string | null, authorized: () => boolean) {
+    let latest: WorkspaceState | null = bridge.snapshot();
+    let sent = after;
+    let scheduled = false;
+    // The request ended with its headers; nothing should time out the reply.
+    request.socket.setTimeout(0);
+    response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "X-Accel-Buffering": "no" });
+    response.flushHeaders();
+
+    function flush() {
+      scheduled = false;
+      if (response.writableEnded) return;
+      if (!latest || !authorized()) {
+        response.end();
+        return;
+      }
+      if (latest.revision === sent || response.writableNeedDrain) return;
+      sent = latest.revision;
+      response.write(`id: ${latest.revision}\ndata: ${JSON.stringify(clientState(latest))}\n\n`);
+    }
+    function schedule() {
+      if (scheduled) return;
+      scheduled = true;
+      setImmediate(flush);
+    }
+
+    const unsubscribe = bridge.subscribe((state) => {
+      latest = state;
+      schedule();
+    });
+    const keepalive = setInterval(() => {
+      if (!authorized()) response.end();
+      else if (!response.writableNeedDrain) response.write(": keepalive\n\n");
+    }, keepaliveInterval);
+    response.on("drain", schedule);
+    response.on("close", () => {
+      clearInterval(keepalive);
+      unsubscribe();
+    });
+    flush();
+  }
+
+  return createServer({ headersTimeout: Math.min(5000, requestTimeout), requestTimeout, connectionsCheckingInterval }, async (request, response) => {
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "no-referrer");
@@ -129,6 +191,13 @@ export function createHttpServer(bridge: Bridge, token: string, webRoot: string,
           response.writeHead(204).end();
           return;
         }
+        if (request.method === "GET" && url.pathname === "/api/events") {
+          const lastEventId = request.headers["last-event-id"];
+          const after = url.searchParams.get("after") ?? (typeof lastEventId === "string" ? lastEventId : null);
+          // A revoked device loses its open stream too.
+          streamEvents(request, response, after, () => hostAccess || Boolean(pairing?.authorizes(authorization)));
+          return;
+        }
         if (request.method === "GET" && url.pathname === "/api/state") {
           const state = bridge.snapshot();
           if (url.searchParams.get("after") === state.revision) response.writeHead(204).end();
@@ -160,6 +229,8 @@ export function createHttpServer(bridge: Bridge, token: string, webRoot: string,
       }
       throw new GatewayError(404, "Not found.");
     } catch (error) {
+      // The client went away mid-request, such as after a request timeout.
+      if (response.destroyed && (error as NodeJS.ErrnoException).code === "ECONNRESET") return;
       if (error instanceof GatewayError) {
         if (error.status === 413) response.setHeader("Connection", "close");
         json(response, error.status, { error: error.message });
