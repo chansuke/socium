@@ -418,14 +418,51 @@ function HostNotices({ warnings }: { warnings: string[] }) {
 }
 
 function MessageCard({ message }: { message: Message }) {
-  const label = { user: "You", assistant: "Socium", system: "System", tool: "Tool", tool_error: "Tool error" }[message.role];
-  const tool = message.role === "tool" || message.role === "tool_error";
+  if (message.role === "tool" || message.role === "tool_error") return <ToolCard message={message} />;
+  const label = { user: "You", assistant: "Socium", system: "System" }[message.role];
   return (
-    <View style={[styles.message, (tool || message.role === "user") && styles.messagePanel]}>
+    <View style={[styles.message, message.role === "user" && styles.messagePanel]}>
       <Text style={styles.label}>{label}</Text>
       {message.role === "assistant"
         ? <MarkdownText text={message.text} />
-        : <Text selectable style={tool ? styles.code : styles.body}>{message.text}</Text>}
+        : <Text selectable style={styles.body}>{message.text}</Text>}
+    </View>
+  );
+}
+
+/** A tool call as its first line, which opens to the full output, as on the web. */
+function ToolCard({ message }: { message: Message }) {
+  const [open, setOpen] = useState(false);
+  const [title = "", ...rest] = message.text.split("\n");
+  const body = rest.join("\n");
+  const failed = message.role === "tool_error";
+  const summary = (
+    <View style={styles.toolSummary}>
+      <Text style={[styles.toolChevron, failed && styles.toolError]}>{body ? (open ? "▾" : "▸") : "•"}</Text>
+      <Text style={[styles.toolTitle, failed && styles.toolError]} numberOfLines={open ? undefined : 2}>{title}</Text>
+    </View>
+  );
+  return (
+    <View style={[styles.tool, failed && styles.toolErrorPanel]}>
+      {body ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`${failed ? "Tool error" : "Tool"}: ${title}`}
+          accessibilityHint={open ? "Hides the output" : "Shows the output"}
+          accessibilityState={{ expanded: open }}
+          onPress={() => setOpen(!open)}
+          style={({ pressed }) => pressed && styles.dim}
+        >
+          {summary}
+        </Pressable>
+      ) : summary}
+      {open && body ? (
+        <ScrollView style={styles.toolOutput} nestedScrollEnabled>
+          <ScrollView horizontal nestedScrollEnabled>
+            <Text selectable style={styles.code}>{body}</Text>
+          </ScrollView>
+        </ScrollView>
+      ) : null}
     </View>
   );
 }
