@@ -1,0 +1,31 @@
+# Reads only the lines a pull request adds, so existing code never fails it.
+name: Added lines
+on:
+  pull_request:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    name: No escape hatches in added lines
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Test the check
+        run: scripts/test-check-escape-hatches.sh
+
+      # A pull request's merge commit has the base branch as its first
+      # parent and the pull request as its second.
+      - name: Check the lines the pull request adds
+        run: scripts/check-escape-hatches.sh HEAD^1 HEAD
