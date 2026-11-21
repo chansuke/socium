@@ -11,7 +11,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; }
-button, input, textarea { font: inherit; }
+button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; opacity: .48; }
 button, input, textarea { color: inherit; }
@@ -43,6 +43,12 @@ button, input, textarea { color: inherit; }
 .current-title { font-weight: 620; font-size: 14px; }
 .model { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; max-width: 45%; overflow: hidden; flex-shrink: 0; color: var(--mint); background: #1f312b; border: 1px solid #32463d; border-radius: 7px; padding: 6px 8px; font: 12px ui-monospace, monospace; white-space: nowrap; }
 .model svg { flex: none; }
+.model select { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 0 2px; color: inherit; background: transparent; border: 0; font: inherit; cursor: pointer; }
+.model select:disabled { cursor: default; opacity: .7; }
+.model select option { color: #e9eef0; background: #171e22; }
+.model:has(select:focus-visible) { outline: 2px solid var(--mint); outline-offset: 2px; }
+.model select:focus-visible { outline: none; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .viewport { overflow-y: auto; }
 .conversation { margin-inline: auto; width: min(100% - 40px, 800px); padding: 30px 0; }
 .conversation.empty { min-height: 100%; display: grid; align-content: center; padding-bottom: 70px; }
