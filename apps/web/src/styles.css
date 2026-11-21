@@ -143,3 +143,18 @@ pre { overflow: auto; padding: 11px; border-radius: 7px; background: #101417; fo
 .pairing-dialog p { color: var(--muted); font-size: 14px; line-height: 1.45; }
 .pairing-dialog canvas { display: block; width: min(100%, 256px); height: auto; margin: 14px auto; border-radius: 6px; }
 .pairing-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pairing-dialog { max-height: calc(100dvh - 30px); overflow-y: auto; }
+.devices { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--edge); }
+.devices-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.devices h3 { margin: 0; font-size: 15px; }
+.icon.small { width: 32px; height: 32px; color: var(--muted); }
+.pairing-dialog .device-feedback { margin: 4px 0; color: var(--mint); font-size: 13px; }
+.pairing-dialog .device-feedback:empty { display: none; }
+.device-list { display: grid; gap: 7px; margin: 10px 0 0; padding: 0; list-style: none; }
+.device-list li { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid var(--edge); border-radius: 9px; background: #141b1f; }
+.device-list li > svg { flex: none; color: var(--mint); }
+.device-list div { display: grid; flex: 1; min-width: 0; gap: 2px; font-size: 12px; color: var(--muted); }
+.device-list strong { color: #ebf2f3; font: 600 13px ui-monospace, monospace; }
+.danger { flex: none; color: #ffb7ad; border-color: #5a3a37; }
+.danger:not(:disabled):hover { background: #3e292b; }
+.dialog-close { display: flex; justify-content: flex-end; margin-top: 16px; }
