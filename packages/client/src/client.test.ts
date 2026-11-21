@@ -168,6 +168,46 @@ test("a state older than a command's reply does not replace it", async (context)
   await until(() => client.getSnapshot().workspace?.revision === "restarted:1");
 });
 
+test("across a gateway restart, a late command reply from the old gateway does not replace the new state", async (context) => {
+  let reply!: (response: Response) => void;
+  const host = fakeHost((call, path) => {
+    if (path === "/api/events") return host.stream(call);
+    return new Promise<Response>((resolve) => reply = resolve);
+  });
+  const { client } = start(context, host);
+  await until(() => host.streams.length === 1);
+  host.streams[0]?.send(workspace("old:3"));
+  await until(() => client.getSnapshot().workspace?.revision === "old:3");
+
+  const sent = client.send({ action: "new" });
+  await until(() => reply !== undefined);
+  host.streams[0]?.send(workspace("new:1", { title: "After the restart" }));
+  await until(() => client.getSnapshot().workspace?.revision === "new:1");
+  reply(json(200, workspace("old:4")));
+  assert(await sent);
+  assert.equal(client.getSnapshot().workspace?.revision, "new:1");
+  assert.equal(client.getSnapshot().workspace?.title, "After the restart");
+});
+
+test("across a gateway restart, a late event from the old gateway does not replace a command reply from the new one", async (context) => {
+  const host = fakeHost((call, path) =>
+    path === "/api/events" ? host.stream(call) : json(200, workspace("new:2", { title: "After the command" })));
+  const { client } = start(context, host);
+  await until(() => host.streams.length === 1);
+  const [old] = host.streams;
+  assert(old);
+  old.send(workspace("old:8"));
+  await until(() => client.getSnapshot().workspace?.revision === "old:8");
+
+  assert(await client.send({ action: "new" }));
+  assert.equal(client.getSnapshot().workspace?.revision, "new:2");
+  old.send(workspace("old:9"));
+  await delay(30);
+  assert.equal(client.getSnapshot().workspace?.revision, "new:2");
+  old.send(workspace("new:3"));
+  await until(() => client.getSnapshot().workspace?.revision === "new:3");
+});
+
 test("a platform that cannot read a streamed response polls instead", async (context) => {
   let polls = 0;
   const host = fakeHost((_call, path) => {

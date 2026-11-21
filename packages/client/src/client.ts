@@ -51,23 +51,28 @@ export interface ClientOptions {
  */
 const maxSilentStreams = 2;
 
+/** Splits a `<instance>:<counter>` revision; the instance changes when the worker restarts. */
+function splitRevision(revision: string) {
+  const at = revision.lastIndexOf(":");
+  return { instance: revision.slice(0, at), count: Number(revision.slice(at + 1)) };
+}
+
 /**
- * Whether `next` is a later state than `current`. Revisions are
- * `<instance>:<counter>`; a different instance is a restarted worker, whose
- * state replaces the old one.
+ * Whether `next` is a later state than `current`. A different instance is a
+ * restarted worker, whose state replaces the old one, unless `retired` says
+ * that instance was itself replaced: then `next` is a late reply or event
+ * from a gateway that is gone.
  */
-function supersedes(next: WorkspaceState, current: WorkspaceState | null) {
+function supersedes(next: WorkspaceState, current: WorkspaceState | null, retired: ReadonlySet<string>) {
+  const nextRevision = splitRevision(next.revision);
+  if (retired.has(nextRevision.instance)) return false;
   if (!current) return true;
-  const split = (revision: string) => {
-    const at = revision.lastIndexOf(":");
-    return [revision.slice(0, at), Number(revision.slice(at + 1))] as const;
-  };
-  const [nextInstance, nextCount] = split(next.revision);
-  const [currentInstance, currentCount] = split(current.revision);
-  if (nextInstance !== currentInstance || !Number.isInteger(nextCount) || !Number.isInteger(currentCount)) {
+  const currentRevision = splitRevision(current.revision);
+  if (nextRevision.instance !== currentRevision.instance ||
+      !Number.isInteger(nextRevision.count) || !Number.isInteger(currentRevision.count)) {
     return next.revision !== current.revision;
   }
-  return nextCount > currentCount;
+  return nextRevision.count > currentRevision.count;
 }
 
 /**
@@ -117,6 +122,8 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
   let poll: AbortController | undefined;
   let stream: AbortController | undefined;
   const listeners = new Set<() => void>();
+  /** Worker instances whose state a later instance has replaced. */
+  const retired = new Set<string>();
 
   function update(changes: Partial<ClientStatus>) {
     status = { ...status, ...changes };
@@ -125,8 +132,14 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
 
   /** Shows `workspace` unless a later state, such as a command's reply, is already shown. */
   function receive(workspace: WorkspaceState) {
-    if (supersedes(workspace, status.workspace)) update({ workspace, connectionError: null });
-    else if (status.connectionError) update({ connectionError: null });
+    const current = status.workspace;
+    if (supersedes(workspace, current, retired)) {
+      const previous = current && splitRevision(current.revision).instance;
+      if (previous !== null && previous !== splitRevision(workspace.revision).instance) retired.add(previous);
+      update({ workspace, connectionError: null });
+    } else if (status.connectionError) {
+      update({ connectionError: null });
+    }
   }
 
   function connectionError(error: unknown) {
