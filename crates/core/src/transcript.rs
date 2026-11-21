@@ -3,7 +3,7 @@
 //! with its result, and failed turns.
 
 use crate::activity::{summarize_tool_input, summarize_tool_result};
-use crate::agent::types::{ContentBlock, Message, MessageContent, Role};
+use crate::conversation::{ContentBlock, Message, MessageContent, Role};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -27,7 +27,7 @@ pub struct TranscriptEntry {
 
 /// The tool calls that ran after a human approved them, as the turn
 /// records them at the execution boundary.
-const HUMAN_APPROVED: &[&str] = &[crate::tools::HUMAN_APPROVED, "human-approved-once"];
+const HUMAN_APPROVED: &[&str] = &[crate::constants::HUMAN_APPROVED, "human-approved-once"];
 
 /// One tool call and its result. `approved` marks a call that ran after
 /// the human allowed it.

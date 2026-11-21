@@ -1,10 +1,11 @@
-use crate::AgentProgress;
-use crate::tools::error::ToolError;
+use crate::conversation::ToolDefinition;
+use crate::progress::AgentProgress;
+use crate::tool_error::ToolError;
 use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_object_input, require_string_field,
 };
-use crate::tools::workspace::resolve_workspace_path;
-use crate::tools::{Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext};
+use crate::workspace::resolve_workspace_path;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -283,13 +284,13 @@ fn git_diff_withholding(
         .concat(),
     )?;
     let named = path
-        .and_then(|path| crate::approval::relative_target(workspace_root, path))
+        .and_then(|path| crate::access::relative_target(workspace_root, path))
         .unwrap_or_default();
     let (withheld, shown): (Vec<String>, Vec<String>) = stdout_to_string(&changed)?
         .split('\0')
         .filter(|name| !name.is_empty())
         .map(str::to_string)
-        .partition(|name| crate::approval::withholds(sensitive, name, &named));
+        .partition(|name| crate::access::withholds(sensitive, name, &named));
     // Pathspecs are literal here, so the files to show are named one by one
     // rather than the others excluded.
     if !withheld.is_empty() {
@@ -317,7 +318,7 @@ fn git_diff_withholding(
         result.push(stdout);
     }
     if !withheld.is_empty() {
-        result.push(crate::approval::withheld_note(&withheld));
+        result.push(crate::access::withheld_note(&withheld));
     }
     Ok(result.join("\n"))
 }
@@ -374,7 +375,7 @@ fn commit_pathspec(canonical_root: &Path, requested: &str) -> Result<String, Too
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        Some(parent) => crate::tools::workspace::resolve_workspace_path_for_create(
+        Some(parent) => crate::workspace::resolve_workspace_path_for_create(
             canonical_root,
             &parent.to_string_lossy(),
         )?,
@@ -785,7 +786,7 @@ fn git_relative_path(workspace_root: &Path, requested_path: &str) -> Result<Stri
     Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
-pub(crate) const DIRTY_WORKTREE_WARNING: &str = "Warning: git worktree has uncommitted changes";
+use crate::constants::DIRTY_WORKTREE_WARNING;
 
 pub(crate) fn maybe_prepend_dirty_worktree_warning(
     workspace_root: &Path,
@@ -806,7 +807,7 @@ fn git_worktree_is_dirty(workspace_root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::types::ContentBlock;
+    use crate::conversation::ContentBlock;
     use crate::test_support::{git_stdout, init_git_repo, make_temp_dir};
     use serde_json::json;
     use std::fs;

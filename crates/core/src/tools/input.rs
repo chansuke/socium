@@ -1,5 +1,5 @@
 use crate::constants::*;
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use serde_json::Value;
 
 pub(crate) fn require_object_input<'a>(

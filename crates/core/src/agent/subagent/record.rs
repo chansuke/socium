@@ -8,13 +8,13 @@
 //! checkpoint of its loop, so a side effect it starts is on disk first, as
 //! for the main conversation.
 
-use crate::agent::state::{
+use crate::constants::STATE_DIR_NAME;
+use crate::conversation::Message;
+use crate::session::{SESSIONS_DIR_NAME, session_file};
+use crate::state::{
     ConversationSummaryState, check_state_file, load_json_file, save_json_file,
     workspace_state_path,
 };
-use crate::agent::types::Message;
-use crate::constants::STATE_DIR_NAME;
-use crate::session::{SESSIONS_DIR_NAME, session_file};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;

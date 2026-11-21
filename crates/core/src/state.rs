@@ -1,4 +1,4 @@
-use crate::agent::types::Message;
+use crate::conversation::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -189,15 +189,15 @@ pub(crate) struct ConversationSummary {
 impl ConversationSummary {
     /// The first request of `messages`, for a summary that does not have
     /// one yet.
-    pub(crate) fn first_request_of(messages: &[crate::agent::types::Message]) -> Option<String> {
-        use crate::agent::types::{MessageContent, Role};
+    pub(crate) fn first_request_of(messages: &[crate::conversation::Message]) -> Option<String> {
+        use crate::conversation::{MessageContent, Role};
         let text = messages
             .iter()
             .find_map(|message| match (&message.role, &message.content) {
                 (Role::User, MessageContent::Text(text)) => Some(text.trim()),
                 _ => None,
             })?;
-        Some(crate::agent::context::elide_tool_output(
+        Some(crate::conversation::elide_tool_output(
             text,
             crate::constants::MAX_FIRST_REQUEST_CHARACTERS,
             "from the first request",
@@ -587,7 +587,7 @@ mod tests {
 
     mod properties {
         use super::super::*;
-        use crate::agent::types::{ContentBlock, Message, MessageContent, Origin, Role};
+        use crate::conversation::{ContentBlock, Message, MessageContent, Origin, Role};
         use crate::test_support::make_temp_dir;
         use proptest::prelude::*;
         use serde_json::Value;

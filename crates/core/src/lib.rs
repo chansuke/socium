@@ -1,11 +1,13 @@
-pub use crate::agent::state::{
+pub use crate::state::{
     load_json_file as load_local_state, save_json_file as save_local_state, scratch_dir,
     workspace_state_path,
 };
+mod access;
 pub mod activity;
 mod activity_log;
 mod approval;
 mod control;
+mod dispatch;
 mod execution;
 pub mod host;
 mod instructions;
@@ -13,19 +15,24 @@ pub mod model_import;
 mod models;
 pub mod plan;
 mod process;
+mod progress;
 mod session;
 mod settings;
+pub mod state;
+mod tool_error;
 mod transcript;
 mod usage;
-pub use approval::Grant;
+mod workspace;
+pub use access::Grant;
 pub use control::{ApprovalAnswer, TaskControl};
 pub use execution::SANDBOX_DESCRIPTION;
-pub use session::{SessionStart, SessionSummary, list_sessions};
+pub use session::{SessionStart, SessionSummary};
 pub use settings::{ApprovalMode, Settings};
 pub use transcript::{TranscriptEntry, TranscriptRole};
 pub use usage::SessionUsage;
 pub mod agent;
 pub mod constants;
+pub mod conversation;
 pub mod error;
 pub mod providers;
 pub mod tools;
@@ -35,6 +42,7 @@ pub use crate::agent::context::ContextMetrics;
 pub use crate::agent::subagent::record::{SubagentStatus, SubagentSummary};
 pub use crate::error::AgentError;
 pub use crate::plan::PlanView;
+pub use crate::progress::AgentProgress;
 
 use crate::activity::ActivityClock;
 use crate::activity_log::{ACTIVITY_LOG_FILE_NAME, ActivityRecorder};
@@ -43,19 +51,20 @@ use crate::agent::context::{
     context_metrics_for_input, history_input_tokens, prepare_context_messages,
     resolve_context_budget,
 };
-use crate::agent::state::{
-    ConversationState, ConversationStateRef, ConversationSummaryState, load_json_file,
-};
 use crate::agent::subagent::catalog::{
     SubagentCatalog, SubagentModel, SubagentType, load_user_types,
 };
+use crate::agent::subagent::record::adopt_legacy_records;
 use crate::agent::turn::{TurnContext, run_agent_turn};
-use crate::agent::types::{Message, MessageContent, Role};
 use crate::constants::*;
+use crate::conversation::ToolDefinition;
+use crate::conversation::{Message, MessageContent, Role};
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::error::ProviderError;
 use crate::providers::{Provider, TokenUsage, build_provider};
-use crate::tools::ToolDefinition;
+use crate::state::{
+    ConversationState, ConversationStateRef, ConversationSummaryState, load_json_file,
+};
 use std::env;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
@@ -206,87 +215,9 @@ pub struct CompactionReport {
     pub(crate) finished: ActivityKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentProgress {
-    ModelRequestStarted {
-        round: usize,
-        provider: String,
-    },
-    ApprovalRequested {
-        request_id: u64,
-        tool: String,
-        /// The tool's main argument on one line, such as the command.
-        summary: String,
-        input: String,
-        /// The subagent that asked, such as `worker subagent "Fix the
-        /// test"`; `None` when the main agent asked.
-        requested_by: Option<String>,
-        /// The "allow for this session" choice to offer, when there is one.
-        session_option: Option<String>,
-    },
-    ApprovalRequired {
-        tool: String,
-        reason: String,
-    },
-    /// The human answered, the request timed out, or the task was cancelled.
-    ApprovalResolved {
-        request_id: u64,
-        approved: bool,
-    },
-    /// Structured record of the turn for the Activity pane.
-    Activity(ActivityEvent),
-    /// One provider stream event as received. Shown on request, never saved.
-    RawProviderEvent {
-        turn_id: usize,
-        round: usize,
-        json: String,
-    },
-    AssistantText {
-        text: String,
-    },
-    ThinkingText {
-        text: String,
-    },
-    ToolCallStarted {
-        name: String,
-    },
-    ToolCallFinished {
-        name: String,
-        is_error: bool,
-    },
-    /// A finished tool call as the transcript shows it after a restart.
-    ToolCallRecorded(TranscriptEntry),
-    CommandOutput {
-        stdout_bytes: u64,
-        stderr_bytes: u64,
-    },
-    CommandStarted {
-        command: String,
-        cwd: String,
-    },
-    CommandFinished {
-        command: String,
-        exit_code: Option<i32>,
-        timed_out: bool,
-        /// Whether either stream was cut in the result; the saved
-        /// artifacts hold what was left out.
-        truncated: bool,
-        /// Where both streams were saved in full, relative to the
-        /// workspace: add `.stdout` or `.stderr`.
-        saved_output: String,
-        stdout_preview: String,
-        stderr_preview: String,
-    },
-    CompactionStarted,
-    CompactionFinished {
-        covered_messages: usize,
-        used_llm: bool,
-    },
-}
-
 pub struct AgentService {
     control: TaskControl,
-    state_lock: Option<crate::agent::state::WorkspaceLock>,
+    state_lock: Option<crate::state::WorkspaceLock>,
     workspace_root: PathBuf,
     /// The conversation saved under `.socium/sessions/<id>/`.
     session_id: String,
@@ -399,6 +330,20 @@ fn provider_http_client() -> Result<reqwest::Client, ProviderError> {
         Duration::from_secs(30),
         crate::providers::error::IDLE_TIMEOUT,
     )
+}
+
+/// The models.dev catalog for `socium models import`, downloaded with the
+/// provider client.
+pub async fn fetch_models_catalog() -> Result<String, String> {
+    let client = provider_http_client().map_err(|err| err.to_string())?;
+    model_import::fetch_catalog(&client).await
+}
+
+/// Saved sessions with messages, most recently saved first, for choosing
+/// one to resume. Briefly takes the workspace lock, so it fails while
+/// another Socium runs here.
+pub fn list_sessions(root: &std::path::Path) -> std::io::Result<Vec<SessionSummary>> {
+    session::list_sessions(root, adopt_legacy_records)
 }
 
 /// Loading the system's CA certificates takes a few milliseconds, so startup
@@ -679,8 +624,8 @@ impl AgentService {
         max_tokens_override: Option<u32>,
         client: impl Into<HttpClient>,
     ) -> Result<Self, AgentError> {
-        let state_lock = crate::agent::state::lock_workspace(&workspace_root)?;
-        session::migrate_legacy_state(&workspace_root)?;
+        let state_lock = crate::state::lock_workspace(&workspace_root)?;
+        session::migrate_legacy_state(&workspace_root, adopt_legacy_records)?;
         let sessions = session::scan_sessions(&workspace_root)?;
         let mut warnings = Vec::new();
         let resumed = match &start {
@@ -845,14 +790,8 @@ impl AgentService {
             .max_output_tokens
             .or(self.max_tokens_override)
             .unwrap_or(DEFAULT_MAX_TOKENS);
-        self.tools = crate::tools::tools_with_settings(&self.settings);
-        if let Some(agent) = self
-            .tools
-            .iter_mut()
-            .find(|tool| tool.name() == AGENT_TOOL_NAME)
-        {
-            *agent = self.subagents.tool_definition();
-        }
+        self.tools =
+            crate::tools::tools_with_settings(&self.settings, self.subagents.tool_definition());
     }
 
     /// User subagent types and every registered model whose provider can
@@ -1044,7 +983,7 @@ impl AgentService {
 
     fn ensure_state_lock(&mut self) -> std::io::Result<()> {
         if self.state_lock.is_none() {
-            self.state_lock = Some(crate::agent::state::lock_workspace(&self.workspace_root)?);
+            self.state_lock = Some(crate::state::lock_workspace(&self.workspace_root)?);
         }
         Ok(())
     }
@@ -1054,7 +993,7 @@ impl AgentService {
     #[cfg(test)]
     fn restore_state(&mut self) -> std::io::Result<()> {
         self.ensure_state_lock()?;
-        session::migrate_legacy_state(&self.workspace_root)?;
+        session::migrate_legacy_state(&self.workspace_root, adopt_legacy_records)?;
         if let Some(latest) = session::scan_sessions(&self.workspace_root)?.first() {
             self.session_id = latest.id.clone();
         }
@@ -1882,8 +1821,8 @@ mod plan_tests;
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::types::{ContentBlock, Message, MessageContent};
     use crate::constants::CONVERSATION_STATE_FILE_NAME;
+    use crate::conversation::{ContentBlock, Message, MessageContent};
     use crate::providers::TokenUsage;
     use crate::providers::anthropic::AnthropicProvider;
     use crate::test_support::{ScriptedProvider, make_temp_dir, text_provider_response};
@@ -1994,7 +1933,7 @@ mod tests {
         std::fs::write(root.join("crates/tui/app.rs"), "fn main() {}\n").unwrap();
         let read = |id: &str| {
             Ok(crate::providers::ProviderResponse {
-                message: crate::agent::types::AgentMessageResponse {
+                message: crate::conversation::AgentMessageResponse {
                     content: vec![ContentBlock::ToolUse {
                         id: id.into(),
                         name: "read_file".into(),
@@ -2081,7 +2020,7 @@ mod tests {
         std::fs::write(root.join("src/lib.rs"), "fn f() {}\n").unwrap();
         let read = |id: &str| {
             Ok(crate::providers::ProviderResponse {
-                message: crate::agent::types::AgentMessageResponse {
+                message: crate::conversation::AgentMessageResponse {
                     content: vec![ContentBlock::ToolUse {
                         id: id.into(),
                         name: "read_file".into(),
@@ -2146,7 +2085,7 @@ mod tests {
         std::fs::write(workspace.path().join("notes.txt"), "needle\n").unwrap();
         let provider = ScriptedProvider::new(vec![
             Ok(crate::providers::ProviderResponse {
-                message: crate::agent::types::AgentMessageResponse {
+                message: crate::conversation::AgentMessageResponse {
                     content: vec![ContentBlock::ToolUse {
                         id: "s1".into(),
                         name: "search_text".into(),
@@ -2187,7 +2126,7 @@ mod tests {
         let workspace = make_temp_dir("web_search");
         let provider = ScriptedProvider::new(vec![
             Ok(crate::providers::ProviderResponse {
-                message: crate::agent::types::AgentMessageResponse {
+                message: crate::conversation::AgentMessageResponse {
                     content: vec![ContentBlock::ToolUse {
                         id: "s1".into(),
                         name: "web_search".into(),
@@ -2247,7 +2186,7 @@ mod tests {
         let workspace = make_temp_dir("steering");
         let provider = ScriptedProvider::new(vec![
             Ok(crate::providers::ProviderResponse {
-                message: crate::agent::types::AgentMessageResponse {
+                message: crate::conversation::AgentMessageResponse {
                     content: vec![ContentBlock::ToolUse {
                         id: "l1".into(),
                         name: "list_files".into(),
@@ -2306,8 +2245,8 @@ mod tests {
             "taken once"
         );
         // Saved with the conversation.
-        let saved: crate::agent::state::ConversationState =
-            crate::agent::state::load_json_file(&service.conversation_path()).unwrap();
+        let saved: crate::state::ConversationState =
+            crate::state::load_json_file(&service.conversation_path()).unwrap();
         assert!(
             serde_json::to_string(&saved.messages)
                 .unwrap()
@@ -2401,8 +2340,8 @@ mod tests {
             })
         );
 
-        let persisted: crate::agent::state::ConversationState =
-            crate::agent::state::load_json_file(&service.conversation_path()).unwrap();
+        let persisted: crate::state::ConversationState =
+            crate::state::load_json_file(&service.conversation_path()).unwrap();
         assert_eq!(
             persisted
                 .summary_state
@@ -2544,10 +2483,10 @@ mod tests {
 
     mod thinking_after_compaction {
         use super::*;
-        use crate::agent::state::{ConversationState, load_json_file};
-        use crate::agent::types::AgentMessageResponse;
+        use crate::conversation::AgentMessageResponse;
         use crate::providers::ProviderResponse;
         use crate::providers::error::ProviderError;
+        use crate::state::{ConversationState, load_json_file};
 
         /// Each turn: a request, a tool call with thinking, its result, and
         /// an answer with thinking. Four messages per turn.
@@ -3083,7 +3022,7 @@ max_output_tokens = 32000
                             text: "answer".into(),
                         },
                     ],
-                    crate::agent::types::Origin {
+                    crate::conversation::Origin {
                         provider: "anthropic".into(),
                         model: "claude-sonnet-5-5".into(),
                     },
@@ -3093,7 +3032,7 @@ max_output_tokens = 32000
 
         /// Whether the next request to the current model carries thinking.
         fn sends_thinking(service: &AgentService) -> bool {
-            let sent = crate::agent::types::readable_thinking(&service.messages, &|origin| {
+            let sent = crate::conversation::readable_thinking(&service.messages, &|origin| {
                 service.provider.reads_thinking_from(origin)
             })
             .unwrap_or_else(|| service.messages.clone());
@@ -3153,7 +3092,7 @@ max_output_tokens = 32000
             let mut service = open(root.path(), &KEYS);
             service.switch_model("ds-flash").unwrap();
             service.messages = thinking_turn();
-            service.messages[1].origin = Some(crate::agent::types::Origin {
+            service.messages[1].origin = Some(crate::conversation::Origin {
                 provider: "deepseek".into(),
                 model: "deepseek-flash".into(),
             });

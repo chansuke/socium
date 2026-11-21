@@ -10,11 +10,11 @@
     reason = "live tests read the real provider key and model from the environment"
 )]
 
-use crate::agent::types::{AgentMessageRequest, ContentBlock, Message};
+use crate::agent::tools_for_model;
 use crate::constants::TEXT_EDITOR_TOOL_NAME;
+use crate::conversation::{AgentMessageRequest, ContentBlock, Message};
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::{Provider, ProviderResponse, build_provider};
-use crate::tools::tools_for_model;
 use std::env;
 
 const LIVE_MAX_TOKENS: u32 = 4_096;
@@ -171,7 +171,7 @@ async fn live_tool_result_round_trip_completes_the_turn() {
 #[tokio::test]
 #[ignore = "calls a paid API; set SOCIUM_LIVE_MODEL and run with --ignored"]
 async fn live_request_after_a_summary_is_accepted() {
-    use crate::agent::state::{ConversationSummary, ConversationSummaryState};
+    use crate::state::{ConversationSummary, ConversationSummaryState};
     let (model, provider) = live_target();
     let tools = tools_for_model();
     let client = crate::provider_http_client().unwrap();
@@ -279,7 +279,7 @@ async fn live_main_agent_delegates_to_an_explorer() {
         .submit_with_progress(
             "Use the agent tool with agent_type explorer to find the value of RETRY_LIMIT in this workspace. Do not search yourself. Then tell me the value.".into(),
             |event| {
-                if let crate::AgentProgress::Activity(activity) = event
+                if let crate::progress::AgentProgress::Activity(activity) = event
                     && let crate::ActivityKind::ToolStarted { name, .. } = activity.kind
                 {
                     match activity.agent {

@@ -1,9 +1,10 @@
-use crate::AgentProgress;
 use crate::constants::*;
-use crate::tools::error::ToolError;
+use crate::conversation::ToolDefinition;
+use crate::progress::AgentProgress;
+use crate::tool_error::ToolError;
 use crate::tools::text_file::read_utf8_file_with_limit;
-use crate::tools::workspace::resolve_workspace_path;
-use crate::tools::{Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext};
+use crate::workspace::resolve_workspace_path;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;

@@ -13,7 +13,7 @@ const MAX_INSTRUCTION_BYTES: usize = 32 * 1024;
 /// warning when one exists but cannot be used.
 pub(crate) fn project_instructions(root: &Path) -> Result<Option<String>, String> {
     for name in INSTRUCTION_FILES {
-        let Ok(path) = crate::tools::workspace::resolve_workspace_path(root, name) else {
+        let Ok(path) = crate::workspace::resolve_workspace_path(root, name) else {
             continue;
         };
         if !path.is_file() {
@@ -47,7 +47,7 @@ pub(crate) fn project_instructions(root: &Path) -> Result<Option<String>, String
 pub(crate) fn nested_instructions(
     root: &Path,
     paths: &[String],
-    context: &[crate::agent::types::Message],
+    context: &[crate::conversation::Message],
 ) -> (Option<String>, Vec<String>) {
     let mut sections = Vec::new();
     let mut warnings = Vec::new();
@@ -67,7 +67,7 @@ pub(crate) fn nested_instructions(
         else {
             continue;
         };
-        let text = match crate::tools::workspace::resolve_workspace_path(root, &name)
+        let text = match crate::workspace::resolve_workspace_path(root, &name)
             .map_err(|err| err.to_string())
             .and_then(|path| {
                 crate::tools::text_file::read_utf8_file_with_limit(
@@ -131,8 +131,8 @@ fn covering_directories(root: &Path, path: &str) -> Vec<String> {
     (1..=depth).map(|end| parts[..end].join("/")).collect()
 }
 
-fn delivered(context: &[crate::agent::types::Message], marker: &str) -> bool {
-    use crate::agent::types::{ContentBlock, MessageContent};
+fn delivered(context: &[crate::conversation::Message], marker: &str) -> bool {
+    use crate::conversation::{ContentBlock, MessageContent};
     context.iter().any(|message| {
         match &message.content {
         MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
@@ -265,9 +265,9 @@ mod tests {
         assert!(err.starts_with("AGENTS.md is not used"), "{err}");
     }
 
-    fn result(content: &str) -> crate::agent::types::Message {
-        crate::agent::types::Message::user_blocks(vec![
-            crate::agent::types::ContentBlock::ToolResult {
+    fn result(content: &str) -> crate::conversation::Message {
+        crate::conversation::Message::user_blocks(vec![
+            crate::conversation::ContentBlock::ToolResult {
                 tool_use_id: "t".into(),
                 content: content.into(),
                 is_error: None,

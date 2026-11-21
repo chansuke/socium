@@ -2,7 +2,7 @@
 //! `ProviderEvent`s the Anthropic stream produces, so the turn loop and the
 //! Activity pane do not depend on the wire.
 
-use crate::agent::types::{AgentMessageResponse, ContentBlock};
+use crate::conversation::{AgentMessageResponse, ContentBlock};
 use crate::providers::error::{ProviderError, describe_error};
 use crate::providers::{BlockKind, ProviderEvent, ProviderResponse, TokenUsage};
 use serde_json::Value;

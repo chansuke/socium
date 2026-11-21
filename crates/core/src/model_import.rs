@@ -600,10 +600,10 @@ pub fn utc_date(time: SystemTime) -> String {
     crate::session::utc_date(time)
 }
 
-/// Downloads the catalog from models.dev through socium's provider client,
-/// which follows no redirects.
-pub async fn fetch_catalog() -> Result<String, String> {
-    let client = crate::provider_http_client().map_err(|err| err.to_string())?;
+/// Downloads the catalog from models.dev through `client`, which
+/// [`crate::fetch_models_catalog`] makes as socium's provider client, so it
+/// follows no redirects.
+pub(crate) async fn fetch_catalog(client: &reqwest::Client) -> Result<String, String> {
     let mut response = client
         .get(CATALOG_URL)
         .send()

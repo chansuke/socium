@@ -9,6 +9,20 @@ use std::fs;
 use std::io::{self, Error, ErrorKind};
 use std::path::{Path, PathBuf};
 
+/// Prices in US dollars per million tokens, as the user writes them in
+/// `models.toml`. Socium ships no prices: they change, and a wrong number
+/// shown as a cost is worse than none.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: Option<f64>,
+    #[serde(default)]
+    pub cache_write: Option<f64>,
+}
+
 pub(crate) const MODELS_FILE_ENV: &str = "SOCIUM_MODELS_FILE";
 pub(crate) const BUILTIN_PROVIDER: &str = "anthropic";
 const BUILTIN_DEFAULT_MODEL: &str = "opus";
@@ -149,7 +163,7 @@ pub(crate) struct ModelConfig {
     /// Prompt size at which history is compacted; `None` uses the default.
     pub(crate) compact_at_tokens: Option<u32>,
     /// The user's prices, for the session cost; `None` shows no cost.
-    pub(crate) price: Option<crate::usage::Price>,
+    pub(crate) price: Option<Price>,
     /// Whether the model takes tool definitions. `tools = false` in
     /// models.toml for one that rejects them: it is sent none, answers in
     /// one round, and cannot read, edit, or run anything.
@@ -224,7 +238,7 @@ struct RawModel {
     max_output_tokens: Option<u32>,
     compact_model: Option<String>,
     compact_at_tokens: Option<u32>,
-    price: Option<crate::usage::Price>,
+    price: Option<Price>,
     #[serde(default = "takes_tools")]
     tools: bool,
 }
@@ -479,10 +493,7 @@ fn models_file(lookup: &dyn Fn(&str) -> Option<String>) -> Option<(PathBuf, bool
     if let Some(explicit) = lookup(MODELS_FILE_ENV).filter(|value| !value.is_empty()) {
         return Some((PathBuf::from(explicit), true));
     }
-    Some((
-        crate::settings::config_dir(lookup)?.join("models.toml"),
-        false,
-    ))
+    Some((crate::host::config_dir(lookup)?.join("models.toml"), false))
 }
 
 /// `models.d/` beside a models file.

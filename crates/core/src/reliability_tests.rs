@@ -4,7 +4,7 @@
     reason = "scenarios read the test environment and give a racing peer a head start"
 )]
 use super::*;
-use crate::agent::types::{AgentMessageResponse, ContentBlock, MessageContent};
+use crate::conversation::{AgentMessageResponse, ContentBlock, MessageContent};
 use crate::providers::{ProviderCapabilities, ProviderEvent, ProviderKind, ProviderResponse};
 use crate::test_support::{ScriptedProvider, git_stdout, init_git_repo, text_provider_response};
 use serde_json::json;
@@ -216,7 +216,7 @@ impl Provider for WaitingProvider {
     async fn send_message(
         &self,
         _: &reqwest::Client,
-        _: &crate::agent::types::AgentMessageRequest<'_>,
+        _: &crate::conversation::AgentMessageRequest<'_>,
         _: &mut (dyn FnMut(ProviderEvent) + Send),
     ) -> Result<ProviderResponse, ProviderError> {
         std::future::pending().await
@@ -489,8 +489,8 @@ fn failed_execution_intent_after_approval_has_no_side_effects() {
     let root = tempfile::tempdir().unwrap();
     let control = TaskControl::default();
     control.enable_interactive_approval();
-    let result = crate::tools::run_tool_call_checkpointed(
-        crate::tools::ToolCall {
+    let result = crate::dispatch::run_tool_call_checkpointed(
+        crate::dispatch::ToolCall {
             workspace_root: root.path(),
             tool_use_id: "call",
             name: "run_command",
@@ -521,7 +521,7 @@ fn lock_child_probe() {
     let Some(root) = std::env::var_os("SOCIUM_TEST_LOCK_ROOT") else {
         return;
     };
-    let err = crate::agent::state::lock_workspace(std::path::Path::new(&root)).unwrap_err();
+    let err = crate::state::lock_workspace(std::path::Path::new(&root)).unwrap_err();
     let owner = std::env::var("SOCIUM_TEST_LOCK_OWNER_PID").unwrap();
     assert!(
         err.to_string()
@@ -533,7 +533,7 @@ fn lock_child_probe() {
 #[test]
 fn session_lock_rejects_a_second_process() {
     let root = tempfile::tempdir().unwrap();
-    let _owner = crate::agent::state::lock_workspace(root.path()).unwrap();
+    let _owner = crate::state::lock_workspace(root.path()).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "reliability_tests::lock_child_probe"])
         .env("SOCIUM_TEST_LOCK_ROOT", root.path())
@@ -964,7 +964,7 @@ fn resume_applies_the_sessions_model_or_stays_and_keeps_thinking_unsent() {
     // The saved history keeps the block; it has no recorded origin, so no
     // provider is sent it.
     assert!(saved.to_string().contains("\"thinking\""));
-    let sent = crate::agent::types::readable_thinking(&agent.messages, &|origin| {
+    let sent = crate::conversation::readable_thinking(&agent.messages, &|origin| {
         agent.provider.reads_thinking_from(origin)
     })
     .unwrap();
@@ -1063,8 +1063,8 @@ fn run_with_settings(
     input: serde_json::Value,
     on_progress: &mut dyn FnMut(AgentProgress),
 ) -> (bool, String) {
-    match crate::tools::run_tool_call_checkpointed(
-        crate::tools::ToolCall {
+    match crate::dispatch::run_tool_call_checkpointed(
+        crate::dispatch::ToolCall {
             workspace_root: root,
             tool_use_id: "call",
             name,

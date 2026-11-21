@@ -1,7 +1,7 @@
 pub(crate) mod request_options;
 mod stream;
 
-use crate::agent::types::AgentMessageRequest;
+use crate::conversation::AgentMessageRequest;
 use crate::models::{AuthScheme, ModelConfig, ModelFeatures, ProviderConfig};
 use crate::providers::error::{ProviderError, api_error};
 use crate::providers::sse::SseParser;
@@ -134,7 +134,7 @@ impl Provider for AnthropicProvider {
 
     /// Anthropic's API takes thinking from any Claude model it served. A
     /// compatible endpoint is only known to accept its own model's.
-    fn reads_thinking_from(&self, origin: Option<&crate::agent::types::Origin>) -> bool {
+    fn reads_thinking_from(&self, origin: Option<&crate::conversation::Origin>) -> bool {
         origin.is_some_and(|origin| {
             origin.provider == self.name && (self.first_party || origin.model == self.model)
         })
@@ -210,9 +210,9 @@ fn native_text_editor(body: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::types::Message;
+    use crate::agent::tools_for_model;
+    use crate::conversation::Message;
     use crate::models::ModelRegistry;
-    use crate::tools::tools_for_model;
 
     fn built_request(registry: &ModelRegistry, alias: &str) -> reqwest::Request {
         let model = registry.find(alias).unwrap();
@@ -314,7 +314,7 @@ id = "deepseek-flash"
 #[cfg(test)]
 mod timeout_tests {
     use super::*;
-    use crate::agent::types::Message;
+    use crate::conversation::Message;
     use crate::providers::test_server::serve_paced;
     use serde_json::json;
     use std::time::{Duration, Instant};
@@ -384,7 +384,7 @@ mod timeout_tests {
         let response = send(&base_url, &client).await.unwrap();
         assert_eq!(
             response.message.content,
-            [crate::agent::types::ContentBlock::Text {
+            [crate::conversation::ContentBlock::Text {
                 text: "xxxxxx".into()
             }]
         );

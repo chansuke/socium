@@ -1,10 +1,11 @@
-use crate::AgentProgress;
 use crate::constants::*;
+use crate::conversation::ToolDefinition;
 use crate::execution::{ExecutionPolicy, WorkspaceAccess};
-use crate::tools::error::ToolError;
+use crate::progress::AgentProgress;
+use crate::tool_error::ToolError;
 use crate::tools::input::{optional_string_field, optional_timeout_ms, require_string_array_field};
-use crate::tools::workspace::resolve_workspace_command_cwd;
-use crate::tools::{Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext};
+use crate::workspace::resolve_workspace_command_cwd;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -132,7 +133,7 @@ fn run_command_controlled<F>(
     input: &Value,
     control: &crate::TaskControl,
     sandbox: &crate::settings::SandboxSettings,
-    restrictions: Option<&crate::approval::Restrictions>,
+    restrictions: Option<&crate::access::Restrictions>,
     on_progress: &mut F,
 ) -> Result<String, ToolError>
 where
@@ -204,9 +205,8 @@ fn execute_command(
     );
     let stem = format!(".socium/{name}");
     let open = |suffix: &str| -> Result<std::fs::File, String> {
-        let path =
-            crate::agent::state::workspace_state_path(workspace_root, &format!("{name}.{suffix}"))
-                .map_err(|e| e.to_string())?;
+        let path = crate::state::workspace_state_path(workspace_root, &format!("{name}.{suffix}"))
+            .map_err(|e| e.to_string())?;
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
@@ -292,7 +292,7 @@ fn execute_command(
 fn prune_outputs(workspace_root: &Path) {
     // The checked path of a file in it, as `open` below gets: the state
     // path checks accept files, not directories.
-    let Some(dir) = crate::agent::state::workspace_state_path(workspace_root, "outputs/0")
+    let Some(dir) = crate::state::workspace_state_path(workspace_root, "outputs/0")
         .ok()
         .and_then(|file| file.parent().map(Path::to_path_buf))
     else {
@@ -389,7 +389,7 @@ fn display_command(command: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TaskControl, agent::types::ContentBlock, tools::run_tool_call_controlled};
+    use crate::{TaskControl, conversation::ContentBlock, tools::run_tool_call_controlled};
     #[test]
     fn forged_approval_is_denied_and_human_approval_is_single_use() {
         let workspace = tempfile::tempdir().unwrap();
@@ -485,7 +485,7 @@ mod tests {
     fn only_the_newest_command_outputs_are_kept() {
         let workspace = crate::test_support::make_temp_dir("prune_outputs");
         // Created the way commands create it, with private permissions.
-        let outputs = crate::agent::state::workspace_state_path(workspace.path(), "outputs/x")
+        let outputs = crate::state::workspace_state_path(workspace.path(), "outputs/x")
             .unwrap()
             .parent()
             .unwrap()

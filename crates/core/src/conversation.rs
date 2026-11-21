@@ -1,5 +1,6 @@
+//! The conversation as the agent, its providers and its saved state share
+//! it: messages, their content blocks, the tools offered, and requests.
 use crate::constants::DEFAULT_SYSTEM_PROMPT;
-use crate::tools::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -220,11 +221,45 @@ pub(crate) enum Role {
     System,
 }
 
+/// A tool as every provider is offered it: a name, a description, and a
+/// JSON Schema for the input. A provider with a built-in form of a tool,
+/// such as Anthropic's text editor, swaps it in when the request is built;
+/// core never holds a provider's wire format.
+#[derive(Debug, Serialize, Clone)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+impl ToolDefinition {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Keeps the head and tail of a tool output within about `keep`
+/// characters, saying how much was left out and why.
+pub(crate) fn elide_tool_output(text: &str, keep: usize, why: &str) -> String {
+    let length = text.chars().count();
+    if length <= keep {
+        return text.to_string();
+    }
+    let head = keep / 2;
+    let tail = keep - head;
+    let start = text.chars().take(head).collect::<String>();
+    let end = text.chars().skip(length - tail).collect::<String>();
+    format!(
+        "{start}\n[... {} characters omitted {why}; ask for a narrower range to see them ...]\n{end}",
+        length - keep
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AgentMessageRequest, ContentBlock, Message, MessageContent, strip_thinking};
+    use crate::agent::default_tools;
     use crate::constants::DEFAULT_SYSTEM_PROMPT;
-    use crate::tools::default_tools;
 
     #[test]
     fn agent_message_request_serializes_default_system_prompt() {

@@ -15,19 +15,20 @@
 //! You review changes for correctness bugs. ...
 //! ```
 
+use crate::agent::tools_for_model;
 use crate::constants::{
     AGENT_TOOL_NAME, PLAN_TOOL_NAME, SUBAGENT_EXPLORER_INSTRUCTIONS, SUBAGENT_WORKER_INSTRUCTIONS,
 };
+use crate::conversation::ToolDefinition;
 use crate::models::{ModelConfig, ModelRegistry};
 use crate::providers::Provider;
-use crate::tools::{ToolDefinition, tools_for_model};
 use serde::Deserialize;
 use serde_json::json;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-pub(crate) const AGENTS_DIR_ENV: &str = "SOCIUM_AGENTS_DIR";
+use crate::constants::AGENTS_DIR_ENV;
 const MAX_DEFINITION_BYTES: u64 = 64 * 1024;
 const MAX_DEFINITIONS: usize = 32;
 const MAX_NAME_CHARS: usize = 32;

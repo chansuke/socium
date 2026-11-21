@@ -67,20 +67,6 @@ impl ExecutionPolicy {
     }
 }
 
-/// Whether `path` lies in a public system runtime the sandbox always mounts
-/// read-only.
-pub(crate) fn is_runtime_path(path: &Path) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        linux::runtime_path(path)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = path;
-        false
-    }
-}
-
 /// No host-execution fallback exists. Missing backends and setup errors fail
 /// closed, including on platforms where we have not implemented enforcement.
 pub(crate) struct SandboxExecutor;

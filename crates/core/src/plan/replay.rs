@@ -5,9 +5,9 @@
 
 use super::render::{nudge, receipt};
 use super::{Plan, PlanError, PlanUpdate, PlanView};
-use crate::agent::types::{ContentBlock, Message, MessageContent};
 use crate::constants::{PLAN_NUDGE_ROUNDS, PLAN_TOOL_NAME};
-use crate::tools::error::ToolError;
+use crate::conversation::{ContentBlock, Message, MessageContent};
+use crate::tool_error::ToolError;
 use serde_json::Value;
 use std::collections::HashMap;
 

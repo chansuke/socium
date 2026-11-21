@@ -1,4 +1,4 @@
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -345,7 +345,7 @@ mod tests {
     fn file_tools_may_change_the_scratch_directory_but_no_other_state() {
         let workspace = make_temp_dir("scratch");
         let root = workspace.path();
-        crate::agent::state::workspace_state_path(root, "conversation.json").unwrap();
+        crate::state::workspace_state_path(root, "conversation.json").unwrap();
         fs::write(root.join(".socium/conversation.json"), "private").unwrap();
         crate::scratch_dir(root).unwrap();
 
@@ -381,7 +381,7 @@ mod tests {
         let root = workspace.path();
         fs::create_dir_all(root.join(".git")).unwrap();
         fs::write(root.join(".git/config"), "[remote]").unwrap();
-        crate::agent::state::workspace_state_path(root, "conversation.json").unwrap();
+        crate::state::workspace_state_path(root, "conversation.json").unwrap();
         fs::write(root.join(".socium/conversation.json"), "private").unwrap();
         fs::create_dir_all(root.join(".socium/outputs")).unwrap();
         fs::write(root.join(".socium/outputs/1-2-0.stdout"), "out").unwrap();
@@ -414,7 +414,7 @@ mod tests {
 
         let workspace = make_temp_dir("scratch_link");
         let root = workspace.path();
-        crate::agent::state::workspace_state_path(root, "conversation.json").unwrap();
+        crate::state::workspace_state_path(root, "conversation.json").unwrap();
         fs::write(root.join(".socium/conversation.json"), "private").unwrap();
         let scratch = crate::scratch_dir(root).unwrap();
         symlink("../conversation.json", scratch.join("link.json")).unwrap();

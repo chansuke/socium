@@ -4,7 +4,7 @@
 
 mod stream;
 
-use crate::agent::types::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
+use crate::conversation::{AgentMessageRequest, ContentBlock, Message, MessageContent, Role};
 use crate::models::{ModelConfig, ModelFeatures, ProviderConfig};
 use crate::providers::anthropic::request_options::RequestOptions;
 use crate::providers::error::{ProviderError, api_error};
@@ -83,7 +83,7 @@ impl Provider for OpenAiChatProvider {
     }
 
     /// Chat Completions has no field for thinking; nothing is sent back.
-    fn reads_thinking_from(&self, _: Option<&crate::agent::types::Origin>) -> bool {
+    fn reads_thinking_from(&self, _: Option<&crate::conversation::Origin>) -> bool {
         false
     }
 
@@ -240,9 +240,9 @@ fn append_message(messages: &mut Vec<Value>, message: &Message) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tools_for_model;
     use crate::models::ModelRegistry;
     use crate::providers::test_server::serve_once;
-    use crate::tools::tools_for_model;
 
     const OPENAI: &str = r#"
 [providers.openai]

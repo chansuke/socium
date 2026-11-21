@@ -1,4 +1,4 @@
-use crate::approval::{Grant, grants_cover};
+use crate::access::{Grant, grants_cover};
 use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -106,7 +106,7 @@ impl TaskControl {
         tool: &str,
         input: &serde_json::Value,
         grant: Option<Grant>,
-        progress: &mut dyn FnMut(crate::AgentProgress),
+        progress: &mut dyn FnMut(crate::progress::AgentProgress),
     ) -> bool {
         self.approve_with_timeout(tool, input, grant, progress, None)
     }
@@ -115,7 +115,7 @@ impl TaskControl {
         tool: &str,
         input: &serde_json::Value,
         grant: Option<Grant>,
-        progress: &mut dyn FnMut(crate::AgentProgress),
+        progress: &mut dyn FnMut(crate::progress::AgentProgress),
         timeout: Option<Duration>,
     ) -> bool {
         if !self.is_interactive() || self.is_cancelled() {
@@ -123,7 +123,7 @@ impl TaskControl {
         }
         let id = self.0.next_id.fetch_add(1, Ordering::Relaxed);
         *self.0.approval.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, None));
-        progress(crate::AgentProgress::ApprovalRequested {
+        progress(crate::progress::AgentProgress::ApprovalRequested {
             request_id: id,
             tool: tool.into(),
             summary: crate::activity::summarize_tool_input(tool, &input["arguments"]),
@@ -167,7 +167,7 @@ impl TaskControl {
                         .unwrap_or_else(|e| e.into_inner())
                         .push(grant);
                 }
-                progress(crate::AgentProgress::ApprovalResolved {
+                progress(crate::progress::AgentProgress::ApprovalResolved {
                     request_id: id,
                     approved,
                 });
@@ -234,7 +234,7 @@ mod tests {
             &serde_json::json!({}),
             None,
             &mut |e| {
-                if let crate::AgentProgress::ApprovalRequested { request_id, .. } = e {
+                if let crate::progress::AgentProgress::ApprovalRequested { request_id, .. } = e {
                     c.answer_approval(request_id, true);
                 }
             },
@@ -252,7 +252,7 @@ mod tests {
             &serde_json::json!({"arguments": {"command": ["cargo", "test"]}}),
             None,
             &mut |e| {
-                if let crate::AgentProgress::ApprovalRequested { summary: s, .. } = e {
+                if let crate::progress::AgentProgress::ApprovalRequested { summary: s, .. } = e {
                     summary = Some(s);
                 }
             },
@@ -271,7 +271,7 @@ mod tests {
             &serde_json::json!({}),
             Some(offered.clone()),
             &mut |e| {
-                if let crate::AgentProgress::ApprovalRequested {
+                if let crate::progress::AgentProgress::ApprovalRequested {
                     request_id,
                     session_option,
                     ..
@@ -301,7 +301,7 @@ mod tests {
         let answering = c.clone();
         let started = Instant::now();
         let approved = c.approve("run_command", &serde_json::json!({}), None, &mut |e| {
-            if let crate::AgentProgress::ApprovalRequested { request_id, .. } = e {
+            if let crate::progress::AgentProgress::ApprovalRequested { request_id, .. } = e {
                 let answering = answering.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(150));
@@ -319,7 +319,7 @@ mod tests {
         let cancelling = c.clone();
         let mut canceller = None;
         let approved = c.approve("run_command", &serde_json::json!({}), None, &mut |e| {
-            if let crate::AgentProgress::ApprovalRequested { .. } = e {
+            if let crate::progress::AgentProgress::ApprovalRequested { .. } = e {
                 let cancelling = cancelling.clone();
                 canceller = Some(std::thread::spawn(move || cancelling.cancel()));
             }
@@ -334,7 +334,7 @@ mod tests {
         let answering = c.clone();
         let mut answerer = None;
         let approved = c.approve("run_command", &serde_json::json!({}), None, &mut |e| {
-            if let crate::AgentProgress::ApprovalRequested { request_id, .. } = e {
+            if let crate::progress::AgentProgress::ApprovalRequested { request_id, .. } = e {
                 let answering = answering.clone();
                 answerer = Some(std::thread::spawn(move || {
                     answering.answer(request_id, ApprovalAnswer::AllowOnce)

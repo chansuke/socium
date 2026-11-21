@@ -1,15 +1,16 @@
-use crate::AgentProgress;
 use crate::constants::*;
+use crate::conversation::ToolDefinition;
+use crate::progress::AgentProgress;
+use crate::tool_error::ToolError;
 use crate::tools::edit_history::{EditOrigin, Mutation, apply_changes, describe, undo};
-use crate::tools::error::ToolError;
 use crate::tools::git::maybe_prepend_dirty_worktree_warning;
 use crate::tools::input::{require_i64_field, require_string_field};
 use crate::tools::list_files::list_files_from_workspace;
 use crate::tools::text_file::{
     apply_view_range, byte_index_after_line, count_lines, read_utf8_file_with_limit,
 };
-use crate::tools::workspace::{resolve_workspace_path, resolve_workspace_path_for_create};
-use crate::tools::{Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext};
+use crate::workspace::{resolve_workspace_path, resolve_workspace_path_for_create};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
@@ -328,7 +329,7 @@ pub(crate) fn text_editor_undo_edit(
 mod tests {
     use super::*;
 
-    use crate::agent::types::ContentBlock;
+    use crate::conversation::ContentBlock;
     use crate::test_support::{init_git_repo, make_temp_dir};
     use crate::tools::run_tool_call;
     use serde_json::json;

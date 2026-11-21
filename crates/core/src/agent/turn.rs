@@ -1,19 +1,19 @@
-use crate::AgentProgress;
 use crate::activity::{
     ActivityClock, ActivityKind, RoundActivity, summarize_tool_input, summarize_tool_result,
 };
 use crate::agent::subagent::catalog::SubagentCatalog;
 use crate::agent::subagent::run_subagent;
-use crate::agent::types::{AgentMessageRequest, ContentBlock, Message};
 use crate::constants::{
     AGENT_TOOL_NAME, MAX_CONCURRENT_SUBAGENTS, MAX_TOOL_ROUNDS, PLAN_TOOL_NAME,
 };
+use crate::conversation::ToolDefinition;
+use crate::conversation::{AgentMessageRequest, ContentBlock, Message};
+use crate::dispatch::{ToolCall, run_tool_call_on_blocking_thread};
 use crate::error::AgentError;
 use crate::plan::PlanLedger;
+use crate::progress::AgentProgress;
 use crate::providers::{Provider, ProviderEvent, TokenUsage};
-use crate::tools::ToolDefinition;
-use crate::tools::error::ToolError;
-use crate::tools::{ToolCall, run_tool_call_on_blocking_thread};
+use crate::tool_error::ToolError;
 use serde_json::Value;
 use std::future::Future;
 use std::path::Path;
@@ -129,8 +129,8 @@ where
         let mut estimate = budget.estimate(ctx.model, messages, ctx.tools);
         if estimate > limit
             && let Some(Message {
-                content: crate::agent::types::MessageContent::Blocks(results),
-                role: crate::agent::types::Role::User,
+                content: crate::conversation::MessageContent::Blocks(results),
+                role: crate::conversation::Role::User,
                 ..
             }) = messages.last_mut()
         {
@@ -165,7 +165,7 @@ where
         );
         // Thinking another provider or model wrote stays in the history
         // but is not sent where it cannot be read.
-        let readable = crate::agent::types::readable_thinking(messages, &|origin| {
+        let readable = crate::conversation::readable_thinking(messages, &|origin| {
             ctx.provider.reads_thinking_from(origin)
         });
         let message_request = AgentMessageRequest::with_system_prompt(
@@ -299,7 +299,7 @@ where
         }
         messages.push(Message::assistant_from(
             assistant_blocks,
-            crate::agent::types::Origin {
+            crate::conversation::Origin {
                 provider: ctx.provider.label(),
                 model: ctx.model.to_string(),
             },
@@ -779,7 +779,7 @@ fn bounded(result: ContentBlock) -> ContentBlock {
             is_error,
         } => ContentBlock::ToolResult {
             tool_use_id,
-            content: crate::agent::context::elide_tool_output(
+            content: crate::conversation::elide_tool_output(
                 &content,
                 crate::constants::MAX_TOOL_RESULT_CHARACTERS,
                 "from this result",
@@ -803,7 +803,7 @@ fn elapsed_ms(start: Instant) -> u64 {
 }
 
 fn validate_protocol(messages: &[Message]) -> Result<(), AgentError> {
-    use crate::agent::types::{MessageContent, Role};
+    use crate::conversation::{MessageContent, Role};
     let invalid = || {
         std::io::Error::other(
             "Invalid conversation tool-call/result protocol; original history preserved",
@@ -849,7 +849,7 @@ fn validate_protocol(messages: &[Message]) -> Result<(), AgentError> {
 /// Repair a crash between intent and result persistence without guessing whether
 /// a side effect happened. This also completes partially recorded tool batches.
 pub(crate) fn repair_incomplete_tools(messages: &mut Vec<Message>) -> bool {
-    use crate::agent::types::{MessageContent, Role};
+    use crate::conversation::{MessageContent, Role};
     let mut repaired = false;
     let mut i = 0;
     while i < messages.len() {
@@ -904,7 +904,7 @@ pub(crate) fn extract_text(blocks: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::types::ContentBlock;
+    use crate::conversation::ContentBlock;
     use serde_json::json;
 
     #[test]
@@ -914,7 +914,7 @@ mod tests {
         let workspace = make_temp_dir("batch");
         let provider = ScriptedProvider::new(Vec::new());
         let client = crate::test_support::http_client();
-        let tools = crate::tools::tools_for_model();
+        let tools = crate::agent::tools_for_model();
         let subagents = SubagentCatalog::builtin();
         let control = crate::TaskControl::default();
         let ctx = TurnContext {
@@ -1005,7 +1005,7 @@ mod tests {
 
     mod properties {
         use super::super::*;
-        use crate::agent::types::{ContentBlock, Message, MessageContent};
+        use crate::conversation::{ContentBlock, Message, MessageContent};
         use proptest::prelude::*;
         use serde_json::json;
 

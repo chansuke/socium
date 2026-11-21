@@ -9,56 +9,16 @@
 //! secrets ask in every mode the config can set; only
 //! `--dangerously-skip-permissions` lets them run unasked.
 
+use crate::access::{Grant, Restrictions, relative_target};
 use crate::settings::{ApprovalMode, PathPatterns, Settings};
-use crate::tools::error::ToolError;
+use crate::tool_error::ToolError;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 /// Most paths a command's sandbox will hide or freeze; more falls back to
 /// asking, since mounting thousands of paths is slow and fragile.
 const MAX_RESTRICTED_PATHS: usize = 256;
-
-/// Something the user allowed for the rest of the session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Grant {
-    /// Commands whose arguments start with these.
-    Command(Vec<String>),
-    /// Edits to these workspace paths.
-    Edit(Vec<String>),
-    /// Reads of these workspace paths.
-    Read(Vec<String>),
-}
-
-impl Grant {
-    /// What the grant covers, as the approval picker names it after
-    /// "Allow".
-    pub fn scope(&self) -> String {
-        match self {
-            Grant::Command(prefix) => format!("`{}` commands", prefix.join(" ")),
-            Grant::Edit(paths) => format!("edits to {}", paths.join(", ")),
-            Grant::Read(paths) => format!("reading {}", paths.join(", ")),
-        }
-    }
-
-    fn covers(&self, other: &Grant) -> bool {
-        match (self, other) {
-            (Grant::Command(prefix), Grant::Command(argv)) => argv.starts_with(prefix),
-            (Grant::Edit(granted), Grant::Edit(paths))
-            | (Grant::Read(granted), Grant::Read(paths)) => {
-                paths.iter().all(|path| granted.contains(path))
-            }
-            _ => false,
-        }
-    }
-}
-
-/// What the sandbox withholds from a command nobody reviewed.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Restrictions {
-    pub(crate) hidden: Vec<PathBuf>,
-    pub(crate) frozen: Vec<PathBuf>,
-}
 
 pub(crate) enum Gate {
     /// Runs without asking. `None` when the call needs no restriction, the
@@ -193,31 +153,6 @@ fn denied_by(rule: &[String]) -> String {
     )
 }
 
-/// Whether a search or diff of `named` leaves out the contents of `path`,
-/// both relative to the workspace: a file that may hold credentials, unless
-/// it is the one named, whose read was approved already.
-pub(crate) fn withholds(
-    sensitive: &crate::settings::PathPatterns,
-    path: &str,
-    named: &str,
-) -> bool {
-    path != named && sensitive.matches(path)
-}
-
-/// The note under a result that left out such files.
-pub(crate) fn withheld_note(paths: &[String]) -> String {
-    format!(
-        "Left out {} that may hold credentials: {}. Name one as the path to read it, which asks for approval.",
-        if paths.len() == 1 { "a file" } else { "files" },
-        paths.join(", ")
-    )
-}
-
-/// Whether a session grant covers `wanted`.
-pub(crate) fn grants_cover(grants: &[Grant], wanted: &Grant) -> bool {
-    grants.iter().any(|grant| grant.covers(wanted))
-}
-
 fn command_argv(input: &Value) -> Option<Vec<String>> {
     input["command"]
         .as_array()?
@@ -337,17 +272,6 @@ fn as_requested(root: &Path, requested: &str) -> String {
         .unwrap_or(requested)
         .to_string_lossy()
         .replace('\\', "/")
-}
-
-/// `requested` as it resolves inside the workspace, symlinks followed, so
-/// an alias cannot dodge a pattern. `None` when it does not resolve; the
-/// tool then reports the error.
-pub(crate) fn relative_target(root: &Path, requested: &str) -> Option<String> {
-    let resolved =
-        crate::tools::workspace::resolve_workspace_path_for_create(root, requested).ok()?;
-    let root = root.canonicalize().ok()?;
-    let relative = resolved.strip_prefix(&root).ok()?;
-    Some(relative.to_string_lossy().replace('\\', "/"))
 }
 
 /// The files a command nobody reviewed may not read (`sensitive`) or change
@@ -480,7 +404,9 @@ fn find_matching_files<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access::grants_cover;
     use serde_json::json;
+    use std::path::PathBuf;
 
     fn words(text: &str) -> Vec<String> {
         text.split_whitespace().map(str::to_string).collect()
@@ -793,6 +719,7 @@ mod tests {
 
     mod properties {
         use super::super::*;
+        use crate::access::grants_cover;
         use crate::settings::ApprovalSettings;
         use proptest::prelude::*;
         use serde_json::json;

@@ -6,7 +6,7 @@
 //! The config directory must lie outside the workspace, so neither the
 //! model's file tools nor its commands can change these settings.
 
-use crate::tools::ToolProfile;
+use crate::constants::TEXT_EDITOR_TOOL_NAME;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -349,13 +349,13 @@ struct RawApproval {
 /// a workspace, or the model could rewrite its own limits.
 pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(dir) = config_dir(lookup) {
+    if let Some(dir) = crate::host::config_dir(lookup) {
         paths.push(dir);
     }
     for variable in [
         CONFIG_FILE_ENV,
         crate::models::MODELS_FILE_ENV,
-        crate::agent::subagent::catalog::AGENTS_DIR_ENV,
+        crate::constants::AGENTS_DIR_ENV,
     ] {
         if let Some(path) = lookup(variable).filter(|value| !value.is_empty()) {
             paths.push(PathBuf::from(path));
@@ -367,19 +367,6 @@ pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathB
         paths.push(crate::models::models_dir_beside(Path::new(&path)));
     }
     paths
-}
-
-/// `$XDG_CONFIG_HOME/socium`, else `~/.config/socium`.
-pub(crate) fn config_dir(lookup: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    let config_home = lookup("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| {
-            lookup("HOME")
-                .filter(|home| !home.is_empty())
-                .map(|home| Path::new(&home).join(".config"))
-        })?;
-    Some(config_home.join("socium"))
 }
 
 /// Refuses a workspace that contains Socium's own configuration: its file
@@ -436,7 +423,7 @@ impl Settings {
         let Some(path) = explicit
             .as_ref()
             .map(PathBuf::from)
-            .or_else(|| config_dir(lookup).map(|dir| dir.join("config.toml")))
+            .or_else(|| crate::host::config_dir(lookup).map(|dir| dir.join("config.toml")))
         else {
             return Ok((Self::default(), Vec::new()));
         };
@@ -519,7 +506,7 @@ impl Settings {
             let configured = expand(value)?;
             match configured.canonicalize() {
                 Ok(dir) if dir.is_dir() => {
-                    if !sandbox.exposes(&dir) && !crate::execution::is_runtime_path(&dir) {
+                    if !sandbox.exposes(&dir) && !crate::host::is_runtime_path(&dir) {
                         warnings.push(format!(
                             "sandbox.path: '{value}' is not inside a sandbox.read_only directory or a system runtime, so commands cannot see it; skipped"
                         ));
@@ -711,6 +698,74 @@ fn reserved_variable(name: &str) -> Option<&'static str> {
         return Some("would change Git's configuration isolation");
     }
     None
+}
+
+/// Which built-in tools the model is offered, from `[tools] profile` in
+/// config.toml, so tool sets can be compared. `agent`, `update_plan`, and
+/// `web_search` are offered whatever the profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ToolProfile {
+    #[default]
+    Full,
+    Basic,
+    Search,
+}
+
+const FULL_PROFILE: &[&str] = &[
+    "read_file",
+    "list_files",
+    "search_text",
+    "apply_patch",
+    "git_branch",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_commit",
+    "find_symbol",
+    "run_command",
+    TEXT_EDITOR_TOOL_NAME,
+];
+
+const BASIC_PROFILE: &[&str] = &[
+    "read_file",
+    "apply_patch",
+    TEXT_EDITOR_TOOL_NAME,
+    "run_command",
+    "git_commit",
+];
+
+const SEARCH_PROFILE: &[&str] = &[
+    "read_file",
+    "apply_patch",
+    TEXT_EDITOR_TOOL_NAME,
+    "run_command",
+    "git_commit",
+    "search_text",
+    "find_symbol",
+];
+
+impl ToolProfile {
+    pub(crate) const ALL: [Self; 3] = [Self::Full, Self::Basic, Self::Search];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Basic => "basic",
+            Self::Search => "search",
+        }
+    }
+
+    pub(crate) fn tools(self) -> &'static [&'static str] {
+        match self {
+            Self::Full => FULL_PROFILE,
+            Self::Basic => BASIC_PROFILE,
+            Self::Search => SEARCH_PROFILE,
+        }
+    }
+
+    pub(crate) fn allows(self, tool: &str) -> bool {
+        self.tools().contains(&tool)
+    }
 }
 
 #[cfg(test)]

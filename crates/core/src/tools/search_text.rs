@@ -1,14 +1,15 @@
-use crate::AgentProgress;
 use crate::constants::*;
-use crate::tools::error::ToolError;
+use crate::conversation::ToolDefinition;
+use crate::progress::AgentProgress;
+use crate::tool_error::ToolError;
 use crate::tools::input::{
     optional_bounded_usize_field, optional_string_field, require_string_field,
 };
 use crate::tools::ripgrep::{
     SearchExecution, SearchMode, format_search_results, search_with_ripgrep,
 };
-use crate::tools::workspace::resolve_workspace_path;
-use crate::tools::{Tool, ToolContext, ToolDefinition};
+use crate::tools::{Tool, ToolContext};
+use crate::workspace::resolve_workspace_path;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -135,10 +136,10 @@ fn search_text_controlled(
         status_code,
         ..
     } = execution;
-    let named = crate::approval::relative_target(workspace_root, path).unwrap_or_default();
+    let named = crate::access::relative_target(workspace_root, path).unwrap_or_default();
     let mut withheld = Vec::new();
     matches.retain(|entry| {
-        let keep = !crate::approval::withholds(sensitive, &entry.path, &named);
+        let keep = !crate::access::withholds(sensitive, &entry.path, &named);
         if !keep && !withheld.contains(&entry.path) {
             withheld.push(entry.path.clone());
         }
@@ -147,7 +148,7 @@ fn search_text_controlled(
     let mut formatted = format_search_results("Pattern", pattern, path, glob, max_results, matches);
     if !withheld.is_empty() {
         formatted.push('\n');
-        formatted.push_str(&crate::approval::withheld_note(&withheld));
+        formatted.push_str(&crate::access::withheld_note(&withheld));
     }
 
     if let Some(note) = note {
