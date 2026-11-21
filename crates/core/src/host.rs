@@ -30,6 +30,19 @@ pub(crate) fn search_path() -> Option<OsString> {
     std::env::var_os("PATH")
 }
 
+/// `$XDG_CONFIG_HOME/socium`, else `~/.config/socium`.
+pub(crate) fn config_dir(lookup: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let config_home = lookup("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            lookup("HOME")
+                .filter(|home| !home.is_empty())
+                .map(|home| std::path::Path::new(&home).join(".config"))
+        })?;
+    Some(config_home.join("socium"))
+}
+
 /// Public runtime installations the sandbox always mounts read-only. Not
 /// arbitrary PATH directories: $HOME, /etc, /run and the host's /tmp are
 /// never mounted whole.

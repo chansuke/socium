@@ -20,7 +20,7 @@ pub(crate) async fn main(command: ModelsImport) -> i32 {
                 return 1;
             }
         },
-        None => match model_import::fetch_catalog().await {
+        None => match socium_core::fetch_models_catalog().await {
             Ok(text) => (text, model_import::CATALOG_URL.to_string()),
             Err(err) => {
                 eprintln!("socium: {err}");

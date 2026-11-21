@@ -493,10 +493,7 @@ fn models_file(lookup: &dyn Fn(&str) -> Option<String>) -> Option<(PathBuf, bool
     if let Some(explicit) = lookup(MODELS_FILE_ENV).filter(|value| !value.is_empty()) {
         return Some((PathBuf::from(explicit), true));
     }
-    Some((
-        crate::settings::config_dir(lookup)?.join("models.toml"),
-        false,
-    ))
+    Some((crate::host::config_dir(lookup)?.join("models.toml"), false))
 }
 
 /// `models.d/` beside a models file.
