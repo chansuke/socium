@@ -741,6 +741,37 @@ fn client_bridge_allows_what_a_request_offers_for_the_session() {
 }
 
 #[test]
+fn client_bridge_activity_names_the_program_but_not_its_arguments() {
+    let secret = "sk-live-activity-secret";
+    let command = json!({"command": ["/usr/bin/touch", format!("--token={secret}")]});
+    let (port, _) = serve(vec![
+        tool_call_reply("call-1", "run_command", command),
+        text_reply("Done."),
+    ]);
+    let fixture = fixture(port);
+    let mut bridge = Bridge::start(&fixture);
+    bridge.next("session");
+    bridge.send(json!({"id": "turn-1", "action": "prompt", "text": "Touch it."}));
+    let approval = bridge.next("approval");
+    let error = bridge.request(json!({
+        "id": "answer", "action": "approve", "request": approval["request"], "allow": true,
+    }));
+    assert_eq!(error, Value::Null);
+    let rest = bridge.until("session");
+    let activity = of_type(&rest, "activity");
+    let details = activity
+        .iter()
+        .filter(|r| r["phase"] == "command")
+        .map(|r| r["detail"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(details, vec![json!("touch")], "{rest:#?}");
+    for record in activity {
+        assert!(!record.to_string().contains(secret), "{record}");
+    }
+    bridge.finish();
+}
+
+#[test]
 fn client_bridge_streams_the_plan_and_what_the_agent_is_doing() {
     let (port, _) = serve(vec![
         tool_reply(
