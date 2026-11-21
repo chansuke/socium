@@ -14,6 +14,14 @@ import { loadPairedHost, savePairedHost } from "./pairedHost";
 import type { PairedHost } from "./pairedHost";
 import { palette, styles } from "./styles";
 
+/**
+ * React Native's fetch only answers once a response has ended, so the event
+ * stream would never open; poll from the start instead.
+ */
+function connectTo(origin: string, token: string) {
+  return createClient(origin, token, fetch, { events: false });
+}
+
 export function App() {
   const [client, setClient] = useState<Client | null | undefined>(undefined);
   const storage = useRef(Promise.resolve());
@@ -21,7 +29,7 @@ export function App() {
   useEffect(() => {
     let mounted = true;
     void loadPairedHost().then((host) => {
-      if (mounted) setClient(host ? createClient(host.origin, host.token) : null);
+      if (mounted) setClient(host ? connectTo(host.origin, host.token) : null);
     });
     return () => { mounted = false; };
   }, []);
@@ -32,7 +40,7 @@ export function App() {
 
   function connectPaired(host: PairedHost) {
     updateSavedHost(host);
-    setClient(createClient(host.origin, host.token));
+    setClient(connectTo(host.origin, host.token));
   }
 
   function disconnect() {
@@ -72,7 +80,7 @@ function ConnectForm({ connect, connectPaired }: {
       return;
     }
     Keyboard.dismiss();
-    connect(createClient(endpoint, token.trim()));
+    connect(connectTo(endpoint, token.trim()));
   }
 
   if (mode === "scan") return <ScanPairing connect={connectPaired} back={() => setMode("choose")} />;
