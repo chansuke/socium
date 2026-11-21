@@ -88,9 +88,13 @@ function checkDirectory(path: string, create: boolean) {
   return true;
 }
 
-/** Changes with the contents, a replacement, or a change of owner or mode. */
+/**
+ * Changes with the contents, a replacement, or a change of owner or mode.
+ * The owner and mode are part of it because file times can stay the same
+ * across changes made within one clock tick.
+ */
 function versionOf(stats: Stats) {
-  return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}:${stats.ctimeMs}`;
+  return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}:${stats.ctimeMs}:${stats.mode}:${stats.uid}`;
 }
 
 /** The version of the file now, without reading it; "missing" before the first pairing. */
