@@ -84,7 +84,8 @@ pre { overflow: auto; padding: 11px; border-radius: 7px; background: #101417; fo
 .notice summary { cursor: pointer; }
 .approval pre { max-height: 25vh; white-space: pre-wrap; overflow-wrap: anywhere; }
 .approval p { margin: 5px 0; }
-.approval-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.approval-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.outlined { border-color: #5d7a6c; color: var(--mint); }
 
 .connect { min-height: 100dvh; display: grid; place-items: center; padding: 25px; background: radial-gradient(ellipse at 50% 36%, #1a2827, #101417 65%); }
 .connect-card { width: min(100%, 430px); display: flex; flex-direction: column; align-items: flex-start; padding: 29px; background: var(--panel); border: 1px solid var(--edge); border-radius: 16px; box-shadow: 0 22px 65px #0004; }

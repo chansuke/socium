@@ -227,13 +227,18 @@ function Conversation({ client, state, error, disabled }: {
             <strong>Approval required · {approval.tool}</strong>
             <p>{approval.summary}{approval.requestedBy && ` · ${approval.requestedBy}`}</p>
             <pre tabIndex={0} aria-label="Tool call details">{approval.input}</pre>
-            {approval.sessionOption && <p>Allow for session also allows {approval.sessionOption} until Socium exits.</p>}
+            {approval.sessionOption && (
+              <p id="session-option">Allow for session allows {approval.sessionOption} until Socium exits.</p>
+            )}
             <div className="approval-actions">
               <button className="quiet" disabled={disabled} onClick={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: false })}>Deny</button>
               {approval.sessionOption && (
-                <button className="quiet" disabled={disabled} title={`Also allow ${approval.sessionOption} until Socium exits`} onClick={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: true, forSession: true })}>Allow for session</button>
+                <button className="quiet outlined" disabled={disabled} aria-describedby="session-option"
+                  onClick={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: true, scope: "session" })}>
+                  Allow for session
+                </button>
               )}
-              <button className="primary" disabled={disabled} onClick={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: true })}>Allow once</button>
+              <button className="primary" disabled={disabled} onClick={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: true, scope: "once" })}>Allow once</button>
             </div>
           </section>
         )}
