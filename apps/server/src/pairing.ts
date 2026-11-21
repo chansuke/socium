@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mobileEndpoint } from "@socium/client";
 import type { PairedDevice } from "@socium/client/protocol";
-import { checkStoreLocation, defaultPairingStore, readStore, storeVersion, writeStore } from "./deviceStore.ts";
+import { checkStoreLocation, defaultPairingStore, readStore, storeVersion, updateStore } from "./deviceStore.ts";
 import type { DeviceRecord, StoreSnapshot } from "./deviceStore.ts";
 
 export { defaultPairingStore } from "./deviceStore.ts";
@@ -35,8 +35,10 @@ export function createPairing(address: string, { clock = Date.now, storePath = d
     return store.devices;
   }
 
-  function save(next: DeviceRecord[]) {
-    store = writeStore(storePath, next);
+  /** Changes the latest records on disk, never the cached ones, under the store lock. */
+  function update(change: (devices: DeviceRecord[]) => DeviceRecord[] | null) {
+    store = updateStore(storePath, change);
+    return store.devices;
   }
 
   return {
@@ -51,21 +53,25 @@ export function createPairing(address: string, { clock = Date.now, storePath = d
       pending = undefined;
       const token = randomBytes(32).toString("base64url");
       const device = { id: randomUUID(), createdAt: new Date(clock()).toISOString(), lastUsedAt: null, tokenHash: hash(token) };
-      save([...load(), device]);
+      update((devices) => [...devices, device]);
       return token;
     },
     authorizes(authorization: string) {
       if (!authorization.startsWith("Bearer ")) return false;
       const tokenHash = hash(authorization.slice("Bearer ".length));
       const now = clock();
-      const devices = load();
-      const device = devices.find((record) => record.tokenHash === tokenHash);
-      if (!device) return false;
-      if (device.lastUsedAt === null || now - Date.parse(device.lastUsedAt) >= usageResolution) {
-        const lastUsedAt = new Date(now).toISOString();
-        save(devices.map((record) => record === device ? { ...record, lastUsedAt } : record));
-      }
-      return true;
+      const due = (record: DeviceRecord) =>
+        record.lastUsedAt === null || now - Date.parse(record.lastUsedAt) >= usageResolution;
+      const cached = load().find((record) => record.tokenHash === tokenHash);
+      if (!cached) return false;
+      if (!due(cached)) return true;
+      const lastUsedAt = new Date(now).toISOString();
+      // Decided again on the locked file: another gateway may have revoked it.
+      const devices = update((current) => {
+        const device = current.find((record) => record.tokenHash === tokenHash);
+        return device && due(device) ? current.map((record) => record === device ? { ...record, lastUsedAt } : record) : null;
+      });
+      return devices.some((record) => record.tokenHash === tokenHash);
     },
     /** Paired devices, oldest first, without their token hashes. */
     devices(): PairedDevice[] {
@@ -73,10 +79,12 @@ export function createPairing(address: string, { clock = Date.now, storePath = d
     },
     /** Forgets a device; its token stops working at once. */
     revoke(id: string) {
-      const devices = load();
-      if (!devices.some((record) => record.id === id)) return false;
-      save(devices.filter((record) => record.id !== id));
-      return true;
+      let found = false;
+      update((devices) => {
+        found = devices.some((record) => record.id === id);
+        return found ? devices.filter((record) => record.id !== id) : null;
+      });
+      return found;
     },
   };
 }

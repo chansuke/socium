@@ -1,9 +1,12 @@
 import { strict as assert } from "node:assert";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
+import { pathToFileURL } from "node:url";
 import { readPairingUrl } from "@socium/client";
 import { defaultPairingStore } from "./deviceStore.ts";
 import { createPairing } from "./pairing.ts";
@@ -82,4 +85,59 @@ test("a store that others can reach, or that is a symlink, is refused", (context
   const device = pair(pairing);
   chmodSync(storePath, 0o644);
   assert.throws(() => pairing.authorizes(device), /mode 600/);
+});
+
+/** Runs pairing operations in another process, as a second gateway on the same store. */
+async function otherGateway(storePath: string, script: string) {
+  const pairingModule = pathToFileURL(join(import.meta.dirname, "pairing.ts")).href;
+  const clientModule = pathToFileURL(join(import.meta.dirname, "../../../packages/client/src/client.ts")).href;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `
+    import { createPairing } from ${JSON.stringify(pairingModule)};
+    import { readPairingUrl } from ${JSON.stringify(clientModule)};
+    const storePath = ${JSON.stringify(storePath)};
+    let minute = 0;
+    // Each call is a minute later, so every authorization rewrites lastUsedAt.
+    const pairing = createPairing("https://socium.test/", { storePath, clock: () => Date.now() + 60_000 * ++minute });
+    const pair = () => pairing.redeem(readPairingUrl(pairing.issue()).code);
+    ${script}
+  `], { stdio: ["ignore", "inherit", "inherit"] });
+  const [code] = await once(child, "exit");
+  assert.equal(code, 0);
+}
+
+test("gateways sharing a store keep every pairing and never bring back a revoked device", { timeout: 60_000 }, async (context) => {
+  const storePath = join(temporaryDirectory(context), "state", "paired-devices.json");
+  const host = createPairing(address, { storePath });
+  const revoked = pair(host);
+  const [device] = host.devices();
+  assert(device);
+
+  const rounds = 40;
+  await Promise.all([
+    // Both pair devices and keep using the doomed one, each from its own cache.
+    otherGateway(storePath, `for (let i = 0; i < ${rounds}; i++) { pair(); pairing.authorizes(${JSON.stringify(revoked)}); }`),
+    otherGateway(storePath, `for (let i = 0; i < ${rounds}; i++) { pair(); pairing.authorizes(${JSON.stringify(revoked)}); }`),
+    // Revokes it while the others are halfway through.
+    otherGateway(storePath, `
+      while (pairing.devices().length < ${rounds}) await new Promise((resolve) => setTimeout(resolve, 1));
+      if (!pairing.revoke(${JSON.stringify(device.id)})) process.exit(2);
+    `),
+  ]);
+
+  const stored = JSON.parse(readFileSync(storePath, "utf8")).devices as { id: string }[];
+  assert.equal(stored.length, rounds * 2, "a pairing was lost");
+  assert(!stored.some(({ id }) => id === device.id), "the revoked device came back");
+  assert.equal(host.authorizes(revoked), false);
+  assert(!existsSync(`${storePath}.lock`));
+});
+
+test("a lock left by a stopped gateway is taken over", (context) => {
+  const directory = temporaryDirectory(context);
+  const storePath = join(directory, "paired-devices.json");
+  // No process has this pid: Linux caps pids well below it.
+  writeFileSync(`${storePath}.lock`, "2147483646 stale\n", { mode: 0o600 });
+  const pairing = createPairing(address, { storePath });
+  pair(pairing);
+  assert.equal(pairing.devices().length, 1);
+  assert(!existsSync(`${storePath}.lock`));
 });

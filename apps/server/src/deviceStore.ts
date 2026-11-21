@@ -19,6 +19,11 @@ export interface StoreSnapshot {
   version: string;
 }
 
+/** A lock older than this is left by a gateway that stopped mid-update. */
+const staleLockAge = 30_000;
+const lockTimeout = 5000;
+const lockRetry = new Int32Array(new SharedArrayBuffer(4));
+
 /**
  * The user-private file that keeps paired devices across restarts. A relative
  * `XDG_STATE_HOME` is ignored, as the XDG Base Directory specification asks.
@@ -146,8 +151,7 @@ export function readStore(path: string): StoreSnapshot {
 }
 
 /** Replaces the store in one step, so a crash leaves the old file or the new one. */
-export function writeStore(path: string, devices: DeviceRecord[]): StoreSnapshot {
-  checkDirectory(path, true);
+function writeStore(path: string, devices: DeviceRecord[]): StoreSnapshot {
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   const descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try {
@@ -170,5 +174,76 @@ export function writeStore(path: string, devices: DeviceRecord[]): StoreSnapshot
       // Already renamed or never written.
     }
     throw error;
+  }
+}
+
+/** Whether the gateway that took `lock` stopped without letting go of it. */
+function isStale(lock: string) {
+  let stats: Stats;
+  let owner: number;
+  try {
+    stats = lstatSync(lock);
+    owner = Number(readFileSync(lock, "utf8").split(" ")[0]);
+  } catch (error) {
+    // Released meanwhile.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  if (Date.now() - stats.mtimeMs > staleLockAge) return true;
+  if (!Number.isInteger(owner) || owner <= 0) return false;
+  try {
+    process.kill(owner, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+/**
+ * Reads the store, lets `change` compute the next records, and writes them,
+ * while holding `<store>.lock`, so gateways sharing the store never lose each
+ * other's updates, such as a revocation. `change` returns null to keep the file.
+ */
+export function updateStore(path: string, change: (devices: DeviceRecord[]) => DeviceRecord[] | null): StoreSnapshot {
+  checkDirectory(path, true);
+  const lock = `${path}.lock`;
+  const deadline = Date.now() + lockTimeout;
+  let descriptor: number;
+  for (;;) {
+    try {
+      descriptor = openSync(lock, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    if (isStale(lock)) {
+      try {
+        unlinkSync(lock);
+      } catch {
+        // Another gateway cleared it first.
+      }
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`The paired device store is locked by another gateway; remove ${lock} if no gateway is running.`);
+    }
+    // Updates take milliseconds; wait without spinning.
+    Atomics.wait(lockRetry, 0, 0, 10);
+  }
+  try {
+    try {
+      writeSync(descriptor, `${process.pid} ${randomBytes(6).toString("hex")}\n`);
+    } finally {
+      closeSync(descriptor);
+    }
+    const current = readStore(path);
+    const next = change(current.devices);
+    return next ? writeStore(path, next) : current;
+  } finally {
+    try {
+      unlinkSync(lock);
+    } catch {
+      // Taken as stale by another gateway; nothing of ours is left to release.
+    }
   }
 }
