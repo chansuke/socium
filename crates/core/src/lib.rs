@@ -332,6 +332,13 @@ fn provider_http_client() -> Result<reqwest::Client, ProviderError> {
     )
 }
 
+/// The models.dev catalog for `socium models import`, downloaded with the
+/// provider client.
+pub async fn fetch_models_catalog() -> Result<String, String> {
+    let client = provider_http_client().map_err(|err| err.to_string())?;
+    model_import::fetch_catalog(&client).await
+}
+
 /// Saved sessions with messages, most recently saved first, for choosing
 /// one to resume. Briefly takes the workspace lock, so it fails while
 /// another Socium runs here.
