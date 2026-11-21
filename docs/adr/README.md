@@ -22,3 +22,4 @@
 * [22. GeminiにはAntigravityのログインでなくGemini APIのキーで接続する](0022-geminiにはantigravityのログインでなくgemini-apiのキーで接続する.md)
 * [23. models.devのカタログを利用者が実行するコマンドでmodels.dに書き出す](0023-models-devのカタログを利用者が実行するコマンドでmodels-dに書き出す.md)
 * [24. 追加の拡張は実装済みの範囲に留めskills-session-fork-pluginは入れない](0024-追加の拡張は実装済みの範囲に留めskills-session-fork-pluginは入れない.md)
+* [25. バックグラウンドのプロセスをrun_commandで起動しPTYで出力を監視して入力を送る](0025-バックグラウンドのプロセスをrun-commandで起動しptyで出力を監視して入力を送る.md)
