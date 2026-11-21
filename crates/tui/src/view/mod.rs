@@ -785,30 +785,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use crate::app::App;
+    use crate::scenario::render_at;
     use ratatui::{Terminal, backend::TestBackend};
     use unicode_width::UnicodeWidthStr;
 
     fn render(app: &App) -> Vec<String> {
         render_at(app, 80, 30)
-    }
-
-    fn render_at(app: &App, width: u16, height: u16) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        let buffer = terminal.backend().buffer();
-        // A wide grapheme fills its cell and the next; read it once.
-        (0..buffer.area.height)
-            .map(|y| {
-                let mut row = String::new();
-                let mut x = 0;
-                while x < buffer.area.width {
-                    let symbol = buffer[(x, y)].symbol();
-                    row.push_str(symbol);
-                    x += symbol.width().max(1) as u16;
-                }
-                row
-            })
-            .collect()
     }
 
     #[test]

@@ -14,8 +14,10 @@ The script reads the `Paths` and `Added lines` of each item. A path is a shell
 pattern in which `*` also matches `/`. An added-lines pattern is an extended
 regular expression matched against the lines the diff adds.
 
-Before a pull request, run the cheap checks first: `cargo fmt`, `cargo clippy`
-and `cargo test` (the pre-commit hook runs all three), then the items here.
+Before a pull request, run `scripts/verify`. It runs `cargo fmt`, `cargo
+clippy`, `cargo test`, the added-lines and feature-map checks, and prints the
+items here that the change triggers; `scripts/verify full` adds the Nix build
+and the evaluation. Logs and a summary are kept in `target/verify/`.
 
 ## Adding and removing items
 

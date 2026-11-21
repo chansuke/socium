@@ -68,7 +68,7 @@ pub(crate) enum InputMode {
     Editing,
 }
 
-enum SubmitAction {
+pub(crate) enum SubmitAction {
     None,
     Exit,
     Pending(PendingSubmission),
@@ -760,6 +760,144 @@ impl App {
             .map(|agent| agent.session_id().to_string()))
     }
 
+    /// What one terminal event does to the app. The caller draws and starts
+    /// the task a returned action asks for, so scenarios can drive the app
+    /// without a terminal.
+    pub(crate) fn handle_event(&mut self, event: Event) -> Result<SubmitAction> {
+        if let Event::Paste(text) = &event {
+            if matches!(self.input_mode, InputMode::Editing)
+                && self.approval.is_none()
+                && self.model_picker.is_none()
+                && self.session_picker.is_none()
+                && self.rewind_picker.is_none()
+            {
+                self.insert_text(text);
+            }
+            return Ok(SubmitAction::None);
+        }
+        if let Event::Key(key) = event {
+            if key.kind == KeyEventKind::Press && self.session_picker.is_some() {
+                if self.handle_session_picker_key(key.code, key.modifiers) {
+                    return Ok(SubmitAction::Compact);
+                }
+                return Ok(SubmitAction::None);
+            }
+            if key.kind == KeyEventKind::Press && self.rewind_picker.is_some() {
+                self.handle_rewind_picker_key(key.code, key.modifiers);
+                return Ok(SubmitAction::None);
+            }
+            if key.kind == KeyEventKind::Press && self.model_picker.is_some() {
+                if self.handle_model_picker_key(key.code) {
+                    return Ok(SubmitAction::Compact);
+                }
+                return Ok(SubmitAction::None);
+            }
+            if key.kind == KeyEventKind::Press && self.handle_slot_key(key.code, key.modifiers) {
+                return Ok(SubmitAction::None);
+            }
+            if key.kind == KeyEventKind::Press
+                && let Some(task) = self.pending_task.as_mut()
+            {
+                if key.code == KeyCode::Esc
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL))
+                {
+                    task.control.cancel();
+                    self.approval = None;
+                    self.status = Some("Cancelling; waiting for cleanup and saved results…".into());
+                    return Ok(SubmitAction::None);
+                }
+                if self.approval.is_some() {
+                    self.handle_approval_key(key.code);
+                    return Ok(SubmitAction::None);
+                }
+            }
+            if key.kind == KeyEventKind::Press
+                && matches!(self.input_mode, InputMode::Editing)
+                && self.handle_slash_popup_key(key.code, key.modifiers)
+            {
+                return Ok(SubmitAction::None);
+            }
+            match self.input_mode {
+                InputMode::Normal if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Char('e') | KeyCode::Enter => {
+                        self.input_mode = InputMode::Editing;
+                        if self.pending_task.is_none() {
+                            self.status = Some("Ready".to_string());
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => self.scroll_transcript_up(1),
+                    KeyCode::Down | KeyCode::Char('j') => self.scroll_transcript_down(1),
+                    KeyCode::PageUp => self.scroll_transcript_up(10),
+                    KeyCode::PageDown => self.scroll_transcript_down(10),
+                    _ => {}
+                },
+                InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Tab => {
+                        self.complete_model_alias();
+                    }
+                    KeyCode::Enter if self.enter_wants_newline(key.modifiers) => {
+                        self.insert_newline();
+                    }
+                    KeyCode::Enter => return self.begin_submit(),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(SubmitAction::Exit);
+                    }
+                    // In a message of several lines the arrows move
+                    // between them; otherwise they recall history.
+                    KeyCode::Up if self.input.contains('\n') => self.move_cursor_vertically(-1),
+                    KeyCode::Down if self.input.contains('\n') => self.move_cursor_vertically(1),
+                    KeyCode::Up if self.pending_task.is_none() => self.history_prev(),
+                    KeyCode::Down if self.pending_task.is_none() => self.history_next(),
+                    KeyCode::Char('p')
+                        if self.pending_task.is_none()
+                            && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        self.history_prev();
+                    }
+                    KeyCode::Char('n')
+                        if self.pending_task.is_none()
+                            && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        self.history_next();
+                    }
+                    // The next message can be written while a request
+                    // runs; Enter sends it once the request is done.
+                    KeyCode::Char(to_insert)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        if self.history_index.is_some() {
+                            self.history_index = None;
+                            self.history_draft.clear();
+                        }
+                        self.enter_char(to_insert);
+                    }
+                    KeyCode::Backspace => {
+                        if self.history_index.is_some() {
+                            self.history_index = None;
+                            self.history_draft.clear();
+                        }
+                        self.delete_char();
+                    }
+                    KeyCode::Left => self.move_cursor_left(),
+                    KeyCode::Right => self.move_cursor_right(),
+                    KeyCode::Esc => {
+                        self.input_mode = InputMode::Normal;
+                        self.status = Some(if self.pending_task.is_some() {
+                            "Request in progress".to_string()
+                        } else {
+                            "Press E to resume typing".to_string()
+                        });
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        Ok(SubmitAction::None)
+    }
+
     async fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         let mut redraw = true;
         loop {
@@ -794,152 +932,16 @@ impl App {
 
             let event = event::read()?;
             redraw = true;
-            if let Event::Paste(text) = &event {
-                if matches!(self.input_mode, InputMode::Editing)
-                    && self.approval.is_none()
-                    && self.model_picker.is_none()
-                    && self.session_picker.is_none()
-                    && self.rewind_picker.is_none()
-                {
-                    self.insert_text(text);
+            match self.handle_event(event)? {
+                SubmitAction::None => {}
+                SubmitAction::Exit => return Ok(()),
+                SubmitAction::Pending(pending) => {
+                    terminal.draw(|frame| self.draw(frame))?;
+                    self.start_submit_task(pending)?;
                 }
-                continue;
-            }
-            if let Event::Key(key) = event {
-                if key.kind == KeyEventKind::Press && self.session_picker.is_some() {
-                    if self.handle_session_picker_key(key.code, key.modifiers) {
-                        terminal.draw(|frame| self.draw(frame))?;
-                        self.start_compact_task()?;
-                    }
-                    continue;
-                }
-                if key.kind == KeyEventKind::Press && self.rewind_picker.is_some() {
-                    self.handle_rewind_picker_key(key.code, key.modifiers);
-                    continue;
-                }
-                if key.kind == KeyEventKind::Press && self.model_picker.is_some() {
-                    if self.handle_model_picker_key(key.code) {
-                        terminal.draw(|frame| self.draw(frame))?;
-                        self.start_compact_task()?;
-                    }
-                    continue;
-                }
-                if key.kind == KeyEventKind::Press && self.handle_slot_key(key.code, key.modifiers)
-                {
-                    continue;
-                }
-                if key.kind == KeyEventKind::Press
-                    && let Some(task) = self.pending_task.as_mut()
-                {
-                    if key.code == KeyCode::Esc
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL))
-                    {
-                        task.control.cancel();
-                        self.approval = None;
-                        self.status =
-                            Some("Cancelling; waiting for cleanup and saved results…".into());
-                        continue;
-                    }
-                    if self.approval.is_some() {
-                        self.handle_approval_key(key.code);
-                        continue;
-                    }
-                }
-                if key.kind == KeyEventKind::Press
-                    && matches!(self.input_mode, InputMode::Editing)
-                    && self.handle_slash_popup_key(key.code, key.modifiers)
-                {
-                    continue;
-                }
-                match self.input_mode {
-                    InputMode::Normal if key.kind == KeyEventKind::Press => match key.code {
-                        KeyCode::Char('e') | KeyCode::Enter => {
-                            self.input_mode = InputMode::Editing;
-                            if self.pending_task.is_none() {
-                                self.status = Some("Ready".to_string());
-                            }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => self.scroll_transcript_up(1),
-                        KeyCode::Down | KeyCode::Char('j') => self.scroll_transcript_down(1),
-                        KeyCode::PageUp => self.scroll_transcript_up(10),
-                        KeyCode::PageDown => self.scroll_transcript_down(10),
-                        _ => {}
-                    },
-                    InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
-                        KeyCode::Tab => {
-                            self.complete_model_alias();
-                        }
-                        KeyCode::Enter if self.enter_wants_newline(key.modifiers) => {
-                            self.insert_newline();
-                        }
-                        KeyCode::Enter => match self.begin_submit()? {
-                            SubmitAction::None => {}
-                            SubmitAction::Exit => return Ok(()),
-                            SubmitAction::Pending(pending) => {
-                                terminal.draw(|frame| self.draw(frame))?;
-                                self.start_submit_task(pending)?;
-                            }
-                            SubmitAction::Compact => {
-                                terminal.draw(|frame| self.draw(frame))?;
-                                self.start_compact_task()?;
-                            }
-                        },
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            return Ok(());
-                        }
-                        // In a message of several lines the arrows move
-                        // between them; otherwise they recall history.
-                        KeyCode::Up if self.input.contains('\n') => self.move_cursor_vertically(-1),
-                        KeyCode::Down if self.input.contains('\n') => {
-                            self.move_cursor_vertically(1)
-                        }
-                        KeyCode::Up if self.pending_task.is_none() => self.history_prev(),
-                        KeyCode::Down if self.pending_task.is_none() => self.history_next(),
-                        KeyCode::Char('p')
-                            if self.pending_task.is_none()
-                                && key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            self.history_prev();
-                        }
-                        KeyCode::Char('n')
-                            if self.pending_task.is_none()
-                                && key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            self.history_next();
-                        }
-                        // The next message can be written while a request
-                        // runs; Enter sends it once the request is done.
-                        KeyCode::Char(to_insert)
-                            if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                && !key.modifiers.contains(KeyModifiers::ALT) =>
-                        {
-                            if self.history_index.is_some() {
-                                self.history_index = None;
-                                self.history_draft.clear();
-                            }
-                            self.enter_char(to_insert);
-                        }
-                        KeyCode::Backspace => {
-                            if self.history_index.is_some() {
-                                self.history_index = None;
-                                self.history_draft.clear();
-                            }
-                            self.delete_char();
-                        }
-                        KeyCode::Left => self.move_cursor_left(),
-                        KeyCode::Right => self.move_cursor_right(),
-                        KeyCode::Esc => {
-                            self.input_mode = InputMode::Normal;
-                            self.status = Some(if self.pending_task.is_some() {
-                                "Request in progress".to_string()
-                            } else {
-                                "Press E to resume typing".to_string()
-                            });
-                        }
-                        _ => {}
-                    },
-                    _ => {}
+                SubmitAction::Compact => {
+                    terminal.draw(|frame| self.draw(frame))?;
+                    self.start_compact_task()?;
                 }
             }
         }
