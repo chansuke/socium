@@ -80,7 +80,8 @@ workspace you accept, such as `cargo test`.
 
 `--dangerously-skip-permissions` gives up the reviews as well. The model can then
 edit files the host runs later, such as `.envrc` or `build.rs`, and read likely
-secrets, which reach the model provider. The sandbox still holds while Socium
+secrets, which reach the model provider, and call any tool of a host or remote
+MCP server, which nothing confines. The sandbox still holds while Socium
 runs, but a host tool that later runs an edited file does so outside it. Use
 the flag only where you would throw the workspace away.
 

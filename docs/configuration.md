@@ -227,8 +227,9 @@ workspace Socium opens, and startup lists what it adds.
   and `sensitive` replace these lists. Approval has no time limit. A denied call
   tells the model not to retry it.
 - No setting turns every approval off. The `--dangerously-skip-permissions`
-  flag does that for one run: nothing asks and commands get no narrower
-  sandbox, but `deny` prefixes are still refused and the sandbox is unchanged.
+  flag does that for one run: nothing asks, MCP tools included, and commands
+  get no narrower sandbox, but `deny` prefixes are still refused and the
+  sandbox is unchanged.
 
 See the [Linux sandbox guide](linux-sandbox.md) for the exact filesystem
 policy, environment, toolchain requirements, and restrictions on networked
@@ -368,7 +369,8 @@ sandbox = "read-only"
 - A tool call asks for approval, since nothing confines what the server does
   (the request says whether it runs on the host or at the server's address);
   you can allow that one tool for the rest of the session. Tools listed in
-  `allow` (their names on the server) run without asking. `socium -p` refuses a
+  `allow` (their names on the server) run without asking, and so does every
+  tool under `--dangerously-skip-permissions`. `socium -p` refuses a
   call that needs approval and tells the model to add the tool to `allow`.
 - Servers start in parallel while the interface opens, and the first turn waits
   for them, at most 30 seconds each; you can cancel the wait. `/mcp` shows each server's state and tools (see
