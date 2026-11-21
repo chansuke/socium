@@ -369,20 +369,35 @@ test("event streams outlive the request timeout that still closes slow requests"
   assert.equal((await events.state())?.revision, "revision-2");
 });
 
-test("a revoked device loses its open event stream", { timeout: 10_000 }, async (context) => {
+test("revoking a device ends its open event streams at once and leaves the others open", { timeout: 10_000 }, async (context) => {
   const token = "host-access-token";
   const bridge = fakeBridge(workspaceState());
   const pairing = createPairing("https://socium.test/", { storePath: join(temporaryDirectory(context), "paired-devices.json") });
-  const api = await listen(context, createHttpServer(bridge, token, tmpdir(), pairing));
-  const deviceToken = await pairDevice(api, token);
-  const events = eventReader(await fetch(`${api}/events`, { headers: { Authorization: `Bearer ${deviceToken}` } }));
-  assert.equal((await events.state())?.mobilePairing, true);
+  // Keepalives would also notice the revocation; keep them out of the way.
+  const api = await listen(context, createHttpServer(bridge, token, tmpdir(), pairing, { keepaliveInterval: 60_000 }));
+  const open = async (authorization: string) => {
+    const controller = new AbortController();
+    context.after(() => controller.abort());
+    const reader = eventReader(await fetch(`${api}/events`, { headers: { Authorization: authorization }, signal: controller.signal }));
+    assert.equal((await reader.state())?.mobilePairing, true);
+    return reader;
+  };
+  const revokedToken = `Bearer ${await pairDevice(api, token)}`;
+  const keptToken = `Bearer ${await pairDevice(api, token)}`;
+  const revoked = [await open(revokedToken), await open(revokedToken)];
+  const kept = await open(keptToken);
+  const host = await open(`Bearer ${token}`);
+  assert.equal(bridge.listeners.size, 4);
 
-  const [device] = pairing.devices();
+  const device = pairing.devices()[0];
   assert(device);
-  const revoked = await fetch(`${api}/devices/${device.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
-  assert.equal(revoked.status, 204);
+  const response = await fetch(`${api}/devices/${device.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(response.status, 204);
+  // Without any new state from the bridge.
+  for (const reader of revoked) assert.equal(await reader.state(), null);
+  assert.equal(bridge.listeners.size, 2);
+
   bridge.emit(workspaceState({ revision: "revision-2" }));
-  assert.equal(await events.state(), null);
-  await until(() => bridge.listeners.size === 0);
+  assert.equal((await kept.state())?.revision, "revision-2");
+  assert.equal((await host.state())?.revision, "revision-2");
 });
