@@ -554,6 +554,90 @@ fn user_mounts_path_and_env_reach_commands_read_only() {
     assert!(SandboxExecutor::command(&plain, &["hello-tool".into()], root.path()).is_err());
 }
 
+/// A read-only mount reached through a symlink is mounted at both paths, but
+/// only the canonical one gets the workspace with its state and secrets
+/// masked; through the alias, an ancestor of the workspace must not expose
+/// them.
+#[test]
+fn an_aliased_mount_does_not_reveal_workspace_state_or_secrets() {
+    let ancestor = tempfile::tempdir().unwrap();
+    let root = ancestor.path().join("ws");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir_all(root.join(".socium")).unwrap();
+    fs::write(root.join(".socium/history.jsonl"), "state").unwrap();
+    fs::write(root.join(".env"), "TOKEN=secret").unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let alias = links.path().join("sdk");
+    std::os::unix::fs::symlink(ancestor.path(), &alias).unwrap();
+    let policy_for = |listed: &Path| {
+        let (settings, warnings) = crate::settings::Settings::from_toml(
+            &format!("[sandbox]\nread_only = [\"{}\"]\n", listed.display()),
+            None,
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let mut policy = ExecutionPolicy::new(&root, WorkspaceAccess::Write)
+            .unwrap()
+            .with_settings(&settings.sandbox);
+        policy.hidden = vec![root.canonicalize().unwrap().join(".env")];
+        policy
+    };
+    let err = SandboxExecutor::command(&policy_for(&alias), &["true".into()], &root).unwrap_err();
+    assert!(err.to_string().contains("list the target instead"), "{err}");
+    // Listed by its canonical path, the ancestor is mounted once and the
+    // workspace mounted over it keeps its state and secrets masked.
+    let canonical = policy_for(&ancestor.path().canonicalize().unwrap());
+    for file in [".socium/history.jsonl", ".env"] {
+        let target = root.canonicalize().unwrap().join(file);
+        let output = run_with(
+            &canonical,
+            &root,
+            &["cat", &target.display().to_string()],
+            5,
+        );
+        let read = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !read.contains("state") && !read.contains("secret"),
+            "{} revealed {read:?}",
+            target.display()
+        );
+    }
+}
+
+/// sandbox.env reaches the command only, never bwrap itself: a loader
+/// variable such as LD_PRELOAD in bwrap's own environment would load code on
+/// the host before any isolation exists. LD_DEBUG_OUTPUT names a host
+/// directory the sandbox cannot write, so a log there comes from bwrap.
+#[test]
+fn user_env_skips_the_host_side_launcher() {
+    let root = tempfile::tempdir().unwrap();
+    let host = tempfile::tempdir().unwrap();
+    let mut policy = ExecutionPolicy::new(root.path(), WorkspaceAccess::Write).unwrap();
+    policy.env = vec![
+        ("LD_DEBUG".into(), "files".into()),
+        (
+            "LD_DEBUG_OUTPUT".into(),
+            host.path().join("ld").display().to_string(),
+        ),
+        ("TOOL_SETTING".into(), "inside".into()),
+    ];
+    let command = SandboxExecutor::command(&policy, &["true".into()], root.path()).unwrap();
+    assert!(command.get_envs().all(|(name, _)| name != "LD_DEBUG"));
+    assert!(command.get_args().all(|arg| arg != "inside"));
+    let output = run_with(
+        &policy,
+        root.path(),
+        &["sh", "-c", "echo \"got $LD_DEBUG $TOOL_SETTING\""],
+        5,
+    );
+    let logs = fs::read_dir(host.path()).unwrap().count();
+    assert_eq!(logs, 0, "the host-side bwrap read sandbox.env");
+    // The child's own loader also logs, to its output since the host
+    // directory is out of its reach; only the variables' arrival matters.
+    assert!(String::from_utf8_lossy(&output.stdout).contains("got files inside\n"));
+    success(output);
+}
+
 #[test]
 fn hidden_files_read_empty_and_frozen_paths_refuse_writes() {
     let root = tempfile::tempdir().unwrap();

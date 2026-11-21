@@ -159,7 +159,16 @@ where
         workspace_root,
         &policy,
         on_progress,
-    )?;
+    );
+    // What the command wrote is checked however it ended.
+    let withheld = match restrictions {
+        Some(restrictions) => restrictions.withhold_changes(workspace_root)?,
+        None => None,
+    };
+    let execution = match execution {
+        Ok(execution) => execution,
+        Err(err) => return Err(format!("{err}{}", withheld.unwrap_or_default()).into()),
+    };
     let cut = |stream: &str| stream.chars().count() > MAX_COMMAND_OUTPUT_CHARACTERS;
     on_progress(AgentProgress::CommandFinished {
         command: execution.command_display.clone(),
@@ -175,8 +184,15 @@ where
             .to_string(),
     });
 
-    let output = format_command_execution(&execution);
-    if control.is_cancelled() || execution.timed_out || execution.exit_code != Some(0) {
+    let mut output = format_command_execution(&execution);
+    if let Some(note) = &withheld {
+        output.push_str(note);
+    }
+    if withheld.is_some()
+        || control.is_cancelled()
+        || execution.timed_out
+        || execution.exit_code != Some(0)
+    {
         Err(output.into())
     } else {
         Ok(output)
@@ -222,6 +238,10 @@ fn execute_command(
     let mut reported = std::time::Instant::now();
     const ARTIFACT_LIMIT: u64 = crate::constants::MAX_COMMAND_ARTIFACT_BYTES;
     let mut observer = |stderr: bool, bytes: &[u8]| -> std::io::Result<()> {
+        #[cfg(test)]
+        if tests::FAIL_OUTPUT.get() {
+            return Err(std::io::Error::other("no space left on device"));
+        }
         let index = usize::from(stderr);
         let keep = (ARTIFACT_LIMIT.saturating_sub(totals[index]) as usize).min(bytes.len());
         files[index].write_all(&bytes[..keep])?;
@@ -390,6 +410,202 @@ fn display_command(command: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::{TaskControl, conversation::ContentBlock, tools::run_tool_call_controlled};
+
+    /// Freezing the protected files that exist does not stop a command
+    /// nobody reviewed from creating new ones, or from moving a frozen
+    /// directory's parent aside and writing a fresh one in its place.
+    #[test]
+    fn an_unreviewed_command_cannot_leave_files_host_tools_run() {
+        let settings =
+            crate::settings::Settings::from_toml("[approval]\ncommands = \"auto\"\n", None)
+                .unwrap()
+                .0;
+        for (script, created) in [
+            ("echo x > .envrc", ".envrc"),
+            ("ln -s notes.txt .envrc", ".envrc"),
+            (
+                "mv .github .gh2 && mkdir -p .github/workflows && echo evil > .github/workflows/x.yml",
+                ".github/workflows/x.yml",
+            ),
+            (
+                "mkdir -p crates/a && echo 'fn main() {}' > crates/a/build.rs",
+                "crates/a/build.rs",
+            ),
+            (
+                "mkdir -p crates/b && echo 'fn main() {}' > crates/b/build.rs && chmod 111 crates/b",
+                "crates/b/build.rs",
+            ),
+            (
+                "mkdir -p crates/c && echo 'fn main() {}' > crates/c/build.rs && chmod 444 crates/c",
+                "crates/c/build.rs",
+            ),
+            (
+                "mkdir -p crates/d && echo 'fn main() {}' > crates/d/build.rs && chmod 555 crates/d",
+                "crates/d/build.rs",
+            ),
+            (
+                "mkdir -p crates/e/sub && echo 'fn main() {}' > crates/e/sub/build.rs && chmod 400 crates/e",
+                "crates/e/sub/build.rs",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join(".github/workflows")).unwrap();
+            std::fs::write(root.path().join(".github/workflows/ci.yaml"), "on: push\n").unwrap();
+            let input = json!({"command": ["sh", "-c", script]});
+            let crate::approval::Gate::Run(Some(restrictions)) =
+                crate::approval::gate("run_command", &input, root.path(), &settings, &|_| false)
+                    .unwrap()
+            else {
+                panic!("an auto-approved command runs restricted");
+            };
+            let result = run_command_controlled(
+                root.path(),
+                &input,
+                &TaskControl::default(),
+                &settings.sandbox,
+                Some(&restrictions),
+                &mut |_| {},
+            );
+            let message = result.expect_err(script).to_string();
+            assert!(message.contains(created), "{script}: {message}");
+            assert!(
+                root.path().join(created).symlink_metadata().is_err(),
+                "{script} left {created}"
+            );
+            let quarantine = root.path().join(".socium/quarantine");
+            let kept = std::fs::read_dir(&quarantine)
+                .unwrap()
+                .flatten()
+                .any(|stamp| stamp.path().join(created).symlink_metadata().is_ok());
+            assert!(kept, "{script}: {created} is not in quarantine");
+        }
+        let root = tempfile::tempdir().unwrap();
+        let input = json!({"command": ["sh", "-c", "echo x > notes.txt"]});
+        let crate::approval::Gate::Run(Some(restrictions)) =
+            crate::approval::gate("run_command", &input, root.path(), &settings, &|_| false)
+                .unwrap()
+        else {
+            panic!("an auto-approved command runs restricted");
+        };
+        run_command_controlled(
+            root.path(),
+            &input,
+            &TaskControl::default(),
+            &settings.sandbox,
+            Some(&restrictions),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(root.path().join("notes.txt").exists());
+    }
+
+    thread_local! {
+        /// Makes saving a command's output fail, as on a full disk.
+        pub(super) static FAIL_OUTPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn run_unreviewed(root: &Path, script: &str) -> Result<String, ToolError> {
+        let settings =
+            crate::settings::Settings::from_toml("[approval]\ncommands = \"auto\"\n", None)
+                .unwrap()
+                .0;
+        let input = json!({"command": ["sh", "-c", script]});
+        let crate::approval::Gate::Run(Some(restrictions)) =
+            crate::approval::gate("run_command", &input, root, &settings, &|_| false).unwrap()
+        else {
+            panic!("an auto-approved command runs restricted");
+        };
+        run_command_controlled(
+            root,
+            &input,
+            &TaskControl::default(),
+            &settings.sandbox,
+            Some(&restrictions),
+            &mut |_| {},
+        )
+    }
+
+    #[test]
+    fn a_command_whose_output_cannot_be_saved_still_loses_new_protected_files() {
+        let root = tempfile::tempdir().unwrap();
+        FAIL_OUTPUT.set(true);
+        let result = run_unreviewed(root.path(), "echo x > .envrc; echo done");
+        FAIL_OUTPUT.set(false);
+        let message = result.expect_err("the output was not saved").to_string();
+        assert!(message.contains("output capture failed"), "{message}");
+        assert!(message.contains(".envrc"), "{message}");
+        assert!(root.path().join(".envrc").symlink_metadata().is_err());
+    }
+
+    /// Cargo takes a crate linked into `crates/` as a member, so a new
+    /// link to one is a new build script, though no file behind it changed.
+    #[test]
+    fn a_command_cannot_link_a_crate_into_the_workspace() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("build.rs"), "fn main() {}\n").unwrap();
+        let outside = outside.path().display();
+        for (script, links) in [
+            ("ln -s ../fixtures/evil crates/evil", vec!["crates/evil"]),
+            (
+                &format!("ln -s {outside} crates/outside"),
+                vec!["crates/outside"],
+            ),
+            (
+                "ln -s ../fixtures/evil crates/a && ln -s ../fixtures/evil crates/b",
+                vec!["crates/a", "crates/b"],
+            ),
+            ("ln -s ../fixtures crates/nest", vec!["crates/nest"]),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("fixtures/evil")).unwrap();
+            std::fs::create_dir_all(root.path().join("crates")).unwrap();
+            std::fs::write(root.path().join("fixtures/evil/build.rs"), "fn main() {}\n").unwrap();
+            let message = run_unreviewed(root.path(), script)
+                .expect_err(script)
+                .to_string();
+            for link in links {
+                assert!(message.contains(link), "{script}: {message}");
+                assert!(
+                    root.path().join(link).symlink_metadata().is_err(),
+                    "{script} left {link}"
+                );
+            }
+            assert!(root.path().join("fixtures/evil/build.rs").exists());
+        }
+    }
+
+    /// Commands may change `.socium/scratch`, which the listing skips, so a
+    /// link into it is followed every time.
+    #[test]
+    fn a_link_into_scratch_cannot_bring_a_build_script_later() {
+        let root = tempfile::tempdir().unwrap();
+        run_unreviewed(
+            root.path(),
+            "mkdir .socium/scratch/s && ln -s .socium/scratch/s s",
+        )
+        .unwrap();
+        let message = run_unreviewed(
+            root.path(),
+            "echo 'fn main() {}' > .socium/scratch/s/build.rs",
+        )
+        .expect_err("a build script behind a link")
+        .to_string();
+        assert!(message.contains("s"), "{message}");
+        assert!(root.path().join("s").symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn a_protected_file_the_quarantine_cannot_take_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let quarantine = crate::state::workspace_state_path(root.path(), "quarantine").unwrap();
+        std::fs::write(quarantine, "").unwrap();
+        let message = run_unreviewed(root.path(), "echo x > .envrc")
+            .expect_err("a new .envrc is an error")
+            .to_string();
+        assert!(message.contains(".envrc"), "{message}");
+        assert!(root.path().join(".envrc").symlink_metadata().is_err());
+    }
+
     #[test]
     fn forged_approval_is_denied_and_human_approval_is_single_use() {
         let workspace = tempfile::tempdir().unwrap();

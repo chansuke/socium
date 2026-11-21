@@ -186,7 +186,7 @@ impl Default for ApprovalSettings {
 /// directory name at any depth; one with `/` matches the path from the
 /// workspace root, where `**` stands for any number of directories and `*`
 /// for part of one name. `!` excludes; the last matching pattern decides.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PathPatterns(Vec<String>);
 
 impl PathPatterns {
@@ -346,10 +346,14 @@ struct RawApproval {
 }
 
 /// Directories and files that configure Socium: none of them may be inside
-/// a workspace, or the model could rewrite its own limits.
+/// a workspace, or the model could rewrite its own limits. The files read
+/// from the directory are listed too, since each may link elsewhere.
 pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    let mut listed_dirs = Vec::new();
     if let Some(dir) = crate::host::config_dir(lookup) {
+        paths.extend([dir.join("config.toml"), dir.join("models.toml")]);
+        listed_dirs.extend([dir.join("agents"), dir.join(crate::models::MODELS_DIR_NAME)]);
         paths.push(dir);
     }
     for variable in [
@@ -358,13 +362,22 @@ pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathB
         crate::constants::AGENTS_DIR_ENV,
     ] {
         if let Some(path) = lookup(variable).filter(|value| !value.is_empty()) {
+            if variable == crate::constants::AGENTS_DIR_ENV {
+                listed_dirs.push(PathBuf::from(&path));
+            }
             paths.push(PathBuf::from(path));
         }
     }
     // The registry also reads models.d/ beside an explicitly named file,
     // which a symlink could place elsewhere.
     if let Some(path) = lookup(crate::models::MODELS_FILE_ENV).filter(|value| !value.is_empty()) {
-        paths.push(crate::models::models_dir_beside(Path::new(&path)));
+        listed_dirs.push(crate::models::models_dir_beside(Path::new(&path)));
+    }
+    for dir in listed_dirs {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            paths.extend(entries.flatten().map(|entry| entry.path()));
+        }
+        paths.push(dir);
     }
     paths
 }
@@ -392,10 +405,12 @@ pub(crate) fn ensure_config_outside(
     Ok(())
 }
 
-/// `path` with its longest existing prefix canonicalized.
+/// `path` with its longest existing prefix canonicalized. A link whose
+/// target is missing is followed to where the target would be.
 fn resolve_existing_prefix(path: &Path) -> PathBuf {
     let mut rest = Vec::new();
     let mut current = path.to_path_buf();
+    let mut hops = 0;
     loop {
         if let Ok(canonical) = current.canonicalize() {
             let mut resolved = canonical;
@@ -403,6 +418,16 @@ fn resolve_existing_prefix(path: &Path) -> PathBuf {
                 resolved.push(part);
             }
             return resolved;
+        }
+        if hops < 40
+            && let Ok(target) = std::fs::read_link(&current)
+        {
+            hops += 1;
+            current = match current.parent() {
+                Some(parent) => parent.join(target),
+                None => target,
+            };
+            continue;
         }
         match (current.file_name(), current.parent()) {
             (Some(name), Some(parent)) => {
@@ -962,6 +987,46 @@ deny = ["git  push"]
             move |key: &str| (key == crate::models::MODELS_FILE_ENV).then(|| models_file.clone());
         let err = ensure_config_outside(workspace.path(), &lookup).unwrap_err();
         assert!(err.to_string().contains("models.d"), "{err}");
+    }
+
+    /// A configuration directory outside the workspace still lets the
+    /// workspace write the configuration when a file in it links there, as
+    /// dotfile managers do.
+    #[test]
+    fn a_config_file_linked_into_the_workspace_is_refused() {
+        // A link whose target is missing counts too: the workspace can
+        // create the target later.
+        for exists in [true, false] {
+            for linked in [
+                "config.toml",
+                "models.toml",
+                "agents/reviewer.md",
+                "agents",
+                "models.d/gemini.toml",
+                "models.d",
+            ] {
+                let home = tempfile::tempdir().unwrap();
+                let workspace = tempfile::tempdir().unwrap();
+                let config = home.path().join(".config/socium");
+                std::fs::create_dir_all(config.join("agents")).unwrap();
+                std::fs::create_dir_all(config.join("models.d")).unwrap();
+                let target = workspace.path().join("dotfiles");
+                if exists {
+                    std::fs::create_dir(&target).unwrap();
+                }
+                let link = config.join(linked);
+                if link.exists() {
+                    std::fs::remove_dir(&link).unwrap();
+                }
+                std::os::unix::fs::symlink(&target, &link).unwrap();
+                let home_str = home.path().to_str().unwrap().to_string();
+                let lookup = move |key: &str| (key == "HOME").then(|| home_str.clone());
+                assert!(
+                    ensure_config_outside(workspace.path(), &lookup).is_err(),
+                    "{linked}, target exists: {exists}"
+                );
+            }
+        }
     }
 
     mod properties {

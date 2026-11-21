@@ -20,7 +20,7 @@ Test code is not checked.
 | 2 | `state`, `providers` | Files under `.socium/`, written atomically and under a lock; the wire formats and streams of each provider |
 | 3 | `plan`, `settings`, `error` | The agent's plan; `config.toml`; the agent error |
 | 4 | `activity`, `execution`, `workspace` | Activity events and signals; the Linux sandbox; resolving paths inside the workspace |
-| 5 | `transcript`, `usage`, `access`, `activity_log` | The transcript after a restart, token use and cost, session grants and withheld files, the saved activity log |
+| 5 | `transcript`, `usage`, `access`, `activity_log` | The transcript after a restart, token use and cost, session grants, withheld files and the quarantine of protected files a command left, the saved activity log |
 | 6 | `progress` | `AgentProgress`, what a running turn reports to the UI |
 | 7 | `control` | `TaskControl`: cancellation, approvals waiting for an answer, steering |
 | 8 | `process` | Running a command in the sandbox with bounded output |
