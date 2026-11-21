@@ -238,30 +238,61 @@ function ScanPairing({ connect, back }: { connect: (host: PairedHost) => void; b
   );
 }
 
+const tokenRejectedMessage = "Session expired or device revoked — pair again.";
+
 function Connection({ client, disconnect }: { client: Client; disconnect: () => void }) {
-  const { workspace, connectionError, commandError, sending } = useSyncExternalStore(client.subscribe, client.getSnapshot);
+  const { workspace, connectionError, tokenRejected, commandError, sending } = useSyncExternalStore(client.subscribe, client.getSnapshot);
   if (!workspace) {
     return (
       <View style={styles.center}>
         <View style={styles.card}>
           <Text accessibilityRole="header" style={styles.heading}>
-            {connectionError ? "Connection unavailable" : "Connecting…"}
+            {tokenRejected ? "Pair again" : connectionError ? "Reconnecting…" : "Connecting…"}
           </Text>
-          {connectionError && <Text accessibilityRole="alert" style={styles.muted}>{connectionError}</Text>}
-          <Button label="Back to connection" onPress={disconnect} />
+          {tokenRejected && <Text accessibilityRole="alert" style={styles.muted}>{tokenRejectedMessage}</Text>}
+          {connectionError && <Text accessibilityRole={tokenRejected ? undefined : "alert"} style={styles.muted}>{connectionError}</Text>}
+          {tokenRejected
+            ? <Button label="Pair again" primary onPress={disconnect} />
+            : <Button label="Back to connection" onPress={disconnect} />}
         </View>
       </View>
     );
   }
 
   return (
-    <Workspace
-      client={client}
-      state={workspace}
-      disabled={sending || Boolean(connectionError)}
-      error={connectionError ?? commandError}
-      disconnect={disconnect}
-    />
+    <>
+      {connectionError && <ConnectionBanner error={connectionError} tokenRejected={tokenRejected} disconnect={disconnect} />}
+      <Workspace
+        client={client}
+        state={workspace}
+        disabled={sending || Boolean(connectionError)}
+        error={commandError}
+        disconnect={disconnect}
+      />
+    </>
+  );
+}
+
+/**
+ * Says whether the client is still retrying or needs a new pairing, with the
+ * way out beside it rather than behind the disabled controls.
+ */
+function ConnectionBanner({ error, tokenRejected, disconnect }: {
+  error: string;
+  tokenRejected: boolean;
+  disconnect: () => void;
+}) {
+  return (
+    <View style={[styles.banner, tokenRejected && styles.bannerError]} accessibilityRole="alert">
+      {!tokenRejected && <ActivityIndicator size="small" color="#f4ceb0" />}
+      <View style={styles.flex}>
+        <Text style={styles.bannerTitle}>{tokenRejected ? tokenRejectedMessage : "Reconnecting…"}</Text>
+        <Text style={styles.bannerDetail} numberOfLines={3}>{error}</Text>
+      </View>
+      {tokenRejected
+        ? <Button label="Pair again" primary onPress={disconnect} />
+        : <Button label="Disconnect" onPress={disconnect} />}
+    </View>
   );
 }
 
