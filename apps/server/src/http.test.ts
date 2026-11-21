@@ -294,7 +294,7 @@ test("only the host lists and revokes paired devices, and revocation is immediat
 
 test("a damaged pairing store stops the gateway instead of dropping devices", (context) => {
   const storePath = join(temporaryDirectory(context), "paired-devices.json");
-  writeFileSync(storePath, "{\"devices\": [{\"id\": 1}]}");
+  writeFileSync(storePath, "{\"devices\": [{\"id\": 1}]}", { mode: 0o600 });
   assert.throws(() => createPairing("https://socium.test/", { storePath }), /damaged/);
   assert.equal(readFileSync(storePath, "utf8"), "{\"devices\": [{\"id\": 1}]}");
 });

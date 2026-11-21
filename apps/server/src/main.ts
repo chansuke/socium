@@ -24,9 +24,10 @@ const token = configuredToken ?? randomBytes(32).toString("base64url");
 if (!/^[a-zA-Z0-9_-]{32,}$/.test(token)) {
   throw new Error("SOCIUM_CLIENT_TOKEN must contain at least 32 base64url characters.");
 }
-const storePath = values["pairing-store"] ? resolve(values["pairing-store"]) : undefined;
-const pairing = values["mobile-url"] ? createPairing(values["mobile-url"], { storePath }) : undefined;
+// Resolved first: the pairing store must stay outside it.
 const workspace = realpathSync(values.workspace);
+const storePath = values["pairing-store"] ? resolve(values["pairing-store"]) : undefined;
+const pairing = values["mobile-url"] ? createPairing(values["mobile-url"], { storePath, workspace }) : undefined;
 const bridge = createBridge(process.env.SOCIUM_BIN ?? "socium", workspace);
 const server = createHttpServer(bridge, token, resolve(import.meta.dirname, "../../web/dist"), pairing);
 
