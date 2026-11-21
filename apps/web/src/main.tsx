@@ -157,6 +157,11 @@ function ModelSwitcher({ client, state, disabled }: { client: Client; state: Wor
   );
 }
 
+/** Text with `code` spans, as the host writes approval options. */
+function InlineCode({ text }: { text: string }) {
+  return text.split(/`([^`]+)`/).map((part, index) => index % 2 ? <code key={index}>{part}</code> : part);
+}
+
 const planIcons: Record<PlanTaskStatus, typeof Circle> = {
   done: CircleCheck,
   active: LoaderCircle,
@@ -274,7 +279,7 @@ function Conversation({ client, state, error, disabled }: {
             <p>{approval.summary}{approval.requestedBy && ` · ${approval.requestedBy}`}</p>
             <pre tabIndex={0} aria-label="Tool call details">{approval.input}</pre>
             {approval.sessionOption && (
-              <p id="session-option">Allow for session allows {approval.sessionOption} until Socium exits.</p>
+              <p id="session-option">Allow for session allows <InlineCode text={approval.sessionOption} /> until Socium exits.</p>
             )}
             <div className="approval-actions">
               <button className="quiet" disabled={disabled} onClick={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: false })}>Deny</button>

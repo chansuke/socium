@@ -109,6 +109,7 @@ pre { overflow: auto; padding: 11px; border-radius: 7px; background: #101417; fo
 .notice summary { cursor: pointer; }
 .approval pre { max-height: 25vh; white-space: pre-wrap; overflow-wrap: anywhere; }
 .approval p { margin: 5px 0; }
+.approval code { font: 12px ui-monospace, monospace; color: #fbe3c8; background: #3a3027; border-radius: 4px; padding: 1px 4px; }
 .approval-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .outlined { border-color: #5d7a6c; color: var(--mint); }
 
