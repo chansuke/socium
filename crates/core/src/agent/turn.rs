@@ -56,6 +56,9 @@ pub(crate) struct TurnContext<'a> {
     pub(crate) clock: ActivityClock,
     /// The search endpoint and key, when `web_search` is offered.
     pub(crate) web_search: Option<&'a crate::tools::web_search::WebSearch>,
+    /// The MCP servers whose tools are among `tools`; the main agent's
+    /// alone, so `None` for subagents.
+    pub(crate) mcp: Option<&'a std::sync::Arc<crate::mcp::McpRegistry>>,
 }
 
 pub(crate) struct TurnOutcome {
@@ -605,6 +608,7 @@ where
                         control: ctx.control,
                         settings: ctx.settings,
                         edit_origin: ctx.edit_origin,
+                        mcp: ctx.mcp,
                     },
                     &mut tool_progress,
                     &mut |authorization| {
@@ -719,7 +723,9 @@ where
 /// How many calls from the start of `calls` can run at once: consecutive
 /// new subagents whose types cannot change the workspace, so they never
 /// ask for approval or edit the same file, at most
-/// `MAX_CONCURRENT_SUBAGENTS` of them. A resumed subagent runs alone.
+/// `MAX_CONCURRENT_SUBAGENTS` of them; a type with a tool of an MCP server
+/// that is not in the read-only sandbox is not one of them. A resumed
+/// subagent runs alone.
 fn concurrent_batch_len(ctx: &TurnContext<'_>, calls: &[(String, String, Value)]) -> usize {
     calls
         .iter()
@@ -731,7 +737,11 @@ fn concurrent_batch_len(ctx: &TurnContext<'_>, calls: &[(String, String, Value)]
                     .get("agent_type")
                     .and_then(Value::as_str)
                     .and_then(|agent_type| ctx.subagents.find(agent_type))
-                    .is_some_and(|kind| !kind.tools.may_change_workspace())
+                    .is_some_and(|kind| {
+                        !kind.tools.may_change_workspace(&|server| {
+                            ctx.settings.is_sandboxed_mcp_server(server)
+                        })
+                    })
         })
         .take(MAX_CONCURRENT_SUBAGENTS)
         .count()
@@ -937,6 +947,7 @@ mod tests {
             session_id: "20261101-000000-0000",
             clock: ActivityClock::start(0),
             web_search: None,
+            mcp: None,
         };
         let agent = |agent_type: &str| {
             (

@@ -21,7 +21,7 @@ export type WorkerCommand =
   | { action: "resume"; session: string }
   | { action: "prompt"; text: string }
   | { action: "cancel" }
-  | { action: "approve"; request: number; allow: boolean };
+  | { action: "approve"; request: number; allow: boolean; forSession: boolean };
 
 export class GatewayError extends Error {
   readonly status: number;
@@ -92,8 +92,8 @@ export function createBridge(binary: string, workspace: string) {
         }
         break;
       case "approval": {
-        const { request, tool, summary, input, requestedBy } = event;
-        updateTurn({ approval: { request, tool, summary, input, requestedBy } });
+        const { request, tool, summary, input, requestedBy, sessionOption } = event;
+        updateTurn({ approval: { request, tool, summary, input, requestedBy, sessionOption: sessionOption ?? null } });
         break;
       }
       case "approval_resolved":

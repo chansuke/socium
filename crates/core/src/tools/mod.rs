@@ -182,6 +182,7 @@ where
             control,
             settings: &crate::settings::Settings::default(),
             edit_origin: None,
+            mcp: None,
         },
         on_progress,
         &mut |_| Ok(()),
@@ -479,6 +480,97 @@ mod tests {
             }
             _ => panic!("expected tool_result"),
         }
+    }
+
+    fn run_mcp(
+        registry: &std::sync::Arc<crate::mcp::McpRegistry>,
+        name: &str,
+        control: &crate::TaskControl,
+        on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> (Vec<String>, String, Option<bool>) {
+        let workspace = make_temp_dir("mcp_call");
+        let mut authorizations = Vec::new();
+        let result = crate::dispatch::run_tool_call_checkpointed(
+            crate::dispatch::ToolCall {
+                workspace_root: workspace.path(),
+                tool_use_id: "call",
+                name,
+                input: &json!({"text": "hi"}),
+                control,
+                settings: &crate::settings::Settings::default(),
+                edit_origin: None,
+                mcp: Some(registry),
+            },
+            &mut |event| on_progress(event),
+            &mut |authorization| {
+                authorizations.push(authorization.to_string());
+                Ok(())
+            },
+        );
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = result
+        else {
+            panic!("expected tool_result");
+        };
+        (authorizations, content, is_error)
+    }
+
+    #[test]
+    fn an_mcp_tool_runs_when_allowed_and_asks_otherwise() {
+        use crate::mcp::tests::{connect_fake, fake_settings};
+        let (registry, _) = connect_fake(&[fake_settings("fake", "", &["echo"])]);
+        let registry = std::sync::Arc::new(registry);
+        let headless = crate::TaskControl::default();
+
+        let (authorizations, content, is_error) =
+            run_mcp(&registry, "mcp__fake__echo", &headless, &mut |_| {});
+        assert_eq!((content.as_str(), is_error), ("echo: hi", None));
+        assert_eq!(authorizations, [crate::constants::ALLOWED_BY_POLICY]);
+
+        let (authorizations, content, is_error) =
+            run_mcp(&registry, "mcp__fake__image", &headless, &mut |_| {});
+        assert_eq!(is_error, Some(true));
+        assert!(authorizations.is_empty(), "nothing may start unapproved");
+        assert_eq!(
+            content,
+            "Needs approval, but no one can answer here: MCP tools run in the fake server on the host, outside Socium's sandbox. Allow it by adding \"image\" to allow under [mcp.servers.fake] in Socium's config.toml, or run it from the TUI."
+        );
+
+        // Allowed for the session, it runs unasked from then on.
+        let interactive = crate::TaskControl::default();
+        interactive.enable_interactive_approval();
+        let answerer = interactive.clone();
+        let mut asked = Vec::new();
+        let mut answer = |event: AgentProgress| {
+            if let AgentProgress::ApprovalRequested {
+                request_id,
+                input,
+                session_option,
+                ..
+            } = event
+            {
+                asked.push((input, session_option));
+                answerer.answer(request_id, crate::ApprovalAnswer::AllowForSession);
+            }
+        };
+        let (authorizations, content, _) =
+            run_mcp(&registry, "mcp__fake__image", &interactive, &mut answer);
+        assert_eq!(content, "a chart\n[image content omitted]");
+        assert_eq!(authorizations, [crate::constants::HUMAN_APPROVED]);
+        run_mcp(&registry, "mcp__fake__image", &interactive, &mut answer);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        let (details, session_option) = &asked[0];
+        assert!(
+            details.contains(
+                "Permissions: MCP tools run in the fake server on the host, outside Socium's sandbox."
+            ),
+            "{details}"
+        );
+        assert_eq!(
+            session_option.as_deref(),
+            Some("the MCP tool `mcp__fake__image`")
+        );
     }
 
     #[test]

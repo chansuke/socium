@@ -165,6 +165,41 @@ See [ADR 8](adr/0008-agentツールで独立した文脈のサブエージェン
 See the [reliability and recovery guide](daily-reliability.md) for storage
 limits, editing guarantees, migration, and recovery procedures.
 
+## MCP servers
+
+`/mcp` lists every MCP server of `config.toml`, one line each: its name,
+whether it is local (with its program, not its arguments, which may hold a
+token), local in the read-only sandbox (`local (read-only sandbox)`), or remote
+(with its URL), and its state. A connected server's tools
+follow; a server that needs a login, failed to start, or is disabled
+(`enabled = false` or an unset `${NAME}`) says why. A server that exited after
+it started shows as failed, and a remote one whose token can no longer be
+renewed as needing a login. While servers are still starting, it shows them as
+starting rather than waiting. Socium shows no env or header value, token, or
+client secret, and blanks out of a failure reason the values of 8 or more
+characters it gave the server. It only reports: change the settings or log in
+from a shell, then restart Socium.
+
+## MCP login
+
+`socium mcp login <server>` logs in to a remote MCP server of `config.toml`
+that needs OAuth. It finds the server's authorization server, registers
+Socium with it unless the server's `oauth` table names a client, prints the
+authorization URL, and tries to open it with `xdg-open` (`open` on macOS),
+found on a PATH without the current directory and started with only the
+variables a desktop needs (not `BROWSER`). Put `--` before a server name that
+begins with `-`: `socium mcp login -- -name`.
+Agree in the browser; it comes back to a listener on 127.0.0.1, and Socium
+stores the token for later runs, the TUI and `socium -p` alike. The command
+waits up to five minutes and exits with status 1 and a reason when the login
+fails. Like Socium itself, it refuses to run in a directory that contains
+the configuration or the token store. Run it again when Socium warns that
+the server needs you to log in.
+
+`socium mcp logout <server>` removes the stored token. It does not revoke the
+token at the server; revoke it there if it may have leaked. See
+[configuration](configuration.md#mcp-servers) for where tokens are kept.
+
 ## Running without the TUI
 
 `socium -p "<prompt>"` runs one turn without the terminal UI and prints the

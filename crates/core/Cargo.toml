@@ -10,11 +10,13 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
+base64 = "0.23"
 reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2"
-tokio = { version = "1", features = ["time", "macros", "sync", "rt"] }
+tokio = { version = "1", features = ["time", "macros", "sync", "rt", "net", "io-util"] }
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 
 [target.'cfg(unix)'.dependencies]

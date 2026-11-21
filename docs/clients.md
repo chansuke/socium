@@ -15,7 +15,7 @@ SOCIUM_BIN="$PWD/target/debug/socium" nix develop --command npm run start:client
 
 Open `http://127.0.0.1:4173` and enter the access token printed by the gateway. If you already have a Socium binary built from this checkout on your PATH, omit `SOCIUM_BIN`. Configure the provider and its key on the Linux host as you would for the terminal client. For Vite development, run `npm run dev:web` with the gateway running. If you set a custom gateway port, set `SOCIUM_GATEWAY_PORT` to the same port for Vite.
 
-The gateway listens on loopback and serves one workspace. Connected clients share the active conversation and turn. Use the conversation list to start a chat or reopen a saved session. Commands that need approval display the tool details and offer **Allow once** or **Deny**. You can stop a running turn from any connected client. Close the TUI for this workspace before starting the gateway so the gateway can acquire the workspace lock.
+The gateway listens on loopback and serves one workspace. Connected clients share the active conversation and turn. Use the conversation list to start a chat or reopen a saved session. Commands that need approval display the tool details and offer **Allow once** or **Deny**, and **Allow for session** when the request offers it (as the terminal UI does). Warnings that arise during a turn, such as an MCP server that did not start or a renewed token that could not be saved, appear among the turn's notices. You can stop a running turn from any connected client. Close the TUI for this workspace before starting the gateway so the gateway can acquire the workspace lock.
 
 ## Connect Android and iOS
 

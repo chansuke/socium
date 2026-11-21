@@ -63,13 +63,22 @@ fn executable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-fn resolve(program: &str, cwd: &Path, paths: &[PathBuf]) -> io::Result<PathBuf> {
+/// `program` as the sandbox runs it: by its path, or found on `paths`,
+/// links followed. `hint` ends the error when it is not found.
+fn resolve(program: &str, cwd: &Path, paths: &[PathBuf], hint: &str) -> io::Result<PathBuf> {
     let candidate = if program.contains('/') {
         cwd.join(program)
     } else {
-        paths.iter().map(|p| p.join(program)).find(|p| executable(p))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound,
-                format!("sandbox executable not found in system runtime PATH: {program}; use ./ for workspace programs")))?
+        paths
+            .iter()
+            .map(|p| p.join(program))
+            .find(|p| executable(p))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("sandbox executable not found in system runtime PATH: {program}{hint}"),
+                )
+            })?
     };
     let path = candidate.canonicalize()?;
     if !executable(&path) {
@@ -184,24 +193,36 @@ pub(super) fn command(
         }
     }
     let paths = search_path(policy);
-    let program = resolve(
-        argv.first()
-            .ok_or_else(|| io::Error::other("empty command"))?,
-        &cwd,
-        &paths,
-    )?;
-    if !program.starts_with(root)
-        && !is_runtime_path(&program)
-        && !mounted_read_only(policy, &program)
-    {
-        return Err(io::Error::other(
-            "executable is outside the workspace, the system runtimes and sandbox.read_only",
-        ));
+    let name = argv
+        .first()
+        .ok_or_else(|| io::Error::other("empty command"))?;
+    // Resolved once, here: what was checked is what runs.
+    let program = if policy.workspace_programs {
+        resolve(name, &cwd, &paths, "; use ./ for workspace programs")?
+    } else {
+        resolve(
+            name,
+            &cwd,
+            &paths,
+            "; give an absolute path in a system runtime or a read_only directory",
+        )?
+    };
+    let in_workspace = policy.workspace_programs && program.starts_with(root);
+    if !in_workspace && !is_runtime_path(&program) && !mounted_read_only(policy, &program) {
+        return Err(io::Error::other(if policy.workspace_programs {
+            "executable is outside the workspace, the system runtimes and sandbox.read_only"
+                .to_string()
+        } else {
+            format!(
+                "`{name}` is {}, which is in neither a system runtime such as /nix/store or /usr nor a read_only directory",
+                program.display()
+            )
+        }));
     }
     // The backend must itself come from a system installation; ./bwrap or a
     // project-controlled or user-added PATH entry can never replace the
     // sandbox boundary.
-    let backend = resolve("bwrap", Path::new("/"), &system_search_path()).map_err(|e| {
+    let backend = resolve("bwrap", Path::new("/"), &system_search_path(), "").map_err(|e| {
         io::Error::other(format!(
             "Linux sandbox requires bubblewrap (bwrap): {e}; no host fallback"
         ))
@@ -246,11 +267,26 @@ pub(super) fn command(
     ]);
     // After the fresh /tmp, which would hide them, and before the workspace,
     // so a listed ancestor of the workspace cannot make it read-only or
-    // reveal the state directory.
+    // reveal the state directory. Each is mounted from a descriptor opened
+    // where the settings found it, so a link put in its place or in one of
+    // its parents since cannot redirect the mount.
+    let mut mounts = Vec::new();
     for mount in &policy.read_only {
-        cmd.arg("--ro-bind").arg(&mount.source).arg(&mount.source);
-        if let Some(alias) = &mount.alias {
-            cmd.arg("--ro-bind").arg(&mount.source).arg(alias);
+        let pinned = pin_mount_source(&mount.source)?;
+        // bubblewrap closes a descriptor once it is mounted.
+        let alias = match &mount.alias {
+            Some(alias) => Some((pinned.try_clone()?, alias)),
+            None => None,
+        };
+        cmd.arg("--ro-bind-fd")
+            .arg(pinned.as_raw_fd().to_string())
+            .arg(&mount.source);
+        mounts.push(pinned);
+        if let Some((again, alias)) = alias {
+            cmd.arg("--ro-bind-fd")
+                .arg(again.as_raw_fd().to_string())
+                .arg(alias);
+            mounts.push(again);
         }
     }
     cmd.arg(if policy.access == WorkspaceAccess::ReadOnly {
@@ -360,8 +396,9 @@ pub(super) fn command(
     // stay alive with Command until spawn and bubblewrap closes them after use.
     unsafe {
         cmd.pre_exec(move || {
-            for fd in
-                std::iter::once(filter.as_raw_fd()).chain(env_args.as_ref().map(AsRawFd::as_raw_fd))
+            for fd in std::iter::once(filter.as_raw_fd())
+                .chain(env_args.as_ref().map(AsRawFd::as_raw_fd))
+                .chain(mounts.iter().map(AsRawFd::as_raw_fd))
             {
                 if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
                     return Err(io::Error::last_os_error());
@@ -371,6 +408,26 @@ pub(super) fn command(
         });
     }
     Ok(cmd)
+}
+
+/// A descriptor for the directory at `source`, a path the settings found
+/// canonical, once it is checked to still be there: a link swapped in for
+/// it or for one of its parents leads elsewhere, and is refused.
+fn pin_mount_source(source: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let pinned = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH)
+        .open(source)?;
+    let opened = fs::read_link(format!("/proc/self/fd/{}", pinned.as_raw_fd()))?;
+    if opened != source {
+        return Err(io::Error::other(format!(
+            "the read_only directory {} now leads to {}; it changed since the settings were read",
+            source.display(),
+            opened.display()
+        )));
+    }
+    Ok(pinned)
 }
 
 /// `--setenv` arguments for the user's `sandbox.env`, NUL-separated in an
@@ -419,8 +476,23 @@ fn linked_worktree_common_dir(root: &Path, gitfile: &Path) -> io::Result<PathBuf
     };
     let read = |path: &Path| -> io::Result<String> {
         use std::io::Read;
-        let mut text = String::new();
-        fs::File::open(path)?.take(4096).read_to_string(&mut text)?;
+        use std::os::unix::fs::OpenOptionsExt;
+        const MAX_BYTES: u64 = 4096;
+        // Without O_NONBLOCK, opening a FIFO waits for a writer that may
+        // never come, and startup with it. Only a regular file is read.
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("not a regular file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(io::Error::other("too large for Git metadata"));
+        }
+        let text = String::from_utf8(bytes).map_err(io::Error::other)?;
         Ok(text.trim().to_string())
     };
     let gitfile_text = read(gitfile)?;
@@ -453,8 +525,13 @@ fn linked_worktree_common_dir(root: &Path, gitfile: &Path) -> io::Result<PathBuf
     {
         return Err(refused("its metadata is not laid out as Git creates it"));
     }
-    if common.starts_with(root) {
-        return Err(refused("its metadata is inside the worktree"));
+    // Inside, it would be writable through the workspace; around it, its
+    // mount, made after the workspace's, would cover `.socium` and the
+    // hidden files again.
+    if common.starts_with(root) || root.starts_with(&common) {
+        return Err(refused(
+            "its metadata is inside the worktree or contains it",
+        ));
     }
     if overlaps_reserved(&common)
         || RUNTIME_ROOTS

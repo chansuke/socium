@@ -53,13 +53,17 @@ function workerCommand(body: Record<string, unknown>, state: WorkspaceState): Wo
     }
     if (action === "cancel") return { action };
     const { allow, request } = body;
-    if (typeof allow !== "boolean" || typeof request !== "number") {
+    const forSession = body.forSession ?? false;
+    if (typeof allow !== "boolean" || typeof request !== "number" || typeof forSession !== "boolean") {
       throw new GatewayError(400, "Invalid approval answer.");
     }
     if (request !== state.turn.approval?.request) {
       throw new GatewayError(409, "This approval request has already closed.");
     }
-    return { action, request, allow };
+    if (forSession && allow && state.turn.approval.sessionOption === null) {
+      throw new GatewayError(400, "This request can only be allowed once.");
+    }
+    return { action, request, allow, forSession: forSession && allow };
   }
 
   if (state.turn) throw new GatewayError(409, "Finish or stop the current turn first.");

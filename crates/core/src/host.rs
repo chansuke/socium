@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// One variable of the process environment, when it is set and valid UTF-8.
-pub(crate) fn process_env(key: &str) -> Option<String> {
+pub fn process_env(key: &str) -> Option<String> {
     std::env::var(key).ok()
 }
 
@@ -41,6 +41,23 @@ pub(crate) fn config_dir(lookup: &dyn Fn(&str) -> Option<String>) -> Option<Path
                 .map(|home| std::path::Path::new(&home).join(".config"))
         })?;
     Some(config_home.join("socium"))
+}
+
+/// Where MCP tokens are kept: `$XDG_STATE_HOME/socium/mcp-auth`, else
+/// `$HOME/.local/state/socium/mcp-auth`, from absolute values of `lookup`
+/// only, so it never depends on the current directory; `None` without
+/// either.
+pub(crate) fn mcp_token_dir(lookup: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let state_home = lookup("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            lookup("HOME")
+                .map(PathBuf::from)
+                .filter(|home| home.is_absolute())
+                .map(|home| home.join(".local/state"))
+        })?;
+    Some(state_home.join("socium").join("mcp-auth"))
 }
 
 /// Public runtime installations the sandbox always mounts read-only. Not

@@ -17,6 +17,8 @@ pub(crate) struct ToolCall<'a> {
     pub(crate) control: &'a crate::TaskControl,
     pub(crate) settings: &'a crate::settings::Settings,
     pub(crate) edit_origin: Option<&'a crate::tools::edit_history::EditOrigin>,
+    /// The MCP servers whose tools the model was offered.
+    pub(crate) mcp: Option<&'a std::sync::Arc<crate::mcp::McpRegistry>>,
 }
 
 pub(crate) fn run_tool_call_checkpointed<F>(
@@ -35,6 +37,7 @@ where
         control,
         settings,
         edit_origin,
+        mcp,
     } = call;
     on_progress(AgentProgress::ToolCallStarted {
         name: name.to_string(),
@@ -43,34 +46,47 @@ where
         if control.is_cancelled() {
             return Err("Cancelled before execution".into());
         }
-        let gate = crate::approval::gate(name, input, workspace_root, settings, &|grant| {
-            control.is_granted(grant)
-        })?;
+        let granted = |grant: &crate::access::Grant| control.is_granted(grant);
+        let mcp_target = mcp.and_then(|registry| registry.target(name));
+        let gate = match &mcp_target {
+            Some(target) => crate::approval::mcp_gate(name, target, &granted),
+            None => crate::approval::gate(name, input, workspace_root, settings, &granted)?,
+        };
         let mut authorization = crate::constants::WORKSPACE_FILE_POLICY;
         let restrictions = match gate {
             crate::approval::Gate::Deny(reason) => return Err(reason.into()),
             crate::approval::Gate::Run(restrictions) => {
-                if settings.approval.mode == crate::settings::ApprovalMode::Bypass {
+                if mcp_target.is_none()
+                    && settings.approval.mode == crate::settings::ApprovalMode::Bypass
+                {
                     authorization = crate::constants::APPROVALS_SKIPPED;
-                } else if restrictions.is_some() {
+                } else if restrictions.is_some() || mcp_target.is_some() {
                     authorization = crate::constants::ALLOWED_BY_POLICY;
                 }
                 restrictions
             }
             crate::approval::Gate::Ask(ask) => {
-                let permissions = match name {
-                    "git_commit" => {
-                        "Linux sandbox: workspace and Git metadata writable; agent state hidden; network denied"
+                let permissions = match (name, &mcp_target) {
+                    (_, Some(target)) => crate::approval::mcp_permissions(target),
+                    ("git_commit", None) => {
+                        "Linux sandbox: workspace and Git metadata writable; agent state hidden; network denied".into()
                     }
-                    "run_command" => {
-                        "Linux sandbox: workspace writable; existing Git metadata read-only; agent state hidden; network denied"
+                    ("run_command", None) => {
+                        "Linux sandbox: workspace writable; existing Git metadata read-only; agent state hidden; network denied".into()
                     }
-                    _ => "Socium's file tools inside the workspace; nothing runs",
+                    _ => "Socium's file tools inside the workspace; nothing runs".into(),
                 };
                 let request = serde_json::json!({"workspace":workspace_root,"tool_call_id":tool_use_id,"arguments":input,"review":ask.review,"permissions":permissions,"reason":ask.reason});
                 if !control.is_interactive() {
+                    let rule = match &mcp_target {
+                        Some(target) => format!(
+                            "by adding \"{}\" to allow under [mcp.servers.{}]",
+                            target.remote, target.server
+                        ),
+                        None => "with an approval rule".into(),
+                    };
                     return Err(format!(
-                        "Needs approval, but no one can answer here: {} Allow it with an approval rule in Socium's config.toml, or run it from the TUI.",
+                        "Needs approval, but no one can answer here: {} Allow it {rule} in Socium's config.toml, or run it from the TUI.",
                         ask.reason
                     )
                     .into());
@@ -117,7 +133,9 @@ where
                 input,
                 on_progress,
             ),
-            None => Err(ToolError::UnsupportedTool(name.into())),
+            None => mcp
+                .and_then(|registry| registry.call(name, input, control))
+                .unwrap_or_else(|| Err(ToolError::UnsupportedTool(name.into()))),
         }
     })();
     let is_error = result.is_err();
@@ -160,10 +178,11 @@ pub(crate) async fn run_tool_call_on_blocking_thread(
         call.name.to_string(),
         call.input.clone(),
     );
-    let (control, settings, edit_origin) = (
+    let (control, settings, edit_origin, mcp) = (
         call.control.clone(),
         call.settings.clone(),
         call.edit_origin.cloned(),
+        call.mcp.cloned(),
     );
     let call = tokio::task::spawn_blocking(move || {
         let stopped = || std::io::Error::other("the turn stopped waiting for this call");
@@ -176,6 +195,7 @@ pub(crate) async fn run_tool_call_on_blocking_thread(
                 control: &control,
                 settings: &settings,
                 edit_origin: edit_origin.as_ref(),
+                mcp: mcp.as_ref(),
             },
             &mut |event| {
                 let _ = relay.send(Relayed::Progress(event));

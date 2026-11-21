@@ -21,7 +21,7 @@ const LAYERS: &[&[&str]] = &[
     &["transcript", "usage", "access", "activity_log"],
     &["progress"],
     &["control"],
-    &["process"],
+    &["process", "mcp"],
     &["tools"],
     &["approval", "instructions"],
     &["dispatch", "session"],

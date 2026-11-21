@@ -382,6 +382,7 @@ mod tests {
         assert!(help.contains("/clear"));
         assert!(help.contains("/exit"));
         assert!(help.contains("/commands"));
+        assert!(help.contains("/mcp"));
     }
 
     #[test]

@@ -70,8 +70,12 @@ versions Socium refuses to run; the exact path allows only the pinned one.
 | Approved `run_command` | Read/write | Read-only | Hidden, except `scratch/` (read/write) | Denied |
 | `run_command` nobody reviewed (`approval.commands = "auto"` or an `allow` rule) | Read/write, except protected paths (read-only) and sensitive files (read as empty) | Read-only | Hidden, except `scratch/` (read/write) | Denied |
 | Approved `git_commit`, including hooks | Read/write | Read/write | Hidden, except `scratch/` (read/write) | Denied |
+| MCP server with `sandbox = "read-only"`, for its whole run | Read-only, except sensitive files as of its start (covered by `/dev/null`, unreadable) | Read-only | Hidden, except `scratch/` (read-only) | Denied |
 
-Directories in `sandbox.read_only` are read-only in every row. A command
+Directories in `sandbox.read_only` are read-only in every row except the
+last: a sandboxed MCP server sees only its own `read_only` directories and
+none of `sandbox.path` or `sandbox.env`, and it does not start when its
+sensitive files cannot be listed. A command
 nobody reviewed gets the narrower view only when the protected and sensitive
 files can be listed in time (at most 256 paths) and no workspace directory
 refuses the listing; otherwise it asks. When it ends, however it ended, the

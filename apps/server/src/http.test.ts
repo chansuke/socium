@@ -59,13 +59,19 @@ test("gateway gates commands by access token, conversation, turn, and exact appr
     id: "turn-2",
     messages: [],
     draft: "",
-    approval: { request: 1, tool: "example", summary: "", input: "Details", requestedBy: null },
+    approval: { request: 1, tool: "example", summary: "", input: "Details", requestedBy: null, sessionOption: null },
   };
   assert.equal((await send({ action: "new" })).status, 409);
   assert.equal((await send({ action: "approve", turn: "turn-1", request: 1, allow: true })).status, 409);
   assert.equal((await send({ action: "approve", turn: "turn-2", request: 2, allow: true })).status, 409);
   assert.equal((await send({ action: "approve", turn: "turn-2", request: 1, allow: false })).status, 200);
-  assert.deepEqual(commands.at(-1), { action: "approve", request: 1, allow: false });
+  assert.deepEqual(commands.at(-1), { action: "approve", request: 1, allow: false, forSession: false });
+  // Allowing for the session needs a request that offers it.
+  assert.equal((await send({ action: "approve", turn: "turn-2", request: 1, allow: true, forSession: true })).status, 400);
+  assert.equal((await send({ action: "approve", turn: "turn-2", request: 1, allow: true, forSession: "yes" })).status, 400);
+  state.turn.approval = { request: 1, tool: "mcp__github__create_issue", summary: "", input: "Details", requestedBy: null, sessionOption: "`create_issue` of github" };
+  assert.equal((await send({ action: "approve", turn: "turn-2", request: 1, allow: true, forSession: true })).status, 200);
+  assert.deepEqual(commands.at(-1), { action: "approve", request: 1, allow: true, forSession: true });
 });
 
 test("pairing codes are issued by the host and exchanged once for a device token", async (context) => {

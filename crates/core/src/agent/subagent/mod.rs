@@ -1,10 +1,10 @@
 //! The `agent` tool: runs a delegated task in a fresh context with its own
 //! tool loop and returns only the subagent's final report as the tool result.
 //!
-//! A subagent shares the main agent's workspace, cancellation, and
-//! approvals, and its model unless its type names another. It never sees
-//! the main conversation, and its tools are a subset chosen by its type that
-//! never includes `agent`, so subagents do not nest.
+//! A subagent shares the main agent's workspace, cancellation, approvals
+//! and MCP servers, and its model unless its type names another. It never
+//! sees the main conversation, and its tools are a subset chosen by its type
+//! that never includes `agent`, so subagents do not nest.
 
 pub(crate) mod catalog;
 pub(crate) mod record;
@@ -84,15 +84,20 @@ pub(crate) fn run_subagent<'a>(
             })?),
         };
 
-        // The type's tools, as its model is offered them.
+        // The type's tools, as its model is offered them, with the MCP
+        // tools the main agent is offered.
         let model_tools;
         let child = match model {
             None => *ctx,
             Some(model) => {
-                model_tools = crate::tools::tools_with_settings(
+                let mut tools = crate::tools::tools_with_settings(
                     ctx.settings,
                     catalog::SubagentCatalog::builtin().tool_definition(),
                 );
+                if let Some(registry) = ctx.mcp {
+                    tools.extend(registry.definitions().iter().cloned());
+                }
+                model_tools = tools;
                 // Its compaction model when that one can run, else itself,
                 // as for the main agent.
                 let summarizer = model
@@ -115,6 +120,8 @@ pub(crate) fn run_subagent<'a>(
         let tools = child
             .tools
             .iter()
+            // An MCP tool the type names that no server offers is left out
+            // (ADR 32).
             .filter(|tool| kind.tools.allows(tool.name()))
             .cloned()
             .collect::<Vec<_>>();
@@ -238,7 +245,10 @@ pub(crate) fn run_subagent<'a>(
         let saved = record.save(root, session);
 
         let notes = last_assistant_text(&record.messages[resumed_from..]);
-        let side_effects = if kind.tools.may_change_workspace() {
+        let side_effects = if kind
+            .tools
+            .may_change_workspace(&|server| ctx.settings.is_sandboxed_mcp_server(server))
+        {
             " Changes it made before stopping are kept; inspect the workspace before retrying."
         } else {
             ""
@@ -734,6 +744,318 @@ mod tests {
             format!("{SUBAGENT_FRAMING}\n\n{SUBAGENT_WORKER_INSTRUCTIONS}")
         );
         assert_eq!(tool_names(&requests[1]), expected);
+    }
+
+    /// The fake MCP server as `fake`, with `allow` run without asking, and
+    /// `user_types` beside the built-in ones.
+    fn with_fake_mcp(
+        service: &mut AgentService,
+        allow: &[&str],
+        user_types: Vec<super::catalog::SubagentType>,
+    ) {
+        service.env = Arc::new(crate::host::process_env);
+        service.install_settings(crate::settings::Settings {
+            mcp_servers: vec![crate::mcp::tests::fake_settings("fake", "", allow)],
+            ..Default::default()
+        });
+        service.install_subagents(super::catalog::SubagentCatalog::new(user_types, Vec::new()));
+    }
+
+    fn user_type(name: &str, tools: &[&str]) -> super::catalog::SubagentType {
+        super::catalog::SubagentType {
+            name: name.into(),
+            description: "Uses the fake server".into(),
+            instructions: "You echo.".into(),
+            tools: super::catalog::ToolSet::Only(
+                tools.iter().map(|tool| tool.to_string()).collect(),
+            ),
+            model: None,
+        }
+    }
+
+    fn mcp_names(request: &Value) -> Vec<String> {
+        tool_names(request)
+            .into_iter()
+            .filter(|name| name.starts_with("mcp__"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_worker_gets_every_mcp_tool_and_an_explorer_none() {
+        let workspace = make_temp_dir("subagent_mcp");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                delegate("worker"),
+                text("Nothing to do."),
+                text("Done."),
+                delegate("explorer"),
+                text("Nothing found."),
+                text("Done."),
+            ],
+        );
+        with_fake_mcp(&mut service, &[], Vec::new());
+
+        service.submit("Fix it".into()).await.unwrap();
+        service.submit("Look".into()).await.unwrap();
+
+        let requests = requests.lock().unwrap().clone();
+        let offered = mcp_names(&requests[0]);
+        assert!(
+            offered.contains(&"mcp__fake__echo".to_string()),
+            "{offered:?}"
+        );
+        let mut expected = tool_names(&requests[0]);
+        expected.retain(|name| !MAIN_AGENT_TOOLS.contains(&name.as_str()));
+        assert_eq!(tool_names(&requests[1]), expected);
+        assert_eq!(mcp_names(&requests[4]), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_user_type_naming_a_server_is_offered_its_tools_and_calls_one() {
+        let workspace = make_temp_dir("subagent_mcp_user");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                delegate("echoer"),
+                calls(&[(
+                    "echo-1",
+                    "mcp__fake__echo",
+                    json!({"text": "from the subagent"}),
+                )]),
+                text("It echoed."),
+                text("Done."),
+            ],
+        );
+        with_fake_mcp(
+            &mut service,
+            &["echo"],
+            vec![user_type("echoer", &["read_file", "mcp__fake__*"])],
+        );
+
+        service.submit("Echo it".into()).await.unwrap();
+
+        let requests = requests.lock().unwrap().clone();
+        let child = &requests[1];
+        let mut expected = vec!["read_file".to_string()];
+        expected.extend(mcp_names(&requests[0]));
+        assert_eq!(tool_names(child), expected);
+        let result = &last_results(&requests[2])[0];
+        assert_eq!(result["tool_use_id"], "echo-1");
+        assert_eq!(result["content"], "echo: from the subagent");
+        assert!(result.get("is_error").is_none(), "{result}");
+        let report = last_results(&requests[3])[0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            report.starts_with("It echoed.\n\n(subagent agent-1: 2 rounds, 1 tool call, "),
+            "{report}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_user_type_naming_tools_no_server_offers_still_runs_without_them() {
+        let workspace = make_temp_dir("subagent_mcp_absent");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                delegate("echoer"),
+                text("Ran with what I had."),
+                text("Done."),
+                delegate("clock"),
+                text("No clock."),
+                text("Done."),
+            ],
+        );
+        with_fake_mcp(
+            &mut service,
+            &[],
+            vec![
+                user_type(
+                    "echoer",
+                    &["mcp__fake__echo", "mcp__fake__missing", "mcp__gone__*"],
+                ),
+                user_type("clock", &["read_file", "mcp__time__get_current_time"]),
+            ],
+        );
+
+        service.submit("Echo it".into()).await.unwrap();
+        // With no MCP server configured at all.
+        service.install_settings(crate::settings::Settings::default());
+        service.submit("What time is it?".into()).await.unwrap();
+
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(tool_names(&requests[1]), ["mcp__fake__echo"]);
+        assert!(
+            last_results(&requests[2])[0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("Ran with what I had.")
+        );
+        assert_eq!(tool_names(&requests[4]), ["read_file"]);
+        assert!(
+            last_results(&requests[5])[0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("No clock.")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subagent_on_another_model_gets_the_mcp_tools_too() {
+        use super::catalog::{SubagentCatalog, SubagentModel};
+        let workspace = make_temp_dir("subagent_mcp_model");
+        let (mut service, _) = scripted(workspace.path(), vec![delegate("echoer"), text("Done.")]);
+        let model_provider = ScriptedProvider::new(vec![text("Nothing to echo.")]);
+        let model_requests = model_provider.recorded_requests.clone();
+        with_fake_mcp(&mut service, &[], Vec::new());
+        let mut echoer = user_type("echoer", &["mcp__fake__echo"]);
+        echoer.model = Some("haiku".into());
+        service.install_subagents(SubagentCatalog::new(
+            vec![echoer],
+            vec![SubagentModel {
+                config: crate::models::ModelRegistry::builtin()
+                    .find("haiku")
+                    .unwrap()
+                    .clone(),
+                provider: Box::new(model_provider),
+                max_tokens: 100,
+            }],
+        ));
+
+        service.submit("Echo it".into()).await.unwrap();
+
+        let child = model_requests.lock().unwrap()[0].clone();
+        assert_eq!(tool_names(&child), ["mcp__fake__echo"]);
+    }
+
+    #[tokio::test]
+    async fn resuming_a_subagent_whose_mcp_tools_are_gone_runs_without_them() {
+        let workspace = make_temp_dir("subagent_mcp_resume");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                delegate("echoer"),
+                calls(&[("echo-1", "mcp__fake__echo", json!({"text": "hi"}))]),
+                text("It echoed."),
+                text("Done."),
+                resume("agent-1", "echoer", "Once more"),
+                text("The echo tool is gone."),
+                text("Done."),
+            ],
+        );
+        with_fake_mcp(
+            &mut service,
+            &["echo"],
+            vec![user_type("echoer", &["read_file", "mcp__fake__*"])],
+        );
+        service.submit("Echo it".into()).await.unwrap();
+
+        service.install_settings(crate::settings::Settings::default());
+        service.submit("Again".into()).await.unwrap();
+
+        let requests = requests.lock().unwrap().clone();
+        let resumed = &requests[5];
+        assert_eq!(tool_names(resumed), ["read_file"]);
+        // It still sees its earlier call and result.
+        assert!(resumed["messages"].to_string().contains("echo: hi"));
+        assert!(
+            last_results(&requests[6])[0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("The echo tool is gone.")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subagents_mcp_call_asks_as_the_main_agents_does_and_shares_its_session_grant() {
+        let workspace = make_temp_dir("subagent_mcp_approval");
+        let echo = |id: &str| calls(&[(id, "mcp__fake__echo", json!({"text": id}))]);
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                delegate("echoer"),
+                echo("echo-1"),
+                text("It echoed."),
+                echo("echo-2"),
+                text("Done."),
+            ],
+        );
+        with_fake_mcp(
+            &mut service,
+            &[],
+            vec![user_type("echoer", &["mcp__fake__*"])],
+        );
+        let control = service.task_control();
+        control.enable_interactive_approval();
+        let mut asked = Vec::new();
+
+        service
+            .submit_with_progress("Echo it".into(), |event| {
+                if let AgentProgress::ApprovalRequested {
+                    request_id,
+                    tool,
+                    requested_by,
+                    session_option,
+                    input,
+                    ..
+                } = event
+                {
+                    asked.push((tool, requested_by, session_option.is_some(), input));
+                    control.answer(request_id, crate::ApprovalAnswer::AllowForSession);
+                }
+            })
+            .await
+            .unwrap();
+
+        // Asked once, naming the subagent; the grant then covers the main
+        // agent's call of the same tool.
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        let (tool, requested_by, session_option, input) = &asked[0];
+        assert_eq!(tool, "mcp__fake__echo");
+        assert_eq!(
+            requested_by.as_deref(),
+            Some("echoer subagent \"Find the greeting\"")
+        );
+        assert!(session_option);
+        assert!(
+            input.contains("MCP tools run in the fake server on the host"),
+            "{input}"
+        );
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(last_results(&requests[2])[0]["content"], "echo: echo-1");
+        assert_eq!(last_results(&requests[4])[0]["content"], "echo: echo-2");
+    }
+
+    #[tokio::test]
+    async fn an_unallowed_mcp_call_of_a_subagent_is_refused_when_no_one_can_answer() {
+        let workspace = make_temp_dir("subagent_mcp_headless");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                delegate("echoer"),
+                calls(&[("echo-1", "mcp__fake__echo", json!({"text": "hi"}))]),
+                text("It was refused."),
+                text("Done."),
+            ],
+        );
+        with_fake_mcp(
+            &mut service,
+            &[],
+            vec![user_type("echoer", &["mcp__fake__echo"])],
+        );
+
+        service.submit("Echo it".into()).await.unwrap();
+
+        let refused = &last_results(&requests.lock().unwrap()[2])[0];
+        assert_eq!(refused["is_error"], true);
+        let content = refused["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("Needs approval, but no one can answer here")
+                && content.contains("adding \"echo\" to allow under [mcp.servers.fake]"),
+            "{content}"
+        );
     }
 
     #[tokio::test]
@@ -1880,6 +2202,209 @@ mod tests {
                 "{result}"
             );
         }
+    }
+
+    /// Answers the main agent from a script and each subagent request
+    /// after a pause, counting how many subagent requests were in flight
+    /// at once.
+    struct OverlapProvider {
+        main: ScriptedProvider,
+        active: std::sync::atomic::AtomicUsize,
+        most: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::providers::Provider for OverlapProvider {
+        fn kind(&self) -> crate::providers::ProviderKind {
+            crate::providers::ProviderKind::Anthropic
+        }
+
+        fn capabilities(&self) -> crate::providers::ProviderCapabilities {
+            crate::providers::ProviderCapabilities {
+                supports_tools: true,
+            }
+        }
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "each reply takes a while, so parallel subagents overlap"
+        )]
+        async fn send_message(
+            &self,
+            client: &reqwest::Client,
+            request: &crate::conversation::AgentMessageRequest<'_>,
+            on_delta: &mut (dyn FnMut(crate::providers::ProviderEvent) + Send),
+        ) -> Result<ProviderResponse, ProviderError> {
+            use std::sync::atomic::Ordering;
+            let value = serde_json::to_value(request)?;
+            if value["system"] == DEFAULT_SYSTEM_PROMPT {
+                return self.main.send_message(client, request, on_delta).await;
+            }
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(text_provider_response("report", None))
+        }
+    }
+
+    /// The most subagents of `tools` that ran at once when the main agent
+    /// started two of them in one response.
+    async fn most_at_once(name: &str, tools: &[&str]) -> usize {
+        most_at_once_with(
+            name,
+            tools,
+            vec![crate::mcp::tests::fake_settings("fake", "", &[])],
+        )
+        .await
+    }
+
+    /// As `most_at_once`, with `servers` as the MCP servers.
+    async fn most_at_once_with(
+        name: &str,
+        tools: &[&str],
+        servers: Vec<crate::settings::McpServerSettings>,
+    ) -> usize {
+        let workspace = make_temp_dir(name);
+        let call = |id: &str| {
+            (
+                id.to_string(),
+                json!({"description": "Look", "prompt": id, "agent_type": "echoer"}),
+            )
+        };
+        let batch = [call("agent-a"), call("agent-b")];
+        let most = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = OverlapProvider {
+            main: ScriptedProvider::new(vec![
+                calls(
+                    &batch
+                        .iter()
+                        .map(|(id, input)| (id.as_str(), "agent", input.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+                text("Both done."),
+            ]),
+            active: std::sync::atomic::AtomicUsize::new(0),
+            most: most.clone(),
+        };
+        let mut service = AgentService::with_provider(
+            workspace.path().into(),
+            Box::new(provider),
+            "test".into(),
+            1000,
+            crate::test_support::http_client(),
+        );
+        service.env = Arc::new(crate::host::process_env);
+        service.install_settings(crate::settings::Settings {
+            mcp_servers: servers,
+            ..Default::default()
+        });
+        service.install_subagents(super::catalog::SubagentCatalog::new(
+            vec![user_type("echoer", tools)],
+            Vec::new(),
+        ));
+
+        let reply = service.submit("Look at both".into()).await.unwrap();
+
+        assert_eq!(reply.text, "Both done.");
+        most.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn a_type_with_an_mcp_tool_runs_one_at_a_time() {
+        // A read-only type overlaps, so the count would show it.
+        assert_eq!(
+            most_at_once("subagent_overlap_read", &["read_file"]).await,
+            2
+        );
+        assert_eq!(
+            most_at_once("subagent_overlap_mcp", &["read_file", "mcp__fake__echo"]).await,
+            1
+        );
+        assert_eq!(
+            most_at_once("subagent_overlap_server", &["mcp__fake__*"]).await,
+            1
+        );
+    }
+
+    /// The fake server on the host as `fake`, and in the read-only sandbox
+    /// as `box` (ADR 33).
+    #[cfg(target_os = "linux")]
+    fn host_and_sandboxed_servers() -> Vec<crate::settings::McpServerSettings> {
+        vec![
+            crate::mcp::tests::fake_settings("fake", "", &[]),
+            crate::mcp::tests::sandboxed::sandboxed_settings("box", &[], &[]),
+        ]
+    }
+
+    /// ADR 33 amends ADR 32: only tools of host servers keep a type from
+    /// running alongside others. A server the settings do not name counts
+    /// as a host one.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_type_with_only_sandboxed_mcp_tools_runs_alongside_others() {
+        for (name, tools, expected) in [
+            ("box_exact", &["read_file", "mcp__box__echo"][..], 2),
+            ("box_server", &["git_diff", "mcp__box__*"], 2),
+            ("box_and_host", &["mcp__box__*", "mcp__fake__echo"], 1),
+            ("unconfigured", &["read_file", "mcp__nowhere__*"], 1),
+        ] {
+            let most = most_at_once_with(
+                &format!("subagent_overlap_{name}"),
+                tools,
+                host_and_sandboxed_servers(),
+            )
+            .await;
+            assert_eq!(most, expected, "{tools:?}");
+        }
+    }
+
+    /// A type of only sandboxed MCP tools changes nothing, so a failure
+    /// does not tell the main agent to inspect the workspace; and explorer
+    /// still gets none of them.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_sandboxed_mcp_type_reports_no_leftover_changes_and_explorer_gets_none() {
+        let workspace = make_temp_dir("subagent_mcp_sandboxed");
+        let (mut service, requests) = scripted(
+            workspace.path(),
+            vec![
+                delegate("searcher"),
+                Err(ProviderError::Api("overloaded".into())),
+                text("It failed."),
+                delegate("explorer"),
+                text("Nothing found."),
+                text("Done."),
+            ],
+        );
+        service.env = Arc::new(crate::host::process_env);
+        service.install_settings(crate::settings::Settings {
+            mcp_servers: host_and_sandboxed_servers(),
+            ..Default::default()
+        });
+        service.install_subagents(super::catalog::SubagentCatalog::new(
+            vec![user_type("searcher", &["read_file", "mcp__box__*"])],
+            Vec::new(),
+        ));
+
+        service.submit("Search".into()).await.unwrap();
+        service.submit("Look".into()).await.unwrap();
+
+        let requests = requests.lock().unwrap().clone();
+        assert!(mcp_names(&requests[0]).contains(&"mcp__box__read".to_string()));
+        let child = mcp_names(&requests[1]);
+        assert!(child.contains(&"mcp__box__echo".to_string()), "{child:?}");
+        assert!(
+            child.iter().all(|name| name.starts_with("mcp__box__")),
+            "{child:?}"
+        );
+        let content = last_results(&requests[2])[0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(content.starts_with("The subagent failed: "), "{content}");
+        assert!(!content.contains("Changes it made"), "{content}");
+        assert_eq!(mcp_names(&requests[4]), Vec::<String>::new());
     }
 
     /// The tool entries a turn shows live, then the ones a restarted
