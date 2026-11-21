@@ -1,6 +1,6 @@
 use crate::approval::{Grant, grants_cover};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -20,6 +20,11 @@ struct ControlState {
     interactive: AtomicBool,
     next_id: AtomicU64,
     approval: Mutex<Option<(u64, Option<ApprovalAnswer>)>>,
+    /// Signalled under `approval` when an answer arrives or the task is
+    /// cancelled, which is what a waiting approval watches for.
+    approval_changed: Condvar,
+    /// Wakes the tasks awaiting [`TaskControl::cancelled`].
+    cancel_notify: tokio::sync::Notify,
     /// What the user allowed for the session; kept across turns.
     grants: Mutex<Vec<Grant>>,
     /// What the user typed while a turn ran, oldest first, until the turn
@@ -35,6 +40,11 @@ pub struct TaskControl(Arc<ControlState>);
 impl TaskControl {
     pub fn cancel(&self) {
         self.0.cancelled.store(true, Ordering::Release);
+        // Taking the lock orders this wake after a waiter's last check of
+        // the flag, so the waiter cannot miss it.
+        drop(self.0.approval.lock().unwrap_or_else(|e| e.into_inner()));
+        self.0.approval_changed.notify_all();
+        self.0.cancel_notify.notify_waiters();
     }
     pub fn is_cancelled(&self) -> bool {
         self.0.cancelled.load(Ordering::Acquire)
@@ -77,6 +87,7 @@ impl TaskControl {
             && slot.is_none()
         {
             *slot = Some(answer);
+            self.0.approval_changed.notify_all();
             return true;
         }
         false
@@ -133,8 +144,8 @@ impl TaskControl {
             session_option: grant.as_ref().map(Grant::scope),
         });
         let start = Instant::now();
+        let mut pending = self.0.approval.lock().unwrap_or_else(|e| e.into_inner());
         loop {
-            let mut pending = self.0.approval.lock().unwrap_or_else(|e| e.into_inner());
             let answer = pending.as_ref().and_then(|(_, a)| *a);
             let expired = timeout.is_some_and(|limit| start.elapsed() >= limit);
             if self.is_cancelled() || expired || answer.is_some() {
@@ -162,17 +173,51 @@ impl TaskControl {
                 });
                 return approved;
             }
-            drop(pending);
-            std::thread::sleep(Duration::from_millis(20));
+            pending = match timeout {
+                Some(limit) => {
+                    let left = limit.saturating_sub(start.elapsed());
+                    self.0
+                        .approval_changed
+                        .wait_timeout(pending, left)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+                None => self
+                    .0
+                    .approval_changed
+                    .wait(pending)
+                    .unwrap_or_else(|e| e.into_inner()),
+            };
         }
     }
     pub fn reset_cancellation(&self) {
         self.0.cancelled.store(false, Ordering::Release);
         *self.0.approval.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
+    /// Waits `delay` on purpose, such as a retry backoff, and ends early when
+    /// the task is cancelled. Returns `false` when it was cancelled.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one deliberate delay, and it ends on cancellation"
+    )]
+    pub(crate) async fn pause(&self, delay: Duration) -> bool {
+        tokio::select! {
+            biased;
+            _ = self.cancelled() => false,
+            _ = tokio::time::sleep(delay) => true,
+        }
+    }
     pub(crate) async fn cancelled(&self) {
-        while !self.is_cancelled() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        loop {
+            let notified = self.0.cancel_notify.notified();
+            tokio::pin!(notified);
+            // Registered before the check, so a cancel between the check and
+            // the await still wakes this task.
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
         }
     }
 }
@@ -245,6 +290,10 @@ mod tests {
         ])));
         assert!(!c.is_granted(&Grant::Command(vec!["cargo".into(), "build".into()])));
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the answer arrives late on purpose"
+    )]
     #[test]
     fn a_pending_request_waits_past_the_old_deadline_until_answered() {
         let c = TaskControl::default();
@@ -262,5 +311,64 @@ mod tests {
         });
         assert!(!approved);
         assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+    #[test]
+    fn a_cancel_from_another_thread_ends_a_pending_request_as_denied() {
+        let c = TaskControl::default();
+        c.enable_interactive_approval();
+        let cancelling = c.clone();
+        let mut canceller = None;
+        let approved = c.approve("run_command", &serde_json::json!({}), None, &mut |e| {
+            if let crate::AgentProgress::ApprovalRequested { .. } = e {
+                let cancelling = cancelling.clone();
+                canceller = Some(std::thread::spawn(move || cancelling.cancel()));
+            }
+        });
+        assert!(!approved);
+        canceller.unwrap().join().unwrap();
+    }
+    #[test]
+    fn an_answer_from_another_thread_wakes_a_pending_request() {
+        let c = TaskControl::default();
+        c.enable_interactive_approval();
+        let answering = c.clone();
+        let mut answerer = None;
+        let approved = c.approve("run_command", &serde_json::json!({}), None, &mut |e| {
+            if let crate::AgentProgress::ApprovalRequested { request_id, .. } = e {
+                let answering = answering.clone();
+                answerer = Some(std::thread::spawn(move || {
+                    answering.answer(request_id, ApprovalAnswer::AllowOnce)
+                }));
+            }
+        });
+        assert!(approved);
+        assert!(answerer.unwrap().join().unwrap());
+    }
+    #[tokio::test]
+    async fn cancelled_returns_once_another_task_cancels() {
+        let c = TaskControl::default();
+        let waiting = tokio::spawn({
+            let c = c.clone();
+            async move { c.cancelled().await }
+        });
+        tokio::task::yield_now().await;
+        c.cancel();
+        waiting.await.unwrap();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_pause_ends_early_and_reports_a_cancel() {
+        let c = TaskControl::default();
+        let pausing = tokio::spawn({
+            let c = c.clone();
+            async move { c.pause(Duration::from_secs(3600)).await }
+        });
+        tokio::task::yield_now().await;
+        c.cancel();
+        assert!(!pausing.await.unwrap());
+        assert!(!c.pause(Duration::ZERO).await);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_pause_that_runs_out_reports_no_cancel() {
+        assert!(TaskControl::default().pause(Duration::from_secs(60)).await);
     }
 }

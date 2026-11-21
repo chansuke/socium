@@ -1244,6 +1244,10 @@ mod tests {
 
     #[test]
     #[ignore = "prints a frame for manual inspection"]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the frame size comes from FRAME_WIDTH and FRAME_HEIGHT"
+    )]
     fn print_activity_frame() {
         let mut app = app_with_activity();
         app.slot.focused = true;

@@ -486,7 +486,7 @@ mod tests {
             "1. User request: fix the bug",
             None,
         ))]);
-        let client = reqwest::Client::builder().build().unwrap();
+        let client = crate::test_support::http_client();
         let messages = transcript_messages();
         let request = CompactionRequest {
             previous_summary: Some("earlier summary text"),
@@ -510,7 +510,7 @@ mod tests {
     #[tokio::test]
     async fn summarize_with_llm_rejects_empty_summary() {
         let provider = ScriptedProvider::new(vec![Ok(text_provider_response("   ", None))]);
-        let client = reqwest::Client::builder().build().unwrap();
+        let client = crate::test_support::http_client();
         let messages = transcript_messages();
         let request = CompactionRequest {
             previous_summary: None,
@@ -530,7 +530,7 @@ mod tests {
         let mut cut = text_provider_response("1. User request: fix the par", None);
         cut.message.stop_reason = Some("max_tokens".into());
         let provider = ScriptedProvider::new(vec![Ok(cut)]);
-        let client = reqwest::Client::builder().build().unwrap();
+        let client = crate::test_support::http_client();
         let messages = transcript_messages();
         let request = CompactionRequest {
             previous_summary: None,
@@ -551,7 +551,7 @@ mod tests {
             Err(crate::providers::error::ProviderError::Api("down".into())),
             Err(crate::providers::error::ProviderError::Api("down".into())),
         ]);
-        let client = reqwest::Client::builder().build().unwrap();
+        let client = crate::test_support::http_client();
         let control = crate::TaskControl::default();
         let messages = (0..60)
             .map(|n| Message::user_text(format!("message {n} {}", "x".repeat(4_000))))

@@ -103,10 +103,8 @@ impl WebSearch {
                 Failure::Retryable(_) => {}
             }
             let delay = Duration::from_secs(1 << (attempt - 1));
-            tokio::select! {
-                biased;
-                _ = control.cancelled() => return Err("Search cancelled; no further request was sent".into()),
-                _ = tokio::time::sleep(delay) => {}
+            if !control.pause(delay).await {
+                return Err("Search cancelled; no further request was sent".into());
             }
         }
     }
@@ -336,6 +334,10 @@ mod tests {
     /// Answers each request with the next of `replies` (status, body); a
     /// `None` reply holds the connection open without answering. Returns
     /// the base URL and the request bodies received.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a held connection stays open for the length of the test"
+    )]
     async fn serve(replies: Vec<Option<(u16, String)>>) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -399,7 +401,7 @@ mod tests {
     }
 
     fn client() -> reqwest::Client {
-        reqwest::Client::builder().build().unwrap()
+        crate::test_support::http_client()
     }
 
     fn results(count: usize) -> String {
@@ -514,6 +516,10 @@ mod tests {
         assert!(large.contains("more than 4 MiB"), "{large}");
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the cancel arrives mid-search, and the test then waits for a request that must not come"
+    )]
     #[tokio::test]
     async fn cancelling_stops_the_search_and_sends_nothing_more() {
         let (base_url, received) = serve(vec![None, None]).await;

@@ -232,11 +232,7 @@ where
                         ),
                     },
                 );
-                tokio::select! {
-                    biased;
-                    _ = ctx.control.cancelled() => {}
-                    _ = tokio::time::sleep(delay) => {}
-                }
+                ctx.control.pause(delay).await;
                 if ctx.control.is_cancelled() {
                     break Err(AgentError::Cancelled);
                 }
@@ -917,7 +913,7 @@ mod tests {
         use crate::test_support::{ScriptedProvider, make_temp_dir};
         let workspace = make_temp_dir("batch");
         let provider = ScriptedProvider::new(Vec::new());
-        let client = reqwest::Client::new();
+        let client = crate::test_support::http_client();
         let tools = crate::tools::tools_for_model();
         let subagents = SubagentCatalog::builtin();
         let control = crate::TaskControl::default();

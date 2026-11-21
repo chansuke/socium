@@ -7,6 +7,7 @@ mod activity_log;
 mod approval;
 mod control;
 mod execution;
+pub mod host;
 mod instructions;
 pub mod model_import;
 mod models;
@@ -437,6 +438,10 @@ impl HttpClient {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one place that builds a provider client"
+)]
 fn http_client(connect: Duration, idle: Duration) -> Result<reqwest::Client, ProviderError> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -556,7 +561,7 @@ impl AgentService {
     pub fn from_env(workspace_root: PathBuf, start: SessionStart) -> Result<Self, AgentError> {
         let sandbox = SandboxCheck::start(workspace_root.clone());
         let client = HttpClient::start();
-        let lookup: EnvLookup = Arc::new(|key| env::var(key).ok());
+        let lookup: EnvLookup = Arc::new(host::process_env);
         let registry = ModelRegistry::load(lookup.as_ref())?;
         // Read from the same lookup as the other limits, in `new`.
         let max_tokens_override = None;
@@ -1912,7 +1917,7 @@ mod tests {
             Box::new(AnthropicProvider::with_credentials("test", "2023-06-01")),
             "test-model".to_string(),
             128,
-            reqwest::Client::builder().build().unwrap(),
+            crate::test_support::http_client(),
         );
         service.messages = messages;
 
@@ -1947,7 +1952,7 @@ mod tests {
             Box::new(provider),
             "claude-sonnet-4-5".to_string(),
             1_000,
-            reqwest::Client::builder().build().unwrap(),
+            crate::test_support::http_client(),
         );
         service.messages = messages;
         service.last_measured_usage = last_measured_usage;
@@ -2885,7 +2890,7 @@ mod tests {
             Box::new(provider),
             "claude-sonnet-4-5".to_string(),
             1_000,
-            reqwest::Client::builder().build().unwrap(),
+            crate::test_support::http_client(),
         );
 
         let metrics_before = service.context_metrics("").unwrap();
@@ -2935,7 +2940,7 @@ max_output_tokens = 32000
                 ModelRegistry::from_toml(MODELS).unwrap(),
                 lookup(env),
                 None,
-                reqwest::Client::new(),
+                crate::test_support::http_client(),
             )
             .unwrap()
         }
@@ -2960,7 +2965,7 @@ max_output_tokens = 32000
                 ModelRegistry::from_toml(&models).unwrap(),
                 lookup(&KEYS),
                 None,
-                reqwest::Client::new(),
+                crate::test_support::http_client(),
             )
             .unwrap();
             let switch = service.switch_model("ds-plain").unwrap();
@@ -3161,7 +3166,7 @@ max_output_tokens = 32000
                 ModelRegistry::from_toml(MODELS).unwrap(),
                 lookup(&[("ANTHROPIC_API_KEY", "a"), ("MODEL", "sonnet")]),
                 None,
-                reqwest::Client::new(),
+                crate::test_support::http_client(),
             )
             .unwrap();
             assert_eq!(service.active_model().alias, "sonnet");
@@ -3194,7 +3199,7 @@ max_output_tokens = 4000
                 registry,
                 lookup(&KEYS),
                 None,
-                reqwest::Client::new(),
+                crate::test_support::http_client(),
             )
             .unwrap();
             service.messages = (0..40)
@@ -3275,7 +3280,7 @@ id = "plain-id"
                 registry,
                 lookup(&[("P_KEY", "k"), ("EFFORT", "high"), ("MODEL", "plain")]),
                 None,
-                reqwest::Client::new(),
+                crate::test_support::http_client(),
             )
             .unwrap();
 
@@ -3307,7 +3312,7 @@ id = "plain-id"
                 ModelRegistry::builtin(),
                 lookup(&KEYS),
                 None,
-                reqwest::Client::new(),
+                crate::test_support::http_client(),
             )
             .unwrap();
             assert_eq!(service.active_model().alias, "opus");
@@ -3389,7 +3394,7 @@ id = "plain-id"
                 ModelRegistry::builtin(),
                 lookup(&[]),
                 None,
-                reqwest::Client::new(),
+                crate::test_support::http_client(),
             )
             .err()
             .unwrap();

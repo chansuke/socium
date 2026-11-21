@@ -580,7 +580,7 @@ fn string(text: &str) -> String {
 
 /// `models.d/` beside the models file socium reads, from the environment.
 pub fn models_dir() -> Option<PathBuf> {
-    crate::models::models_dir(&|key| std::env::var(key).ok())
+    crate::models::models_dir(&crate::host::process_env)
 }
 
 /// Writes `<dir>/<provider_id>.toml` in place of any earlier file,

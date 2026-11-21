@@ -226,7 +226,7 @@ mod tests {
         let tools = tools_for_model();
         let request = AgentMessageRequest::new(&model.id, 100, &messages, &tools);
         provider
-            .build_request(&reqwest::Client::new(), &request)
+            .build_request(&crate::test_support::http_client(), &request)
             .unwrap()
             .build()
             .unwrap()

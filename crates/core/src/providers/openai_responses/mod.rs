@@ -334,7 +334,7 @@ features = ["effort"]
         let tools = tools_for_model();
         let request = AgentMessageRequest::new("gpt-6-astra", 1000, &messages, &tools);
         let built = provider(Some("high"))
-            .build_request(&reqwest::Client::new(), &request)
+            .build_request(&crate::test_support::http_client(), &request)
             .unwrap()
             .build()
             .unwrap();

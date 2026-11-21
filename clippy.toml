@@ -2,3 +2,18 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-print-in-tests = true
+
+# Each reason is what Clippy prints, so it names the API to use instead.
+# A call that truly needs the raw API takes
+# `#[expect(clippy::disallowed_methods, reason = "...")]` on the smallest item.
+disallowed-methods = [
+    { path = "std::thread::sleep", reason = "do not wait on a timer for something that will happen: wait on the event (Condvar or tokio::sync::Notify in TaskControl, poll(2) on a descriptor, a channel). Sleep only for a deliberate delay such as a retry backoff, under #[expect] with that reason" },
+    { path = "tokio::time::sleep", reason = "do not wait on a timer for something that will happen: await the event (tokio::sync::Notify, a channel, TaskControl::cancelled). Sleep only for a deliberate delay such as a retry backoff, under #[expect] with that reason" },
+    { path = "std::env::var", reason = "configuration comes through the EnvLookup that AgentService is built with, so tests can inject it; host locations (HOME, PATH) come from socium_core::host" },
+    { path = "std::env::var_os", reason = "configuration comes through the EnvLookup that AgentService is built with, so tests can inject it; host locations (HOME, PATH) come from socium_core::host" },
+    { path = "std::env::vars", reason = "configuration comes through the EnvLookup that AgentService is built with; the environment is never copied whole" },
+    { path = "std::env::set_var", reason = "tests run in parallel in one process: pass values through EnvLookup or Command::env instead of changing the process environment" },
+    { path = "std::env::remove_var", reason = "tests run in parallel in one process: pass values through EnvLookup or Command::env_remove instead of changing the process environment" },
+    { path = "reqwest::Client::new", reason = "a provider client must refuse redirects and use the connect and idle timeouts: use crate::http_client or provider_http_client, and crate::test_support::http_client in tests" },
+    { path = "reqwest::Client::builder", reason = "a provider client must refuse redirects and use the connect and idle timeouts: use crate::http_client or provider_http_client, and crate::test_support::http_client in tests" },
+]

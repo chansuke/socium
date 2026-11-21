@@ -16,7 +16,7 @@ fn service(workspace: &std::path::Path, provider: ScriptedProvider) -> AgentServ
         Box::new(provider),
         "claude-sonnet-4-5".to_string(),
         1_000,
-        reqwest::Client::builder().build().unwrap(),
+        crate::test_support::http_client(),
     )
 }
 
