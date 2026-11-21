@@ -349,7 +349,7 @@ struct RawApproval {
 /// a workspace, or the model could rewrite its own limits.
 pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(dir) = config_dir(lookup) {
+    if let Some(dir) = crate::host::config_dir(lookup) {
         paths.push(dir);
     }
     for variable in [
@@ -367,19 +367,6 @@ pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathB
         paths.push(crate::models::models_dir_beside(Path::new(&path)));
     }
     paths
-}
-
-/// `$XDG_CONFIG_HOME/socium`, else `~/.config/socium`.
-pub(crate) fn config_dir(lookup: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    let config_home = lookup("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| {
-            lookup("HOME")
-                .filter(|home| !home.is_empty())
-                .map(|home| Path::new(&home).join(".config"))
-        })?;
-    Some(config_home.join("socium"))
 }
 
 /// Refuses a workspace that contains Socium's own configuration: its file
@@ -436,7 +423,7 @@ impl Settings {
         let Some(path) = explicit
             .as_ref()
             .map(PathBuf::from)
-            .or_else(|| config_dir(lookup).map(|dir| dir.join("config.toml")))
+            .or_else(|| crate::host::config_dir(lookup).map(|dir| dir.join("config.toml")))
         else {
             return Ok((Self::default(), Vec::new()));
         };
