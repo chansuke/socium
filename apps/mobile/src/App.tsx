@@ -2,14 +2,15 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
-  FlatList, Keyboard, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView,
+  ActivityIndicator, FlatList, Keyboard, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView,
   Text, TextInput, View,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { createClient, mobileEndpoint, readPairingUrl, redeemPairing } from "@socium/client";
 import type { Client } from "@socium/client";
 import { maxPromptLength } from "@socium/client/protocol";
-import type { Message, WorkspaceState } from "@socium/client/protocol";
+import type { Message, Plan, PlanTaskStatus, WorkspaceState } from "@socium/client/protocol";
+import { describeActivity, planProgress, planStatusLabels } from "@socium/client/progress";
 import { MarkdownText } from "./MarkdownText";
 import { loadPairedHost, savePairedHost } from "./pairedHost";
 import type { PairedHost } from "./pairedHost";
@@ -300,11 +301,15 @@ function Workspace({ client, state, error, disabled, disconnect }: {
               if (await client.send({ action: "resume", target: session.id })) setSessionsOpen(false);
             }} />
           ))}
+          <ModelChoices client={client} state={state} disabled={locked} />
           {error && <Text accessibilityRole="alert" style={styles.notice}>{error}</Text>}
           <Button label="Disconnect" onPress={disconnect} />
         </ScrollView>
       ) : (
-        <Conversation key={state.session} client={client} state={state} error={error} disabled={disabled} />
+        <>
+          {state.plan && <PlanSummary key={state.session} plan={state.plan} />}
+          <Conversation key={state.session} client={client} state={state} error={error} disabled={disabled} />
+        </>
       )}
     </>
   );
@@ -359,7 +364,12 @@ function Conversation({ client, state, error, disabled }: {
         ListFooterComponent={
           <>
             {turn?.draft ? <MessageCard message={{ role: "assistant", text: turn.draft }} /> : null}
-            {turn && !approval && <Text style={styles.model} accessibilityLiveRegion="polite">Running…</Text>}
+            {turn && !approval && (
+              <View style={styles.activity}>
+                <ActivityIndicator size="small" color={palette.mint} />
+                <Text style={styles.activityText} accessibilityLiveRegion="polite">{describeActivity(turn.activity)}</Text>
+              </View>
+            )}
             {state.notices.map((notice, index) => <Text key={index} style={styles.notice}>{notice}</Text>)}
           </>
         }
@@ -375,13 +385,17 @@ function Conversation({ client, state, error, disabled }: {
             <ScrollView style={styles.review} nestedScrollEnabled>
               <Text selectable style={styles.code}>{approval.input}</Text>
             </ScrollView>
-            {approval.sessionOption && <Text style={styles.muted}>Allow for session also allows {approval.sessionOption} until Socium exits.</Text>}
+            {approval.sessionOption && (
+              <Text style={styles.muted}>
+                Allow for session allows <InlineCode text={approval.sessionOption} /> until Socium exits.
+              </Text>
+            )}
             <View style={styles.actions}>
               <Button label="Deny" disabled={disabled} onPress={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: false })} />
               {approval.sessionOption && (
-                <Button label="Allow for session" disabled={disabled} onPress={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: true, forSession: true })} />
+                <Button label="Allow for session" disabled={disabled} onPress={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: true, scope: "session" })} />
               )}
-              <Button label="Allow once" primary disabled={disabled} onPress={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: true })} />
+              <Button label="Allow once" primary disabled={disabled} onPress={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: true, scope: "once" })} />
             </View>
           </View>
         )}
@@ -402,6 +416,91 @@ function Conversation({ client, state, error, disabled }: {
         </View>
       </View>
     </>
+  );
+}
+
+/** Text with `code` spans, as the host writes approval options. */
+function InlineCode({ text }: { text: string }) {
+  return text.split(/`([^`]+)`/).map((part, index) => index % 2
+    ? <Text key={index} style={styles.inlineCode}>{part}</Text>
+    : part);
+}
+
+/** The host's models; switching happens between turns, and unavailable models say why. */
+function ModelChoices({ client, state, disabled }: { client: Client; state: WorkspaceState; disabled: boolean }) {
+  if (!state.models.length) return null;
+  return (
+    <View style={styles.choices} accessibilityRole="radiogroup" accessibilityLabel="Model">
+      <Text accessibilityRole="header" style={styles.label}>Model</Text>
+      {disabled && <Text style={styles.muted}>Switch models between turns.</Text>}
+      {state.models.map((model) => {
+        const selected = model.alias === state.model;
+        const unavailable = model.unavailable !== null;
+        return (
+          <Pressable
+            key={model.alias}
+            accessibilityRole="radio"
+            accessibilityLabel={`${model.alias}, ${model.provider}`}
+            accessibilityHint={model.unavailable ?? model.description ?? undefined}
+            accessibilityState={{ selected, disabled: disabled || unavailable }}
+            disabled={selected || disabled || unavailable}
+            onPress={() => void client.send({ action: "set_model", model: model.alias })}
+            style={({ pressed }) => [styles.choice, selected && styles.choiceSelected, (pressed || ((disabled || unavailable) && !selected)) && styles.dim]}
+          >
+            <Text style={[styles.choiceMark, selected && styles.choiceMarkSelected]}>{selected ? "●" : "○"}</Text>
+            <View style={styles.flex}>
+              <Text style={styles.buttonText} numberOfLines={1}>{model.alias} <Text style={styles.muted}>· {model.provider}</Text></Text>
+              {(model.unavailable ?? model.description) ? (
+                <Text style={styles.choiceDetail} numberOfLines={2}>{model.unavailable ?? model.description}</Text>
+              ) : null}
+            </View>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+const planMarks: Record<PlanTaskStatus, string> = { done: "✓", active: "◐", pending: "○", blocked: "!", dropped: "–" };
+
+/** The agent's plan as one line that opens to its tasks, so it never crowds the transcript. */
+function PlanSummary({ plan }: { plan: Plan }) {
+  const [open, setOpen] = useState(false);
+  const { done, total, active } = planProgress(plan);
+  return (
+    <View style={styles.plan}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Plan: ${plan.goal}, ${done} of ${total} tasks done`}
+        accessibilityState={{ expanded: open }}
+        onPress={() => setOpen(!open)}
+        style={({ pressed }) => [styles.planSummary, pressed && styles.dim]}
+      >
+        <Text style={styles.toolChevron}>{open ? "▾" : "▸"}</Text>
+        <View style={styles.flex}>
+          <Text style={styles.planGoal} numberOfLines={1}>{plan.goal}</Text>
+          {active && !open ? <Text style={styles.choiceDetail} numberOfLines={1}>{active.title}</Text> : null}
+        </View>
+        <Text style={styles.model}>{done}/{total}</Text>
+      </Pressable>
+      <View style={styles.planTrack}><View style={[styles.planFill, { width: `${Math.min(100, plan.done / 10)}%` }]} /></View>
+      {open && (
+        <ScrollView style={styles.planTasks} nestedScrollEnabled>
+          {plan.tasks.map((task) => (
+            <View key={task.id} style={[styles.planTask, { paddingLeft: task.depth * 16 }]}
+              accessible accessibilityLabel={`${task.title}, ${planStatusLabels[task.status]}`}>
+              <Text style={[styles.planMark, task.status === "done" && styles.planDone, task.status === "blocked" && styles.toolError]}>
+                {planMarks[task.status]}
+              </Text>
+              <View style={styles.flex}>
+                <Text style={[styles.planTaskTitle, task.group && styles.planGroup, task.status === "dropped" && styles.planDropped]}>{task.title}</Text>
+                {task.note ? <Text style={styles.choiceDetail}>{task.note}</Text> : null}
+              </View>
+            </View>
+          ))}
+        </ScrollView>
+      )}
+    </View>
   );
 }
 
