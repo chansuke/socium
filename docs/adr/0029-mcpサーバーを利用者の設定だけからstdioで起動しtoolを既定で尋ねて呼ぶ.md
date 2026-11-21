@@ -49,7 +49,7 @@ Chosen option: 「サーバーをホストで動かし、設定を `config.toml`
 * tool の呼び出しは組み込み tool と同じ経路 (`run_tool_call_checkpointed`) を通す。承認、`tool_started` の記録、中断はそのまま適用される。中断したとき、または `tool_timeout_secs` を過ぎたときは `notifications/cancelled` を送る。期限切れは「実行されたかは分からない」と伝え、自動では再送しない。`initialize` は仕様に従って取り消さず、サーバーを止める。引数は JSON の object に限る。結果は `text` を連結し、画像などは 1 行の置き換えにし、`structuredContent` しか無ければその JSON を返す。`isError` は tool のエラーにする。`result` も `error` も無い応答と、`content` の無い結果は成功として扱わず、実行されたかは分からないと伝える。
 * サーバーの stderr は、起動に失敗したときの利用者向けの警告にだけ使い、モデルが読む tool のエラーには入れない。警告とエラーでは、`env` で渡した 8 文字以上の値を `[redacted]` に置き換える。サーバーが tool の結果に値を書き戻すことまでは防げない。
 * 一つのサーバーがすべての要求を埋めないよう、tool の説明は 2048 文字で切り、64 KiB を超える `inputSchema` の tool は警告して渡さない。一つのサーバーが渡せるのは 64 個、説明と schema を合わせて 128 KiB まで、すべてのサーバーを合わせて 100 個、256 KiB までとし、超えた分は一覧の順に後ろから渡さず、サーバーごとに一つの警告で知らせる。OpenAI は一つの要求の tool を 128 個までとし、組み込みの tool もそこに入るため。stderr は 1 行あたり決まった量しか読み込まない。
-* 承認は ADR 13 に `Grant::McpTool` を足す。`allow` にある tool と、このセッションで許可した tool は尋ねずに実行する。それ以外は「MCP tools run in the <server> server on the host, outside Socium's sandbox.」を理由に尋ね、その tool だけをセッション中許可する選択肢を出す。答える人がいない実行では拒否し、`allow` に足す方法を伝える。
+* 承認は ADR 13 に `Grant::McpTool` を足す。`allow` にある tool と、このセッションで許可した tool は尋ねずに実行する。それ以外は「MCP tools run in the <server> server on the host, outside Socium's sandbox.」を理由に尋ね、その tool だけをセッション中許可する選択肢を出す。答える人がいない実行では拒否し、`allow` に足す方法を伝える。`--dangerously-skip-permissions` ([ADR 20](0020-dangerously-skip-permissionsで承認をすべて省く実行を起動の引数に限って許す.md)) で起動したときは、組み込み tool と同じく MCP の tool も尋ねずに実行し、`tool_started` に `approvals-skipped` と記録する。
 * MCP の tool はメインのエージェントだけに渡す。サブエージェントには渡さない。
 * 今回は扱わない: resources、prompts、sampling、roots、HTTP などの遠隔接続、OAuth、`notifications/tools/list_changed`、サブエージェントでの利用。
 
@@ -58,7 +58,7 @@ Chosen option: 「サーバーをホストで動かし、設定を `config.toml`
 * Good, because ワークスペースの内容では、ホストで動くプログラムが増えない。サーバーを決めるのは利用者だけになる。
 * Good, because プロバイダーの API キーなど socium の環境変数がサーバーに渡らない。
 * Good, because 応答しない、または stdin を読まないサーバーがあっても、tool の呼び出しは期限か中断で戻り、socium の終了も止まらない。
-* Good, because 既定では MCP の tool ごとに人が確かめる。尋ねずに動かすのは、利用者が `allow` に書いたものかセッション中に許可したものに限る。
+* Good, because 既定では MCP の tool ごとに人が確かめる。尋ねずに動かすのは、利用者が `allow` に書いたものかセッション中に許可したもの、または利用者が起動の引数で承認をすべて省いたときに限る。
 * Bad, because サーバーはサンドボックスの外で動く。サーバーがホストで何をするかは socium の制御の外にある。
 * Bad, because サーバーの返す内容はモデルにそのまま渡る。そこに書かれた指示にモデルが従うことがある。
 * Bad, because 作業ディレクトリを既定の対象にするサーバーには、対象のパスを引数で絶対パスとして渡す必要がある。

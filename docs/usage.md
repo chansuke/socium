@@ -51,8 +51,8 @@ Socium's state is hidden from all child processes, except
 `.socium/scratch/`, where commands may keep temporary files. What asks and what runs
 without asking is set in [`config.toml`](configuration.md#sandbox-and-approval-settings).
 `socium --dangerously-skip-permissions` runs every call without asking for that
-run, commits and edits to files the host runs included; `deny` rules and the
-sandbox still apply, and the footer shows `approvals skipped`. Use it only in a
+run, commits, edits to files the host runs, and MCP tools included; `deny`
+rules and the sandbox still apply, and the footer shows `approvals skipped`. Use it only in a
 throwaway environment.
 
 ## Files, edits, and command output

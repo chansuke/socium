@@ -149,17 +149,19 @@ fn denied_by(rule: &[String]) -> String {
 
 /// How the MCP tool exposed as `name` may run: unasked when its server
 /// runs in the read-only sandbox (ADR 33), when its server's `allow` names
-/// it, or when the user allowed it for this session; else after the user
-/// approves, since nothing confines what a host or remote server does.
+/// it, when the user allowed it for this session, or when approvals are
+/// skipped (ADR 20); else after the user approves, since nothing confines
+/// what a host or remote server does.
 pub(crate) fn mcp_gate(
     name: &str,
     target: &crate::mcp::McpTarget<'_>,
+    mode: ApprovalMode,
     granted: &dyn Fn(&Grant) -> bool,
 ) -> Gate {
     // The sandbox already keeps it from writing the workspace, reaching the
     // network, or reading the hidden secrets: at worst it reads what it
     // sees and the result goes to the provider.
-    if target.sandboxed {
+    if target.sandboxed || mode == ApprovalMode::Bypass {
         return Gate::Run(None);
     }
     let grant = Grant::McpTool(name.to_string());
@@ -387,7 +389,12 @@ mod tests {
             sandboxed: false,
             origin: None,
         };
-        let Gate::Ask(ask) = mcp_gate("mcp__github__get_issue", &target(false), &|_| false) else {
+        let Gate::Ask(ask) = mcp_gate(
+            "mcp__github__get_issue",
+            &target(false),
+            ApprovalMode::Ask,
+            &|_| false,
+        ) else {
             panic!("an MCP tool must ask by default");
         };
         assert_eq!(
@@ -397,17 +404,32 @@ mod tests {
         let offered = ask.grant.unwrap();
         assert_eq!(offered.scope(), "the MCP tool `mcp__github__get_issue`");
         assert!(matches!(
-            mcp_gate("mcp__github__get_issue", &target(true), &|_| false),
+            mcp_gate(
+                "mcp__github__get_issue",
+                &target(true),
+                ApprovalMode::Ask,
+                &|_| false
+            ),
             Gate::Run(None)
         ));
         let grants = [offered];
         let granted = |wanted: &Grant| grants_cover(&grants, wanted);
         assert!(matches!(
-            mcp_gate("mcp__github__get_issue", &target(false), &granted),
+            mcp_gate(
+                "mcp__github__get_issue",
+                &target(false),
+                ApprovalMode::Ask,
+                &granted
+            ),
             Gate::Run(None)
         ));
         assert!(matches!(
-            mcp_gate("mcp__github__create_issue", &target(false), &granted),
+            mcp_gate(
+                "mcp__github__create_issue",
+                &target(false),
+                ApprovalMode::Ask,
+                &granted
+            ),
             Gate::Ask(_)
         ));
         assert!(!grants_cover(
@@ -418,7 +440,12 @@ mod tests {
             origin: Some("https://api.githubcopilot.com"),
             ..target(false)
         };
-        let Gate::Ask(ask) = mcp_gate("mcp__github__get_issue", &remote, &|_| false) else {
+        let Gate::Ask(ask) = mcp_gate(
+            "mcp__github__get_issue",
+            &remote,
+            ApprovalMode::Ask,
+            &|_| false,
+        ) else {
             panic!("a remote MCP tool must ask by default");
         };
         assert_eq!(
@@ -439,7 +466,12 @@ mod tests {
             origin: None,
         };
         assert!(matches!(
-            mcp_gate("mcp__astgrep__search", &sandboxed, &|_| false),
+            mcp_gate(
+                "mcp__astgrep__search",
+                &sandboxed,
+                ApprovalMode::Ask,
+                &|_| false
+            ),
             Gate::Run(None)
         ));
         assert_eq!(
@@ -463,10 +495,52 @@ mod tests {
                 "MCP tools run in the astgrep server at https://a.example; Socium does not control what it does.",
             ),
         ] {
-            let Gate::Ask(ask) = mcp_gate("mcp__astgrep__search", &target, &|_| false) else {
+            let Gate::Ask(ask) =
+                mcp_gate("mcp__astgrep__search", &target, ApprovalMode::Ask, &|_| {
+                    false
+                })
+            else {
                 panic!("{reason}");
             };
             assert_eq!(ask.reason, reason);
+        }
+    }
+
+    /// ADR 20: skipped approvals cover host and remote MCP tools too, with
+    /// no `allow` and no session grant; `ask` and `auto` still ask.
+    #[test]
+    fn skipping_approvals_runs_host_and_remote_mcp_tools_without_asking() {
+        let host = crate::mcp::McpTarget {
+            server: "github",
+            remote: "create_issue",
+            allowed: false,
+            sandboxed: false,
+            origin: None,
+        };
+        let remote = crate::mcp::McpTarget {
+            origin: Some("https://api.githubcopilot.com"),
+            ..host
+        };
+        for target in [&host, &remote] {
+            assert!(matches!(
+                mcp_gate(
+                    "mcp__github__create_issue",
+                    target,
+                    ApprovalMode::Bypass,
+                    &|_| false
+                ),
+                Gate::Run(None)
+            ));
+            for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {
+                assert!(
+                    matches!(
+                        mcp_gate("mcp__github__create_issue", target, mode, &|_| false),
+                        Gate::Ask(Ask { grant: Some(_), .. })
+                    ),
+                    "{mode:?} {:?}",
+                    target.origin
+                );
+            }
         }
     }
 

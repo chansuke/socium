@@ -49,16 +49,16 @@ where
         let granted = |grant: &crate::access::Grant| control.is_granted(grant);
         let mcp_target = mcp.and_then(|registry| registry.target(name));
         let gate = match &mcp_target {
-            Some(target) => crate::approval::mcp_gate(name, target, &granted),
+            Some(target) => {
+                crate::approval::mcp_gate(name, target, settings.approval.mode, &granted)
+            }
             None => crate::approval::gate(name, input, workspace_root, settings, &granted)?,
         };
         let mut authorization = crate::constants::WORKSPACE_FILE_POLICY;
         let restrictions = match gate {
             crate::approval::Gate::Deny(reason) => return Err(reason.into()),
             crate::approval::Gate::Run(restrictions) => {
-                if mcp_target.is_none()
-                    && settings.approval.mode == crate::settings::ApprovalMode::Bypass
-                {
+                if settings.approval.mode == crate::settings::ApprovalMode::Bypass {
                     authorization = crate::constants::APPROVALS_SKIPPED;
                 } else if restrictions.is_some() || mcp_target.is_some() {
                     authorization = crate::constants::ALLOWED_BY_POLICY;

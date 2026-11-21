@@ -488,6 +488,17 @@ mod tests {
         control: &crate::TaskControl,
         on_progress: &mut dyn FnMut(AgentProgress),
     ) -> (Vec<String>, String, Option<bool>) {
+        let settings = crate::settings::Settings::default();
+        run_mcp_with(registry, name, control, &settings, on_progress)
+    }
+
+    fn run_mcp_with(
+        registry: &std::sync::Arc<crate::mcp::McpRegistry>,
+        name: &str,
+        control: &crate::TaskControl,
+        settings: &crate::settings::Settings,
+        on_progress: &mut dyn FnMut(AgentProgress),
+    ) -> (Vec<String>, String, Option<bool>) {
         let workspace = make_temp_dir("mcp_call");
         let mut authorizations = Vec::new();
         let result = crate::dispatch::run_tool_call_checkpointed(
@@ -497,7 +508,7 @@ mod tests {
                 name,
                 input: &json!({"text": "hi"}),
                 control,
-                settings: &crate::settings::Settings::default(),
+                settings,
                 edit_origin: None,
                 mcp: Some(registry),
             },
@@ -571,6 +582,61 @@ mod tests {
             session_option.as_deref(),
             Some("the MCP tool `mcp__fake__image`")
         );
+    }
+
+    /// ADR 20: `--dangerously-skip-permissions` runs an MCP tool of a host
+    /// server without asking too, allowed or not, and records it as such;
+    /// `auto` still asks, since it covers sandboxed commands only.
+    #[test]
+    fn skipping_approvals_runs_an_mcp_tool_without_asking() {
+        use crate::mcp::tests::{connect_fake, fake_settings};
+        use crate::settings::ApprovalMode;
+        let (registry, _) = connect_fake(&[fake_settings("fake", "", &["echo"])]);
+        let registry = std::sync::Arc::new(registry);
+        let headless = crate::TaskControl::default();
+        let mut settings = crate::settings::Settings::default();
+
+        settings.approval.mode = ApprovalMode::Bypass;
+        for (name, expected) in [
+            ("mcp__fake__echo", "echo: hi"),
+            ("mcp__fake__image", "a chart\n[image content omitted]"),
+        ] {
+            let (authorizations, content, is_error) =
+                run_mcp_with(&registry, name, &headless, &settings, &mut |_| {});
+            assert_eq!((content.as_str(), is_error), (expected, None), "{name}");
+            assert_eq!(
+                authorizations,
+                [crate::constants::APPROVALS_SKIPPED],
+                "{name}"
+            );
+        }
+
+        for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {
+            settings.approval.mode = mode;
+            let (authorizations, content, is_error) = run_mcp_with(
+                &registry,
+                "mcp__fake__image",
+                &headless,
+                &settings,
+                &mut |_| {},
+            );
+            assert_eq!(is_error, Some(true), "{mode:?}");
+            assert!(authorizations.is_empty(), "{mode:?}");
+            assert!(content.starts_with("Needs approval"), "{mode:?}: {content}");
+            let (authorizations, _, is_error) = run_mcp_with(
+                &registry,
+                "mcp__fake__echo",
+                &headless,
+                &settings,
+                &mut |_| {},
+            );
+            assert_eq!(is_error, None, "{mode:?}");
+            assert_eq!(
+                authorizations,
+                [crate::constants::ALLOWED_BY_POLICY],
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]
