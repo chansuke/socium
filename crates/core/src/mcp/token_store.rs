@@ -1,0 +1,591 @@
+//! Where `socium mcp login` keeps a remote server's OAuth tokens (ADR 31):
+//! `$XDG_STATE_HOME/socium/mcp-auth/<server>.json`, else
+//! `~/.local/state/socium/mcp-auth/<server>.json`. That is per user and
+//! outside every workspace, so neither the model nor a project can read or
+//! plant one. The directory is 0700, each file 0600 and replaced
+//! atomically; a directory that is a link, belongs to another user, or is
+//! open to others is refused when reading as well as when writing.
+
+use crate::settings::ClientAuth;
+use crate::state::{atomic_write_with_mode, read_state_bytes};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::{self, Error, ErrorKind};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// A token file is small; anything larger is not one.
+const MAX_TOKEN_FILE_BYTES: u64 = 256 * 1024;
+
+/// The tokens and client one login produced.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StoredToken {
+    /// The server's `url` when the login ran. A token for another URL is
+    /// ignored, so changing the URL never sends it elsewhere.
+    pub(crate) url: String,
+    /// The `resource` the token was requested for (RFC 8707).
+    pub(crate) resource: String,
+    pub(crate) access_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) refresh_token: Option<String>,
+    /// Seconds since the Unix epoch; `None` when the server gave no
+    /// lifetime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expires_at: Option<u64>,
+    /// When the access token was issued, which with `expires_at` gives its
+    /// lifetime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) issued_at: Option<u64>,
+    pub(crate) token_endpoint: String,
+    /// The authorization server the login verified (RFC 8414 3.3), whose
+    /// token endpoint this is. A token without one, saved before Socium
+    /// kept it, is not used with a configured `issuer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) issuer: Option<String>,
+    pub(crate) client_id: String,
+    /// Only for a client the login registered; a configured secret stays
+    /// in the environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) client_secret: Option<String>,
+    #[serde(default)]
+    pub(crate) client_auth: ClientAuth,
+}
+
+impl std::fmt::Debug for StoredToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hidden = |value: &Option<String>| value.as_ref().map(|_| "<hidden>");
+        f.debug_struct("StoredToken")
+            .field("url", &self.url)
+            .field("resource", &self.resource)
+            .field("access_token", &"<hidden>")
+            .field("refresh_token", &hidden(&self.refresh_token))
+            .field("expires_at", &self.expires_at)
+            .field("issued_at", &self.issued_at)
+            .field("token_endpoint", &self.token_endpoint)
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &hidden(&self.client_secret))
+            .field("client_auth", &self.client_auth)
+            .finish()
+    }
+}
+
+impl StoredToken {
+    /// Whether the access token should be renewed before it is sent: it
+    /// expires within `margin` seconds, or within half its lifetime when
+    /// that is shorter, so a short-lived token is not renewed for every
+    /// request.
+    pub(crate) fn due_for_renewal(&self, margin: u64) -> bool {
+        let Some(expires_at) = self.expires_at else {
+            return false;
+        };
+        let margin = match self.issued_at {
+            Some(issued_at) => margin.min(expires_at.saturating_sub(issued_at) / 2),
+            None => margin,
+        };
+        now_seconds().saturating_add(margin) >= expires_at
+    }
+}
+
+pub(crate) fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// The token directory of one user.
+#[derive(Debug, Clone)]
+pub(crate) struct TokenStore {
+    dir: PathBuf,
+    /// Saves still to fail, for tests of a full disk.
+    #[cfg(test)]
+    failing_saves: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PartialEq for TokenStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.dir == other.dir
+    }
+}
+
+impl Eq for TokenStore {}
+
+impl TokenStore {
+    /// `$XDG_STATE_HOME/socium/mcp-auth`, else
+    /// `$HOME/.local/state/socium/mcp-auth`, from absolute values only, so
+    /// the store never depends on the current directory; `None` without
+    /// either.
+    pub(crate) fn from_env(lookup: &dyn Fn(&str) -> Option<String>) -> Option<Self> {
+        crate::host::mcp_token_dir(lookup).map(Self::at)
+    }
+
+    pub(crate) fn at(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            #[cfg(test)]
+            failing_saves: Default::default(),
+        }
+    }
+
+    /// Makes the next `count` saves fail.
+    #[cfg(test)]
+    pub(crate) fn fail_next_saves(&self, count: usize) {
+        self.failing_saves
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The file of `server`, whose name settings validated, so it has no
+    /// path separator.
+    pub(crate) fn path(&self, server: &str) -> PathBuf {
+        self.dir.join(format!("{server}.json"))
+    }
+
+    /// The token stored for `server` at `url`. `None` when there is none or
+    /// it was stored for another URL. An unreadable file is an error that
+    /// never quotes its content.
+    pub(crate) fn load(&self, server: &str, url: &str) -> io::Result<Option<StoredToken>> {
+        if !self.check_dir()? {
+            return Ok(None);
+        }
+        let path = self.path(server);
+        let Some(bytes) = read_state_bytes(&path, MAX_TOKEN_FILE_BYTES)? else {
+            return Ok(None);
+        };
+        let token: StoredToken = serde_json::from_slice(&bytes).map_err(|_| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("{} is not a Socium token file", path.display()),
+            )
+        })?;
+        Ok((token.url == url).then_some(token))
+    }
+
+    /// Replaces the token of `server`, creating the directory owner-only.
+    /// A token too large to load again is refused.
+    pub(crate) fn save(&self, server: &str, token: &StoredToken) -> io::Result<()> {
+        #[cfg(test)]
+        if self
+            .failing_saves
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(Error::other("no space left on device"));
+        }
+        self.prepare_dir()?;
+        let bytes = serde_json::to_vec_pretty(token).map_err(Error::other)?;
+        if bytes.len() as u64 > MAX_TOKEN_FILE_BYTES {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "the token is larger than {} KiB",
+                    MAX_TOKEN_FILE_BYTES / 1024
+                ),
+            ));
+        }
+        atomic_write_with_mode(&self.path(server), &bytes, Some(0o600))
+    }
+
+    /// Deletes the token of `server`; `false` when there was none. It waits
+    /// for a renewal under way, which would otherwise write the file back.
+    pub(crate) fn remove(&self, server: &str) -> io::Result<bool> {
+        if !self.check_dir()? {
+            return Ok(false);
+        }
+        let _lock = self.lock(server, true)?;
+        match fs::remove_file(self.path(server)) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Holds the lock that every Socium of this user takes to renew, save
+    /// a login of, or remove `server`'s token, until the returned guard is
+    /// dropped. Without `wait`, `None` means another holds it.
+    pub(crate) fn lock(&self, server: &str, wait: bool) -> io::Result<Option<TokenLock>> {
+        self.prepare_dir()?;
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(self.dir.join(format!("{server}.lock")))?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let operation = if wait {
+                libc::LOCK_EX
+            } else {
+                libc::LOCK_EX | libc::LOCK_NB
+            };
+            // SAFETY: flock only reads the descriptor, which `file` owns.
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+                let err = Error::last_os_error();
+                if err.kind() == ErrorKind::WouldBlock {
+                    return Ok(None);
+                }
+                return Err(err);
+            }
+        }
+        Ok(Some(TokenLock { _file: file }))
+    }
+
+    /// Whether `socium/mcp-auth` exists, refusing one that is a link, not a
+    /// directory, belongs to another user, or lets anyone else in: another
+    /// user could then plant a token whose endpoint gets the configured
+    /// client secret.
+    fn check_dir(&self) -> io::Result<bool> {
+        let metadata = match fs::symlink_metadata(&self.dir) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(Error::other(format!(
+                "{} must be a directory, not a link",
+                self.dir.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // SAFETY: geteuid has no arguments or memory preconditions.
+            if metadata.uid() != unsafe { libc::geteuid() } {
+                return Err(Error::other(format!(
+                    "{} belongs to another user",
+                    self.dir.display()
+                )));
+            }
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(Error::other(format!(
+                    "{} must be open to its owner only (chmod 700)",
+                    self.dir.display()
+                )));
+            }
+        }
+        Ok(true)
+    }
+
+    /// Creates `socium/mcp-auth` 0700 and checks it as [`Self::check_dir`]
+    /// does.
+    fn prepare_dir(&self) -> io::Result<()> {
+        if let Some(parent) = self.dir.parent().and_then(Path::parent) {
+            fs::create_dir_all(parent)?;
+        }
+        for dir in [self.dir.parent(), Some(self.dir.as_path())]
+            .into_iter()
+            .flatten()
+        {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            match builder.create(dir) {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err),
+            }
+        }
+        if self.check_dir()? {
+            Ok(())
+        } else {
+            Err(Error::other(format!(
+                "{} could not be created",
+                self.dir.display()
+            )))
+        }
+    }
+}
+
+/// The renewal lock of one server's token, released when dropped.
+pub(crate) struct TokenLock {
+    _file: fs::File,
+}
+
+impl Drop for TokenLock {
+    /// Unlocks before the descriptor closes: a child forked meanwhile holds
+    /// a copy of it until it execs, and the lock, which belongs to the open
+    /// file, would otherwise last until then.
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: flock only reads the descriptor, which `_file` owns.
+            unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    pub(crate) fn token(url: &str) -> StoredToken {
+        StoredToken {
+            url: url.into(),
+            resource: url.into(),
+            access_token: "access-s3cret".into(),
+            refresh_token: Some("refresh-s3cret".into()),
+            expires_at: Some(now_seconds() + 3600),
+            issued_at: Some(now_seconds()),
+            token_endpoint: "https://auth.example/token".into(),
+            issuer: Some("https://auth.example".into()),
+            client_id: "client-1".into(),
+            client_secret: Some("client-s3cret".into()),
+            client_auth: ClientAuth::ClientSecretBasic,
+        }
+    }
+
+    #[test]
+    fn the_store_lives_under_the_state_home() {
+        let lookup = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            }
+        };
+        assert_eq!(
+            TokenStore::from_env(&lookup(&[("XDG_STATE_HOME", "/s"), ("HOME", "/h")])).unwrap(),
+            TokenStore::at("/s/socium/mcp-auth".into())
+        );
+        // A relative XDG_STATE_HOME is ignored, as the XDG spec says.
+        assert_eq!(
+            TokenStore::from_env(&lookup(&[("XDG_STATE_HOME", "s"), ("HOME", "/h")])).unwrap(),
+            TokenStore::at("/h/.local/state/socium/mcp-auth".into())
+        );
+        assert_eq!(TokenStore::from_env(&lookup(&[])), None);
+        // Nor does a relative HOME name a store.
+        assert_eq!(TokenStore::from_env(&lookup(&[("HOME", "h")])), None);
+    }
+
+    #[test]
+    fn a_short_lived_token_is_renewed_at_half_its_lifetime() {
+        let now = now_seconds();
+        let lasting = |issued: u64, lifetime: u64| StoredToken {
+            issued_at: Some(issued),
+            expires_at: Some(issued + lifetime),
+            ..token("https://mcp.example/mcp")
+        };
+        // A 30-second token is not due right after it was issued.
+        assert!(!lasting(now, 30).due_for_renewal(60));
+        assert!(lasting(now - 16, 30).due_for_renewal(60));
+        // A long one is due a minute before it expires.
+        assert!(!lasting(now - 3500, 3600).due_for_renewal(60));
+        assert!(lasting(now - 3550, 3600).due_for_renewal(60));
+    }
+
+    #[test]
+    fn a_token_too_large_to_load_again_is_not_saved() {
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        let huge = StoredToken {
+            access_token: "x".repeat(300 * 1024),
+            ..token("https://mcp.example/mcp")
+        };
+
+        assert!(store.save("big", &huge).is_err());
+        assert_eq!(store.load("big", "https://mcp.example/mcp").unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_renewal_lock_is_held_by_one_holder_at_a_time() {
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+
+        let held = store.lock("github", false).unwrap();
+        assert!(held.is_some());
+        assert!(store.lock("github", false).unwrap().is_none());
+        drop(held);
+        assert!(store.lock("github", false).unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_while_the_lock_is_held_does_not_keep_it() {
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        let held = store.lock("github", false).unwrap().unwrap();
+
+        // As another test's Command does between fork and exec: the child
+        // has a copy of the descriptor for a while.
+        // SAFETY: the child only sleeps and exits, which are safe after
+        // fork in a process with threads.
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            let pause = libc::timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            };
+            // SAFETY: nanosleep and _exit are async-signal-safe.
+            unsafe {
+                libc::nanosleep(&pause, std::ptr::null_mut());
+                libc::_exit(0);
+            }
+        }
+        assert!(child > 0, "fork failed");
+        drop(held);
+        let taken = store.lock("github", false).unwrap();
+
+        let mut status = 0;
+        // SAFETY: waits for the child forked above.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert!(taken.is_some(), "the child kept the lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_directory_that_is_a_link_or_open_to_others_is_refused_everywhere() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let url = "https://mcp.example/mcp";
+        let home = tempfile::tempdir().unwrap();
+        // No directory yet: nothing to read or remove, and nothing created.
+        let missing = TokenStore::at(home.path().join("missing/mcp-auth"));
+        assert_eq!(missing.load("github", url).unwrap(), None);
+        assert!(!missing.remove("github").unwrap());
+        assert!(!home.path().join("missing").exists());
+
+        let real = TokenStore::at(home.path().join("real/mcp-auth"));
+        real.save("github", &token(url)).unwrap();
+        let linked = home.path().join("linked");
+        fs::create_dir(&linked).unwrap();
+        symlink(real.dir(), linked.join("mcp-auth")).unwrap();
+        let dangling = home.path().join("dangling");
+        fs::create_dir(&dangling).unwrap();
+        symlink(home.path().join("nowhere"), dangling.join("mcp-auth")).unwrap();
+        for store in [
+            TokenStore::at(linked.join("mcp-auth")),
+            TokenStore::at(dangling.join("mcp-auth")),
+        ] {
+            assert!(store.load("github", url).is_err(), "{store:?}");
+            assert!(store.save("github", &token(url)).is_err(), "{store:?}");
+            assert!(store.remove("github").is_err(), "{store:?}");
+            assert!(store.lock("github", false).is_err(), "{store:?}");
+        }
+        assert!(!home.path().join("nowhere").exists());
+        assert!(real.path("github").exists());
+
+        fs::set_permissions(real.dir(), fs::Permissions::from_mode(0o750)).unwrap();
+        let err = real.load("github", url).unwrap_err();
+        assert!(err.to_string().contains("chmod 700"), "{err}");
+        assert!(real.save("github", &token(url)).is_err());
+        assert!(real.remove("github").is_err());
+        assert!(real.path("github").exists());
+        fs::set_permissions(real.dir(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(real.load("github", url).unwrap(), Some(token(url)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_lock_file_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        store
+            .save("real", &token("https://mcp.example/mcp"))
+            .unwrap();
+        let target = home.path().join("elsewhere.lock");
+        std::os::unix::fs::symlink(&target, store.dir().join("link.lock")).unwrap();
+
+        assert!(store.lock("link", false).is_err());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn a_token_saved_before_socium_kept_the_issuer_still_loads() {
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        store
+            .save("old", &token("https://mcp.example/mcp"))
+            .unwrap();
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path("old")).unwrap()).unwrap();
+        assert_eq!(file["issuer"], "https://auth.example");
+        file.as_object_mut().unwrap().remove("issuer");
+        fs::write(store.path("old"), file.to_string()).unwrap();
+
+        let loaded = store
+            .load("old", "https://mcp.example/mcp")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.issuer, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_token_is_saved_private_reloaded_for_its_url_only_and_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("state/socium/mcp-auth"));
+        let url = "https://mcp.example/mcp";
+        assert_eq!(store.load("github", url).unwrap(), None);
+
+        store.save("github", &token(url)).unwrap();
+
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(store.dir()), 0o700);
+        assert_eq!(mode(store.dir().parent().unwrap()), 0o700);
+        assert_eq!(mode(&store.path("github")), 0o600);
+        assert_eq!(store.load("github", url).unwrap(), Some(token(url)));
+        assert_eq!(
+            store.load("github", "https://other.example/mcp").unwrap(),
+            None
+        );
+        assert_eq!(store.load("other", url).unwrap(), None);
+        // Replacing keeps the file private and leaves no temporary file.
+        let mut refreshed = token(url);
+        refreshed.access_token = "new-access".into();
+        store.save("github", &refreshed).unwrap();
+        assert_eq!(mode(&store.path("github")), 0o600);
+        assert_eq!(fs::read_dir(store.dir()).unwrap().count(), 1);
+        assert_eq!(
+            store.load("github", url).unwrap().unwrap().access_token,
+            "new-access"
+        );
+
+        assert!(store.remove("github").unwrap());
+        assert!(!store.remove("github").unwrap());
+        assert_eq!(store.load("github", url).unwrap(), None);
+    }
+
+    #[test]
+    fn neither_debug_nor_a_broken_file_shows_a_secret() {
+        let shown = format!("{:?}", token("https://mcp.example/mcp"));
+        assert!(shown.contains("client-1"), "{shown}");
+        assert!(!shown.contains("s3cret"), "{shown}");
+
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        drop(store.lock("x", false).unwrap());
+        fs::write(store.path("x"), "{\"access_token\": \"s3cret\"").unwrap();
+        let err = store.load("x", "https://mcp.example/mcp").unwrap_err();
+        assert!(
+            err.to_string().contains("is not a Socium token file"),
+            "{err}"
+        );
+        assert!(!err.to_string().contains("s3cret"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_token_file_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let store = TokenStore::at(home.path().join("mcp-auth"));
+        store
+            .save("real", &token("https://mcp.example/mcp"))
+            .unwrap();
+        std::os::unix::fs::symlink(store.path("real"), store.path("link")).unwrap();
+
+        assert!(store.load("link", "https://mcp.example/mcp").is_err());
+    }
+}

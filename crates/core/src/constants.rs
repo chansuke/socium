@@ -118,3 +118,5 @@ pub(crate) const APPROVALS_SKIPPED: &str = "approvals-skipped";
 pub(crate) const AGENTS_DIR_ENV: &str = "SOCIUM_AGENTS_DIR";
 /// The first line of a tool result whose commit left other changes behind.
 pub(crate) const DIRTY_WORKTREE_WARNING: &str = "Warning: git worktree has uncommitted changes";
+/// What every MCP tool's exposed name starts with: `mcp__<server>__<tool>`.
+pub(crate) const MCP_TOOL_PREFIX: &str = "mcp__";

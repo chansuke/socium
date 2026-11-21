@@ -255,6 +255,28 @@ mod tests {
         assert!(app.approval.is_some());
     }
 
+    #[test]
+    fn an_mcp_tool_can_be_allowed_for_the_session() {
+        let mut app = App::for_test();
+        app.open_approval(
+            9,
+            "mcp__github__get_issue".into(),
+            r#"{"issue":7}"#.into(),
+            "Tool call: c3".into(),
+            Some(Grant::McpTool("mcp__github__get_issue".into()).scope()),
+        );
+        let prompt = app.approval.as_ref().unwrap();
+        assert_eq!(
+            prompt.label(ApprovalChoice::AllowForSession),
+            "Allow the MCP tool `mcp__github__get_issue` until Socium exits"
+        );
+        app.handle_approval_key(KeyCode::Char('a'));
+        assert_eq!(
+            last_message(&app),
+            "✓ mcp__github__get_issue allowed; the MCP tool `mcp__github__get_issue` allowed until Socium exits"
+        );
+    }
+
     fn last_message(app: &App) -> &str {
         &app.messages.last().unwrap().body
     }

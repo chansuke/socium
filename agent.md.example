@@ -7,7 +7,9 @@ name = "reviewer"
 description = "Reviews uncommitted changes for correctness bugs and reports each with path:line"
 # Optional. Tools this type may use; omit for the read-only tools
 # (read_file, list_files, search_text, find_symbol, git_branch, git_status,
-# git_diff, git_log). agent is never allowed.
+# git_diff, git_log). agent is never allowed. MCP tools from config.toml are
+# named mcp__<server>__<tool>, or mcp__<server>__* for all of a server's tools;
+# one no server offers is left out when the subagent runs, without an error.
 tools = ["read_file", "search_text", "find_symbol", "git_status", "git_diff"]
 # Optional. A model alias from the built-in registry or models.toml; omit to
 # use the current model. A type whose model cannot start is not loaded.

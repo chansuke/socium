@@ -10,6 +10,7 @@
 //! name = "reviewer"
 //! description = "Reviews a diff for correctness bugs"
 //! tools = ["read_file", "search_text", "git_diff"]  # default: read-only tools
+//!                                                   # MCP: "mcp__<server>__<tool>" or "mcp__<server>__*"
 //! model = "haiku"                                   # default: the current model
 //! +++
 //! You review changes for correctness bugs. ...
@@ -52,11 +53,16 @@ const READ_ONLY_TOOLS: &[&str] = &[
 pub(crate) const MAIN_AGENT_TOOLS: &[&str] = &[AGENT_TOOL_NAME, PLAN_TOOL_NAME];
 
 /// The tools a subagent type gets, as a subset of the tools offered to its
-/// model. `MAIN_AGENT_TOOLS` are never part of it.
+/// model, MCP tools included. `MAIN_AGENT_TOOLS` are never part of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolSet {
+    /// `READ_ONLY_TOOLS`; no MCP tool, not even a sandboxed server's, so
+    /// servers the user adds do not widen the default.
     ReadOnly,
+    /// Every tool, MCP tools included.
     AllButAgent,
+    /// Tool names as the definition lists them, where `mcp__<server>__*`
+    /// stands for every tool of that server.
     Only(Vec<String>),
 }
 
@@ -65,18 +71,36 @@ impl ToolSet {
         match self {
             Self::ReadOnly => READ_ONLY_TOOLS.contains(&tool),
             Self::AllButAgent => !MAIN_AGENT_TOOLS.contains(&tool),
-            Self::Only(tools) => tools.iter().any(|name| name == tool),
+            Self::Only(tools) => tools.iter().any(|name| match name.strip_suffix('*') {
+                Some(server_prefix) => {
+                    crate::mcp::is_mcp_tool(tool) && tool.starts_with(server_prefix)
+                }
+                None => name == tool,
+            }),
         }
     }
 
-    /// Whether a run that stops halfway may have changed the workspace.
-    pub(crate) fn may_change_workspace(&self) -> bool {
+    /// Whether a run that stops halfway may have changed the workspace or
+    /// anything else. An MCP tool may, unless `sandboxed` says its server
+    /// runs in the read-only sandbox (ADR 33); `sandboxed` takes the server
+    /// name and reads only the settings, so a server need not have
+    /// connected, and a server the settings do not name counts as one that
+    /// may.
+    pub(crate) fn may_change_workspace(&self, sandboxed: &dyn Fn(&str) -> bool) -> bool {
         match self {
             Self::ReadOnly => false,
             Self::AllButAgent => true,
-            Self::Only(tools) => tools
-                .iter()
-                .any(|tool| !READ_ONLY_TOOLS.contains(&tool.as_str())),
+            Self::Only(tools) => tools.iter().any(|tool| {
+                if READ_ONLY_TOOLS.contains(&tool.as_str()) {
+                    return false;
+                }
+                // A server name has no `__`, so the first one ends it.
+                let server = tool
+                    .strip_prefix("mcp__")
+                    .and_then(|rest| rest.split_once("__"))
+                    .map(|(server, _)| server);
+                !server.is_some_and(sandboxed)
+            }),
         }
     }
 }
@@ -295,7 +319,11 @@ pub(crate) fn parse_definition(text: &str) -> Result<Definition, String> {
                         "tools cannot include {tool}; only the main agent uses it"
                     ));
                 }
-                if !known.iter().any(|known| known.name() == tool) {
+                if crate::mcp::is_mcp_tool(&tool) {
+                    // The servers connect after this, so only the form is
+                    // checked; a tool no server offers is left out at run time.
+                    check_mcp_tool(&tool)?;
+                } else if !known.iter().any(|known| known.name() == tool) {
                     return Err(format!("unknown tool '{tool}'"));
                 }
                 if !chosen.contains(&tool) {
@@ -322,6 +350,44 @@ pub(crate) fn parse_definition(text: &str) -> Result<Definition, String> {
         tools,
         model: front.model,
     })
+}
+
+/// Checks that `tool` is `mcp__<server>__<tool>` or `mcp__<server>__*`,
+/// with names an MCP tool can have.
+fn check_mcp_tool(tool: &str) -> Result<(), String> {
+    let form = || {
+        format!(
+            "tool '{tool}' must be mcp__<server>__<tool> or mcp__<server>__* for every tool of a server"
+        )
+    };
+    let rest = tool.strip_prefix("mcp__").ok_or_else(form)?;
+    let (server, name) = match rest.strip_suffix("__*") {
+        Some(server) => (server, None),
+        None => {
+            let (server, name) = rest.split_once("__").ok_or_else(form)?;
+            (server, Some(name))
+        }
+    };
+    if !crate::settings::is_valid_mcp_server_name(server) {
+        return Err(format!(
+            "tool '{tool}' names the MCP server '{server}', but {}",
+            crate::settings::MCP_SERVER_NAME_RULE
+        ));
+    }
+    if let Some(name) = name {
+        let valid = !name.is_empty()
+            && tool.len() <= crate::mcp::MAX_TOOL_NAME
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+        if !valid {
+            return Err(format!(
+                "tool '{tool}' is not an MCP tool name: at most {} characters of letters, digits, '_' or '-', or mcp__{server}__* for every tool of the server",
+                crate::mcp::MAX_TOOL_NAME
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn split_front_matter(text: &str) -> Result<(&str, &str), String> {
@@ -492,7 +558,7 @@ mod tests {
                 model: Some("haiku".into()),
             }
         );
-        assert!(!definition.tools.may_change_workspace());
+        assert!(!definition.tools.may_change_workspace(&|_| false));
     }
 
     #[test]
@@ -503,9 +569,105 @@ mod tests {
 
         let fixer = "+++\nname = \"fixer\"\ndescription = \"Fixes\"\ntools = [\"read_file\", \"apply_patch\"]\n+++\nFix it.";
         let tools = parse_definition(fixer).unwrap().tools;
-        assert!(tools.may_change_workspace());
+        assert!(tools.may_change_workspace(&|_| false));
         assert!(tools.allows("apply_patch"));
         assert!(!tools.allows("run_command"));
+    }
+
+    #[test]
+    fn a_type_names_mcp_tools_exactly_or_by_server() {
+        let with = |tools: &str| {
+            format!("+++\nname = \"a\"\ndescription = \"d\"\ntools = {tools}\n+++\np")
+        };
+        let tools = parse_definition(&with(
+            r#"["read_file", "mcp__time__get_current_time", "mcp__git-hub__*"]"#,
+        ))
+        .unwrap()
+        .tools;
+
+        assert_eq!(
+            tools,
+            ToolSet::Only(vec![
+                "read_file".into(),
+                "mcp__time__get_current_time".into(),
+                "mcp__git-hub__*".into(),
+            ])
+        );
+        assert!(tools.allows("mcp__time__get_current_time"));
+        assert!(!tools.allows("mcp__time__convert_time"));
+        assert!(tools.allows("mcp__git-hub__search_issues"));
+        assert!(!tools.allows("mcp__git-hubx__search_issues"));
+        // No server may be named `git-hub_`, so this is the tool `_x` of
+        // `git-hub`, not the tool `x` of another server.
+        assert!(tools.allows("mcp__git-hub___x"));
+        assert!(!tools.allows("apply_patch"));
+        // An MCP tool may do anything, so the type runs alone.
+        assert!(tools.may_change_workspace(&|_| false));
+
+        let invalid = [
+            (r#"["mcp__"]"#, "must be mcp__<server>__<tool>"),
+            (r#"["mcp__time"]"#, "must be mcp__<server>__<tool>"),
+            (r#"["mcp____echo"]"#, "names the MCP server ''"),
+            (r#"["mcp__*"]"#, "must be mcp__<server>__<tool>"),
+            (r#"["mcp__*__echo"]"#, "names the MCP server '*'"),
+            (r#"["mcp__safe___*"]"#, "names the MCP server 'safe_'"),
+            (r#"["mcp__time__"]"#, "is not an MCP tool name"),
+            (r#"["mcp__time__get*"]"#, "is not an MCP tool name"),
+            (r#"["mcp__time__a.b"]"#, "is not an MCP tool name"),
+            (
+                &format!(r#"["mcp__time__{}"]"#, "x".repeat(60)),
+                "at most 64 characters",
+            ),
+            (
+                &format!(r#"["mcp__{}__*"]"#, "s".repeat(33)),
+                "a server name must be 1 to 32",
+            ),
+        ];
+        for (tools, expected) in invalid {
+            let err = parse_definition(&with(tools)).unwrap_err();
+            assert!(err.contains(expected), "{tools}: {err}");
+        }
+    }
+
+    #[test]
+    fn explorer_gets_no_mcp_tool_and_worker_gets_every_one() {
+        let catalog = SubagentCatalog::builtin();
+        let explorer = &catalog.find("explorer").unwrap().tools;
+        let worker = &catalog.find("worker").unwrap().tools;
+
+        assert!(!explorer.allows("mcp__fake__echo"));
+        assert!(!explorer.may_change_workspace(&|_| false));
+        assert!(worker.allows("mcp__fake__echo"));
+        assert!(!worker.allows("agent"));
+    }
+
+    /// ADR 33: only the settings decide, so a server that is not
+    /// configured, or runs on the host, still counts as one that may.
+    #[test]
+    fn tools_of_sandboxed_servers_do_not_change_the_workspace() {
+        let sandboxed = |server: &str| server == "astgrep" || server == "safe";
+        let only = |tools: &[&str]| ToolSet::Only(tools.iter().map(|t| t.to_string()).collect());
+        for tools in [
+            &["read_file", "mcp__astgrep__search"][..],
+            &["mcp__astgrep__*"],
+            &["git_diff", "mcp__astgrep__*", "mcp__safe___x"],
+        ] {
+            assert!(!only(tools).may_change_workspace(&sandboxed), "{tools:?}");
+            // Without the setting, the same type may.
+            assert!(only(tools).may_change_workspace(&|_| false), "{tools:?}");
+        }
+        for tools in [
+            &["mcp__astgrep__search", "mcp__github__get_issue"][..],
+            &["mcp__unknown__*"],
+            &["mcp__astgrepx__search"],
+            &["read_file", "run_command", "mcp__astgrep__*"],
+        ] {
+            assert!(only(tools).may_change_workspace(&sandboxed), "{tools:?}");
+        }
+        assert!(ToolSet::AllButAgent.may_change_workspace(&|_| true));
+        // explorer and types that leave `tools` out get no MCP tool at all,
+        // a sandboxed server's included.
+        assert!(!ToolSet::ReadOnly.allows("mcp__astgrep__search"));
     }
 
     #[test]

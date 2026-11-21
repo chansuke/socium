@@ -366,8 +366,12 @@ function Conversation({ client, state, error, disabled }: {
             <ScrollView style={styles.review} nestedScrollEnabled>
               <Text selectable style={styles.code}>{approval.input}</Text>
             </ScrollView>
+            {approval.sessionOption && <Text style={styles.muted}>Allow for session also allows {approval.sessionOption} until Socium exits.</Text>}
             <View style={styles.actions}>
               <Button label="Deny" disabled={disabled} onPress={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: false })} />
+              {approval.sessionOption && (
+                <Button label="Allow for session" disabled={disabled} onPress={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: true, forSession: true })} />
+              )}
               <Button label="Allow once" primary disabled={disabled} onPress={() => void client.send({ action: "approve", turn: turn.id, request: approval.request, allow: true })} />
             </View>
           </View>

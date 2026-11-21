@@ -1,5 +1,6 @@
-//! Command-line flags: which session to open, whether to run one prompt
-//! without the terminal UI, and the `models import` subcommand.
+//! Command-line flags: which session to open, and whether to run one
+//! prompt without the terminal UI; or the `models import` or `mcp`
+//! subcommand.
 
 /// The parsed command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -43,6 +44,8 @@ pub(crate) enum Launch {
     Version,
     /// `models import [--from FILE] [PROVIDER...]`.
     ModelsImport(ModelsImport),
+    /// `mcp login|logout [--] SERVER`, which opens no session.
+    Mcp(McpCommand),
 }
 
 /// Writes registry files for models.dev providers, or lists the providers.
@@ -54,10 +57,20 @@ pub(crate) struct ModelsImport {
     pub(crate) from: Option<String>,
 }
 
+/// `socium mcp ...`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum McpCommand {
+    /// Log in to the remote server with OAuth and keep its token.
+    Login(String),
+    /// Forget the server's token.
+    Logout(String),
+}
+
 pub(crate) fn usage(program: &str) -> String {
     format!(
         "Usage: {program} [-c | -r [ID]] [-p [PROMPT] [--output-format FMT]]\n       \
-                {program} models import [--from FILE] [PROVIDER...]\n\
+                {program} models import [--from FILE] [PROVIDER...]\n       \
+                {program} mcp login|logout [--] SERVER\n\
          \n\
          Starts a new conversation in the current directory.\n\
          \n\
@@ -83,14 +96,27 @@ pub(crate) fn usage(program: &str) -> String {
                               edits to files host tools run included. Deny\n                     \
                               rules and the sandbox still apply.\n  \
            -h, --help         Show this help\n  \
-           -V, --version      Show the version"
+           -V, --version      Show the version\n\
+         \n\
+         Commands:\n  \
+           mcp login SERVER   Log in to the remote MCP server SERVER of config.toml\n                     \
+                              with OAuth in a browser, and keep its token for\n                     \
+                              later runs\n  \
+           mcp logout SERVER  Forget the stored token of SERVER\n\
+         \n\
+         Put -- before a SERVER whose name begins with '-'."
     )
 }
 
 pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let args = args.into_iter().collect::<Vec<_>>();
-    // Asked to identify itself, it does so whatever else is on the line.
-    if args.iter().any(|arg| arg == "-V" || arg == "--version") {
+    // Asked to identify itself, it does so whatever else is on the line,
+    // up to a `--` after which every argument is a name.
+    if args
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "-V" || arg == "--version")
+    {
         return Ok(Args {
             launch: Launch::Version,
             print: None,
@@ -105,6 +131,13 @@ pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, Stri
         });
     }
     let mut args = args.into_iter().peekable();
+    if args.next_if(|first| first == "mcp").is_some() {
+        return mcp(args.collect()).map(|launch| Args {
+            launch,
+            print: None,
+            skip_permissions: false,
+        });
+    }
     let mut launch = None;
     let mut print = false;
     let mut prompt = None;
@@ -206,6 +239,33 @@ fn parse_models(args: &[String]) -> Result<Launch, String> {
         }
     }
     Ok(Launch::ModelsImport(import))
+}
+
+/// `mcp login|logout [--] SERVER`, or the help. A server name may begin
+/// with `-`, as config.toml allows; after `--` it is not taken for a flag.
+fn mcp(args: Vec<String>) -> Result<Launch, String> {
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let command = |verb: &str, server: &str| match verb {
+        "login" => Launch::Mcp(McpCommand::Login(server.into())),
+        _ => Launch::Mcp(McpCommand::Logout(server.into())),
+    };
+    match args[..] {
+        [verb @ ("login" | "logout"), "--", server] => Ok(command(verb, server)),
+        [verb @ ("login" | "logout"), server] if !server.starts_with('-') => {
+            Ok(command(verb, server))
+        }
+        _ if args
+            .iter()
+            .take_while(|arg| **arg != "--")
+            .any(|arg| matches!(*arg, "-h" | "--help")) =>
+        {
+            Ok(Launch::Help)
+        }
+        ["login" | "logout"] | ["login" | "logout", "--"] => {
+            Err(format!("mcp {} needs a server name", args[0]))
+        }
+        _ => Err("mcp takes login SERVER or logout SERVER".to_string()),
+    }
 }
 
 fn output_format(value: &str) -> Result<OutputFormat, String> {
@@ -387,6 +447,103 @@ mod tests {
             printed(&["-p", "models"]).unwrap().print.unwrap().prompt,
             Some("models".into())
         );
+    }
+
+    #[test]
+    fn mcp_logs_in_to_or_out_of_one_server() {
+        let mcp = |command| {
+            Ok(Args {
+                launch: Launch::Mcp(command),
+                print: None,
+                skip_permissions: false,
+            })
+        };
+        assert_eq!(
+            printed(&["mcp", "login", "github"]),
+            mcp(McpCommand::Login("github".into()))
+        );
+        assert_eq!(
+            printed(&["mcp", "logout", "github"]),
+            mcp(McpCommand::Logout("github".into()))
+        );
+        assert_eq!(parsed(&["mcp", "--help"]), Ok(Launch::Help));
+        assert_eq!(parsed(&["mcp", "login", "-h"]), Ok(Launch::Help));
+        assert_eq!(
+            parsed(&["mcp", "login"]),
+            Err("mcp login needs a server name".into())
+        );
+        for bad in [
+            &["mcp"][..],
+            &["mcp", "list"],
+            &["mcp", "login", "a", "b"],
+            &["mcp", "login", "-p"],
+        ] {
+            assert!(parsed(bad).is_err(), "{bad:?}");
+        }
+        // Only as the first argument.
+        assert!(parsed(&["-c", "mcp", "login", "x"]).is_err());
+    }
+
+    #[test]
+    fn a_server_name_that_begins_with_a_dash_follows_a_double_dash() {
+        let mcp = |command| Ok(Launch::Mcp(command));
+        assert_eq!(
+            parsed(&["mcp", "login", "--", "-gh"]),
+            mcp(McpCommand::Login("-gh".into()))
+        );
+        assert_eq!(
+            parsed(&["mcp", "logout", "--", "-gh"]),
+            mcp(McpCommand::Logout("-gh".into()))
+        );
+        // After `--`, neither -h nor -V is a flag.
+        assert_eq!(
+            parsed(&["mcp", "login", "--", "-h"]),
+            mcp(McpCommand::Login("-h".into()))
+        );
+        assert_eq!(
+            parsed(&["mcp", "logout", "--", "-V"]),
+            mcp(McpCommand::Logout("-V".into()))
+        );
+        assert_eq!(
+            parsed(&["mcp", "login", "--", "github"]),
+            mcp(McpCommand::Login("github".into()))
+        );
+        assert_eq!(
+            parsed(&["mcp", "login", "--"]),
+            Err("mcp login needs a server name".into())
+        );
+        for bad in [
+            &["mcp", "login", "-gh"][..],
+            &["mcp", "login", "--", "a", "b"],
+            &["mcp", "--", "login", "x"],
+        ] {
+            assert!(parsed(bad).is_err(), "{bad:?}");
+        }
+        assert!(usage("socium").contains("mcp login|logout [--] SERVER"));
+    }
+
+    #[test]
+    fn models_and_mcp_take_each_other_s_name_as_an_argument() {
+        assert_eq!(
+            parsed(&["models", "import", "mcp"]),
+            Ok(Launch::ModelsImport(ModelsImport {
+                providers: vec!["mcp".into()],
+                from: None,
+            }))
+        );
+        assert_eq!(
+            parsed(&["mcp", "login", "models"]),
+            Ok(Launch::Mcp(McpCommand::Login("models".into())))
+        );
+        for subcommand in ["models", "mcp"] {
+            assert!(
+                parsed(&[subcommand, "--dangerously-skip-permissions"]).is_err(),
+                "{subcommand}"
+            );
+        }
+        let usage = usage("socium");
+        assert!(usage.contains("socium models import [--from FILE] [PROVIDER...]\n"));
+        assert!(usage.contains("       socium mcp login|logout [--] SERVER\n"));
     }
 
     #[test]

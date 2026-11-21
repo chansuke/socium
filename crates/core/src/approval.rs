@@ -9,18 +9,11 @@
 //! secrets ask in every mode the config can set; only
 //! `--dangerously-skip-permissions` lets them run unasked.
 
-use crate::access::{
-    Grant, ListedFile, Listing, Restrictions, find_matching_files, relative_target,
-};
-use crate::settings::{ApprovalMode, PathPatterns, Settings};
+use crate::access::{Grant, Restrictions, relative_target};
+use crate::settings::{ApprovalMode, Settings};
 use crate::tool_error::ToolError;
 use serde_json::Value;
 use std::path::Path;
-
-/// Most paths a command's sandbox will hide or freeze; more falls back to
-/// asking, since mounting thousands of paths is slow and fragile.
-const MAX_RESTRICTED_PATHS: usize = 256;
-
 pub(crate) enum Gate {
     /// Runs without asking. `None` when the call needs no restriction, the
     /// restrictions for a command nobody reviewed otherwise.
@@ -90,7 +83,7 @@ pub(crate) fn gate(
                 || granted(&Grant::Command(argv.clone()))
                 || approval.mode == ApprovalMode::Auto;
             if allowed {
-                match restrictions(root, approval) {
+                match crate::access::restrictions(root, approval) {
                     Ok(restrictions) => return Ok(Gate::Run(Some(restrictions))),
                     Err(reason) => {
                         return Ok(Gate::Ask(Ask {
@@ -152,6 +145,52 @@ fn denied_by(rule: &[String]) -> String {
         "`{}` is denied by approval.deny in Socium's config.toml; do not retry it",
         rule.join(" ")
     )
+}
+
+/// How the MCP tool exposed as `name` may run: unasked when its server
+/// runs in the read-only sandbox (ADR 33), when its server's `allow` names
+/// it, or when the user allowed it for this session; else after the user
+/// approves, since nothing confines what a host or remote server does.
+pub(crate) fn mcp_gate(
+    name: &str,
+    target: &crate::mcp::McpTarget<'_>,
+    granted: &dyn Fn(&Grant) -> bool,
+) -> Gate {
+    // The sandbox already keeps it from writing the workspace, reaching the
+    // network, or reading the hidden secrets: at worst it reads what it
+    // sees and the result goes to the provider.
+    if target.sandboxed {
+        return Gate::Run(None);
+    }
+    let grant = Grant::McpTool(name.to_string());
+    if target.allowed || granted(&grant) {
+        return Gate::Run(None);
+    }
+    Gate::Ask(Ask {
+        reason: mcp_permissions(target),
+        review: None,
+        grant: Some(grant),
+    })
+}
+
+/// What an MCP tool may do, as its approval request says: where it runs.
+pub(crate) fn mcp_permissions(target: &crate::mcp::McpTarget<'_>) -> String {
+    let server = target.server;
+    if target.sandboxed {
+        return format!(
+            "MCP tools run in the {server} server in Socium's read-only sandbox, without network."
+        );
+    }
+    match target.origin {
+        None => {
+            format!("MCP tools run in the {server} server on the host, outside Socium's sandbox.")
+        }
+        Some(origin) => {
+            format!(
+                "MCP tools run in the {server} server at {origin}; Socium does not control what it does."
+            )
+        }
+    }
 }
 
 fn command_argv(input: &Value) -> Option<Vec<String>> {
@@ -275,104 +314,14 @@ fn as_requested(root: &Path, requested: &str) -> String {
         .replace('\\', "/")
 }
 
-/// The files a command nobody reviewed may not read (`sensitive`) or change
-/// (`protected`), found with ripgrep, ignored files included. A directory
-/// that matches as a whole is frozen as a whole, so new files cannot be
-/// added to it either.
-fn restrictions(
-    root: &Path,
-    approval: &crate::settings::ApprovalSettings,
-) -> Result<Restrictions, String> {
-    let listed = find_matching_files(
-        root,
-        &|path| approval.protected.matches(path) || approval.sensitive.matches(path),
-        Listing::Before,
-    )?;
-    if let Some(link) = listed.unlisted_links.first() {
-        return Err(format!("{link} links to more files than can be listed"));
-    }
-    let mut restrictions = Restrictions {
-        protected: approval.protected.clone(),
-        links: listed.links,
-        ..Restrictions::default()
-    };
-    let mut frozen_dirs: Vec<String> = Vec::new();
-    for ListedFile {
-        path: file,
-        id,
-        through,
-    } in listed.files
-    {
-        if through.is_some() {
-            // The sandbox withholds the file at its own path.
-            if approval.protected.matches(&file) {
-                restrictions.before.insert(file, id);
-            }
-            continue;
-        }
-        if approval.sensitive.matches(&file) {
-            restrictions.hidden.push(root.join(&file));
-        }
-        if approval.protected.matches(&file) {
-            restrictions.before.insert(file.clone(), id);
-            let target = shallowest_matching_dir(&file, &approval.protected).unwrap_or(file);
-            if !frozen_dirs
-                .iter()
-                .any(|dir| target.starts_with(&format!("{dir}/")) || *dir == target)
-            {
-                frozen_dirs.push(target);
-            }
-        }
-    }
-    // Directory patterns whose directory exists at the root but holds no
-    // file yet.
-    for pattern in approval.protected.patterns() {
-        if let Some(dir) = pattern.strip_suffix("/**")
-            && !pattern.starts_with('!')
-        {
-            // A rooted `/dir/**` names a workspace directory, not a host one.
-            let dir = dir
-                .strip_prefix("**/")
-                .unwrap_or(dir)
-                .trim_start_matches('/');
-            if !dir.contains('*')
-                && root.join(dir).is_dir()
-                && !frozen_dirs.iter().any(|known| known == dir)
-            {
-                frozen_dirs.push(dir.to_string());
-            }
-        }
-    }
-    let all = frozen_dirs.clone();
-    frozen_dirs.retain(|dir| {
-        !all.iter()
-            .any(|other| other != dir && dir.starts_with(&format!("{other}/")))
-    });
-    restrictions.frozen = frozen_dirs.iter().map(|dir| root.join(dir)).collect();
-    // A hidden file under a frozen directory is mounted after it, so it
-    // stays hidden.
-    if restrictions.hidden.len() + restrictions.frozen.len() > MAX_RESTRICTED_PATHS {
-        return Err(format!(
-            "the workspace has more than {MAX_RESTRICTED_PATHS} protected or sensitive files to withhold"
-        ));
-    }
-    Ok(restrictions)
-}
-
-fn shallowest_matching_dir(file: &str, patterns: &PathPatterns) -> Option<String> {
-    let parts = file.split('/').collect::<Vec<_>>();
-    (1..parts.len())
-        .map(|end| parts[..end].join("/"))
-        .find(|dir| patterns.matches(dir))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access::grants_cover;
+    use crate::access::{grants_cover, restrictions, sensitive_files};
+    use crate::settings::PathPatterns;
     use serde_json::json;
     use std::path::PathBuf;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn words(text: &str) -> Vec<String> {
         text.split_whitespace().map(str::to_string).collect()
@@ -427,6 +376,255 @@ mod tests {
 
     fn decide(root: &Path, settings: &Settings, name: &str, input: Value) -> Gate {
         gate(name, &input, root, settings, &|_| false).unwrap()
+    }
+
+    #[test]
+    fn mcp_tools_ask_unless_allowed_by_config_or_for_this_session() {
+        let target = |allowed| crate::mcp::McpTarget {
+            server: "github",
+            remote: "get_issue",
+            allowed,
+            sandboxed: false,
+            origin: None,
+        };
+        let Gate::Ask(ask) = mcp_gate("mcp__github__get_issue", &target(false), &|_| false) else {
+            panic!("an MCP tool must ask by default");
+        };
+        assert_eq!(
+            ask.reason,
+            "MCP tools run in the github server on the host, outside Socium's sandbox."
+        );
+        let offered = ask.grant.unwrap();
+        assert_eq!(offered.scope(), "the MCP tool `mcp__github__get_issue`");
+        assert!(matches!(
+            mcp_gate("mcp__github__get_issue", &target(true), &|_| false),
+            Gate::Run(None)
+        ));
+        let grants = [offered];
+        let granted = |wanted: &Grant| grants_cover(&grants, wanted);
+        assert!(matches!(
+            mcp_gate("mcp__github__get_issue", &target(false), &granted),
+            Gate::Run(None)
+        ));
+        assert!(matches!(
+            mcp_gate("mcp__github__create_issue", &target(false), &granted),
+            Gate::Ask(_)
+        ));
+        assert!(!grants_cover(
+            &grants,
+            &Grant::Command(vec!["mcp__github__get_issue".into()])
+        ));
+        let remote = crate::mcp::McpTarget {
+            origin: Some("https://api.githubcopilot.com"),
+            ..target(false)
+        };
+        let Gate::Ask(ask) = mcp_gate("mcp__github__get_issue", &remote, &|_| false) else {
+            panic!("a remote MCP tool must ask by default");
+        };
+        assert_eq!(
+            ask.reason,
+            "MCP tools run in the github server at https://api.githubcopilot.com; Socium does not control what it does."
+        );
+    }
+
+    /// ADR 33: the sandbox is the boundary, so neither `allow` nor a
+    /// session grant is needed; host and remote servers still ask.
+    #[test]
+    fn a_sandboxed_mcp_tool_runs_without_asking_and_host_ones_still_ask() {
+        let sandboxed = crate::mcp::McpTarget {
+            server: "astgrep",
+            remote: "search",
+            allowed: false,
+            sandboxed: true,
+            origin: None,
+        };
+        assert!(matches!(
+            mcp_gate("mcp__astgrep__search", &sandboxed, &|_| false),
+            Gate::Run(None)
+        ));
+        assert_eq!(
+            mcp_permissions(&sandboxed),
+            "MCP tools run in the astgrep server in Socium's read-only sandbox, without network."
+        );
+        for (target, reason) in [
+            (
+                crate::mcp::McpTarget {
+                    sandboxed: false,
+                    ..sandboxed
+                },
+                "MCP tools run in the astgrep server on the host, outside Socium's sandbox.",
+            ),
+            (
+                crate::mcp::McpTarget {
+                    sandboxed: false,
+                    origin: Some("https://a.example"),
+                    ..sandboxed
+                },
+                "MCP tools run in the astgrep server at https://a.example; Socium does not control what it does.",
+            ),
+        ] {
+            let Gate::Ask(ask) = mcp_gate("mcp__astgrep__search", &target, &|_| false) else {
+                panic!("{reason}");
+            };
+            assert_eq!(ask.reason, reason);
+        }
+    }
+
+    /// What a sandboxed MCP server sees empty: sensitive files only, and a
+    /// listing that cannot finish is an error, never an empty list.
+    #[test]
+    fn a_sandboxed_server_hides_sensitive_files_and_fails_when_it_cannot_list_them() {
+        let root = tempfile::tempdir().unwrap();
+        for file in [".env", "app/credentials.json", "build.rs", "src/lib.rs"] {
+            let path = root.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        let sensitive = Settings::default().approval.sensitive;
+        let hidden = list_for_server(root.path(), &sensitive).unwrap();
+        assert_eq!(
+            hidden,
+            [
+                root.path().join(".env"),
+                root.path().join("app/credentials.json")
+            ]
+        );
+        crate::access::tests::TIMEOUT.set(Some(Duration::ZERO));
+        let late = list_for_server(root.path(), &sensitive);
+        crate::access::tests::TIMEOUT.set(None);
+        assert!(late.unwrap_err().contains("in time"));
+        // The server's own startup deadline, when it comes first.
+        let late = sensitive_files(root.path(), &sensitive, Instant::now(), &|| false);
+        assert!(late.unwrap_err().contains("in time"));
+    }
+
+    /// Sensitive files for a sandboxed server, with a minute to list them.
+    fn list_for_server(root: &Path, sensitive: &PathPatterns) -> Result<Vec<PathBuf>, String> {
+        sensitive_files(
+            root,
+            sensitive,
+            Instant::now() + Duration::from_secs(60),
+            &|| false,
+        )
+    }
+
+    /// A startup cancelled while the files are listed stops the listing.
+    #[test]
+    fn cancelling_a_sandboxed_server_start_stops_the_listing() {
+        let root = tempfile::tempdir().unwrap();
+        for n in 0..20 {
+            std::fs::create_dir_all(root.path().join(format!("d{n}"))).unwrap();
+            std::fs::write(root.path().join(format!("d{n}/f")), "x").unwrap();
+        }
+        let checks = std::cell::Cell::new(0);
+        let cancelled_later = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 5
+        };
+        let sensitive = Settings::default().approval.sensitive;
+        let far = Instant::now() + Duration::from_secs(60);
+        let err = sensitive_files(root.path(), &sensitive, far, &cancelled_later).unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        assert_eq!(checks.get(), 6, "the listing went on after the cancel");
+        let err = sensitive_files(root.path(), &sensitive, far, &|| true).unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+    }
+
+    /// Only the workspace's own `.socium` is the sandbox's to cover; one
+    /// deeper down is an ordinary directory, for commands as for servers.
+    #[test]
+    fn a_nested_socium_directory_is_listed_like_any_other() {
+        let root = tempfile::tempdir().unwrap();
+        for file in ["packages/app/.socium/.env", ".socium/history/.env"] {
+            let path = root.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "TOKEN=x").unwrap();
+        }
+        let nested = vec![root.path().join("packages/app/.socium/.env")];
+        let sensitive = Settings::default().approval.sensitive;
+        assert_eq!(list_for_server(root.path(), &sensitive).unwrap(), nested);
+        assert_eq!(
+            restrictions(root.path(), &auto().approval).unwrap().hidden,
+            nested
+        );
+    }
+
+    /// Hiding one name of a file leaves its hard links, which are other
+    /// names of the same file, so each is hidden too.
+    #[test]
+    fn every_hard_link_of_a_sensitive_file_is_hidden() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".env"), "TOKEN=x").unwrap();
+        std::fs::create_dir(root.path().join("docs")).unwrap();
+        std::fs::hard_link(root.path().join(".env"), root.path().join("docs/notes.txt")).unwrap();
+        std::fs::write(root.path().join("plain.txt"), "x").unwrap();
+        let expected = vec![root.path().join(".env"), root.path().join("docs/notes.txt")];
+        let sensitive = Settings::default().approval.sensitive;
+        assert_eq!(list_for_server(root.path(), &sensitive).unwrap(), expected);
+        assert_eq!(
+            restrictions(root.path(), &auto().approval).unwrap().hidden,
+            expected
+        );
+    }
+
+    /// A pattern that matches a path through a directory symlink, but not
+    /// the same file at its target, still hides it from a sandboxed server,
+    /// which can open either path. A link whose name no pattern matches is
+    /// not listed twice.
+    #[test]
+    fn a_sandboxed_server_loses_what_a_pattern_matches_through_a_directory_symlink() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        for file in [
+            "real/secret.txt",
+            "real/readme.md",
+            "keys/a.txt",
+            "lib/.env",
+        ] {
+            let path = root.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        symlink("real", root.path().join("alias")).unwrap();
+        symlink("keys", root.path().join("secrets")).unwrap();
+        symlink("lib", root.path().join("vendor")).unwrap();
+        // Followed through `secrets` in turn, not hidden as a directory.
+        symlink("../lib", root.path().join("keys/inner")).unwrap();
+        let sensitive = PathPatterns::new(&["alias/secret.txt", "secrets", ".env"]);
+        assert_eq!(
+            list_for_server(root.path(), &sensitive).unwrap(),
+            [
+                root.path().join("keys/a.txt"),
+                root.path().join("lib/.env"),
+                root.path().join("real/secret.txt"),
+            ]
+        );
+        // One that cannot be hidden file by file fails the listing.
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("secrets-elsewhere")).unwrap();
+        let sensitive = PathPatterns::new(&["secrets-elsewhere"]);
+        let err = list_for_server(root.path(), &sensitive).unwrap_err();
+        assert!(err.contains("cannot be hidden one by one"), "{err}");
+        // A link back to where it is would be listed without end.
+        let looped = tempfile::tempdir().unwrap();
+        std::fs::create_dir(looped.path().join("dir")).unwrap();
+        symlink(".", looped.path().join("dir/secrets")).unwrap();
+        let err = list_for_server(looped.path(), &PathPatterns::new(&["secrets"])).unwrap_err();
+        assert!(err.contains("back to files listed already"), "{err}");
+    }
+
+    /// A sandboxed server sees `.socium/scratch`, read-only, so what is
+    /// sensitive there is hidden from it too.
+    #[test]
+    fn a_sandboxed_server_loses_sensitive_files_in_the_scratch_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = crate::state::scratch_dir(root.path()).unwrap();
+        std::fs::write(scratch.join(".env"), "TOKEN=x").unwrap();
+        let sensitive = Settings::default().approval.sensitive;
+        assert_eq!(
+            list_for_server(root.path(), &sensitive).unwrap(),
+            [root.path().join(".socium/scratch/.env")]
+        );
     }
 
     #[test]

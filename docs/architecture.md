@@ -23,7 +23,7 @@ Test code is not checked.
 | 5 | `transcript`, `usage`, `access`, `activity_log` | The transcript after a restart, token use and cost, session grants, withheld files and the quarantine of protected files a command left, the saved activity log |
 | 6 | `progress` | `AgentProgress`, what a running turn reports to the UI |
 | 7 | `control` | `TaskControl`: cancellation, approvals waiting for an answer, steering |
-| 8 | `process` | Running a command in the sandbox with bounded output |
+| 8 | `process`, `mcp` | Running a command in the sandbox with bounded output; MCP servers, their tools, and OAuth tokens |
 | 9 | `tools` | The built-in tools and the tool list a model is offered |
 | 10 | `approval`, `instructions` | Whether a call runs, asks, or is refused; nested instruction files, which tools read |
 | 11 | `dispatch`, `session` | Running one tool call through the gate; saved sessions |

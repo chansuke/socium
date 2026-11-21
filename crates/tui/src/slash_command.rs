@@ -11,6 +11,7 @@ pub(crate) enum SlashAction {
     Rename,
     Rewind,
     Agents,
+    Mcp,
     Undo,
     Exit,
 }
@@ -78,6 +79,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "List this session's subagents; /agents <id> shows one's conversation",
         action: SlashAction::Agents,
         takes_argument: true,
+    },
+    SlashCommand {
+        name: "mcp",
+        description: "Show each configured MCP server: where it runs, its state, and its tools",
+        action: SlashAction::Mcp,
+        takes_argument: false,
     },
     SlashCommand {
         name: "undo",
@@ -188,7 +195,8 @@ mod tests {
     #[test]
     fn prefix_narrows_candidates() {
         assert_eq!(names("/c"), ["commands", "clear", "compact"]);
-        assert_eq!(names("/m"), ["model"]);
+        assert_eq!(names("/m"), ["model", "mcp"]);
+        assert_eq!(names("/mc"), ["mcp"]);
         assert_eq!(names("/re"), ["resume", "rename", "rewind"]);
         assert_eq!(names("/rew"), ["rewind"]);
         assert_eq!(names("/co"), ["commands", "compact"]);
@@ -213,6 +221,8 @@ mod tests {
         assert!(find("exit now").is_none());
         assert!(find("clear").is_none());
         assert_eq!(action("/clear"), Some(SlashAction::Clear));
+        assert_eq!(action("/mcp"), Some(SlashAction::Mcp));
+        assert!(find("/mcp time").is_none());
         assert!(find("/cle").is_none());
         assert!(find("/clear now").is_none());
     }

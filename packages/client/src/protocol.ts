@@ -17,6 +17,8 @@ export interface Approval {
   summary: string;
   input: string;
   requestedBy: string | null;
+  /** What an allow for the session covers; null when only once is offered. */
+  sessionOption: string | null;
 }
 
 export interface Turn {
@@ -45,6 +47,6 @@ export type Command =
   | { action: "resume"; target: string }
   | { action: "prompt"; text: string }
   | { action: "cancel"; turn: string }
-  | { action: "approve"; turn: string; request: number; allow: boolean };
+  | { action: "approve"; turn: string; request: number; allow: boolean; forSession?: boolean };
 
 export const maxPromptLength = 16_000;

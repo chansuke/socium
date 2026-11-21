@@ -1,13 +1,14 @@
 //! User settings from `config.toml` in the Socium config directory
 //! (`$XDG_CONFIG_HOME/socium/`, else `~/.config/socium/`, or the file named
 //! by `SOCIUM_CONFIG_FILE`): what sandboxed commands may additionally see,
-//! and when tool calls need the user's approval (ADR 12, ADR 13).
+//! when tool calls need the user's approval, and which MCP servers to start
+//! and how (ADR 12, ADR 13, ADR 29, ADR 33).
 //!
 //! The config directory must lie outside the workspace, so neither the
 //! model's file tools nor its commands can change these settings.
 
 use crate::constants::TEXT_EDITOR_TOOL_NAME;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Error, ErrorKind};
@@ -85,6 +86,11 @@ pub struct Settings {
     /// The `web_search` tool, which sends the model's queries to DeepSeek's
     /// paid Search API; `None` unless the user turned it on.
     pub(crate) web_search: Option<WebSearchSettings>,
+    /// `[mcp.servers.<name>]`: MCP servers Socium starts on the host or
+    /// connects to, in name order, the disabled ones left out.
+    pub(crate) mcp_servers: Vec<McpServerSettings>,
+    /// The disabled ones, in name order, for `/mcp`.
+    pub(crate) mcp_disabled: Vec<DisabledMcpServer>,
     /// Where the settings came from, shown in errors and `/help`.
     pub(crate) source: Option<PathBuf>,
 }
@@ -94,6 +100,216 @@ pub struct Settings {
 pub(crate) struct WebSearchSettings {
     /// The Search API root, normalized without a trailing slash.
     pub(crate) base_url: String,
+}
+
+/// One `[mcp.servers.<name>]` table (ADR 29, ADR 30).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct McpServerSettings {
+    /// Matches `[A-Za-z0-9_-]{1,32}` without `__` and not ending in `_`, so
+    /// `mcp__<name>__<tool>` names one server.
+    pub(crate) name: String,
+    pub(crate) transport: McpTransportSettings,
+    /// Remote tool names that run without asking.
+    pub(crate) allow: Vec<String>,
+    /// How long a tool call may take before it is given up.
+    pub(crate) tool_timeout: Duration,
+}
+
+/// How long an MCP tool call may take unless `tool_timeout_secs` says.
+const DEFAULT_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Where a server runs. Only the program or the URL: arguments, which may
+/// hold a token, env and header values, and client secrets are never part
+/// of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpServerTransport {
+    /// A child process, by the program its command runs: on the host, or
+    /// in the read-only sandbox when `sandboxed` (ADR 33).
+    Local { program: String, sandboxed: bool },
+    /// A server over Streamable HTTP; settings reject a URL with
+    /// credentials, a query, or a fragment.
+    Remote { url: String },
+}
+
+impl McpServerTransport {
+    pub(crate) fn of(settings: &McpTransportSettings) -> Self {
+        match settings {
+            McpTransportSettings::Stdio {
+                command, sandbox, ..
+            } => Self::Local {
+                program: command[0].clone(),
+                sandboxed: sandbox.is_some(),
+            },
+            McpTransportSettings::Http { url, .. } => Self::Remote { url: url.clone() },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpDisabled {
+    /// `enabled = false`.
+    Setting,
+    /// `setting` (such as `headers.Authorization`) names `${variable}`,
+    /// which is not set.
+    UnsetVariable { setting: String, variable: String },
+}
+
+/// How the client proves itself at the token endpoint (RFC 6749 2.3.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ClientAuth {
+    /// A public client: `client_id` in the form only.
+    #[default]
+    None,
+    /// HTTP Basic with the client ID and secret.
+    ClientSecretBasic,
+    /// The secret in the form.
+    ClientSecretPost,
+}
+
+/// A `[mcp.servers.<name>]` that is not started, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DisabledMcpServer {
+    pub(crate) name: String,
+    pub(crate) transport: McpServerTransport,
+    pub(crate) reason: McpDisabled,
+}
+
+/// How Socium reaches an MCP server.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum McpTransportSettings {
+    /// `command`: a child process that speaks JSON-RPC on stdin and stdout.
+    Stdio {
+        /// The program, an absolute path or a name looked up on PATH, and
+        /// its arguments. On the host it runs with `/` as the directory; in
+        /// the sandbox, in the workspace root.
+        command: Vec<String>,
+        /// Variables set for the server, `${NAME}` already expanded from
+        /// Socium's environment: on the host on top of PATH, HOME, USER and
+        /// LANG; in the sandbox on top of what the sandbox sets. Never
+        /// shown.
+        env: BTreeMap<String, String>,
+        /// `sandbox = "read-only"` (ADR 33); `None` runs it on the host.
+        sandbox: Option<McpSandboxSettings>,
+    },
+    /// `url`: a remote server over Streamable HTTP.
+    Http {
+        /// https, or plain http on loopback.
+        url: String,
+        /// Sent with every request, `${NAME}` already expanded. The values
+        /// are often secrets, so they are never shown.
+        headers: BTreeMap<String, String>,
+        /// `oauth`: a client registered with the server's authorization
+        /// server ahead of time (ADR 31). A server without it still uses
+        /// OAuth once `socium mcp login` stored a token for it.
+        oauth: Option<McpOAuthSettings>,
+    },
+}
+
+/// `sandbox = "read-only"` under a server with `command`: it runs in the
+/// sandbox with the workspace read-only, no network, a private HOME, and
+/// none of the `[sandbox]` table (ADR 33).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct McpSandboxSettings {
+    /// `read_only`: host directories this server alone sees, read-only,
+    /// checked as `sandbox.read_only` is.
+    pub(crate) read_only: Vec<ReadOnlyMount>,
+}
+
+/// `oauth = { ... }` under a server with `url`.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(crate) struct McpOAuthSettings {
+    /// Registered ahead of time; without it, login registers a client.
+    pub(crate) client_id: Option<String>,
+    /// `${NAME}` already expanded. Never shown.
+    pub(crate) client_secret: Option<String>,
+    /// Asked for at login; empty means the server's own list, if any.
+    pub(crate) scopes: Vec<String>,
+    /// The login's loopback port, for a client whose redirect URI is fixed.
+    pub(crate) callback_port: Option<u16>,
+    /// The authorization server the client was registered with. Required
+    /// with `client_secret`, so the secret goes only to that server's token
+    /// endpoint, whatever the MCP server names.
+    pub(crate) issuer: Option<String>,
+    /// How the client was registered to prove itself; `None` picks from
+    /// what the authorization server supports.
+    pub(crate) token_endpoint_auth_method: Option<ClientAuth>,
+}
+
+impl std::fmt::Debug for McpOAuthSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpOAuthSettings")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<hidden>"),
+            )
+            .field("scopes", &self.scopes)
+            .field("callback_port", &self.callback_port)
+            .field("issuer", &self.issuer)
+            .field(
+                "token_endpoint_auth_method",
+                &self.token_endpoint_auth_method,
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for McpTransportSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdio {
+                command,
+                env,
+                sandbox,
+            } => f
+                .debug_struct("Stdio")
+                .field("command", command)
+                .field("env", &env.keys().collect::<Vec<_>>())
+                .field("sandbox", sandbox)
+                .finish(),
+            Self::Http {
+                url,
+                headers,
+                oauth,
+            } => f
+                .debug_struct("Http")
+                .field("url", url)
+                .field("headers", &headers.keys().collect::<Vec<_>>())
+                .field("oauth", oauth)
+                .finish(),
+        }
+    }
+}
+
+/// Headers the HTTP transport sets itself.
+const RESERVED_MCP_HEADERS: &[&str] = &[
+    "accept",
+    "content-type",
+    "content-length",
+    "host",
+    "mcp-session-id",
+    "mcp-protocol-version",
+];
+
+/// Longest server name, so `mcp__<server>__<tool>` leaves room for the tool
+/// within the 64 characters providers accept.
+const MAX_MCP_SERVER_NAME: usize = 32;
+
+/// What [`is_valid_mcp_server_name`] checks, for error messages.
+pub(crate) const MCP_SERVER_NAME_RULE: &str =
+    "a server name must be 1 to 32 letters, digits, '_' or '-', without '__' and not ending in '_'";
+
+/// Whether `name` can name an MCP server, so `mcp__<name>__<tool>` names
+/// one server and the name is safe in a file name.
+pub(crate) fn is_valid_mcp_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_MCP_SERVER_NAME
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        && !name.contains("__")
+        && !name.ends_with('_')
 }
 
 /// DeepSeek's API root, where `/v1/tools/search` lives.
@@ -214,6 +430,17 @@ impl PathPatterns {
         }
         matched
     }
+
+    /// Whether every path below `a` matches as the same path below `b`
+    /// does: no pattern names a path from the root, and none matches a name
+    /// in `a` or in `b`. Then only the names below decide, and they are the
+    /// same.
+    pub(crate) fn alike_below(&self, a: &str, b: &str) -> bool {
+        self.0.iter().all(|pattern| {
+            let pattern = pattern.strip_prefix('!').unwrap_or(pattern);
+            !pattern.contains('/') && !pattern_matches(pattern, a) && !pattern_matches(pattern, b)
+        })
+    }
 }
 
 /// `pattern` with a leading `./` written as `/`, which anchors it at the
@@ -303,6 +530,49 @@ struct RawFile {
     tools: RawTools,
     #[serde(default)]
     web_search: RawWebSearch,
+    #[serde(default)]
+    mcp: RawMcp,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawMcp {
+    #[serde(default)]
+    servers: BTreeMap<String, RawMcpServer>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcpServer {
+    command: Option<Vec<String>>,
+    env: Option<BTreeMap<String, String>>,
+    url: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
+    oauth: Option<RawMcpOAuth>,
+    /// `None` when left out, so an empty list next to `sandbox` is still
+    /// refused.
+    allow: Option<Vec<String>>,
+    tool_timeout_secs: Option<u64>,
+    #[serde(default = "enabled_by_default")]
+    enabled: bool,
+    sandbox: Option<String>,
+    read_only: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcpOAuth {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+    callback_port: Option<u16>,
+    issuer: Option<String>,
+    token_endpoint_auth_method: Option<String>,
+}
+
+fn enabled_by_default() -> bool {
+    true
 }
 
 #[derive(Deserialize, Default)]
@@ -345,9 +615,10 @@ struct RawApproval {
     sensitive: Option<Vec<String>>,
 }
 
-/// Directories and files that configure Socium: none of them may be inside
-/// a workspace, or the model could rewrite its own limits. The files read
-/// from the directory are listed too, since each may link elsewhere.
+/// Directories and files that configure Socium, and the MCP token store:
+/// none of them may be inside a workspace, or the model could rewrite its
+/// own limits or read a token. The files read from the configuration
+/// directory are listed too, since each may link elsewhere.
 pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut listed_dirs = Vec::new();
@@ -355,6 +626,9 @@ pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathB
         paths.extend([dir.join("config.toml"), dir.join("models.toml")]);
         listed_dirs.extend([dir.join("agents"), dir.join(crate::models::MODELS_DIR_NAME)]);
         paths.push(dir);
+    }
+    if let Some(store) = crate::host::mcp_token_dir(lookup) {
+        paths.push(store);
     }
     for variable in [
         CONFIG_FILE_ENV,
@@ -382,8 +656,9 @@ pub(crate) fn config_paths(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<PathB
     paths
 }
 
-/// Refuses a workspace that contains Socium's own configuration: its file
-/// tools could then edit `config.toml`, `models.toml`, or subagent types.
+/// Refuses a workspace that contains Socium's own configuration or MCP
+/// tokens: its file tools could then edit `config.toml`, `models.toml`, or
+/// subagent types, or read a token.
 pub(crate) fn ensure_config_outside(
     workspace: &Path,
     lookup: &dyn Fn(&str) -> Option<String>,
@@ -395,7 +670,7 @@ pub(crate) fn ensure_config_outside(
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!(
-                    "The workspace {} contains Socium's configuration ({}); the agent could change its own permissions. Start Socium in a project directory instead",
+                    "The workspace {} contains Socium's configuration ({}); the agent could change its own permissions or read MCP tokens. Start Socium in a project directory instead",
                     workspace.display(),
                     path.display()
                 ),
@@ -474,7 +749,7 @@ impl Settings {
         };
         let home = lookup("HOME").filter(|home| !home.is_empty());
         let (mut settings, warnings) =
-            Self::from_toml(&text, home.as_deref()).map_err(|message| {
+            Self::parse(&text, home.as_deref(), lookup).map_err(|message| {
                 Error::new(
                     ErrorKind::InvalidInput,
                     format!("{}: {message}", path.display()),
@@ -484,45 +759,28 @@ impl Settings {
         Ok((settings, warnings))
     }
 
+    /// As [`Settings::parse`] with no environment, so every `${NAME}` is
+    /// missing.
+    #[cfg(test)]
     pub(crate) fn from_toml(text: &str, home: Option<&str>) -> Result<(Self, Vec<String>), String> {
-        let raw: RawFile = toml::from_str(text).map_err(|err| err.to_string())?;
-        let mut warnings = Vec::new();
-        let expand = |value: &str| -> Result<PathBuf, String> {
-            let path = match value.strip_prefix("~/") {
-                Some(rest) => Path::new(home.ok_or("~ needs HOME to be set")?).join(rest),
-                None if value == "~" => PathBuf::from(home.ok_or("~ needs HOME to be set")?),
-                None => PathBuf::from(value),
-            };
-            if !path.is_absolute() {
-                return Err(format!(
-                    "'{value}' must be an absolute path or start with ~/"
-                ));
-            }
-            Ok(path)
-        };
-        let home_dir = home.and_then(|home| Path::new(home).canonicalize().ok());
+        Self::parse(text, home, &|_| None)
+    }
 
-        let mut read_only = Vec::new();
-        for value in &raw.sandbox.read_only {
-            let configured = expand(value)?;
-            let source = match configured.canonicalize() {
-                Ok(source) => source,
-                Err(_) => {
-                    warnings.push(format!(
-                        "sandbox.read_only: '{value}' does not exist on this machine; skipped"
-                    ));
-                    continue;
-                }
-            };
-            if let Some(reason) = unsafe_mount(&source, home_dir.as_deref()) {
-                return Err(format!("sandbox.read_only: '{value}' {reason}"));
-            }
-            let alias = (normalize(&configured) != source).then(|| normalize(&configured));
-            let mount = ReadOnlyMount { source, alias };
-            if !read_only.contains(&mount) {
-                read_only.push(mount);
-            }
-        }
+    /// `env` supplies the values of `${NAME}` in MCP server variables.
+    pub(crate) fn parse(
+        text: &str,
+        home: Option<&str>,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<(Self, Vec<String>), String> {
+        let raw: RawFile = toml::from_str(text).map_err(|err| toml_error(text, &err))?;
+        let mut warnings = Vec::new();
+        let expand = |value: &str| expand_home(value, home);
+        let read_only = read_only_mounts(
+            "sandbox.read_only",
+            &raw.sandbox.read_only,
+            home,
+            &mut warnings,
+        )?;
         let mut sandbox = SandboxSettings {
             read_only,
             ..SandboxSettings::default()
@@ -631,12 +889,22 @@ impl Settings {
                     .map_err(|err| format!("web_search.{err}"))
             })
             .transpose()?;
+        let mut mcp_servers = Vec::new();
+        let mut mcp_disabled = Vec::new();
+        for (name, server) in raw.mcp.servers {
+            match mcp_server(name, server, home, env, &mut warnings)? {
+                Ok(server) => mcp_servers.push(server),
+                Err(disabled) => mcp_disabled.push(disabled),
+            }
+        }
         Ok((
             Self {
                 sandbox,
                 approval,
                 tools,
                 web_search,
+                mcp_servers,
+                mcp_disabled,
                 source: None,
             },
             warnings,
@@ -663,8 +931,592 @@ impl Settings {
                 self.tools.tools().join(", ")
             ));
         }
+        for server in &self.mcp_servers {
+            lines.push(match &server.transport {
+                McpTransportSettings::Stdio {
+                    command,
+                    sandbox: None,
+                    ..
+                } => format!(
+                    "MCP server {} runs on the host, outside the sandbox: {}",
+                    server.name, command[0]
+                ),
+                McpTransportSettings::Stdio {
+                    command,
+                    sandbox: Some(sandbox),
+                    ..
+                } => {
+                    let also = if sandbox.read_only.is_empty() {
+                        String::new()
+                    } else {
+                        let dirs = sandbox
+                            .read_only
+                            .iter()
+                            .map(|mount| mount.source.display().to_string())
+                            .collect::<Vec<_>>();
+                        format!(", and reads {}", dirs.join(", "))
+                    };
+                    format!(
+                        "MCP server {} runs in a read-only sandbox and its tools run without asking: {}. \
+                         It reads the workspace, where files matching approval.sensitive when it started are hidden; \
+                         .git, a linked worktree's main Git directory and secrets created after it started are not hidden. \
+                         It has no network and sees neither your home directory nor the [sandbox] settings{also}. \
+                         What its tools return goes to the model provider",
+                        server.name, command[0]
+                    )
+                }
+                McpTransportSettings::Http {
+                    url,
+                    headers,
+                    oauth,
+                } => {
+                    let mut notes = Vec::new();
+                    if !headers.is_empty() {
+                        notes.push(format!(
+                            "headers: {}",
+                            headers.keys().cloned().collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                    if let Some(client_id) = oauth.as_ref().and_then(|o| o.client_id.as_ref()) {
+                        notes.push(format!("OAuth client: {client_id}"));
+                    }
+                    if notes.is_empty() {
+                        format!("MCP server {} is remote: {url}", server.name)
+                    } else {
+                        format!(
+                            "MCP server {} is remote: {url} ({})",
+                            server.name,
+                            notes.join("; ")
+                        )
+                    }
+                }
+            });
+        }
         lines
     }
+}
+
+impl Settings {
+    /// Whether `server` is configured with `sandbox = "read-only"`, enabled
+    /// or not. Only `config.toml` decides, never what a server reports, so
+    /// this holds before any server connects (ADR 33).
+    pub(crate) fn is_sandboxed_mcp_server(&self, server: &str) -> bool {
+        self.mcp_servers
+            .iter()
+            .any(|settings| settings.name == server && settings.sandbox().is_some())
+            || self.mcp_disabled.iter().any(|disabled| {
+                disabled.name == server
+                    && matches!(
+                        disabled.transport,
+                        McpServerTransport::Local {
+                            sandboxed: true,
+                            ..
+                        }
+                    )
+            })
+    }
+}
+
+impl McpServerSettings {
+    /// How the server is sandboxed; `None` when it runs on the host or is
+    /// remote.
+    pub(crate) fn sandbox(&self) -> Option<&McpSandboxSettings> {
+        match &self.transport {
+            McpTransportSettings::Stdio { sandbox, .. } => sandbox.as_ref(),
+            McpTransportSettings::Http { .. } => None,
+        }
+    }
+}
+
+/// `value` with a leading `~` expanded; it must then be absolute.
+fn expand_home(value: &str, home: Option<&str>) -> Result<PathBuf, String> {
+    let path = match value.strip_prefix("~/") {
+        Some(rest) => Path::new(home.ok_or("~ needs HOME to be set")?).join(rest),
+        None if value == "~" => PathBuf::from(home.ok_or("~ needs HOME to be set")?),
+        None => PathBuf::from(value),
+    };
+    if !path.is_absolute() {
+        return Err(format!(
+            "'{value}' must be an absolute path or start with ~/"
+        ));
+    }
+    Ok(path)
+}
+
+/// The directories of a `read_only` list (`setting`) as mounts. One that
+/// does not exist on this machine is skipped with a warning; one that would
+/// expose the home directory or replace a sandbox mount is an error.
+fn read_only_mounts(
+    setting: &str,
+    values: &[String],
+    home: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<ReadOnlyMount>, String> {
+    let home_dir = home.and_then(|home| Path::new(home).canonicalize().ok());
+    let mut mounts = Vec::new();
+    for value in values {
+        let configured = expand_home(value, home)?;
+        let source = match configured.canonicalize() {
+            Ok(source) => source,
+            Err(_) => {
+                warnings.push(format!(
+                    "{setting}: '{value}' does not exist on this machine; skipped"
+                ));
+                continue;
+            }
+        };
+        if let Some(reason) = unsafe_mount(&source, home_dir.as_deref()) {
+            return Err(format!("{setting}: '{value}' {reason}"));
+        }
+        let alias = (normalize(&configured) != source).then(|| normalize(&configured));
+        let mount = ReadOnlyMount { source, alias };
+        if !mounts.contains(&mount) {
+            mounts.push(mount);
+        }
+    }
+    Ok(mounts)
+}
+
+/// Why a sandboxed MCP server must not see `mount`: it overlaps the
+/// workspace (and with it `.socium`), which the model can write, or
+/// Socium's configuration and MCP tokens. Both of the mount's paths count,
+/// and each configuration path is followed through links. The workspace is
+/// `None` while settings are read, before it is known.
+pub(crate) fn mcp_mount_refusal(
+    mount: &ReadOnlyMount,
+    workspace: Option<&Path>,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let overlaps = |guarded: &Path| {
+        std::iter::once(&mount.source)
+            .chain(&mount.alias)
+            .find(|path| path.starts_with(guarded) || guarded.starts_with(path))
+    };
+    if let Some(workspace) = workspace {
+        let workspace = resolve_existing_prefix(workspace);
+        for guarded in [workspace.clone(), workspace.join(".socium")] {
+            if let Some(path) = overlaps(&guarded) {
+                return Some(format!(
+                    "{} overlaps the workspace {}, which the model can change",
+                    path.display(),
+                    workspace.display()
+                ));
+            }
+        }
+    }
+    for configured in config_paths(lookup) {
+        let guarded = resolve_existing_prefix(&configured);
+        if let Some(path) = overlaps(&guarded) {
+            return Some(format!(
+                "{} overlaps Socium's configuration or MCP tokens ({})",
+                path.display(),
+                configured.display()
+            ));
+        }
+    }
+    None
+}
+
+/// A validated `[mcp.servers.<name>]`, or `Err` inside when it is turned
+/// off or names a variable that is not set (with a warning).
+fn mcp_server(
+    name: String,
+    raw: RawMcpServer,
+    home: Option<&str>,
+    env: &dyn Fn(&str) -> Option<String>,
+    warnings: &mut Vec<String>,
+) -> Result<Result<McpServerSettings, DisabledMcpServer>, String> {
+    let disabled = |name: &str, transport: McpServerTransport, reason: McpDisabled| {
+        Ok(Err(DisabledMcpServer {
+            name: name.to_string(),
+            transport,
+            reason,
+        }))
+    };
+    if !is_valid_mcp_server_name(&name) {
+        return Err(format!("mcp.servers.{name}: {MCP_SERVER_NAME_RULE}"));
+    }
+    if raw.tool_timeout_secs == Some(0) {
+        return Err(format!(
+            "mcp.servers.{name}.tool_timeout_secs must be at least 1"
+        ));
+    }
+    if let Some(tool) = raw
+        .allow
+        .iter()
+        .flatten()
+        .find(|tool| tool.trim().is_empty())
+    {
+        return Err(format!(
+            "mcp.servers.{name}.allow: '{tool}' is not a tool name"
+        ));
+    }
+    let sandboxed = match raw.sandbox.as_deref() {
+        None => false,
+        Some("read-only") => true,
+        Some(other) => {
+            return Err(format!(
+                "mcp.servers.{name}.sandbox must be \"read-only\" or left out; got '{other}'"
+            ));
+        }
+    };
+    if sandboxed && raw.url.is_some() {
+        return Err(format!(
+            "mcp.servers.{name}.sandbox applies only to a server with command; a url server runs elsewhere"
+        ));
+    }
+    if sandboxed && raw.allow.is_some() {
+        return Err(format!(
+            "mcp.servers.{name}: sandbox and allow cannot be combined, since every tool of a sandboxed server runs without asking"
+        ));
+    }
+    if raw.read_only.is_some() && !sandboxed {
+        return Err(format!(
+            "mcp.servers.{name}.read_only applies only with sandbox = \"read-only\""
+        ));
+    }
+    let transport = match (raw.command, raw.url) {
+        (Some(command), None) => {
+            if raw.headers.is_some() {
+                return Err(format!(
+                    "mcp.servers.{name}.headers applies only to a server with url; a command server takes env"
+                ));
+            }
+            if raw.oauth.is_some() {
+                return Err(format!(
+                    "mcp.servers.{name}.oauth applies only to a server with url; a command server takes env"
+                ));
+            }
+            let Some(program) = command.first().filter(|program| !program.is_empty()) else {
+                return Err(format!(
+                    "mcp.servers.{name}.command must name a program and its arguments"
+                ));
+            };
+            if program.contains('/') && !Path::new(program).is_absolute() {
+                return Err(format!(
+                    "mcp.servers.{name}.command: '{program}' must be an absolute path or a program name found on PATH"
+                ));
+            }
+            let raw_env = raw.env.unwrap_or_default();
+            if let Some(variable) = raw_env
+                .keys()
+                .find(|variable| variable.is_empty() || variable.contains(['=', '\0']))
+            {
+                return Err(format!(
+                    "mcp.servers.{name}.env: '{variable}' is not a variable name"
+                ));
+            }
+            let sandbox = if sandboxed {
+                // The sandbox sets these itself, as it does for commands.
+                if let Some((variable, reason)) = raw_env
+                    .keys()
+                    .find_map(|variable| Some((variable, reserved_variable(variable)?)))
+                {
+                    return Err(format!("mcp.servers.{name}.env: {variable} {reason}"));
+                }
+                let setting = format!("mcp.servers.{name}.read_only");
+                let read_only = read_only_mounts(
+                    &setting,
+                    raw.read_only.as_deref().unwrap_or_default(),
+                    home,
+                    warnings,
+                )?;
+                for mount in &read_only {
+                    if let Some(reason) = mcp_mount_refusal(mount, None, env) {
+                        return Err(format!("{setting}: {reason}"));
+                    }
+                }
+                Some(McpSandboxSettings { read_only })
+            } else {
+                None
+            };
+            let local = || McpServerTransport::Local {
+                program: command[0].clone(),
+                sandboxed,
+            };
+            if !raw.enabled {
+                return disabled(&name, local(), McpDisabled::Setting);
+            }
+            let env = match expand_table(&name, "env", raw_env, env, warnings)? {
+                Ok(env) => env,
+                Err(unset) => return disabled(&name, local(), unset),
+            };
+            McpTransportSettings::Stdio {
+                command,
+                env,
+                sandbox,
+            }
+        }
+        (None, Some(url)) => {
+            if raw.env.is_some() {
+                return Err(format!(
+                    "mcp.servers.{name}.env applies only to a server with command; a url server takes headers"
+                ));
+            }
+            crate::models::check_endpoint_url("url", &url)
+                .map_err(|err| format!("mcp.servers.{name}.{err}"))?;
+            let raw_headers = raw.headers.unwrap_or_default();
+            for header in raw_headers.keys() {
+                if reqwest::header::HeaderName::from_bytes(header.as_bytes()).is_err() {
+                    return Err(format!(
+                        "mcp.servers.{name}.headers: '{header}' is not a header name"
+                    ));
+                }
+                if RESERVED_MCP_HEADERS.contains(&header.to_ascii_lowercase().as_str()) {
+                    return Err(format!(
+                        "mcp.servers.{name}.headers: Socium sets '{header}' itself"
+                    ));
+                }
+            }
+            let remote = || McpServerTransport::Remote { url: url.clone() };
+            if !raw.enabled {
+                return disabled(&name, remote(), McpDisabled::Setting);
+            }
+            let headers = match expand_table(&name, "headers", raw_headers, env, warnings)? {
+                Ok(headers) => headers,
+                Err(unset) => return disabled(&name, remote(), unset),
+            };
+            // Never repeat the value: it is usually a token.
+            if let Some(header) = headers
+                .iter()
+                .find(|(_, value)| reqwest::header::HeaderValue::from_str(value).is_err())
+                .map(|(header, _)| header)
+            {
+                return Err(format!(
+                    "mcp.servers.{name}.headers.{header}: the value is not a valid header value once its variables are expanded"
+                ));
+            }
+            let oauth = match raw.oauth {
+                Some(oauth) => match oauth_settings(&name, oauth, env, warnings)? {
+                    Ok(oauth) => Some(oauth),
+                    Err(unset) => return disabled(&name, remote(), unset),
+                },
+                None => None,
+            };
+            McpTransportSettings::Http {
+                url,
+                headers,
+                oauth,
+            }
+        }
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(format!(
+                "mcp.servers.{name} needs exactly one of command (a program to start) or url (a remote server)"
+            ));
+        }
+    };
+    Ok(Ok(McpServerSettings {
+        name,
+        transport,
+        allow: raw.allow.unwrap_or_default(),
+        tool_timeout: raw
+            .tool_timeout_secs
+            .map_or(DEFAULT_MCP_TOOL_TIMEOUT, Duration::from_secs),
+    }))
+}
+
+/// A validated `oauth` table, or `Err` inside when `client_secret` names a
+/// variable that is not set (with a warning). The secret is never repeated.
+fn oauth_settings(
+    name: &str,
+    raw: RawMcpOAuth,
+    env: &dyn Fn(&str) -> Option<String>,
+    warnings: &mut Vec<String>,
+) -> Result<Result<McpOAuthSettings, McpDisabled>, String> {
+    let printable =
+        |value: &str| !value.trim().is_empty() && value.chars().all(|c| c.is_ascii_graphic());
+    if let Some(client_id) = &raw.client_id
+        && !printable(client_id)
+    {
+        return Err(format!(
+            "mcp.servers.{name}.oauth.client_id must be printable ASCII without spaces"
+        ));
+    }
+    if raw.client_secret.is_some() && raw.client_id.is_none() {
+        return Err(format!(
+            "mcp.servers.{name}.oauth.client_secret needs client_id: a secret belongs to a client registered ahead of time"
+        ));
+    }
+    if let Some(scope) = raw.scopes.iter().find(|scope| !printable(scope)) {
+        return Err(format!(
+            "mcp.servers.{name}.oauth.scopes: '{scope}' is not a scope (printable ASCII without spaces)"
+        ));
+    }
+    if raw.callback_port == Some(0) {
+        return Err(format!(
+            "mcp.servers.{name}.oauth.callback_port must be 1 to 65535; leave it out for any free port"
+        ));
+    }
+    if raw.client_secret.is_some() && raw.issuer.is_none() {
+        return Err(format!(
+            "mcp.servers.{name}.oauth.client_secret needs issuer: the authorization server the client was registered with, so the secret is sent only there"
+        ));
+    }
+    if let Some(issuer) = &raw.issuer {
+        crate::models::check_endpoint_url("issuer", issuer)
+            .map_err(|err| format!("mcp.servers.{name}.oauth.{err}"))?;
+    }
+    use ClientAuth;
+    let token_endpoint_auth_method = match raw.token_endpoint_auth_method.as_deref() {
+        None => None,
+        Some(_) if raw.client_secret.is_none() => {
+            return Err(format!(
+                "mcp.servers.{name}.oauth.token_endpoint_auth_method needs client_secret"
+            ));
+        }
+        Some("client_secret_basic") => Some(ClientAuth::ClientSecretBasic),
+        Some("client_secret_post") => Some(ClientAuth::ClientSecretPost),
+        Some(other) => {
+            return Err(format!(
+                "mcp.servers.{name}.oauth.token_endpoint_auth_method: '{other}' is not client_secret_basic or client_secret_post"
+            ));
+        }
+    };
+    let client_secret = match raw.client_secret {
+        Some(secret) => {
+            let table = BTreeMap::from([("client_secret".to_string(), secret)]);
+            let mut expanded = match expand_table(name, "oauth", table, env, warnings)? {
+                Ok(expanded) => expanded,
+                Err(unset) => return Ok(Err(unset)),
+            };
+            let secret = expanded.remove("client_secret").unwrap_or_default();
+            if !printable(&secret) {
+                return Err(format!(
+                    "mcp.servers.{name}.oauth.client_secret must be printable ASCII without spaces once its variables are expanded"
+                ));
+            }
+            Some(secret)
+        }
+        None => None,
+    };
+    Ok(Ok(McpOAuthSettings {
+        client_id: raw.client_id,
+        client_secret,
+        scopes: raw.scopes,
+        callback_port: raw.callback_port,
+        issuer: raw.issuer,
+        token_endpoint_auth_method,
+    }))
+}
+
+/// `table` (`env` or `headers`) with each `${NAME}` expanded, or `Err`
+/// inside naming the setting and the variable when one is not set (with a
+/// warning).
+fn expand_table(
+    name: &str,
+    table: &str,
+    raw: BTreeMap<String, String>,
+    env: &dyn Fn(&str) -> Option<String>,
+    warnings: &mut Vec<String>,
+) -> Result<Result<BTreeMap<String, String>, McpDisabled>, String> {
+    let mut expanded = BTreeMap::new();
+    for (key, value) in raw {
+        match expand_variables(&value, env) {
+            Ok(value) => {
+                expanded.insert(key, value);
+            }
+            Err(Expansion::Missing(missing)) => {
+                warnings.push(format!(
+                    "mcp.servers.{name}.{table}.{key}: ${{{missing}}} is not set, so the {name} server is not started"
+                ));
+                return Ok(Err(McpDisabled::UnsetVariable {
+                    setting: format!("{table}.{key}"),
+                    variable: missing,
+                }));
+            }
+            Err(Expansion::Malformed) => {
+                return Err(format!(
+                    "mcp.servers.{name}.{table}.{key}: '${{' must be followed by a variable name and '}}'"
+                ));
+            }
+        }
+    }
+    Ok(Ok(expanded))
+}
+
+/// A TOML error by its place, with what it quotes of the file blanked
+/// out: the full error repeats the line, and a line may hold a token
+/// written in the file.
+fn toml_error(text: &str, err: &toml::de::Error) -> String {
+    let place = err
+        .span()
+        .and_then(|span| text.get(..span.start))
+        .map(|before| {
+            let line = before.matches('\n').count() + 1;
+            let start = before.rsplit('\n').next().unwrap_or("");
+            let column = start.chars().count() + 1;
+            // The key before the value names the setting; keys are not
+            // secrets, values may be.
+            let key = start
+                .rsplit_once('=')
+                .map(|(key, _)| key)
+                .and_then(|key| key.rsplit(['{', ',']).next())
+                .map(|key| key.trim().trim_matches('"'))
+                .filter(|key| {
+                    !key.is_empty()
+                        && key
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                });
+            match key {
+                Some(key) => format!("line {line}, column {column} ({key}): "),
+                None => format!("line {line}, column {column}: "),
+            }
+        })
+        .unwrap_or_default();
+    // A type error quotes the value it found, as `string "..."`.
+    let mut message = String::new();
+    let mut quoted = false;
+    for c in err.message().trim().chars() {
+        match c {
+            '"' if quoted => {
+                message.push_str("…\"");
+                quoted = false;
+            }
+            '"' => {
+                message.push('"');
+                quoted = true;
+            }
+            _ if quoted => {}
+            c => message.push(c),
+        }
+    }
+    if quoted {
+        message.push('…');
+    }
+    format!("{place}{message}")
+}
+
+enum Expansion {
+    Missing(String),
+    Malformed,
+}
+
+/// `value` with each `${NAME}` replaced by the variable's value. Any other
+/// `$` stays as written.
+fn expand_variables(
+    value: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, Expansion> {
+    let mut expanded = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find('}').ok_or(Expansion::Malformed)?;
+        let variable = &after[..end];
+        let valid = !variable.is_empty()
+            && variable
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            return Err(Expansion::Malformed);
+        }
+        expanded.push_str(&env(variable).ok_or_else(|| Expansion::Missing(variable.into()))?);
+        rest = &after[end + 1..];
+    }
+    expanded.push_str(rest);
+    Ok(expanded)
 }
 
 /// `.` and `..` resolved without touching the filesystem.
@@ -834,6 +1686,695 @@ mod tests {
     }
 
     #[test]
+    fn mcp_servers_are_parsed_with_their_variables_expanded() {
+        let text = r#"
+[mcp.servers.github]
+command = ["github-mcp-server", "stdio"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}", MODE = "read-$only" }
+allow = ["get_issue"]
+
+[mcp.servers.time]
+command = ["/usr/local/bin/uvx", "mcp-server-time"]
+tool_timeout_secs = 30
+
+[mcp.servers.off]
+command = ["off"]
+enabled = false
+"#;
+        let env = |name: &str| (name == "GITHUB_TOKEN").then(|| "ghp_x".to_string());
+        let (settings, warnings) = Settings::parse(text, None, &env).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            settings.mcp_servers,
+            [
+                McpServerSettings {
+                    name: "github".into(),
+                    transport: McpTransportSettings::Stdio {
+                        command: vec!["github-mcp-server".into(), "stdio".into()],
+                        env: BTreeMap::from([
+                            ("GITHUB_PERSONAL_ACCESS_TOKEN".into(), "ghp_x".into()),
+                            ("MODE".into(), "read-$only".into()),
+                        ]),
+                        sandbox: None,
+                    },
+                    allow: vec!["get_issue".into()],
+                    tool_timeout: Duration::from_secs(600),
+                },
+                McpServerSettings {
+                    name: "time".into(),
+                    transport: McpTransportSettings::Stdio {
+                        command: vec!["/usr/local/bin/uvx".into(), "mcp-server-time".into()],
+                        env: BTreeMap::new(),
+                        sandbox: None,
+                    },
+                    allow: Vec::new(),
+                    tool_timeout: Duration::from_secs(30),
+                },
+            ]
+        );
+        assert_eq!(
+            settings.mcp_disabled,
+            [DisabledMcpServer {
+                name: "off".into(),
+                transport: McpServerTransport::Local {
+                    program: "off".into(),
+                    sandboxed: false,
+                },
+                reason: McpDisabled::Setting,
+            }]
+        );
+        let summary = settings.summary();
+        assert!(
+            summary.contains(
+                &"MCP server github runs on the host, outside the sandbox: github-mcp-server"
+                    .to_string()
+            ),
+            "{summary:?}"
+        );
+        assert!(
+            Settings::from_toml("", None)
+                .unwrap()
+                .0
+                .mcp_servers
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_mcp_server_whose_variable_is_unset_is_skipped_with_a_warning() {
+        let text = "[mcp.servers.github]\ncommand = [\"gh-mcp\"]\nenv = { TOKEN = \"${GITHUB_TOKEN}\" }\n[mcp.servers.time]\ncommand = [\"time-mcp\"]";
+        let (settings, warnings) = Settings::from_toml(text, None).unwrap();
+        assert_eq!(settings.mcp_servers.len(), 1);
+        assert_eq!(settings.mcp_servers[0].name, "time");
+        assert_eq!(
+            settings.mcp_disabled,
+            [DisabledMcpServer {
+                name: "github".into(),
+                transport: McpServerTransport::Local {
+                    program: "gh-mcp".into(),
+                    sandboxed: false,
+                },
+                reason: McpDisabled::UnsetVariable {
+                    setting: "env.TOKEN".into(),
+                    variable: "GITHUB_TOKEN".into(),
+                },
+            }]
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("${GITHUB_TOKEN} is not set")
+                && warnings[0].contains("github server is not started"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_remote_mcp_server_has_a_url_and_headers_whose_values_stay_hidden() {
+        let text = r#"
+[mcp.servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+headers = { Authorization = "Bearer ${GITHUB_TOKEN}", X-Toolsets = "repos" }
+allow = ["get_issue"]
+
+[mcp.servers.local]
+url = "http://127.0.0.1:8931/mcp"
+"#;
+        let env = |name: &str| (name == "GITHUB_TOKEN").then(|| "ghp_secret".to_string());
+        let (settings, warnings) = Settings::parse(text, None, &env).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            settings.mcp_servers[0].transport,
+            McpTransportSettings::Http {
+                // Kept as written: the trailing slash is part of the endpoint.
+                url: "https://api.githubcopilot.com/mcp/".into(),
+                headers: BTreeMap::from([
+                    ("Authorization".into(), "Bearer ghp_secret".into()),
+                    ("X-Toolsets".into(), "repos".into()),
+                ]),
+                oauth: None,
+            }
+        );
+        assert_eq!(settings.mcp_servers[0].allow, ["get_issue"]);
+        assert_eq!(
+            settings.summary(),
+            [
+                "MCP server github is remote: https://api.githubcopilot.com/mcp/ (headers: Authorization, X-Toolsets)",
+                "MCP server local is remote: http://127.0.0.1:8931/mcp",
+            ]
+        );
+        let shown = format!("{settings:?}");
+        assert!(shown.contains("Authorization"), "{shown}");
+        assert!(!shown.contains("ghp_secret"), "{shown}");
+    }
+
+    #[test]
+    fn a_remote_mcp_server_may_name_an_oauth_client_whose_secret_stays_hidden() {
+        let text = r#"
+[mcp.servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+oauth = { client_id = "Iv1.abc", client_secret = "${GITHUB_SECRET}", issuer = "https://github.com/login/oauth", token_endpoint_auth_method = "client_secret_post", scopes = ["repo", "read:org"], callback_port = 8976 }
+
+[mcp.servers.linear]
+url = "https://mcp.linear.app/mcp"
+oauth = {}
+"#;
+        let env = |name: &str| (name == "GITHUB_SECRET").then(|| "gh-client-s3cret".to_string());
+        let (settings, warnings) = Settings::parse(text, None, &env).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let McpTransportSettings::Http { oauth, .. } = &settings.mcp_servers[0].transport else {
+            unreachable!("a url server");
+        };
+        assert_eq!(
+            oauth.as_ref().unwrap(),
+            &McpOAuthSettings {
+                client_id: Some("Iv1.abc".into()),
+                client_secret: Some("gh-client-s3cret".into()),
+                scopes: vec!["repo".into(), "read:org".into()],
+                callback_port: Some(8976),
+                issuer: Some("https://github.com/login/oauth".into()),
+                token_endpoint_auth_method: Some(ClientAuth::ClientSecretPost),
+            }
+        );
+        assert_eq!(
+            settings.summary(),
+            [
+                "MCP server github is remote: https://api.githubcopilot.com/mcp/ (OAuth client: Iv1.abc)",
+                "MCP server linear is remote: https://mcp.linear.app/mcp",
+            ]
+        );
+        let shown = format!("{settings:?}");
+        assert!(shown.contains("Iv1.abc"), "{shown}");
+        assert!(!shown.contains("s3cret"), "{shown}");
+
+        // An unset secret skips the server, like a header.
+        let (settings, warnings) = Settings::from_toml(text, None).unwrap();
+        assert_eq!(settings.mcp_servers.len(), 1);
+        assert_eq!(
+            settings.mcp_disabled[0].reason,
+            McpDisabled::UnsetVariable {
+                setting: "oauth.client_secret".into(),
+                variable: "GITHUB_SECRET".into(),
+            }
+        );
+        assert_eq!(
+            warnings,
+            [
+                "mcp.servers.github.oauth.client_secret: ${GITHUB_SECRET} is not set, so the github server is not started"
+            ]
+        );
+        let env = |_: &str| Some("two words s3cret".to_string());
+        let err = Settings::parse(text, None, &env).unwrap_err();
+        assert!(
+            err.contains("oauth.client_secret must be printable"),
+            "{err}"
+        );
+        assert!(!err.contains("s3cret"), "{err}");
+    }
+
+    #[test]
+    fn a_remote_mcp_server_whose_header_variable_is_unset_is_skipped_with_a_warning() {
+        let text = "[mcp.servers.github]\nurl = \"https://a.example/mcp\"\nheaders = { Authorization = \"Bearer ${GITHUB_TOKEN}\" }";
+        let (settings, warnings) = Settings::from_toml(text, None).unwrap();
+        assert!(settings.mcp_servers.is_empty());
+        assert_eq!(
+            warnings,
+            [
+                "mcp.servers.github.headers.Authorization: ${GITHUB_TOKEN} is not set, so the github server is not started"
+            ]
+        );
+        // A value that is no header value is an error that does not repeat it.
+        let env = |_: &str| Some("secret\nX-Injected: 1".to_string());
+        let err = Settings::parse(text, None, &env).unwrap_err();
+        assert!(
+            err.contains(
+                "mcp.servers.github.headers.Authorization: the value is not a valid header value"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("secret"), "{err}");
+        let disabled = format!("{text}\nenabled = false");
+        assert!(Settings::from_toml(&disabled, None).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_config_is_reported_by_place_without_repeating_its_values() {
+        for (text, place) in [
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = { Authorization = \"Bearer s3cret-literal }\n",
+                "line 3, column 53 (Authorization): ",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = \"Authorization: Bearer s3cret-literal\"\n",
+                "line 3, column 11 (headers): ",
+            ),
+        ] {
+            let err = Settings::from_toml(text, None).unwrap_err();
+            assert!(!err.contains("s3cret"), "{err}");
+            assert!(err.starts_with(place), "{err}");
+        }
+    }
+
+    #[test]
+    fn malformed_mcp_servers_are_errors() {
+        for (text, expected) in [
+            (
+                "[mcp.servers.\"a b\"]\ncommand = [\"x\"]",
+                "mcp.servers.a b: a server name",
+            ),
+            (
+                "[mcp.servers.a__b]\ncommand = [\"x\"]",
+                "mcp.servers.a__b: a server name",
+            ),
+            (
+                &format!("[mcp.servers.{}]\ncommand = [\"x\"]", "a".repeat(33)),
+                "a server name",
+            ),
+            ("[mcp.servers.a_]\ncommand = [\"x\"]", "not ending in '_'"),
+            ("[mcp.servers.x]\ncommand = []", "mcp.servers.x.command"),
+            (
+                "[mcp.servers.x]\ncommand = [\"./server\"]",
+                "'./server' must be an absolute path",
+            ),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\ntool_timeout_secs = 0",
+                "mcp.servers.x.tool_timeout_secs",
+            ),
+            ("[mcp.servers.x]\nenv = {}", "needs exactly one of command"),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\nurl = \"https://a.example/mcp\"",
+                "needs exactly one of command",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nenv = {}",
+                "mcp.servers.x.env applies only to a server with command",
+            ),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\nheaders = { A = \"b\" }",
+                "mcp.servers.x.headers applies only to a server with url",
+            ),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\noauth = {}",
+                "mcp.servers.x.oauth applies only to a server with url",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_secret = \"s\" }",
+                "mcp.servers.x.oauth.client_secret needs client_id",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_id = \"a b\" }",
+                "mcp.servers.x.oauth.client_id",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { scopes = [\"a b\"] }",
+                "mcp.servers.x.oauth.scopes: 'a b' is not a scope",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_id = \"c\", client_secret = \"s\" }",
+                "oauth.client_secret needs issuer",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_id = \"c\", token_endpoint_auth_method = \"client_secret_post\" }",
+                "oauth.token_endpoint_auth_method needs client_secret",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_id = \"c\", client_secret = \"s\", issuer = \"https://a.example\", token_endpoint_auth_method = \"private_key_jwt\" }",
+                "'private_key_jwt' is not client_secret_basic",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { client_id = \"c\", client_secret = \"s\", issuer = \"http://a.example\" }",
+                "mcp.servers.x.oauth.issuer must use https",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { callback_port = 0 }",
+                "mcp.servers.x.oauth.callback_port must be 1 to 65535",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { callback_port = 70000 }",
+                "callback_port",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\noauth = { scope = [] }",
+                "unknown field",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"http://a.example/mcp\"",
+                "mcp.servers.x.url must use https (http only for localhost)",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"ftp://127.0.0.1/mcp\"",
+                "mcp.servers.x.url must use https",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp?key=1\"",
+                "mcp.servers.x.url must not contain a query",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://u:p@a.example/mcp\"",
+                "mcp.servers.x.url must not contain credentials",
+            ),
+            ("[mcp.servers.x]\nurl = \"not a url\"", "invalid url"),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = { \"a b\" = \"c\" }",
+                "mcp.servers.x.headers: 'a b' is not a header name",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = { Mcp-Session-Id = \"c\" }",
+                "Socium sets 'Mcp-Session-Id' itself",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheaders = { A = \"${B\" }",
+                "mcp.servers.x.headers.A",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nheader = {}",
+                "unknown field",
+            ),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\nalow = []",
+                "unknown field",
+            ),
+            ("[mcp]\nserver = {}", "unknown field"),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\nenv = { A = \"${B\" }",
+                "mcp.servers.x.env.A",
+            ),
+            (
+                "[mcp.servers.x]\ncommand = [\"x\"]\nallow = [\"\"]",
+                "mcp.servers.x.allow",
+            ),
+        ] {
+            let err = Settings::from_toml(text, None).unwrap_err();
+            assert!(err.contains(expected), "{text}: {err}");
+        }
+    }
+
+    /// A lookup with only HOME, as `Settings::load` gets, so the
+    /// configuration directory is `<home>/.config/socium`.
+    fn lookup_home(home: &Path) -> impl Fn(&str) -> Option<String> + use<> {
+        let home = home.display().to_string();
+        move |name: &str| (name == "HOME").then(|| home.clone())
+    }
+
+    #[test]
+    fn a_sandboxed_mcp_server_has_its_own_read_only_directories_and_no_host_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let link = home.path().join("tools-link");
+        std::os::unix::fs::symlink(tools.path(), &link).unwrap();
+        let text = format!(
+            r#"
+[sandbox]
+read_only = ["{shared}"]
+[sandbox.env]
+SHARED = "for commands"
+
+[mcp.servers.astgrep]
+command = ["astgrep-mcp", "--stdio"]
+sandbox = "read-only"
+read_only = ["~/tools-link", "{tools}", "~/missing"]
+env = {{ ASTGREP_TOKEN = "${{ASTGREP_TOKEN}}", MODE = "plain" }}
+
+[mcp.servers.off]
+command = ["off-mcp"]
+sandbox = "read-only"
+enabled = false
+
+[mcp.servers.host]
+command = ["host-mcp"]
+"#,
+            shared = shared.path().display(),
+            tools = tools.path().display(),
+        );
+        let lookup = lookup_home(home.path());
+        let env = |name: &str| match name {
+            "ASTGREP_TOKEN" => Some("sk-sandboxed-secret".to_string()),
+            other => lookup(other),
+        };
+        let (settings, warnings) =
+            Settings::parse(&text, Some(home.path().to_str().unwrap()), &env).unwrap();
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("mcp.servers.astgrep.read_only: '~/missing' does not exist"),
+            "{warnings:?}"
+        );
+        let astgrep = &settings.mcp_servers[0];
+        let tools = tools.path().canonicalize().unwrap();
+        assert_eq!(
+            astgrep.transport,
+            McpTransportSettings::Stdio {
+                command: vec!["astgrep-mcp".into(), "--stdio".into()],
+                env: BTreeMap::from([
+                    ("ASTGREP_TOKEN".into(), "sk-sandboxed-secret".into()),
+                    ("MODE".into(), "plain".into()),
+                ]),
+                sandbox: Some(McpSandboxSettings {
+                    read_only: vec![
+                        ReadOnlyMount {
+                            source: tools.clone(),
+                            alias: Some(link),
+                        },
+                        ReadOnlyMount {
+                            source: tools.clone(),
+                            alias: None,
+                        },
+                    ],
+                }),
+            }
+        );
+        // `[sandbox]` stays with commands.
+        assert_eq!(settings.sandbox.read_only.len(), 1);
+        assert_eq!(settings.sandbox.env.len(), 1);
+        assert!(settings.is_sandboxed_mcp_server("astgrep"));
+        assert!(settings.is_sandboxed_mcp_server("off"));
+        assert!(!settings.is_sandboxed_mcp_server("host"));
+        assert!(!settings.is_sandboxed_mcp_server("unknown"));
+        assert_eq!(
+            settings.mcp_disabled[0].transport,
+            McpServerTransport::Local {
+                program: "off-mcp".into(),
+                sandboxed: true,
+            }
+        );
+
+        let summary = settings.summary();
+        let line = summary
+            .iter()
+            .find(|line| line.starts_with("MCP server astgrep "))
+            .unwrap();
+        for part in [
+            "runs in a read-only sandbox and its tools run without asking: astgrep-mcp",
+            "files matching approval.sensitive when it started are hidden",
+            ".git, a linked worktree's main Git directory and secrets created after it started are not hidden",
+            "no network",
+            "neither your home directory nor the [sandbox] settings",
+            &format!("and reads {}", tools.display()),
+            "goes to the model provider",
+        ] {
+            assert!(line.contains(part), "{part}: {line}");
+        }
+        assert!(
+            summary.contains(
+                &"MCP server host runs on the host, outside the sandbox: host-mcp".to_string()
+            ),
+            "{summary:?}"
+        );
+        // Values are never shown, though the names are.
+        let shown = format!("{summary:?} {:?}", settings.mcp_servers);
+        assert!(!shown.contains("sk-sandboxed-secret"), "{shown}");
+        assert!(!shown.contains("plain"), "{shown}");
+        assert!(shown.contains("ASTGREP_TOKEN"), "{shown}");
+    }
+
+    #[test]
+    fn a_sandboxed_mcp_server_refuses_what_it_cannot_honor() {
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_str().unwrap();
+        let config = home.path().join(".config/socium");
+        std::fs::create_dir_all(&config).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let config_link = elsewhere.path().join("socium-config");
+        std::os::unix::fs::symlink(&config, &config_link).unwrap();
+        let ancestor = elsewhere.path().display().to_string();
+        let server = "[mcp.servers.x]\ncommand = [\"x\"]\n";
+        let sandboxed = format!("{server}sandbox = \"read-only\"\n");
+        for (text, expected) in [
+            (
+                format!("{server}sandbox = \"read-write\""),
+                "mcp.servers.x.sandbox must be \"read-only\" or left out; got 'read-write'",
+            ),
+            (
+                format!("{server}sandbox = \"\""),
+                "mcp.servers.x.sandbox must be \"read-only\"",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nsandbox = \"read-only\"".into(),
+                "mcp.servers.x.sandbox applies only to a server with command",
+            ),
+            (
+                format!("{sandboxed}allow = [\"search\"]"),
+                "mcp.servers.x: sandbox and allow cannot be combined",
+            ),
+            // ADR 33: the two are not written together, even when empty.
+            (
+                format!("{sandboxed}allow = []"),
+                "mcp.servers.x: sandbox and allow cannot be combined",
+            ),
+            (
+                format!("{sandboxed}headers = {{ A = \"b\" }}"),
+                "mcp.servers.x.headers applies only to a server with url",
+            ),
+            (
+                format!("{sandboxed}oauth = {{}}"),
+                "mcp.servers.x.oauth applies only to a server with url",
+            ),
+            (
+                format!("{server}read_only = [\"/usr\"]"),
+                "mcp.servers.x.read_only applies only with sandbox = \"read-only\"",
+            ),
+            (
+                "[mcp.servers.x]\nurl = \"https://a.example/mcp\"\nread_only = [\"/usr\"]".into(),
+                "mcp.servers.x.read_only applies only with sandbox",
+            ),
+            (
+                format!("{sandboxed}read_only = [\"/\"]"),
+                "mcp.servers.x.read_only: '/' would expose the whole filesystem",
+            ),
+            (
+                format!("{sandboxed}read_only = [\"~\"]"),
+                "mcp.servers.x.read_only: '~' is the home directory",
+            ),
+            (
+                format!(
+                    "{sandboxed}read_only = [\"{}\"]",
+                    home.path().parent().unwrap().display()
+                ),
+                "is the home directory or contains it",
+            ),
+            (
+                format!("{sandboxed}read_only = [\"/proc\"]"),
+                "overlaps a path the sandbox provides",
+            ),
+            (
+                format!("{sandboxed}read_only = [\"/run\", \"/tmp\"]"),
+                // The temporary home is in /tmp, which is refused either way.
+                "mcp.servers.x.read_only: '/tmp' is",
+            ),
+            (
+                format!("{sandboxed}read_only = [\"tools\"]"),
+                "'tools' must be an absolute path",
+            ),
+            (
+                format!("{sandboxed}read_only = [\"~/.config/socium\"]"),
+                "overlaps Socium's configuration or MCP tokens",
+            ),
+            (
+                format!("{sandboxed}read_only = [\"~/.config\"]"),
+                "overlaps Socium's configuration or MCP tokens",
+            ),
+            // Through a link, the target counts.
+            (
+                format!("{sandboxed}read_only = [\"{}\"]", config_link.display()),
+                "overlaps Socium's configuration or MCP tokens",
+            ),
+            (
+                format!(
+                    "{sandboxed}read_only = [\"{ancestor}\"]\n[mcp.servers.y]\ncommand = [\"y\"]"
+                ),
+                "",
+            ),
+            (
+                format!("{sandboxed}env = {{ PATH = \"/s3cret-path\" }}"),
+                "mcp.servers.x.env: PATH is set by the sandbox",
+            ),
+            (
+                format!("{sandboxed}env = {{ HOME = \"s3cret\" }}"),
+                "mcp.servers.x.env: HOME is set by the sandbox",
+            ),
+            (
+                format!("{sandboxed}env = {{ TMPDIR = \"s3cret\" }}"),
+                "mcp.servers.x.env: TMPDIR is set by the sandbox",
+            ),
+            (
+                format!("{sandboxed}env = {{ GIT_DIR = \"s3cret\" }}"),
+                "mcp.servers.x.env: GIT_DIR would change Git's configuration isolation",
+            ),
+            (
+                format!("{sandboxed}env = {{ lower = \"s3cret\" }}"),
+                "mcp.servers.x.env: lower must be an upper-case variable name",
+            ),
+            (format!("{sandboxed}read_olny = []"), "unknown field"),
+        ] {
+            let lookup = lookup_home(home.path());
+            let result = Settings::parse(&text, Some(home_str), &lookup);
+            if expected.is_empty() {
+                // A directory that holds a link to the configuration does
+                // not hold the configuration.
+                result.unwrap();
+                continue;
+            }
+            let err = result.unwrap_err();
+            assert!(err.contains(expected), "{text}: {err}");
+            assert!(!err.contains("s3cret"), "{text}: {err}");
+        }
+        // The same names are fine for a host server, which ADR 29 governs.
+        let lookup = lookup_home(home.path());
+        Settings::parse(
+            &format!("{server}env = {{ PATH = \"/x\", lower = \"y\" }}"),
+            Some(home_str),
+            &lookup,
+        )
+        .unwrap();
+    }
+
+    /// The workspace is known only at startup, where the server is refused
+    /// with this reason rather than started.
+    #[test]
+    fn a_sandboxed_read_only_directory_must_not_overlap_the_workspace_or_configuration() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(workspace.join(".socium/scratch")).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".config/socium")).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let link = other.path().join("project-link");
+        std::os::unix::fs::symlink(&workspace, &link).unwrap();
+        let lookup = lookup_home(home.path());
+        let mount = |path: &Path| ReadOnlyMount {
+            source: path.canonicalize().unwrap(),
+            alias: None,
+        };
+        let refusal = |mount: &ReadOnlyMount| mcp_mount_refusal(mount, Some(&workspace), &lookup);
+        for (mount, expected) in [
+            (mount(&workspace), "overlaps the workspace"),
+            (mount(parent.path()), "overlaps the workspace"),
+            (mount(&workspace.join("src")), "overlaps the workspace"),
+            (
+                mount(&workspace.join(".socium/scratch")),
+                "overlaps the workspace",
+            ),
+            // A link to the workspace is the workspace.
+            (
+                ReadOnlyMount {
+                    source: workspace.canonicalize().unwrap(),
+                    alias: Some(link.clone()),
+                },
+                "overlaps the workspace",
+            ),
+            (
+                mount(&home.path().join(".config/socium")),
+                "overlaps Socium's configuration",
+            ),
+        ] {
+            let reason = refusal(&mount).unwrap_or_else(|| panic!("{mount:?} was accepted"));
+            assert!(reason.contains(expected), "{reason}");
+        }
+        assert_eq!(refusal(&mount(other.path())), None);
+    }
+
+    #[test]
     fn the_example_file_is_valid() {
         let home = tempfile::tempdir().unwrap();
         for dir in [".cargo/registry", ".cargo/git", ".rustup"] {
@@ -973,6 +2514,16 @@ deny = ["git  push"]
         let project = home.path().join("project");
         std::fs::create_dir(&project).unwrap();
         ensure_config_outside(&project, &lookup).unwrap();
+        // The MCP token store counts too.
+        let state = project.join("state").to_str().unwrap().to_string();
+        let home_str = home.path().to_str().unwrap().to_string();
+        let lookup = move |key: &str| match key {
+            "HOME" => Some(home_str.clone()),
+            "XDG_STATE_HOME" => Some(state.clone()),
+            _ => None,
+        };
+        let err = ensure_config_outside(&project, &lookup).unwrap_err();
+        assert!(err.to_string().contains("mcp-auth"), "{err}");
     }
 
     #[cfg(unix)]

@@ -38,6 +38,9 @@ pub(crate) struct ExecutionPolicy {
     pub hidden: Vec<PathBuf>,
     /// Workspace paths a command nobody reviewed cannot change.
     pub frozen: Vec<PathBuf>,
+    /// Whether the program may be one in the workspace. A sandboxed MCP
+    /// server's may not: the model could have written it (ADR 33).
+    pub workspace_programs: bool,
 }
 
 impl ExecutionPolicy {
@@ -55,6 +58,7 @@ impl ExecutionPolicy {
             env: Vec::new(),
             hidden: Vec::new(),
             frozen: Vec::new(),
+            workspace_programs: true,
         })
     }
 

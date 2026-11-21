@@ -725,6 +725,11 @@ impl App {
                 );
                 self.status = Some("Subagents".to_string());
             }
+            SlashAction::Mcp => {
+                let servers = self.agent_mut()?.mcp_servers();
+                self.push_message(Speaker::System, crate::mcp_status::servers_text(&servers));
+                self.status = Some("MCP servers".to_string());
+            }
             SlashAction::Undo => {
                 let message = match self.agent_mut()?.undo(argument.as_deref()) {
                     Ok(paths) => format!("Undid the last edit of {}", paths.join(", ")),

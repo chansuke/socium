@@ -767,6 +767,146 @@ fn a_gitfile_that_is_not_a_real_linked_worktree_is_refused() {
     }
 }
 
+/// A worktree inside its main checkout's Git directory: that directory,
+/// mounted after the workspace, would cover `.socium` and the hidden files.
+#[test]
+fn a_linked_worktree_inside_its_common_git_dir_is_refused() {
+    let parent = tempfile::tempdir().unwrap();
+    let main = parent.path().join("main");
+    fs::create_dir(&main).unwrap();
+    crate::test_support::init_git_repo(&main);
+    let inner = main.join(".git/inner");
+    crate::test_support::run_git(
+        &main,
+        &["worktree", "add", "-b", "feature", inner.to_str().unwrap()],
+    );
+    let policy = ExecutionPolicy::new(&inner, WorkspaceAccess::ReadOnly).unwrap();
+    let err = SandboxExecutor::command(&policy, &["true".into()], &inner).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("its metadata is inside the worktree or contains it"),
+        "{err}"
+    );
+}
+
+/// `gitdir` and `commondir` are read without waiting: a FIFO there with no
+/// writer fails at once instead of stalling the start.
+#[test]
+fn a_fifo_in_linked_worktree_metadata_fails_without_waiting() {
+    for file in ["gitdir", "commondir"] {
+        let parent = tempfile::tempdir().unwrap();
+        let main = parent.path().join("main");
+        fs::create_dir(&main).unwrap();
+        crate::test_support::init_git_repo(&main);
+        let linked = parent.path().join("linked");
+        crate::test_support::run_git(
+            &main,
+            &["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
+        );
+        let metadata = main.join(".git/worktrees/linked").join(file);
+        fs::remove_file(&metadata).unwrap();
+        crate::test_support::make_fifo(&metadata);
+        let policy = ExecutionPolicy::new(&linked, WorkspaceAccess::ReadOnly).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = SandboxExecutor::command(&policy, &["true".into()], &linked)
+                .map(drop)
+                .map_err(|err| err.to_string());
+            let _ = sent.send(result);
+        });
+        let err = received
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("{file}: the start waited on the FIFO"))
+            .unwrap_err();
+        assert!(err.contains("linked worktree"), "{file}: {err}");
+    }
+}
+
+/// A read_only directory is mounted from a descriptor opened when the
+/// command is set up: a link swapped in for it afterwards, before the
+/// sandbox starts, changes nothing the command sees, and one swapped in
+/// before is refused.
+#[test]
+fn a_read_only_directory_swapped_for_a_link_mounts_what_was_checked() {
+    let root = tempfile::tempdir().unwrap();
+    let outer = tempfile::tempdir().unwrap();
+    let secret = tempfile::tempdir().unwrap();
+    fs::write(secret.path().join("canary"), "secret\n").unwrap();
+    let source = outer.path().canonicalize().unwrap().join("tools");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("canary"), "tools\n").unwrap();
+    let mut policy = ExecutionPolicy::new(root.path(), WorkspaceAccess::ReadOnly).unwrap();
+    policy.read_only = vec![ReadOnlyMount {
+        source: source.clone(),
+        alias: None,
+    }];
+    let argv = vec![
+        "cat".to_string(),
+        source.join("canary").display().to_string(),
+    ];
+    let mut command = SandboxExecutor::command(&policy, &argv, root.path()).unwrap();
+
+    fs::rename(&source, outer.path().join("before")).unwrap();
+    symlink(secret.path(), &source).unwrap();
+    let output = command.output().unwrap();
+
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "tools\n");
+    let err = SandboxExecutor::command(&policy, &argv, root.path()).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("changed since the settings were read"),
+        "{err}"
+    );
+}
+
+/// Without workspace programs, as for a sandboxed MCP server, no way of
+/// naming one reaches the workspace: a relative or absolute path, or a
+/// name on PATH or a path in a read_only directory that links there.
+/// Commands still run them.
+#[test]
+fn a_policy_without_workspace_programs_refuses_every_way_into_the_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().canonicalize().unwrap();
+    let script = workspace.join("tool.sh");
+    fs::write(&script, "#!/bin/sh\necho ran\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let tools = tempfile::tempdir().unwrap();
+    let tools = tools.path().canonicalize().unwrap();
+    symlink(&script, tools.join("tool")).unwrap();
+    let mut policy = ExecutionPolicy::new(root.path(), WorkspaceAccess::ReadOnly).unwrap();
+    policy.read_only = vec![ReadOnlyMount {
+        source: tools.clone(),
+        alias: None,
+    }];
+    policy.path = vec![tools.clone()];
+    for argv in [&["tool"][..], &["./tool.sh"]] {
+        success(run_with(&policy, root.path(), argv, 5));
+    }
+
+    policy.workspace_programs = false;
+
+    for name in [
+        "tool".to_string(),
+        "./tool.sh".into(),
+        script.display().to_string(),
+        tools.join("tool").display().to_string(),
+    ] {
+        let err = SandboxExecutor::command(&policy, std::slice::from_ref(&name), root.path())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("is in neither a system runtime"),
+            "{name}: {err}"
+        );
+    }
+    let err = SandboxExecutor::command(&policy, &["socium-no-such-program".into()], root.path())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("not found in system runtime PATH") && !err.contains("./"),
+        "{err}"
+    );
+}
+
 /// Names in `dir` as the sandbox lists them.
 fn sandbox_listing(root: &Path, dir: &str) -> BTreeSet<String> {
     let output = run(root, WorkspaceAccess::Write, &["ls", "-1A", dir]);

@@ -72,3 +72,54 @@ profile = "full"
 # API with the key in DEEPSEEK_API_KEY; each search with results is billed.
 # Off unless set to true.
 enabled = false
+
+# MCP servers whose tools the model may call. A table has either `command`,
+# a local server started over stdio when Socium starts, or `url`, a remote
+# server reached over Streamable HTTP. A local server runs on the host,
+# outside the sandbox, with `/` as its directory; configure only servers you
+# trust. It gets PATH (without the workspace), HOME, USER, LANG and its
+# `env`, where ${NAME} is read from Socium's environment (an unset variable
+# keeps the server from starting). Tool calls ask unless the tool is listed
+# in `allow`, and are given up after `tool_timeout_secs` (default 600). Tools
+# reach the model as mcp__<server>__<tool>.
+# [mcp.servers.github]
+# command = ["github-mcp-server", "stdio"]
+# env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }
+# allow = ["get_issue"]
+# tool_timeout_secs = 600
+# enabled = true
+#
+# A remote server receives the arguments of every call to its tools and the
+# `headers`, expanded like `env`; keep tokens in your environment. The url
+# must use https (http only for localhost). A server that needs OAuth is
+# logged in to once with `socium mcp login <name>`; the token is kept in
+# ~/.local/state/socium/mcp-auth/, outside every workspace. An Authorization
+# header, when configured, is sent instead of that token.
+# [mcp.servers.github-remote]
+# url = "https://api.githubcopilot.com/mcp/"
+# headers = { Authorization = "Bearer ${GITHUB_TOKEN}" }
+# allow = ["get_issue"]
+#
+# `oauth` is only for a client registered ahead of time (GitHub's server, for
+# one, does not register clients itself). client_secret is expanded like
+# headers and needs issuer, the authorization server the client belongs to, as
+# the server's /.well-known/oauth-protected-resource lists it; callback_port
+# fixes the redirect URI http://127.0.0.1:<port>/callback.
+# [mcp.servers.linear]
+# url = "https://mcp.linear.app/mcp"
+# oauth = { client_id = "my-client", client_secret = "${LINEAR_CLIENT_SECRET}", issuer = "https://mcp.linear.app", scopes = ["read"], callback_port = 8976 }
+#
+# `sandbox = "read-only"` runs a local server in Socium's sandbox instead of
+# on the host: it reads the workspace from its root, without network, your
+# home directory or the [sandbox] table, and with the files matching
+# approval.sensitive at its start hidden (not .git, a linked worktree's
+# main Git directory, or secrets created later). Its tools run without
+# asking, so it takes no `allow`, and what they return goes to the model
+# provider. Its program must be in a system runtime such as /nix/store, or
+# in its own `read_only` directories, which may not overlap the workspace or
+# this configuration.
+# `env` names follow the rules of sandbox.env.
+# [mcp.servers.astgrep]
+# command = ["astgrep-mcp"]
+# sandbox = "read-only"
+# read_only = ["/opt/astgrep-rules"]
