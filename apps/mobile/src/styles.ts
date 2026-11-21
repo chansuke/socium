@@ -9,6 +9,8 @@ export const palette = {
   mint: "#a8eacb",
 };
 
+const monospace = Platform.OS === "ios" ? "Menlo" : "monospace";
+
 export const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: palette.background },
   flex: { flex: 1 },
@@ -29,7 +31,7 @@ export const styles = StyleSheet.create({
   message: { padding: 9, gap: 5 },
   messagePanel: { borderColor: palette.edge, borderWidth: 1, borderRadius: 10, backgroundColor: palette.panel },
   body: { color: palette.text, fontSize: 16, lineHeight: 24 },
-  code: { color: palette.text, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 13, lineHeight: 19 },
+  code: { color: palette.text, fontFamily: monospace, fontSize: 13, lineHeight: 19 },
   composerArea: { padding: 9, gap: 6, borderTopColor: palette.edge, borderTopWidth: 1 },
   composer: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
   prompt: { flex: 1, maxHeight: 110, textAlignVertical: "top" },
@@ -42,4 +44,26 @@ export const styles = StyleSheet.create({
   primary: { backgroundColor: palette.mint, borderColor: palette.mint },
   primaryText: { color: "#10251b", fontSize: 14, fontWeight: "700" },
   dim: { opacity: 0.5 },
+});
+
+export const markdownStyles = StyleSheet.create({
+  document: { gap: 9 },
+  paragraph: { color: palette.text, fontSize: 16, lineHeight: 24 },
+  heading: { color: palette.text, fontWeight: "700", letterSpacing: -0.3, marginTop: 4 },
+  headingLarge: { fontSize: 21, lineHeight: 28 },
+  headingSmall: { fontSize: 17, lineHeight: 24 },
+  strong: { fontWeight: "700" },
+  emphasis: { fontStyle: "italic" },
+  inlineCode: { fontFamily: monospace, fontSize: 14, color: palette.mint, backgroundColor: "#1f2a2e" },
+  link: { color: palette.mint, textDecorationLine: "underline" },
+  codeBlock: { backgroundColor: palette.background, borderColor: palette.edge, borderWidth: 1, borderRadius: 8, padding: 10, gap: 4 },
+  codeLanguage: { color: palette.muted, fontSize: 11, fontWeight: "600" },
+  code: { color: palette.text, fontFamily: monospace, fontSize: 13, lineHeight: 19 },
+  list: { gap: 4 },
+  listItem: { flexDirection: "row", gap: 7 },
+  listMarker: { color: palette.mint, fontSize: 16, lineHeight: 24, minWidth: 14 },
+  listText: { flex: 1 },
+  quote: { borderLeftColor: "#35584a", borderLeftWidth: 3, paddingLeft: 10 },
+  quoteText: { color: palette.muted },
+  rule: { height: 1, backgroundColor: palette.edge, marginVertical: 4 },
 });
