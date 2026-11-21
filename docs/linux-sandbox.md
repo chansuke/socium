@@ -73,7 +73,16 @@ versions Socium refuses to run; the exact path allows only the pinned one.
 
 Directories in `sandbox.read_only` are read-only in every row. A command
 nobody reviewed gets the narrower view only when the protected and sensitive
-files can be listed in time (at most 256 paths); otherwise it asks.
+files can be listed in time (at most 256 paths) and no workspace directory
+refuses the listing; otherwise it asks. When it ends, however it ended, the
+protected files are listed again, symlinks included, with no time limit and
+with owner access given back to any directory the command closed. The listing
+also follows directory symlinks the command made or changed, and those into
+`.socium/scratch`. Any protected file it created or replaced, such as a new
+`.envrc`, a workflow written after moving `.github` aside, or a crate linked
+into `crates/`, is moved to `.socium/quarantine` (the link, for a file behind
+one), or removed if it cannot be moved, and the command reports them as an
+error.
 
 Every tool subprocess goes through this executor. The trusted backend version
 query runs outside the sandbox with an empty environment before setup. Human approval displays
@@ -105,7 +114,10 @@ The child environment is rebuilt with only:
   `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`.
 
 Variables from `[sandbox.env]` come last; PATH, HOME, TMPDIR and `GIT_*` cannot
-be set there. There is no inherited credential denylist to become stale: unknown
+be set there. bwrap reads them from a descriptor and sets them in the command
+only, so a loader variable such as `LD_PRELOAD` does not reach bwrap itself,
+which runs on the host, and the values do not appear in its command line. There
+is no inherited credential denylist to become stale: unknown
 future secret variables are excluded as well. `git_commit` uses the repository's
 identity, or else your global `user.name` and `user.email`, which the host's Git
 reads outside any repository and passes in as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`.
@@ -152,8 +164,10 @@ writes; inspect unknown outcomes before retrying after a crash.
   fresh `/tmp` and before the workspace, so a listed ancestor of the workspace
   can neither make it read-only nor reveal `.socium`. `/`, the home directory
   and its ancestors, `/proc`, `/dev`, `/socium-home`, and `/tmp` itself are
-  refused; a directory that does not exist is skipped with a warning.
-  Executables inside these directories may run.
+  refused; a directory that does not exist is skipped with a warning. A
+  symlink is mounted at both its target and its own path, so a symlink whose
+  target contains the workspace or lies inside it is refused: list the target
+  instead. Executables inside these directories may run.
 - `path`: PATH entries, kept only when they lie in a `read_only` directory or a
   system runtime.
 - `env`: extra variables, such as `CARGO_HOME`.

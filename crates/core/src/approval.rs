@@ -9,12 +9,13 @@
 //! secrets ask in every mode the config can set; only
 //! `--dangerously-skip-permissions` lets them run unasked.
 
-use crate::access::{Grant, Restrictions, relative_target};
+use crate::access::{
+    Grant, ListedFile, Listing, Restrictions, find_matching_files, relative_target,
+};
 use crate::settings::{ApprovalMode, PathPatterns, Settings};
 use crate::tool_error::ToolError;
 use serde_json::Value;
 use std::path::Path;
-use std::time::Duration;
 
 /// Most paths a command's sandbox will hide or freeze; more falls back to
 /// asking, since mounting thousands of paths is slow and fragile.
@@ -282,21 +283,38 @@ fn restrictions(
     root: &Path,
     approval: &crate::settings::ApprovalSettings,
 ) -> Result<Restrictions, String> {
-    let candidates = find_matching_files(
+    let listed = find_matching_files(
         root,
-        approval
-            .protected
-            .patterns()
-            .iter()
-            .chain(approval.sensitive.patterns()),
+        &|path| approval.protected.matches(path) || approval.sensitive.matches(path),
+        Listing::Before,
     )?;
-    let mut restrictions = Restrictions::default();
+    if let Some(link) = listed.unlisted_links.first() {
+        return Err(format!("{link} links to more files than can be listed"));
+    }
+    let mut restrictions = Restrictions {
+        protected: approval.protected.clone(),
+        links: listed.links,
+        ..Restrictions::default()
+    };
     let mut frozen_dirs: Vec<String> = Vec::new();
-    for file in candidates {
+    for ListedFile {
+        path: file,
+        id,
+        through,
+    } in listed.files
+    {
+        if through.is_some() {
+            // The sandbox withholds the file at its own path.
+            if approval.protected.matches(&file) {
+                restrictions.before.insert(file, id);
+            }
+            continue;
+        }
         if approval.sensitive.matches(&file) {
             restrictions.hidden.push(root.join(&file));
         }
         if approval.protected.matches(&file) {
+            restrictions.before.insert(file.clone(), id);
             let target = shallowest_matching_dir(&file, &approval.protected).unwrap_or(file);
             if !frozen_dirs
                 .iter()
@@ -348,65 +366,13 @@ fn shallowest_matching_dir(file: &str, patterns: &PathPatterns) -> Option<String
         .find(|dir| patterns.matches(dir))
 }
 
-/// Workspace files matching any of the positive `patterns`, ignored files
-/// and hidden files included, `.git` and `.socium` excluded.
-fn find_matching_files<'a>(
-    root: &Path,
-    patterns: impl Iterator<Item = &'a String>,
-) -> Result<Vec<String>, String> {
-    let mut command = vec![
-        "rg".to_string(),
-        "--no-config".into(),
-        "--files".into(),
-        "--hidden".into(),
-        "--no-ignore".into(),
-        "--null".into(),
-    ];
-    let mut any = false;
-    for pattern in patterns.filter(|pattern| !pattern.starts_with('!')) {
-        command.push("--glob".into());
-        command.push(pattern.clone());
-        any = true;
-    }
-    if !any {
-        return Ok(Vec::new());
-    }
-    command.extend([
-        "--glob".into(),
-        "!.git".into(),
-        "--glob".into(),
-        "!.socium".into(),
-    ]);
-    let output = crate::process::run(
-        &command,
-        root,
-        Duration::from_secs(5),
-        &crate::TaskControl::default(),
-    )
-    .map_err(|err| format!("protected files could not be listed ({err})"))?;
-    if output.timed_out || output.truncated || !matches!(output.status.code(), Some(0 | 1)) {
-        return Err("protected files could not be listed in time".into());
-    }
-    let mut files = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| {
-            String::from_utf8_lossy(path)
-                .trim_start_matches("./")
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    files.sort();
-    Ok(files)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::access::grants_cover;
     use serde_json::json;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     fn words(text: &str) -> Vec<String> {
         text.split_whitespace().map(str::to_string).collect()
@@ -670,6 +636,72 @@ mod tests {
             .unwrap(),
             Gate::Run(None)
         ));
+    }
+
+    fn auto() -> Settings {
+        Settings::from_toml("[approval]\ncommands = \"auto\"\n", None)
+            .unwrap()
+            .0
+    }
+
+    /// Commands run as the user, so a directory nobody can list still lets
+    /// them read a file whose name they know.
+    #[test]
+    fn a_directory_that_cannot_be_listed_makes_a_command_ask() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let locked = root.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join(".env"), "TOKEN=x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let gate = decide(
+            root.path(),
+            &auto(),
+            "run_command",
+            json!({"command": ["cat", "locked/.env"]}),
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(gate, Gate::Ask(_)));
+    }
+
+    /// Giving up on the listing after a command would leave what it wrote.
+    #[test]
+    fn only_the_listing_before_a_command_gives_up_in_time() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = auto();
+        std::fs::write(root.path().join("notes.txt"), "x").unwrap();
+        let restrictions = restrictions(root.path(), &settings.approval).unwrap();
+        crate::access::tests::TIMEOUT.set(Some(Duration::ZERO));
+        let gate = decide(
+            root.path(),
+            &settings,
+            "run_command",
+            json!({"command": ["true"]}),
+        );
+        std::fs::write(root.path().join(".envrc"), "x").unwrap();
+        let withheld = restrictions.withhold_changes(root.path());
+        crate::access::tests::TIMEOUT.set(None);
+        assert!(matches!(gate, Gate::Ask(_)));
+        assert!(withheld.unwrap().unwrap().contains(".envrc"));
+        assert!(root.path().join(".envrc").symlink_metadata().is_err());
+    }
+
+    /// A file can come back with the inode of the one it replaced.
+    #[test]
+    fn a_protected_file_put_back_in_place_counts_as_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        let envrc = root.path().join(".envrc");
+        std::fs::write(&envrc, "x").unwrap();
+        let mut restrictions = restrictions(root.path(), &auto().approval).unwrap();
+        // As if the listing ran a clock tick before the command: within one
+        // tick the change time would not move.
+        for id in restrictions.before.values_mut() {
+            id.3 -= 1;
+        }
+        std::fs::rename(&envrc, root.path().join("aside")).unwrap();
+        std::fs::rename(root.path().join("aside"), &envrc).unwrap();
+        let note = restrictions.withhold_changes(root.path()).unwrap();
+        assert!(note.is_some_and(|note| note.contains(".envrc")));
     }
 
     #[test]
