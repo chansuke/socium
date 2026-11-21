@@ -451,3 +451,31 @@ test("a pairing store error while a stream is open ends that stream and keeps th
   assert.equal((await fetch(`${api}/state`, { headers: host })).status, 200);
   assert.equal((await fetch(`${api}/state`, { headers: device })).status, 500);
 });
+
+test("host-only routes refuse a missing token and a device token without changing paired devices", async (context) => {
+  const token = "host-access-token";
+  const storePath = join(temporaryDirectory(context), "paired-devices.json");
+  const pairing = createPairing("https://socium.test/", { storePath });
+  const api = await listen(context, createHttpServer(fakeBridge(workspaceState()), token, tmpdir(), pairing));
+  const device = { Authorization: `Bearer ${await pairDevice(api, token)}` };
+  // Recorded once the device has connected, so its lastUsedAt is settled.
+  assert.equal((await fetch(`${api}/state`, { headers: device })).status, 200);
+  const [paired] = pairing.devices();
+  assert(paired);
+  const stored = readFileSync(storePath, "utf8");
+
+  const routes = [
+    { method: "POST", path: "/pairing" },
+    { method: "GET", path: "/devices" },
+    { method: "DELETE", path: `/devices/${paired.id}` },
+  ];
+  for (const { method, path } of routes) {
+    for (const [headers, status] of [[{}, 401], [device, 403]] as const) {
+      const response = await fetch(`${api}${path}`, { method, headers });
+      assert.equal(response.status, status, `${method} ${path}`);
+      assert.equal(typeof (await response.json()).error, "string");
+      assert.equal(readFileSync(storePath, "utf8"), stored, `${method} ${path}`);
+      assert.deepEqual(pairing.devices(), [paired]);
+    }
+  }
+});
