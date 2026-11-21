@@ -41,6 +41,25 @@ export function createPairing(address: string, { clock = Date.now, storePath = d
     return store.devices;
   }
 
+  /** The id of the paired device that `authorization` belongs to, or null. */
+  function authenticate(authorization: string): string | null {
+    if (!authorization.startsWith("Bearer ")) return null;
+    const tokenHash = hash(authorization.slice("Bearer ".length));
+    const now = clock();
+    const due = (record: DeviceRecord) =>
+      record.lastUsedAt === null || now - Date.parse(record.lastUsedAt) >= usageResolution;
+    const cached = load().find((record) => record.tokenHash === tokenHash);
+    if (!cached) return null;
+    if (!due(cached)) return cached.id;
+    const lastUsedAt = new Date(now).toISOString();
+    // Decided again on the locked file: another gateway may have revoked it.
+    const devices = update((current) => {
+      const device = current.find((record) => record.tokenHash === tokenHash);
+      return device && due(device) ? current.map((record) => record === device ? { ...record, lastUsedAt } : record) : null;
+    });
+    return devices.find((record) => record.tokenHash === tokenHash)?.id ?? null;
+  }
+
   return {
     storePath,
     issue() {
@@ -56,23 +75,8 @@ export function createPairing(address: string, { clock = Date.now, storePath = d
       update((devices) => [...devices, device]);
       return token;
     },
-    authorizes(authorization: string) {
-      if (!authorization.startsWith("Bearer ")) return false;
-      const tokenHash = hash(authorization.slice("Bearer ".length));
-      const now = clock();
-      const due = (record: DeviceRecord) =>
-        record.lastUsedAt === null || now - Date.parse(record.lastUsedAt) >= usageResolution;
-      const cached = load().find((record) => record.tokenHash === tokenHash);
-      if (!cached) return false;
-      if (!due(cached)) return true;
-      const lastUsedAt = new Date(now).toISOString();
-      // Decided again on the locked file: another gateway may have revoked it.
-      const devices = update((current) => {
-        const device = current.find((record) => record.tokenHash === tokenHash);
-        return device && due(device) ? current.map((record) => record === device ? { ...record, lastUsedAt } : record) : null;
-      });
-      return devices.some((record) => record.tokenHash === tokenHash);
-    },
+    authenticate,
+    authorizes: (authorization: string) => authenticate(authorization) !== null,
     /** Paired devices, oldest first, without their token hashes. */
     devices(): PairedDevice[] {
       return load().map(({ id, createdAt, lastUsedAt }) => ({ id, createdAt, lastUsedAt }));
