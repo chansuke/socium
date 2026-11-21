@@ -119,11 +119,35 @@ function Workspace({
         <header className="topbar">
           <button className="icon menu" aria-label="Open conversations" aria-expanded={showSessions} onClick={() => setShowSessions(true)}><Menu size={20} /></button>
           <span className="current-title">{currentTitle}</span>
-          <span className="model"><CircleDot size={13} /> {state.model}</span>
+          <ModelSwitcher client={client} state={state} disabled={locked} />
         </header>
         <Conversation key={state.session} client={client} state={state} error={error} disabled={disabled} />
       </main>
     </div>
+  );
+}
+
+/** Switches the host's model between turns; models the host cannot use now are listed but disabled. */
+function ModelSwitcher({ client, state, disabled }: { client: Client; state: WorkspaceState; disabled: boolean }) {
+  if (!state.models.some(({ alias }) => alias !== state.model)) {
+    return <span className="model"><CircleDot size={13} /> {state.model}</span>;
+  }
+  return (
+    <label className="model" title={disabled ? "Switch models between turns." : undefined}>
+      <CircleDot size={13} aria-hidden />
+      <span className="visually-hidden">Model</span>
+      <select value={state.model} disabled={disabled} onChange={(event) => {
+        void client.send({ action: "set_model", model: event.currentTarget.value });
+      }}>
+        {state.models.some(({ alias }) => alias === state.model) ? null : <option value={state.model}>{state.model}</option>}
+        {state.models.map((model) => (
+          <option key={model.alias} value={model.alias} disabled={model.unavailable !== null}
+            title={model.unavailable ?? model.description ?? undefined}>
+            {model.alias} · {model.provider}{model.unavailable ? " (unavailable)" : ""}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
