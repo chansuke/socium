@@ -1,12 +1,17 @@
 import { StrictMode, useCallback, useRef, useState, useSyncExternalStore } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { ArrowUp, ChevronLeft, CircleDot, Folder, Menu, MessageSquare, Plus, QrCode, Square, Terminal, Unplug } from "lucide-react";
+import {
+  ArrowUp, ChevronLeft, Circle, CircleAlert, CircleCheck, CircleDot, CircleSlash, Folder, ListChecks, LoaderCircle, Menu,
+  MessageSquare, Plus, QrCode, Square, Terminal, Unplug,
+} from "lucide-react";
+import type { CSSProperties } from "react";
 import Markdown from "react-markdown";
 import { createClient } from "@socium/client";
 import type { Client } from "@socium/client";
 import { maxPromptLength } from "@socium/client/protocol";
-import type { Message, WorkspaceState } from "@socium/client/protocol";
+import type { Message, Plan, PlanTaskStatus, WorkspaceState } from "@socium/client/protocol";
+import { describeActivity, planProgress, planStatusLabels } from "@socium/client/progress";
 import { PairingDialog } from "./PairingDialog";
 import "./styles.css";
 
@@ -121,6 +126,7 @@ function Workspace({
           <span className="current-title">{currentTitle}</span>
           <ModelSwitcher client={client} state={state} disabled={locked} />
         </header>
+        {state.plan && <PlanPanel key={state.session} plan={state.plan} />}
         <Conversation key={state.session} client={client} state={state} error={error} disabled={disabled} />
       </main>
     </div>
@@ -148,6 +154,46 @@ function ModelSwitcher({ client, state, disabled }: { client: Client; state: Wor
         ))}
       </select>
     </label>
+  );
+}
+
+const planIcons: Record<PlanTaskStatus, typeof Circle> = {
+  done: CircleCheck,
+  active: LoaderCircle,
+  pending: Circle,
+  blocked: CircleAlert,
+  dropped: CircleSlash,
+};
+
+/** The agent's plan, open by default except on small screens, where it would crowd the transcript. */
+function PlanPanel({ plan }: { plan: Plan }) {
+  const [open] = useState(() => !window.matchMedia("(max-width: 690px)").matches);
+  const { done, total, active } = planProgress(plan);
+  return (
+    <details className="plan" open={open}>
+      <summary>
+        <ListChecks size={15} aria-hidden />
+        <span className="plan-goal">{plan.goal}</span>
+        {active && <span className="plan-active">· {active.title}</span>}
+        <span className="plan-count">{done}/{total}</span>
+      </summary>
+      <progress value={plan.done} max={1000} aria-label={`Plan ${Math.round(plan.done / 10)}% done`} />
+      <ol className="plan-tasks">
+        {plan.tasks.map((task) => {
+          const Icon = planIcons[task.status];
+          return (
+            <li key={task.id} className={`plan-task ${task.status}${task.group ? " group" : ""}`} style={{ "--depth": task.depth } as CSSProperties}>
+              <Icon size={14} aria-hidden />
+              <span>
+                {task.title}
+                <span className="visually-hidden"> ({planStatusLabels[task.status]})</span>
+                {task.note && <small>{task.note}</small>}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </details>
   );
 }
 
@@ -210,7 +256,7 @@ function Conversation({ client, state, error, disabled }: {
             {messages.map((message, index) => <MessageCard key={index} message={message} />)}
             {turn?.draft && <MessageCard message={{ role: "assistant", text: turn.draft }} />}
           </div>
-          {turn && !approval && <div className="running" role="status">Running…</div>}
+          {turn && !approval && <div className="running" role="status"><span className="pulse" aria-hidden />{describeActivity(turn.activity)}</div>}
           {state.notices.map((notice, index) => <p className="notice" key={index}>{notice}</p>)}
         </div>
       </div>
