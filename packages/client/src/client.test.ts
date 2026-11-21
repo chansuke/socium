@@ -189,6 +189,23 @@ test("a platform that cannot read a streamed response polls instead", async (con
   assert.equal(host.paths().filter((path) => path.startsWith("/api/events")).length, 1);
 });
 
+test("a stream whose headers never arrive, as with React Native's fetch, leads to polling", async (context) => {
+  const host = fakeHost((call, path) => {
+    if (path === "/api/state") return json(200, workspace("w:1"));
+    assert.equal(path, "/api/events");
+    // Answers only once the request is aborted.
+    return new Promise<Response>((_resolve, reject) => {
+      call.init.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+    });
+  });
+  const { client } = start(context, host, { ...fast, connectTimeout: 20 });
+  await until(() => client.getSnapshot().transport === "polling");
+  assert.deepEqual(host.paths().slice(0, 3), ["/api/events?after=", "/api/events?after=", "/api/state?after="]);
+  await until(() => client.getSnapshot().workspace?.revision === "w:1");
+  assert.equal(client.getSnapshot().connectionError, null);
+  assert.equal(host.paths().filter((path) => path.startsWith("/api/events")).length, 2);
+});
+
 test("a gateway without the event stream is polled", async (context) => {
   const host = fakeHost((_call, path) =>
     path === "/api/events" ? json(404, { error: "Not found." }) : json(200, workspace("w:1")));

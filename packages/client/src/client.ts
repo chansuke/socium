@@ -33,13 +33,22 @@ export interface ClientOptions {
   events?: boolean;
   /** Reconnect after this long without a byte; the gateway sends a keepalive every 15 seconds. */
   idleTimeout?: number;
+  /**
+   * Give up on a stream whose response headers take longer than this; the
+   * gateway sends them at once. React Native's fetch only answers once the
+   * whole response has arrived, which for a stream is never.
+   */
+  connectTimeout?: number;
   /** Wait before reconnecting after a connection error. */
   retryDelay?: number;
   /** Wait between polls, and before reopening a stream the gateway ended. */
   pollDelay?: number;
 }
 
-/** Streams that connected but sent nothing, in a row, before falling back to polling. */
+/**
+ * Streams that sent nothing, in a row, before falling back to polling: ones
+ * that connected but stayed silent, and ones whose headers never came.
+ */
 const maxSilentStreams = 2;
 
 /**
@@ -100,7 +109,7 @@ async function readEvents(
 }
 
 export function createClient(base: string, token: string, fetchRequest = fetch, options: ClientOptions = {}) {
-  const { idleTimeout = 45_000, retryDelay = 2500, pollDelay = 650 } = options;
+  const { idleTimeout = 45_000, connectTimeout = 10_000, retryDelay = 2500, pollDelay = 650 } = options;
   let status = initialStatus;
   let transport: Transport = options.events === false ? "polling" : "events";
   let silentStreams = 0;
@@ -177,12 +186,18 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     const controller = new AbortController();
     stream = controller;
     let idle: ReturnType<typeof setTimeout> | undefined;
-    const keepAlive = () => {
+    let timedOut = false;
+    const abortAfter = (milliseconds: number) => {
       clearTimeout(idle);
-      idle = setTimeout(() => controller.abort(), idleTimeout);
+      idle = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, milliseconds);
     };
-    keepAlive();
+    const keepAlive = () => abortAfter(idleTimeout);
+    abortAfter(connectTimeout);
     let next: "reconnect" | "poll" | "stop" = "reconnect";
+    let headers = false;
     let connected = false;
     let received = false;
     try {
@@ -191,6 +206,8 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         headers: { Accept: "text/event-stream" },
         signal: controller.signal,
       });
+      headers = true;
+      keepAlive();
       const reader = bodyReader(response);
       if (!reader) {
         next = "poll";
@@ -206,7 +223,9 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
       });
     } catch (error) {
       if (stream !== controller) return;
-      if (error instanceof RequestError && error.status === 404) {
+      if (timedOut && !headers) {
+        // Counted below as a stream that sent nothing; polling shows whether the host is reachable.
+      } else if (error instanceof RequestError && error.status === 404) {
         // A gateway without the event stream.
         next = "poll";
       } else {
@@ -219,7 +238,7 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         stream = undefined;
         controller.abort();
         // A proxy that buffers the stream lets nothing through.
-        silentStreams = received ? 0 : silentStreams + Number(connected);
+        silentStreams = received ? 0 : silentStreams + Number(connected || (timedOut && !headers));
         if (next === "reconnect" && silentStreams >= maxSilentStreams) next = "poll";
         if (listeners.size && next === "poll") fallBackToPolling();
         else if (listeners.size && next === "reconnect") {
