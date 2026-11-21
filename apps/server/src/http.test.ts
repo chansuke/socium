@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { connect } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -400,4 +400,54 @@ test("revoking a device ends its open event streams at once and leaves the other
   bridge.emit(workspaceState({ revision: "revision-2" }));
   assert.equal((await kept.state())?.revision, "revision-2");
   assert.equal((await host.state())?.revision, "revision-2");
+});
+
+test("closing the gateway ends open event streams instead of waiting for them", { timeout: 10_000 }, async (context) => {
+  const token = "host-access-token";
+  const bridge = fakeBridge(workspaceState());
+  const server = createHttpServer(bridge, token, tmpdir(), undefined, { keepaliveInterval: 60_000 });
+  const api = await listen(context, server);
+  const events = eventReader(await fetch(`${api}/events`, { headers: { Authorization: `Bearer ${token}` } }));
+  assert.equal((await events.state())?.revision, "revision-1");
+
+  const started = Date.now();
+  const closed = new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  assert.equal(await events.state(), null);
+  await closed;
+  assert(Date.now() - started < 1000);
+  assert.equal(bridge.listeners.size, 0);
+});
+
+test("a pairing store error while a stream is open ends that stream and keeps the gateway up", { timeout: 10_000 }, async (context) => {
+  const token = "host-access-token";
+  const host = { Authorization: `Bearer ${token}` };
+  const bridge = fakeBridge(workspaceState());
+  const storePath = join(temporaryDirectory(context), "paired-devices.json");
+  const pairing = createPairing("https://socium.test/", { storePath });
+  const logged = context.mock.method(console, "error", () => {});
+  const api = await listen(context, createHttpServer(bridge, token, tmpdir(), pairing, { keepaliveInterval: 30 }));
+  const device = { Authorization: `Bearer ${await pairDevice(api, token)}` };
+  const open = async () => {
+    const reader = eventReader(await fetch(`${api}/events`, { headers: device }));
+    assert.equal((await reader.state())?.revision, "revision-1");
+    return reader;
+  };
+
+  // Found on a keepalive.
+  const idle = await open();
+  chmodSync(storePath, 0o644);
+  assert.equal(await idle.state(), null);
+  await until(() => bridge.listeners.size === 0);
+  assert(logged.mock.calls.some(({ arguments: [error] }) => /mode 600/.test(String(error))));
+
+  // Found when a new state is sent.
+  chmodSync(storePath, 0o600);
+  const busy = await open();
+  chmodSync(storePath, 0o644);
+  bridge.emit(workspaceState({ revision: "revision-2" }));
+  assert.equal(await busy.state(), null);
+  await until(() => bridge.listeners.size === 0);
+
+  assert.equal((await fetch(`${api}/state`, { headers: host })).status, 200);
+  assert.equal((await fetch(`${api}/state`, { headers: device })).status, 500);
 });
