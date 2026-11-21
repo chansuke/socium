@@ -6,6 +6,7 @@
   "scripts": {
     "start": "expo start",
     "typecheck": "tsc -p tsconfig.json",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/*.test.ts",
     "android": "expo run:android",
     "bundle:android": "expo export --platform android --output-dir dist/android",
     "ios": "expo run:ios",

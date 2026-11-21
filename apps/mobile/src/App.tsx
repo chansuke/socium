@@ -10,6 +10,7 @@ import { createClient, mobileEndpoint, readPairingUrl, redeemPairing } from "@so
 import type { Client } from "@socium/client";
 import { maxPromptLength } from "@socium/client/protocol";
 import type { Message, WorkspaceState } from "@socium/client/protocol";
+import { MarkdownText } from "./MarkdownText";
 import { loadPairedHost, savePairedHost } from "./pairedHost";
 import type { PairedHost } from "./pairedHost";
 import { palette, styles } from "./styles";
@@ -422,7 +423,9 @@ function MessageCard({ message }: { message: Message }) {
   return (
     <View style={[styles.message, (tool || message.role === "user") && styles.messagePanel]}>
       <Text style={styles.label}>{label}</Text>
-      <Text selectable style={tool ? styles.code : styles.body}>{message.text}</Text>
+      {message.role === "assistant"
+        ? <MarkdownText text={message.text} />
+        : <Text selectable style={tool ? styles.code : styles.body}>{message.text}</Text>}
     </View>
   );
 }
