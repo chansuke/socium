@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { Server } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import { maxPromptLength } from "@socium/client/protocol";
@@ -128,15 +128,42 @@ export function createHttpServer(
   ) {
     let latest: WorkspaceState | null = bridge.snapshot();
     let sent = after;
-    let scheduled = false;
+    let pending: NodeJS.Immediate | undefined;
+    let closed = false;
     // The request ended with its headers; nothing should time out the reply.
     request.socket.setTimeout(0);
-    response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "X-Accel-Buffering": "no" });
+    // The connection closes with the stream, so a shutdown does not wait for it.
+    response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "X-Accel-Buffering": "no", Connection: "close" });
     response.flushHeaders();
 
+    /** Lets go of the bridge, the timers, and the socket listener; safe to call more than once. */
+    function cleanup() {
+      if (closed) return;
+      closed = true;
+      streams.delete(end);
+      clearInterval(keepalive);
+      clearImmediate(pending);
+      pending = undefined;
+      unsubscribe();
+      response.off("drain", schedule);
+    }
+    function end() {
+      cleanup();
+      if (!response.writableEnded) response.end();
+    }
+    /** Runs `step` and ends the stream if it fails, such as on a pairing store error. */
+    function guarded(step: () => void) {
+      if (closed) return;
+      try {
+        step();
+      } catch (error) {
+        console.error(error);
+        end();
+      }
+    }
+
     function flush() {
-      scheduled = false;
-      if (response.writableEnded) return;
+      pending = undefined;
       if (!latest || !authorized()) {
         end();
         return;
@@ -146,40 +173,33 @@ export function createHttpServer(
       response.write(`id: ${latest.revision}\ndata: ${JSON.stringify(clientState(latest))}\n\n`);
     }
     function schedule() {
-      if (scheduled) return;
-      scheduled = true;
-      setImmediate(flush);
+      if (closed || pending) return;
+      pending = setImmediate(() => guarded(flush));
     }
 
     const unsubscribe = bridge.subscribe((state) => {
       latest = state;
       schedule();
     });
-    const keepalive = setInterval(() => {
+    const keepalive = setInterval(() => guarded(() => {
       if (!authorized()) end();
       else if (!response.writableNeedDrain) response.write(": keepalive\n\n");
-    }, keepaliveInterval);
-    let closed = false;
-    /** Lets go of the bridge and the timers; safe to call more than once. */
-    function cleanup() {
-      if (closed) return;
-      closed = true;
-      streams.delete(end);
-      clearInterval(keepalive);
-      unsubscribe();
-      response.off("drain", schedule);
-    }
-    function end() {
-      cleanup();
-      if (!response.writableEnded) response.end();
-    }
+    }), keepaliveInterval);
     streams.set(end, deviceId);
     response.on("drain", schedule);
     response.on("close", cleanup);
-    flush();
+    guarded(flush);
   }
 
-  return createServer({ headersTimeout: Math.min(5000, requestTimeout), requestTimeout, connectionsCheckingInterval }, async (request, response) => {
+  /** Ends the event streams first, which would otherwise keep `close` waiting. */
+  class GatewayServer extends Server {
+    override close(callback?: (error?: Error) => void) {
+      for (const end of streams.keys()) end();
+      return super.close(callback);
+    }
+  }
+
+  return new GatewayServer({ headersTimeout: Math.min(5000, requestTimeout), requestTimeout, connectionsCheckingInterval }, async (request, response) => {
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "no-referrer");
