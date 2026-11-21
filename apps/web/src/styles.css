@@ -38,7 +38,7 @@ button, input, textarea { color: inherit; }
 .session { width: 100%; justify-content: flex-start; text-align: left; color: var(--muted); }
 .session.selected { background: #263237; color: #ebf2f3; }
 
-.main { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.main { min-height: 0; display: flex; flex-direction: column; }
 .topbar { display: flex; align-items: center; gap: 12px; min-height: 65px; border-bottom: 1px solid var(--edge); padding: 12px 24px; }
 .current-title { font-weight: 620; font-size: 14px; }
 .model { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; max-width: 45%; overflow: hidden; flex-shrink: 0; color: var(--mint); background: #1f312b; border: 1px solid #32463d; border-radius: 7px; padding: 6px 8px; font: 12px ui-monospace, monospace; white-space: nowrap; }
@@ -49,7 +49,7 @@ button, input, textarea { color: inherit; }
 .model:has(select:focus-visible) { outline: 2px solid var(--mint); outline-offset: 2px; }
 .model select:focus-visible { outline: none; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.viewport { overflow-y: auto; }
+.viewport { flex: 1; min-height: 0; overflow-y: auto; }
 .conversation { margin-inline: auto; width: min(100% - 40px, 800px); padding: 30px 0; }
 .conversation.empty { min-height: 100%; display: grid; align-content: center; padding-bottom: 70px; }
 .welcome { text-align: center; }
@@ -71,7 +71,32 @@ pre { overflow: auto; padding: 11px; border-radius: 7px; background: #101417; fo
 .tool { margin: 9px 0; border-radius: 7px; padding: 7px 10px; color: var(--muted); font-size: 13px; }
 .tool summary { overflow-wrap: anywhere; cursor: pointer; }
 .tool-error { color: #f9b8ac; }
-.running { font-size: 13px; color: var(--mint); margin-top: 12px; }
+.running { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--mint); margin-top: 12px; overflow-wrap: anywhere; }
+.pulse { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--mint); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+
+.plan { flex: none; width: min(100% - 40px, 800px); margin: 12px auto 0; border: 1px solid var(--edge); border-radius: 10px; background: var(--panel); font-size: 13px; }
+.plan summary { display: flex; align-items: center; gap: 7px; padding: 9px 12px; cursor: pointer; color: #ebf2f3; }
+.plan summary svg { flex: none; color: var(--mint); }
+.plan-goal { font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-active { min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-count { margin-left: auto; flex: none; color: var(--mint); font: 12px ui-monospace, monospace; }
+.plan progress { display: block; width: calc(100% - 24px); height: 4px; margin: 0 12px 6px; border: 0; border-radius: 2px; background: #263237; accent-color: var(--mint); }
+.plan progress::-webkit-progress-bar { background: #263237; border-radius: 2px; }
+.plan progress::-webkit-progress-value { background: var(--mint); border-radius: 2px; }
+.plan progress::-moz-progress-bar { background: var(--mint); border-radius: 2px; }
+.plan-tasks { max-height: 28vh; overflow-y: auto; margin: 0; padding: 2px 12px 10px; list-style: none; }
+.plan-task { display: flex; align-items: flex-start; gap: 7px; padding: 3px 0 3px calc(var(--depth, 0) * 18px); color: var(--muted); line-height: 1.4; }
+.plan-task svg { flex: none; margin-top: 2px; }
+.plan-task small { display: block; color: var(--muted); opacity: .8; }
+.plan-task.group { color: #ebf2f3; font-weight: 600; }
+.plan-task.done svg { color: var(--mint); }
+.plan-task.active { color: #ebf2f3; }
+.plan-task.active svg { color: var(--mint); animation: spin 1.6s linear infinite; }
+.plan-task.blocked, .plan-task.blocked svg { color: #f9b8ac; }
+.plan-task.dropped > span { text-decoration: line-through; opacity: .7; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pulse, .plan-task.active svg { animation: none; } }
 
 .composer-area { width: min(100% - 40px, 800px); margin: 0 auto; padding: 10px 0 max(17px, env(safe-area-inset-bottom)); }
 .composer { display: flex; gap: 12px; align-items: flex-end; border: 1px solid #40524f; border-radius: 13px; padding: 10px; background: var(--panel); }
@@ -103,7 +128,10 @@ pre { overflow: auto; padding: 11px; border-radius: 7px; background: #101417; fo
   .rail.rail-open { display: flex; position: fixed; inset: 0 auto 0 0; width: min(82vw, 280px); z-index: 2; }
   .menu { display: inline-flex; }
   .scrim { display: block; position: fixed; inset: 0; z-index: 1; border: 0; background: #0008; }
-  .conversation, .composer-area { width: calc(100% - 24px); }
+  .conversation, .composer-area, .plan { width: calc(100% - 24px); }
+  .plan { margin-top: 8px; }
+  .plan-tasks { max-height: 22vh; }
+  .plan-active { display: none; }
   .conversation.empty { padding-bottom: 25px; }
   .starters { margin-top: 16px; }
 }
