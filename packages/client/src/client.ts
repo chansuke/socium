@@ -15,6 +15,11 @@ export type Transport = "events" | "polling";
 interface ClientStatus {
   workspace: WorkspaceState | null;
   connectionError: string | null;
+  /**
+   * The host rejected the token, such as a revoked device or a host started
+   * with a new token; the client has stopped retrying and needs a new token.
+   */
+  tokenRejected: boolean;
   commandError: string | null;
   sending: boolean;
   transport: Transport | null;
@@ -23,6 +28,7 @@ interface ClientStatus {
 const initialStatus: ClientStatus = {
   workspace: null,
   connectionError: null,
+  tokenRejected: false,
   commandError: null,
   sending: false,
   transport: null,
@@ -136,9 +142,9 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     if (supersedes(workspace, current, retired)) {
       const previous = current && splitRevision(current.revision).instance;
       if (previous !== null && previous !== splitRevision(workspace.revision).instance) retired.add(previous);
-      update({ workspace, connectionError: null });
+      update({ workspace, connectionError: null, tokenRejected: false });
     } else if (status.connectionError) {
-      update({ connectionError: null });
+      update({ connectionError: null, tokenRejected: false });
     }
   }
 
@@ -227,7 +233,7 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         return;
       }
       connected = true;
-      if (stream === controller) update({ transport: "events", connectionError: null });
+      if (stream === controller) update({ transport: "events", connectionError: null, tokenRejected: false });
       await readEvents(reader, () => {
         received = true;
         keepAlive();
@@ -242,8 +248,9 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         // A gateway without the event stream.
         next = "poll";
       } else {
-        if (error instanceof RequestError && error.status === 401) next = "stop";
-        update({ connectionError: connectionError(error) });
+        const rejected = error instanceof RequestError && error.status === 401;
+        if (rejected) next = "stop";
+        update({ connectionError: connectionError(error), tokenRejected: rejected });
       }
     } finally {
       clearTimeout(idle);
@@ -274,13 +281,13 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         const workspace: WorkspaceState = await response.json();
         if (poll === controller) receive(workspace);
       } else if (poll === controller && status.connectionError) {
-        update({ connectionError: null });
+        update({ connectionError: null, tokenRejected: false });
       }
       if (poll === controller && status.transport !== "polling") update({ transport: "polling" });
     } catch (error) {
       if (poll !== controller) return;
       retry = !(error instanceof RequestError && error.status === 401);
-      update({ connectionError: connectionError(error) });
+      update({ connectionError: connectionError(error), tokenRejected: !retry });
     } finally {
       clearTimeout(timeout);
       if (poll === controller) {

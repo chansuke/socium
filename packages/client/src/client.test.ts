@@ -282,6 +282,7 @@ test("the stream reconnects after an error and resumes from the last state", asy
   host.streams[0]?.end();
   await until(() => attempts === 2);
   await until(() => client.getSnapshot().connectionError === "Cannot reach the Socium host.");
+  assert.equal(client.getSnapshot().tokenRejected, false);
   await until(() => attempts === 3);
   await until(() => client.getSnapshot().connectionError === "Socium is starting.");
   await until(() => host.streams.length === 2);
@@ -297,6 +298,7 @@ test("a rejected token stops retrying", async (context) => {
     const { client } = start(context, host, { ...fast, events });
     await until(() => client.getSnapshot().connectionError !== null);
     assert.equal(client.getSnapshot().connectionError, "Enter the access token shown on the Socium host.");
+    assert.equal(client.getSnapshot().tokenRejected, true);
     await delay(50);
     assert.equal(host.calls.length, 1, `events: ${events}`);
   }
