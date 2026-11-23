@@ -11,6 +11,7 @@ import type { Client } from "@socium/client";
 import { maxPromptLength } from "@socium/client/protocol";
 import type { Message, Plan, PlanTaskStatus, WorkspaceState } from "@socium/client/protocol";
 import { describeActivity, planProgress, planStatusLabels } from "@socium/client/progress";
+import { createHostStorage } from "./hostStorage";
 import { MarkdownText } from "./MarkdownText";
 import { loadPairedHost, savePairedHost } from "./pairedHost";
 import type { PairedHost } from "./pairedHost";
@@ -24,9 +25,16 @@ function connectTo(origin: string, token: string) {
   return createClient(origin, token, fetch, { events: false });
 }
 
+/** A pairing this phone failed to save or forget, with the way to try again. */
+interface StorageProblem {
+  message: string;
+  retry: () => void;
+}
+
 export function App() {
   const [client, setClient] = useState<Client | null | undefined>(undefined);
-  const storage = useRef(Promise.resolve());
+  const [storeHost] = useState(() => createHostStorage(savePairedHost));
+  const [storageProblem, setStorageProblem] = useState<StorageProblem | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -36,17 +44,28 @@ export function App() {
     return () => { mounted = false; };
   }, []);
 
-  function updateSavedHost(host: PairedHost | null) {
-    storage.current = storage.current.then(() => savePairedHost(host)).catch(() => {});
+  function saveHost(host: PairedHost) {
+    setStorageProblem(null);
+    storeHost(host).catch(() => setStorageProblem({
+      message: "Paired, but this phone could not save the pairing, so it will ask again after a restart.",
+      retry: () => saveHost(host),
+    }));
   }
 
   function connectPaired(host: PairedHost) {
-    updateSavedHost(host);
+    saveHost(host);
     setClient(connectTo(host.origin, host.token));
   }
 
-  function disconnect() {
-    updateSavedHost(null);
+  /** Forgets the saved token before leaving, and stays put if the phone could not forget it. */
+  async function disconnect() {
+    setStorageProblem(null);
+    try {
+      await storeHost(null);
+    } catch {
+      setStorageProblem({ message: "Could not remove the saved pairing from this phone. Try again.", retry: () => void disconnect() });
+      return;
+    }
     setClient(null);
   }
 
@@ -55,6 +74,12 @@ export function App() {
       <StatusBar style="light" />
       <SafeAreaView style={styles.screen}>
         <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          {storageProblem && (
+            <View style={[styles.banner, styles.bannerError]} accessibilityRole="alert">
+              <Text style={[styles.bannerTitle, styles.flex]}>{storageProblem.message}</Text>
+              <Button label="Try again" primary onPress={storageProblem.retry} />
+            </View>
+          )}
           {client === undefined ? null : client
             ? <Connection client={client} disconnect={disconnect} />
             : <ConnectForm connect={setClient} connectPaired={connectPaired} />}
@@ -241,7 +266,7 @@ function ScanPairing({ connect, back }: { connect: (host: PairedHost) => void; b
 const tokenRejectedMessage = "Session expired or device revoked — pair again.";
 
 function Connection({ client, disconnect }: { client: Client; disconnect: () => void }) {
-  const { workspace, connectionError, tokenRejected, commandError, sending } = useSyncExternalStore(client.subscribe, client.getSnapshot);
+  const { workspace, connectionError, tokenRejected, reconnecting, commandError, sending } = useSyncExternalStore(client.subscribe, client.getSnapshot);
   if (!workspace) {
     return (
       <View style={styles.center}>
@@ -261,11 +286,13 @@ function Connection({ client, disconnect }: { client: Client; disconnect: () => 
 
   return (
     <>
-      {connectionError && <ConnectionBanner error={connectionError} tokenRejected={tokenRejected} disconnect={disconnect} />}
+      {(connectionError || reconnecting) && (
+        <ConnectionBanner error={connectionError ?? "Waiting for the host's updates."} tokenRejected={tokenRejected} disconnect={disconnect} />
+      )}
       <Workspace
         client={client}
         state={workspace}
-        disabled={sending || Boolean(connectionError)}
+        disabled={sending || reconnecting || Boolean(connectionError)}
         error={commandError}
         disconnect={disconnect}
       />
