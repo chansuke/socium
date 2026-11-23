@@ -186,14 +186,24 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     return response;
   }
 
-  /** `request` with a deadline, without `AbortSignal.timeout`, which React Native lacks. */
-  async function requestWithin(path: string, options: RequestInit, milliseconds = 10_000) {
+  /**
+   * `request` with a deadline, without `AbortSignal.timeout`, which React
+   * Native lacks, that also stops when `signal` aborts.
+   */
+  async function requestWithin(path: string, options: RequestInit, signal?: AbortSignal, milliseconds = 10_000) {
+    signal?.throwIfAborted();
     const controller = new AbortController();
+    const abort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", abort);
     const timeout = setTimeout(() => controller.abort(), milliseconds);
     try {
-      return await request(path, { ...options, signal: controller.signal });
+      const response = await request(path, { ...options, signal: controller.signal });
+      // A body read after an abort would still resolve.
+      controller.signal.throwIfAborted();
+      return response;
     } finally {
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
     }
   }
 
@@ -328,22 +338,29 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         if (!listeners.size) disconnect();
       };
     },
-    async mobilePairingUrl() {
-      const response = await requestWithin("pairing", { method: "POST" });
+    /** A one-time pairing link for a phone. Needs the host access token; stops when `signal` aborts. */
+    async mobilePairingUrl(signal?: AbortSignal) {
+      const response = await requestWithin("pairing", { method: "POST" }, signal);
       const { url } = await response.json();
+      signal?.throwIfAborted();
       if (typeof url !== "string") throw new Error("The host did not send a pairing link.");
       return url;
     },
-    /** Devices paired with the host, oldest first. Needs the host access token. */
-    async listDevices(): Promise<PairedDevice[]> {
-      const response = await requestWithin("devices", {});
+    /** Devices paired with the host, oldest first. Needs the host access token; stops when `signal` aborts. */
+    async listDevices(signal?: AbortSignal): Promise<PairedDevice[]> {
+      const response = await requestWithin("devices", {}, signal);
       const { devices } = await response.json();
+      signal?.throwIfAborted();
       if (!Array.isArray(devices)) throw new Error("The host did not send its paired devices.");
       return devices;
     },
-    /** Revokes a paired device; its token stops working at once. Needs the host access token. */
-    async revokeDevice(id: string) {
-      await requestWithin(`devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+    /**
+     * Revokes a paired device; its token stops working at once. Needs the
+     * host access token; stops when `signal` aborts, though the host may
+     * already have revoked the device.
+     */
+    async revokeDevice(id: string, signal?: AbortSignal) {
+      await requestWithin(`devices/${encodeURIComponent(id)}`, { method: "DELETE" }, signal);
     },
     async send(command: Command) {
       const workspace = status.workspace;
