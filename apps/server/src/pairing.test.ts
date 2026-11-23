@@ -2,7 +2,8 @@ import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
-  chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync,
+  utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -144,22 +145,66 @@ test("a store that belongs to another user is refused, at startup and later", (c
   assert.throws(() => pairing.authorizes(device), /belong to the user/);
 });
 
-/** Runs pairing operations in another process, as a second gateway on the same store. */
-async function otherGateway(storePath: string, script: string) {
-  const pairingModule = pathToFileURL(join(import.meta.dirname, "pairing.ts")).href;
-  const clientModule = pathToFileURL(join(import.meta.dirname, "../../../packages/client/src/client.ts")).href;
+const deviceStoreModule = pathToFileURL(join(import.meta.dirname, "deviceStore.ts")).href;
+const pairingModule = pathToFileURL(join(import.meta.dirname, "pairing.ts")).href;
+const clientModule = pathToFileURL(join(import.meta.dirname, "../../../packages/client/src/client.ts")).href;
+
+/**
+ * Starts pairing operations in another process, as a second gateway on the
+ * same store. `retry` repeats a step while the store is busy, printing
+ * "busy" the first time, and resolves to how often it was busy.
+ */
+function startGateway(storePath: string, script: string, lockTimeout = 5000) {
   const child = spawn(process.execPath, ["--input-type=module", "-e", `
+    import { openStore } from ${JSON.stringify(deviceStoreModule)};
     import { createPairing } from ${JSON.stringify(pairingModule)};
     import { readPairingUrl } from ${JSON.stringify(clientModule)};
     const storePath = ${JSON.stringify(storePath)};
     let minute = 0;
     // Each call is a minute later, so every authorization rewrites lastUsedAt.
-    const pairing = createPairing("https://socium.test/", { storePath, clock: () => Date.now() + 60_000 * ++minute });
+    const pairing = createPairing("https://socium.test/", { storePath, lockTimeout: ${lockTimeout}, clock: () => Date.now() + 60_000 * ++minute });
     const pair = () => pairing.redeem(readPairingUrl(pairing.issue()).code);
+    async function retry(step) {
+      for (let busy = 0; ; busy++) {
+        try {
+          step();
+          return busy;
+        } catch (error) {
+          if (!/busy/.test(error.message)) throw error;
+          if (busy === 0) console.log("busy");
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
+    }
     ${script}
-  `], { stdio: ["ignore", "inherit", "inherit"] });
-  const [code] = await once(child, "exit");
-  assert.equal(code, 0);
+  `], { stdio: ["ignore", "pipe", "inherit"] });
+  let output = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => output += chunk);
+  const exited = once(child, "exit");
+  return {
+    child,
+    /** Waits until the gateway has printed `line`, and fails if it exits first. */
+    async printed(line: string) {
+      while (!output.split("\n").includes(line)) {
+        const ended = await Promise.race([once(child.stdout, "data").then(() => false), exited.then(() => true)]);
+        if (ended && !output.split("\n").includes(line)) assert.fail(`The gateway exited without printing ${line}.`);
+      }
+    },
+    /** Waits for a clean exit and returns what it printed. */
+    async finished() {
+      const [code] = await exited;
+      assert.equal(code, 0, output);
+      return output;
+    },
+  };
+}
+
+const otherGateway = (storePath: string, script: string) => startGateway(storePath, script).finished();
+
+function assertPrivateLock(storePath: string) {
+  const lock = lstatSync(`${storePath}.lock`);
+  assert(lock.isFile());
+  assert.equal(lock.mode & 0o777, 0o600);
 }
 
 test("gateways sharing a store keep every pairing and never bring back a revoked device", { timeout: 60_000 }, async (context) => {
@@ -185,16 +230,64 @@ test("gateways sharing a store keep every pairing and never bring back a revoked
   assert.equal(stored.length, rounds * 2, "a pairing was lost");
   assert(!stored.some(({ id }) => id === device.id), "the revoked device came back");
   assert.equal(host.authorizes(revoked), false);
-  assert(!existsSync(`${storePath}.lock`));
+  // Kept for the next update; deleting it could let two gateways lock different files.
+  assertPrivateLock(storePath);
 });
 
-test("a lock left by a stopped gateway is taken over", (context) => {
+test("a paused lock holder keeps the lock, so its stale records never bring back a revoked device", { timeout: 60_000 }, async (context) => {
   const directory = temporaryDirectory(context);
-  const storePath = join(directory, "paired-devices.json");
-  // No process has this pid: Linux caps pids well below it.
-  writeFileSync(`${storePath}.lock`, "2147483646 stale\n", { mode: 0o600 });
-  const pairing = createPairing(address, { storePath });
+  const storePath = join(directory, "state", "paired-devices.json");
+  const release = join(directory, "release");
+  const host = createPairing(address, { storePath });
+  const revoked = pair(host);
+  const [device] = host.devices();
+  assert(device);
+
+  // Reads the records under the lock, then stops until the test lets it go on.
+  const holder = startGateway(storePath, `
+    import("node:fs").then(({ existsSync }) => openStore(storePath).update((devices) => {
+      console.log("locked");
+      while (!existsSync(${JSON.stringify(release)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      return [...devices, { id: "held", createdAt: new Date().toISOString(), lastUsedAt: null, tokenHash: "0".repeat(64) }];
+    }));
+  `);
+  // A stopped process outlives a failed test otherwise.
+  context.after(() => holder.child.kill("SIGKILL"));
+  await holder.printed("locked");
+  holder.child.kill("SIGSTOP");
+  // A lock's age means nothing: this is how a long pause looks to the others.
+  utimesSync(`${storePath}.lock`, new Date(0), new Date(0));
+
+  const contenders = [
+    startGateway(storePath, `await retry(() => { if (!pairing.revoke(${JSON.stringify(device.id)})) process.exit(2); });`, 50),
+    startGateway(storePath, "await retry(pair);", 50),
+    startGateway(storePath, "await retry(pair);", 50),
+  ];
+  // Each one waited for the lock and failed, rather than taking it.
+  await Promise.all(contenders.map((contender) => contender.printed("busy")));
+  assert.deepEqual(host.devices().map(({ id }) => id), [device.id], "a contender changed the store while the lock was held");
+  assertPrivateLock(storePath);
+
+  writeFileSync(release, "");
+  holder.child.kill("SIGCONT");
+  await holder.finished();
+  await Promise.all(contenders.map((contender) => contender.finished()));
+
+  const stored = (JSON.parse(readFileSync(storePath, "utf8")).devices as { id: string }[]).map(({ id }) => id);
+  assert.equal(stored.length, 3, "a pairing was lost");
+  assert(stored.includes("held"), "the holder's update was lost");
+  assert(!stored.includes(device.id), "the revoked device came back");
+  assert.equal(host.authorizes(revoked), false);
+});
+
+test("a gateway that dies while holding the lock releases it with its process", { timeout: 30_000 }, async (context) => {
+  const storePath = join(temporaryDirectory(context), "state", "paired-devices.json");
+  const holder = startGateway(storePath, `openStore(storePath).update(() => process.kill(process.pid, "SIGKILL"));`);
+  const [, signal] = await once(holder.child, "exit");
+  assert.equal(signal, "SIGKILL");
+  assertPrivateLock(storePath);
+  // Far shorter than any lock age a time-based takeover would need.
+  const pairing = createPairing(address, { storePath, lockTimeout: 500 });
   pair(pairing);
   assert.equal(pairing.devices().length, 1);
-  assert(!existsSync(`${storePath}.lock`));
 });
