@@ -385,3 +385,30 @@ test("the host lists and revokes paired devices", async () => {
   await assert.rejects(client.revokeDevice("other/device"), /host access token/);
   assert.equal(host.calls.at(-1)?.url, "https://socium.test/api/devices/other%2Fdevice");
 });
+
+test("pairing and device requests stop when their signal aborts", async () => {
+  const signals: AbortSignal[] = [];
+  const host = fakeHost((call) => new Promise<Response>((_resolve, reject) => {
+    const { signal } = call.init;
+    assert(signal);
+    signals.push(signal);
+    signal.addEventListener("abort", () => reject(signal.reason));
+  }));
+  const client = createClient("https://socium.test", "secret-token", host.fetchRequest);
+  for (const start of [
+    (signal: AbortSignal) => client.mobilePairingUrl(signal),
+    (signal: AbortSignal) => client.listDevices(signal),
+    (signal: AbortSignal) => client.revokeDevice("device-1", signal),
+  ]) {
+    const controller = new AbortController();
+    const pending = start(controller.signal);
+    await until(() => signals.length === host.calls.length && signals.length > 0);
+    controller.abort(new DOMException("The dialog closed.", "AbortError"));
+    await assert.rejects(pending, { name: "AbortError" });
+    assert(signals.at(-1)?.aborted);
+  }
+  // Already aborted: nothing is sent.
+  const sent = host.calls.length;
+  await assert.rejects(client.listDevices(AbortSignal.abort()), { name: "AbortError" });
+  assert.equal(host.calls.length, sent);
+});
