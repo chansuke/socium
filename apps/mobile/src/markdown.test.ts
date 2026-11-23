@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
+import { performance } from "node:perf_hooks";
 import { test } from "node:test";
-import { parseInline, parseMarkdown, safeLinkUrl } from "./markdown.ts";
+import { safeHttpUrl as safeLinkUrl } from "@socium/client/links";
+import { maxInlineDepth, maxMarkdownLength, maxMarkdownNodes, parseInline, parseMarkdown } from "./markdown.ts";
 import type { Inline } from "./markdown.ts";
 
 const text = (value: string): Inline => ({ type: "text", text: value });
@@ -53,13 +55,13 @@ test("lists: markers, numbering, nesting, continuation, and loose items", () => 
   ].join("\n")), [
     { type: "paragraph", children: [text("Steps:")] },
     { type: "list", ordered: true, start: 3, items: [
-      { depth: 0, children: [text("third continued")] },
-      { depth: 0, children: [text("fourth")] },
-      { depth: 1, children: [text("nested")] },
+      { depth: 0, number: 3, children: [text("third continued")] },
+      { depth: 0, number: 4, children: [text("fourth")] },
+      { depth: 1, number: null, children: [text("nested")] },
     ] },
     { type: "list", ordered: false, start: 1, items: [
-      { depth: 0, children: [text("other list")] },
-      { depth: 0, children: [text("same list")] },
+      { depth: 0, number: null, children: [text("other list")] },
+      { depth: 0, number: null, children: [text("same list")] },
     ] },
     { type: "paragraph", children: [text("After.")] },
   ]);
@@ -135,4 +137,117 @@ test("links to anything but http and https keep their label and lose their targe
   ]);
   assert.equal(safeLinkUrl(" HTTPS://Example.com/a?b=c#d "), "https://example.com/a?b=c#d");
   assert.equal(safeLinkUrl("http://localhost:4173/"), "http://localhost:4173/");
+});
+
+/** Parses `source` and fails if it takes long enough to show quadratic work or backtracking. */
+function parseQuickly(source: string, limit = 100) {
+  const started = performance.now();
+  const blocks = parseMarkdown(source);
+  const elapsed = performance.now() - started;
+  assert(elapsed < limit, `parsing ${source.length} characters took ${elapsed.toFixed(1)} ms`);
+  return blocks;
+}
+
+/** Every text in `blocks`, in order, to check nothing of a reply is lost. */
+function allText(blocks: ReturnType<typeof parseMarkdown>) {
+  const inline = (inlines: ReturnType<typeof parseInline>): string =>
+    inlines.map((node) => node.type === "text" || node.type === "code" ? node.text : inline(node.children)).join("");
+  return blocks.map((block) =>
+    block.type === "code" ? block.text
+      : block.type === "rule" ? ""
+        : block.type === "list" ? block.items.map((item) => inline(item.children)).join("")
+          : inline(block.children)).join("");
+}
+
+test("long unclosed delimiters parse in linear time", () => {
+  const length = 40_000;
+  for (const [name, source] of [
+    ["brackets", "[".repeat(length)],
+    ["brackets with text", "[a ".repeat(length / 3)],
+    ["link openers", "[a](".repeat(length / 4)],
+    ["asterisks", "*a ".repeat(length / 3)],
+    ["underscores", "_a ".repeat(length / 3)],
+    ["double asterisks", "**a ".repeat(length / 4)],
+    ["backticks", "``a`".repeat(length / 4)],
+    ["autolinks", "<http://a".repeat(length / 9)],
+    ["parens in a bare URL", `https://example.com/${")".repeat(length)}`],
+    ["escapes", "\\[".repeat(length / 3)],
+  ] as const) {
+    const blocks = parseQuickly(source);
+    assert(allText(blocks).length > 0, name);
+  }
+});
+
+test("deep nesting is capped instead of recursing without bound", () => {
+  const levels = 20_000;
+  const links = parseQuickly(`${"[".repeat(levels)}x${"](https://example.com)".repeat(levels)}`);
+  const emphasis = parseQuickly(`${"*_".repeat(levels)}x${"_*".repeat(levels)}`);
+  const strong = parseQuickly(`${"**a ".repeat(levels)}x${" a**".repeat(levels)}`);
+  for (const blocks of [links, emphasis, strong]) {
+    let depth = 0;
+    const deepest = (inlines: ReturnType<typeof parseInline>, level: number) => {
+      depth = Math.max(depth, level);
+      for (const node of inlines) if ("children" in node) deepest(node.children, level + 1);
+    };
+    for (const block of blocks) if ("children" in block) deepest(block.children, 0);
+    assert(depth <= maxInlineDepth, `nested ${depth} deep`);
+  }
+  // Past the cap, the text shows as written.
+  const u = "https://example.com/";
+  const link = (...children: ReturnType<typeof parseInline>) => ({ type: "link" as const, href: u, children });
+  assert.deepEqual(parseInline(`[a [b [c [d [e](${u}) f](${u}) g](${u}) h](${u}) i](${u})`), [
+    link(text("a "), link(text("b "), link(text("c "), link(text(`d [e](${u}) f`)), text(" g")), text(" h")), text(" i")),
+  ]);
+});
+
+test("long runs of whitespace inside lines parse in linear time", () => {
+  const spaces = " ".repeat(40_000);
+  for (const source of [
+    `a${spaces}b\nnext`,
+    `a${spaces}b${spaces}\nnext`,
+    `# a${spaces}b`,
+    `# a${spaces}#x`,
+    `\`\`\`a${spaces}\``,
+    `- - -${spaces}x`,
+    `-${spaces}x`,
+    `> a${spaces}b`,
+    `1.${spaces}a`,
+    `\`${spaces}x${spaces}\``,
+  ]) {
+    assert(allText(parseQuickly(source)).includes("a") || source.includes("x"));
+  }
+  assert.deepEqual(parseQuickly(`# a${spaces}b #`), [{ type: "heading", level: 1, children: [text(`a${spaces}b`)] }]);
+});
+
+test("a long ordered list is numbered once while parsing", () => {
+  const count = 500;
+  const source = Array.from({ length: count }, (_, index) => `${index + 1}. item ${index + 1}${index % 50 ? "" : "\n   - nested"}`);
+  const blocks = parseQuickly(source.join("\n"), 50);
+  assert.equal(blocks.length, 1);
+  const [list] = blocks;
+  assert(list?.type === "list");
+  const numbers = list.items.filter(({ depth }) => depth === 0).map(({ number }) => number);
+  assert.deepEqual(numbers, Array.from({ length: count }, (_, index) => index + 1));
+  assert(list.items.filter(({ depth }) => depth > 0).every(({ number }) => number === null));
+  // Many blank-separated items do not rescan the lines after each one.
+  parseQuickly(Array.from({ length: 5000 }, () => "- item").join("\n\n\n"));
+});
+
+test("a reply past the length or block limits still shows in full, as plain text", () => {
+  const long = `**start** ${"word ".repeat(maxMarkdownLength / 5)}tail **end**`;
+  const blocks = parseQuickly(long);
+  assert.deepEqual(blocks[0]?.type === "paragraph" && blocks[0].children[0], { type: "strong", children: [text("start")] });
+  assert.equal(blocks.at(-1)?.type, "paragraph");
+  assert(allText(blocks).endsWith("tail **end**"));
+
+  const many = Array.from({ length: maxMarkdownNodes * 2 }, (_, index) => `# heading ${index}`).join("\n");
+  const capped = parseQuickly(many);
+  assert.equal(capped.length, maxMarkdownNodes + 1);
+  assert.deepEqual(capped.at(-1), { type: "paragraph", children: [text(Array.from({ length: maxMarkdownNodes }, (_, index) => `# heading ${index + maxMarkdownNodes}`).join("\n"))] });
+
+  const items = parseQuickly(Array.from({ length: maxMarkdownNodes * 2 }, (_, index) => `- item ${index}`).join("\n"));
+  const [list, rest] = items;
+  assert(list?.type === "list");
+  assert.equal(list.items.length, maxMarkdownNodes - 1);
+  assert.equal(rest?.type === "paragraph" && rest.children[0]?.type === "text" && rest.children[0].text.split("\n")[0], `- item ${maxMarkdownNodes - 1}`);
 });
