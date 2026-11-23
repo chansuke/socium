@@ -1,4 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { watch } from "node:fs";
+import { basename, dirname } from "node:path";
 import { mobileEndpoint } from "@socium/client";
 import type { PairedDevice } from "@socium/client/protocol";
 import { defaultPairingStore, openStore } from "./deviceStore.ts";
@@ -85,6 +87,22 @@ export function createPairing(
     /** Paired devices, oldest first, without their token hashes. */
     devices(): PairedDevice[] {
       return load().map(({ id, createdAt, lastUsedAt }) => ({ id, createdAt, lastUsedAt }));
+    },
+    /** Whether a device is still paired, as the latest store says; unlike `authenticate`, not a use. */
+    isPaired: (id: string) => load().some((record) => record.id === id),
+    /**
+     * Calls `onChange` soon after any gateway on this store replaces the file,
+     * such as for a revocation, or when watching fails. Returns a function
+     * that stops watching. The directory is watched because each update
+     * replaces the file.
+     */
+    watch(onChange: () => void) {
+      const name = basename(storePath);
+      const watcher = watch(dirname(storePath), { persistent: false }, (_event, changed) => {
+        if (changed === null || changed === name) onChange();
+      });
+      watcher.on("error", onChange);
+      return () => watcher.close();
     },
     /** Forgets a device; its token stops working at once. */
     revoke(id: string) {
