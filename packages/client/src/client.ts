@@ -17,9 +17,15 @@ interface ClientStatus {
   connectionError: string | null;
   /**
    * The host rejected the token, such as a revoked device or a host started
-   * with a new token; the client has stopped retrying and needs a new token.
+   * with a new token. Final for this client: it has stopped every request,
+   * ignores replies still on their way, and needs a new token.
    */
   tokenRejected: boolean;
+  /**
+   * The event stream ended and the client is opening it again, or polling
+   * instead; states may be missed until then, so commands wait.
+   */
+  reconnecting: boolean;
   commandError: string | null;
   sending: boolean;
   transport: Transport | null;
@@ -29,6 +35,7 @@ const initialStatus: ClientStatus = {
   workspace: null,
   connectionError: null,
   tokenRejected: false,
+  reconnecting: false,
   commandError: null,
   sending: false,
   transport: null,
@@ -154,14 +161,15 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
    * later state, such as a command's reply, is already shown.
    */
   function receive(workspace: WorkspaceState, issue: number) {
+    if (status.tokenRejected) return;
     const current = status.workspace;
     if (supersedes({ workspace, issue }, current && { workspace: current, issue: shownIssue }, retired)) {
       const previous = current && splitRevision(current.revision).instance;
       if (previous !== null && previous !== splitRevision(workspace.revision).instance) retired.add(previous);
       shownIssue = Math.max(shownIssue, issue);
-      update({ workspace, connectionError: null, tokenRejected: false });
+      update({ workspace, connectionError: null, reconnecting: false });
     } else if (status.connectionError) {
-      update({ connectionError: null, tokenRejected: false });
+      update({ connectionError: null });
     }
   }
 
@@ -181,8 +189,10 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     if (!response.ok) {
       const body = await response.json().catch(() => null);
       const message = typeof body?.error === "string" ? body.error : `Request failed (${response.status}).`;
+      if (response.status === 401) rejectToken(message);
       throw new RequestError(response.status, message);
     }
+    if (status.tokenRejected) throw new RequestError(401, status.connectionError ?? "The host rejected the token.");
     return response;
   }
 
@@ -207,7 +217,15 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     }
   }
 
+  /** Stops everything for good: no request with this token can succeed again. */
+  function rejectToken(message: string) {
+    if (status.tokenRejected) return;
+    disconnect();
+    update({ tokenRejected: true, connectionError: message, reconnecting: false, sending: false });
+  }
+
   function connect() {
+    if (status.tokenRejected) return;
     if (transport === "events") void listen();
     else void refresh();
   }
@@ -228,7 +246,7 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
   }
 
   async function listen() {
-    if (stream || poll || listeners.size === 0) return;
+    if (stream || poll || listeners.size === 0 || status.tokenRejected) return;
     const controller = new AbortController();
     stream = controller;
     const issue = ++issued;
@@ -261,7 +279,7 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         return;
       }
       connected = true;
-      if (stream === controller) update({ transport: "events", connectionError: null, tokenRejected: false });
+      if (stream === controller) update({ transport: "events", connectionError: null, reconnecting: false });
       await readEvents(reader, () => {
         received = true;
         keepAlive();
@@ -276,9 +294,8 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         // A gateway without the event stream.
         next = "poll";
       } else {
-        const rejected = error instanceof RequestError && error.status === 401;
-        if (rejected) next = "stop";
-        update({ connectionError: connectionError(error), tokenRejected: rejected });
+        if (error instanceof RequestError && error.status === 401) next = "stop";
+        else update({ connectionError: connectionError(error) });
       }
     } finally {
       clearTimeout(idle);
@@ -288,16 +305,18 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         // A proxy that buffers the stream lets nothing through.
         silentStreams = received ? 0 : silentStreams + Number(connected || (timedOut && !headers));
         if (next === "reconnect" && silentStreams >= maxSilentStreams) next = "poll";
-        if (listeners.size && next === "poll") fallBackToPolling();
-        else if (listeners.size && next === "reconnect") {
-          timer = setTimeout(listen, status.connectionError ? retryDelay : pollDelay);
+        if (listeners.size && next !== "stop" && !status.tokenRejected) {
+          // Until a stream or poll succeeds again, states may be missing.
+          update({ reconnecting: true });
+          if (next === "poll") fallBackToPolling();
+          else timer = setTimeout(listen, status.connectionError ? retryDelay : pollDelay);
         }
       }
     }
   }
 
   async function refresh() {
-    if (poll || stream || listeners.size === 0) return;
+    if (poll || stream || listeners.size === 0 || status.tokenRejected) return;
     const controller = new AbortController();
     poll = controller;
     const issue = ++issued;
@@ -309,19 +328,19 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
       if (response.status !== 204) {
         const workspace: WorkspaceState = await response.json();
         if (poll === controller) receive(workspace, issue);
-      } else if (poll === controller && status.connectionError) {
-        update({ connectionError: null, tokenRejected: false });
+      } else if (poll === controller && (status.connectionError || status.reconnecting)) {
+        update({ connectionError: null, reconnecting: false });
       }
-      if (poll === controller && status.transport !== "polling") update({ transport: "polling" });
+      if (poll === controller && status.transport !== "polling") update({ transport: "polling", reconnecting: false });
     } catch (error) {
       if (poll !== controller) return;
       retry = !(error instanceof RequestError && error.status === 401);
-      update({ connectionError: connectionError(error), tokenRejected: !retry });
+      if (retry) update({ connectionError: connectionError(error) });
     } finally {
       clearTimeout(timeout);
       if (poll === controller) {
         poll = undefined;
-        if (retry && listeners.size) {
+        if (retry && listeners.size && !status.tokenRejected) {
           timer = setTimeout(refresh, status.connectionError ? retryDelay : pollDelay);
         }
       }
@@ -364,7 +383,7 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     },
     async send(command: Command) {
       const workspace = status.workspace;
-      if (!workspace || status.sending || status.connectionError) return false;
+      if (!workspace || status.sending || status.connectionError || status.reconnecting || status.tokenRejected) return false;
       update({ sending: true, commandError: null });
       const issue = ++issued;
       const controller = new AbortController();
@@ -376,6 +395,8 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
           signal: controller.signal,
         });
         const next: WorkspaceState = await response.json();
+        // The token was rejected while this command was on its way.
+        if (status.tokenRejected) return false;
         if (transport === "polling") {
           // A GET begun before this mutation may carry a superseded workspace.
           disconnect();
@@ -387,7 +408,10 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         }
         return true;
       } catch (error) {
-        update({ commandError: error instanceof RequestError ? error.message : "The host did not confirm the change." });
+        // A rejected token shows as the connection error instead.
+        if (!status.tokenRejected) {
+          update({ commandError: error instanceof RequestError ? error.message : "The host did not confirm the change." });
+        }
         return false;
       } finally {
         clearTimeout(timeout);
