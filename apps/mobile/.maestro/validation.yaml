@@ -1,0 +1,23 @@
+appId: com.chansuke.socium
+---
+- launchApp:
+    clearState: true
+- assertVisible: "Connect to Socium"
+- tapOn: "Enter manually"
+- tapOn: "Host address"
+- inputText: "http://socium.example.com"
+- tapOn: "Access token"
+- inputText: "not-a-real-token"
+- hideKeyboard
+- tapOn: "Connect"
+- assertVisible: "Enter an HTTPS host URL, such as https://socium.example.com."
+- tapOn: "Back"
+- assertNotVisible: "Enter an HTTPS host URL, such as https://socium.example.com."
+- assertVisible: "Scan QR code"
+- tapOn: "Enter manually"
+- assertNotVisible: "Enter an HTTPS host URL, such as https://socium.example.com."
+- tapOn: "Back"
+- tapOn: "Scan QR code"
+- assertVisible: "Scan a Socium QR code"
+- tapOn: "Back to connection"
+- assertVisible: "Connect to Socium"
