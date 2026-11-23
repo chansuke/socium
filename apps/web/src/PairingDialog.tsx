@@ -1,10 +1,8 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState, useSyncExternalStore } from "react";
 import { toCanvas } from "qrcode";
 import { RefreshCw, Smartphone } from "lucide-react";
 import type { Client } from "@socium/client";
-import type { PairedDevice } from "@socium/client/protocol";
-
-const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
+import { createPairingSession, shortId } from "./pairingSession";
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
@@ -14,75 +12,28 @@ function formatTime(value: string | null) {
   return Number.isNaN(time.getTime()) ? value : dateFormat.format(time);
 }
 
-/** Enough of the id to tell devices apart. */
-const shortId = (id: string) => id.slice(0, 8);
-
 export function PairingDialog({ client, close }: { client: Client; close: () => void }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [devices, setDevices] = useState<PairedDevice[] | null>(null);
-  const [devicesError, setDevicesError] = useState<string | null>(null);
-  const [revoking, setRevoking] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<string | null>(null);
-  /** Only the latest device list request may update the list. */
-  const listing = useRef(0);
+  const [session] = useState(() => createPairingSession(client));
+  const { url, error, loading, devices, devicesError, revoking, feedback } = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const drawCode = useCallback((canvas: HTMLCanvasElement | null) => {
-    if (canvas && url) {
-      void toCanvas(canvas, url, { width: 256, margin: 4 }).catch(() => {
-        setError("Could not draw the QR code.");
-      });
+    const { signal } = session;
+    if (canvas && url && !signal.aborted) {
+      void toCanvas(canvas, url, { width: 256, margin: 4 }).catch(() => session.drawFailed(signal));
     }
-  }, [url]);
-
-  async function loadDevices() {
-    const request = ++listing.current;
-    try {
-      const listed = await client.listDevices();
-      if (request !== listing.current) return;
-      setDevices(listed);
-      setDevicesError(null);
-    } catch (error) {
-      if (request === listing.current) setDevicesError(errorMessage(error, "Could not load paired devices."));
-    }
-  }
-
-  async function issue() {
-    setError(null);
-    setUrl(null);
-    setLoading(true);
-    try {
-      setUrl(await client.mobilePairingUrl());
-    } catch (error) {
-      setError(errorMessage(error, "Could not create a QR code."));
-    } finally {
-      setLoading(false);
-    }
-    // A pairing finishes on the phone; the list shows it after the next refresh.
-    void loadDevices();
-  }
-
-  async function revoke(device: PairedDevice) {
-    setRevoking(device.id);
-    setFeedback(null);
-    setDevicesError(null);
-    try {
-      await client.revokeDevice(device.id);
-      setFeedback(`Revoked device ${shortId(device.id)}. It must pair again to connect.`);
-    } catch (error) {
-      setDevicesError(errorMessage(error, "Could not revoke the device."));
-    } finally {
-      setRevoking(null);
-    }
-    await loadDevices();
-  }
+  }, [session, url]);
+  // Stable, so React detaches it only when the dialog unmounts; that aborts what is in flight.
+  const attach = useCallback((dialog: HTMLDialogElement | null) => {
+    if (!dialog) return;
+    session.open();
+    if (!dialog.open) dialog.showModal();
+    void session.loadDevices();
+    return () => session.close();
+  }, [session]);
 
   return (
-    <dialog className="pairing-dialog" aria-labelledby="pairing-heading" onClose={close} ref={(dialog) => {
-      if (dialog && !dialog.open) {
-        dialog.showModal();
-        void loadDevices();
-      }
+    <dialog className="pairing-dialog" aria-labelledby="pairing-heading" ref={attach} onClose={() => {
+      session.close();
+      close();
     }}>
       <h2 id="pairing-heading">Pair a phone</h2>
       <p>Open Socium on your phone and choose <strong>Scan QR code</strong>.</p>
@@ -90,7 +41,7 @@ export function PairingDialog({ client, close }: { client: Client; close: () => 
       {url && <p>This code expires after five minutes or one scan.</p>}
       {error && <p className="notice" role="alert">{error}</p>}
       <div className="pairing-actions">
-        <button className="primary" disabled={loading} onClick={() => void issue()}>
+        <button className="primary" disabled={loading} onClick={() => void session.issue()}>
           {loading ? "Generating…" : url ? "Generate new code" : "Generate QR code"}
         </button>
       </div>
@@ -98,7 +49,7 @@ export function PairingDialog({ client, close }: { client: Client; close: () => 
       <section className="devices" aria-labelledby="devices-heading">
         <div className="devices-header">
           <h3 id="devices-heading">Paired devices</h3>
-          <button className="icon small" aria-label="Refresh paired devices" title="Refresh" onClick={() => void loadDevices()}>
+          <button className="icon small" aria-label="Refresh paired devices" title="Refresh" onClick={() => void session.loadDevices()}>
             <RefreshCw size={15} />
           </button>
         </div>
@@ -119,7 +70,7 @@ export function PairingDialog({ client, close }: { client: Client; close: () => 
                   <span>Last used {formatTime(device.lastUsedAt)}</span>
                 </div>
                 <button className="quiet danger" disabled={revoking !== null} aria-label={`Revoke device ${shortId(device.id)}`}
-                  onClick={() => void revoke(device)}>
+                  onClick={() => void session.revoke(device)}>
                   {revoking === device.id ? "Revoking…" : "Revoke"}
                 </button>
               </li>
