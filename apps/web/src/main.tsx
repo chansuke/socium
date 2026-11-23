@@ -6,12 +6,12 @@ import {
   MessageSquare, Plus, QrCode, Square, Terminal, Unplug,
 } from "lucide-react";
 import type { CSSProperties } from "react";
-import Markdown from "react-markdown";
 import { createClient } from "@socium/client";
 import type { Client } from "@socium/client";
 import { maxPromptLength } from "@socium/client/protocol";
 import type { Message, Plan, PlanTaskStatus, WorkspaceState } from "@socium/client/protocol";
 import { describeActivity, planProgress, planStatusLabels } from "@socium/client/progress";
+import { AssistantMarkdown } from "./assistantMarkdown";
 import { PairingDialog } from "./PairingDialog";
 import "./styles.css";
 
@@ -331,9 +331,7 @@ function MessageCard({ message }: { message: Message }) {
   return <article className={`message ${message.role}`}>
     <h2>{label}</h2>
     {message.role === "assistant"
-      ? <Markdown skipHtml disallowedElements={["img"]} components={{
-        a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>,
-      }}>{message.text}</Markdown>
+      ? <AssistantMarkdown text={message.text} />
       : <div className="plain">{message.text}</div>}
   </article>;
 }
