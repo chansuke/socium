@@ -1,13 +1,14 @@
 import { Fragment, memo, useMemo } from "react";
 import type { ReactNode } from "react";
 import { Linking, ScrollView, Text, View } from "react-native";
-import { parseMarkdown, safeLinkUrl } from "./markdown";
+import { safeHttpUrl } from "@socium/client/links";
+import { parseMarkdown } from "./markdown";
 import type { Block, Inline } from "./markdown";
 import { markdownStyles as styles } from "./styles";
 
 function openLink(href: string) {
   // Checked again where the URL leaves the app.
-  const url = safeLinkUrl(href);
+  const url = safeHttpUrl(href);
   if (url) void Linking.openURL(url).catch(() => {});
 }
 
@@ -66,8 +67,7 @@ function MarkdownBlock({ block }: { block: Block }) {
       return (
         <View style={styles.list}>
           {block.items.map((item, index) => {
-            const number = block.start + block.items.slice(0, index).filter(({ depth }) => depth === 0).length;
-            const marker = item.depth > 0 ? "◦" : block.ordered ? `${number}.` : "•";
+            const marker = item.depth > 0 ? "◦" : item.number !== null ? `${item.number}.` : "•";
             return (
               <View key={index} style={[styles.listItem, { paddingLeft: item.depth * 18 }]}>
                 <Text style={styles.listMarker}>{marker}</Text>
