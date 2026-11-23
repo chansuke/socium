@@ -58,6 +58,10 @@ pub enum AgentProgress {
     },
     CommandStarted {
         command: String,
+        /// The file name of the program, from `argv[0]` without its
+        /// directory, for displays that must not show arguments, which may
+        /// carry secrets. Empty when `argv[0]` has no file name.
+        program: String,
         cwd: String,
     },
     CommandFinished {
