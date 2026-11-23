@@ -412,3 +412,84 @@ test("pairing and device requests stop when their signal aborts", async () => {
   await assert.rejects(client.listDevices(AbortSignal.abort()), { name: "AbortError" });
   assert.equal(host.calls.length, sent);
 });
+
+test("a rejected token is final: a command reply that arrives later neither clears it nor restarts polling", async (context) => {
+  for (const events of [true, false]) {
+    let reply!: (response: Response) => void;
+    let rejectNow = false;
+    const host = fakeHost((call, path) => {
+      if (path === "/api/command") return new Promise<Response>((resolve) => reply = resolve);
+      if (rejectNow) return json(401, { error: "Enter the access token shown on the Socium host." });
+      return path === "/api/events" ? host.stream(call) : json(200, workspace("w:1"));
+    });
+    const { client } = start(context, host, { ...fast, events });
+    await until(() => client.getSnapshot().workspace?.revision === "w:1" || host.streams.length === 1);
+    host.streams[0]?.send(workspace("w:1"));
+    await until(() => client.getSnapshot().workspace?.revision === "w:1");
+
+    const sent = client.send({ action: "new" });
+    await until(() => reply !== undefined);
+    // The device is revoked: the next poll, or the reopened stream, is refused.
+    rejectNow = true;
+    host.streams[0]?.end();
+    await until(() => client.getSnapshot().tokenRejected);
+    const calls = host.calls.length;
+    reply(json(200, workspace("w:2", { title: "Too late" })));
+    assert.equal(await sent, false, `events: ${events}`);
+    await delay(50);
+    const snapshot = client.getSnapshot();
+    assert.equal(snapshot.tokenRejected, true);
+    assert.equal(snapshot.connectionError, "Enter the access token shown on the Socium host.");
+    assert.equal(snapshot.workspace?.revision, "w:1");
+    assert.equal(snapshot.sending, false);
+    assert.equal(host.calls.length, calls, "the client sent requests after the token was rejected");
+    assert.equal(await client.send({ action: "new" }), false);
+    assert.equal(host.calls.length, calls);
+  }
+});
+
+test("a rejected command token stops the open stream too", async (context) => {
+  const host = fakeHost((call, path) =>
+    path === "/api/events" ? host.stream(call) : json(401, { error: "Enter the access token shown on the Socium host." }));
+  const { client } = start(context, host);
+  await until(() => host.streams.length === 1);
+  host.streams[0]?.send(workspace("w:1"));
+  await until(() => client.getSnapshot().workspace?.revision === "w:1");
+  assert.equal(await client.send({ action: "new" }), false);
+  assert.equal(client.getSnapshot().tokenRejected, true);
+  assert.equal(client.getSnapshot().commandError, null);
+  assert(host.streams[0]?.aborted);
+  host.streams[0]?.send(workspace("w:2"));
+  await delay(50);
+  assert.equal(client.getSnapshot().workspace?.revision, "w:1");
+  assert.equal(host.calls.length, 2);
+});
+
+test("an event stream that ends says it is reconnecting and holds commands until a stream opens again", async (context) => {
+  let open!: () => void;
+  let attempts = 0;
+  const host = fakeHost((call, path) => {
+    if (path === "/api/command") return json(200, workspace("w:2"));
+    attempts++;
+    if (attempts === 1) return host.stream(call);
+    // The next stream opens when the test says.
+    return new Promise<Response>((resolve) => open = () => resolve(host.stream(call)));
+  });
+  const { client } = start(context, host, { ...fast, connectTimeout: 5000 });
+  await until(() => host.streams.length === 1);
+  host.streams[0]?.send(workspace("w:1"));
+  await until(() => client.getSnapshot().workspace?.revision === "w:1");
+  assert.equal(client.getSnapshot().reconnecting, false);
+
+  host.streams[0]?.end();
+  await until(() => client.getSnapshot().reconnecting);
+  assert.equal(client.getSnapshot().connectionError, null);
+  assert.equal(await client.send({ action: "new" }), false);
+  assert(!host.paths().includes("/api/command"));
+
+  await until(() => open !== undefined);
+  open();
+  await until(() => !client.getSnapshot().reconnecting);
+  assert(await client.send({ action: "new" }));
+  assert.equal(client.getSnapshot().workspace?.revision, "w:2");
+});
