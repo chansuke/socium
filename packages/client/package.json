@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/client.ts",
     "./protocol": "./src/protocol.ts",
-    "./progress": "./src/progress.ts"
+    "./progress": "./src/progress.ts",
+    "./links": "./src/links.ts"
   },
   "scripts": {
     "test": "node --test src/*.test.ts",
