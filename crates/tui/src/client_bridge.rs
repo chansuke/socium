@@ -312,8 +312,9 @@ impl ProgressPublisher {
             }
             AgentProgress::ThinkingText { .. } => return self.activity("thinking", None),
             AgentProgress::ToolCallStarted { name } => return self.activity("tool", Some(&name)),
-            AgentProgress::CommandStarted { command, .. } => {
-                return self.activity("command", program_name(&command));
+            AgentProgress::CommandStarted { program, .. } => {
+                let program = (!program.is_empty()).then_some(program.as_str());
+                return self.activity("command", program);
             }
             AgentProgress::CompactionStarted => return self.activity("compacting", None),
             _ => return,
@@ -343,26 +344,6 @@ fn turn_notices(warnings: Vec<String>, outcome: Vec<String>) -> Vec<String> {
         }
     }
     notices
-}
-
-/// The program a displayed command runs, without its directory or arguments,
-/// which may carry secrets such as tokens in flags.
-fn program_name(command: &str) -> Option<&str> {
-    let program = match command.strip_prefix('"') {
-        // `display_command` quotes a part with whitespace as a Rust string.
-        Some(quoted) => {
-            let mut escaped = false;
-            let end = quoted.char_indices().find_map(|(at, c)| {
-                let closes = c == '"' && !escaped;
-                escaped = c == '\\' && !escaped;
-                closes.then_some(at)
-            })?;
-            &quoted[..end]
-        }
-        None => command.split_whitespace().next()?,
-    };
-    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    (!name.is_empty()).then_some(name)
 }
 
 fn respond(id: &str, result: Result<(), AgentError>) {
@@ -434,18 +415,5 @@ mod tests {
             ),
             ApprovalAnswer::Deny
         );
-    }
-
-    #[test]
-    fn program_name_drops_the_directory_and_every_argument() {
-        assert_eq!(
-            program_name("curl -H \"Authorization: Bearer t0k3n\""),
-            Some("curl")
-        );
-        assert_eq!(program_name("/usr/bin/env SECRET=x make"), Some("env"));
-        assert_eq!(program_name("\"/opt/my tools/run\" --key=k"), Some("run"));
-        assert_eq!(program_name("\"\\\"odd\\\"/x\" y"), Some("x"));
-        assert_eq!(program_name(""), None);
-        assert_eq!(program_name("\"unterminated --key=k"), None);
     }
 }

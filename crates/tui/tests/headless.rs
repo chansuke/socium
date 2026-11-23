@@ -743,28 +743,41 @@ fn client_bridge_allows_what_a_request_offers_for_the_session() {
 #[test]
 fn client_bridge_activity_names_the_program_but_not_its_arguments() {
     let secret = "sk-live-activity-secret";
-    let command = json!({"command": ["/usr/bin/touch", format!("--token={secret}")]});
+    let plain = json!({"command": ["/usr/bin/touch", format!("--token={secret}")]});
+    // Shown as `"run sk-live-…"`, which reads as one quoted program name.
+    let quoted = json!({"command": ["\"run", format!("{secret}\"")]});
     let (port, _) = serve(vec![
-        tool_call_reply("call-1", "run_command", command),
+        tool_call_reply("call-1", "run_command", plain),
+        tool_call_reply("call-2", "run_command", quoted),
         text_reply("Done."),
     ]);
     let fixture = fixture(port);
     let mut bridge = Bridge::start(&fixture);
     bridge.next("session");
-    bridge.send(json!({"id": "turn-1", "action": "prompt", "text": "Touch it."}));
-    let approval = bridge.next("approval");
-    let error = bridge.request(json!({
-        "id": "answer", "action": "approve", "request": approval["request"], "allow": true,
-    }));
-    assert_eq!(error, Value::Null);
-    let rest = bridge.until("session");
-    let activity = of_type(&rest, "activity");
+    bridge.send(json!({"id": "turn-1", "action": "prompt", "text": "Run both."}));
+    let mut records = Vec::new();
+    for answer in ["answer-1", "answer-2"] {
+        records.extend(bridge.until("approval"));
+        let approval = records.last().unwrap().clone();
+        bridge.send(json!({
+            "id": answer, "action": "approve", "request": approval["request"], "allow": true,
+        }));
+        // Kept: the command may start before the answer's response arrives.
+        records.extend(bridge.until("response"));
+        assert_eq!(records.last().unwrap()["error"], Value::Null);
+    }
+    records.extend(bridge.until("session"));
+    let activity = of_type(&records, "activity");
     let details = activity
         .iter()
         .filter(|r| r["phase"] == "command")
         .map(|r| r["detail"].clone())
         .collect::<Vec<_>>();
-    assert_eq!(details, vec![json!("touch")], "{rest:#?}");
+    assert_eq!(
+        details,
+        vec![json!("touch"), json!("\"run")],
+        "{records:#?}"
+    );
     for record in activity {
         assert!(!record.to_string().contains(secret), "{record}");
     }

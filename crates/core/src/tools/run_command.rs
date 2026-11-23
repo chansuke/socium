@@ -143,6 +143,7 @@ where
     let resolved_cwd = resolve_workspace_command_cwd(workspace_root, request.cwd)?;
     on_progress(AgentProgress::CommandStarted {
         command: display_command(&request.command),
+        program: program_name(&request.command),
         cwd: request.cwd.to_string(),
     });
     let mut policy = ExecutionPolicy::new(workspace_root, WorkspaceAccess::Write)
@@ -392,6 +393,16 @@ fn format_command_stream(stream: &str) -> String {
     )
 }
 
+/// The file name of `argv[0]`, taken from the argument vector itself rather
+/// than from the displayed command, so no argument can become part of it.
+fn program_name(command: &[String]) -> String {
+    command
+        .first()
+        .and_then(|program| program.rsplit(['/', '\\']).next())
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn display_command(command: &[String]) -> String {
     command
         .iter()
@@ -410,6 +421,25 @@ fn display_command(command: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::{TaskControl, conversation::ContentBlock, tools::run_tool_call_controlled};
+
+    #[test]
+    fn program_name_is_the_file_name_of_argv0_alone() {
+        let name = |parts: &[&str]| {
+            program_name(
+                &parts
+                    .iter()
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(name(&["/usr/bin/env", "SECRET=x", "make"]), "env");
+        assert_eq!(name(&["/opt/my tools/run", "--key=k"]), "run");
+        // A quote in the program name never pulls in the next argument.
+        assert_eq!(name(&["\"echo", "secret\""]), "\"echo");
+        assert_eq!(name(&["C:\\tools\\run.exe", "--key=k"]), "run.exe");
+        assert_eq!(name(&["dir/", "--key=k"]), "");
+        assert_eq!(name(&[]), "");
+    }
 
     /// Freezing the protected files that exist does not stop a command
     /// nobody reviewed from creating new ones, or from moving a frozen
