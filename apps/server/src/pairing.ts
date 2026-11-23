@@ -20,11 +20,16 @@ export interface PairingOptions {
   storePath?: string;
   /** The real path of the served workspace, which must not contain the store. */
   workspace?: string;
+  /** How long a store update waits for another gateway's update, in milliseconds. */
+  lockTimeout?: number;
 }
 
-export function createPairing(address: string, { clock = Date.now, storePath = defaultPairingStore(), workspace }: PairingOptions = {}) {
+export function createPairing(
+  address: string,
+  { clock = Date.now, storePath = defaultPairingStore(), workspace, lockTimeout }: PairingOptions = {},
+) {
   const origin = mobileEndpoint(address);
-  const file = openStore(storePath, { workspace });
+  const file = openStore(storePath, { workspace, lockTimeout });
   /** The records of the file version last read or written here. */
   let store: StoreSnapshot = file.read();
   let pending: { hash: string; expires: number } | undefined;

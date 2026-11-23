@@ -6,6 +6,7 @@ import {
 import type { Stats } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { PairedDevice } from "@socium/client/protocol";
 
 export interface DeviceRecord extends PairedDevice {
@@ -19,10 +20,10 @@ export interface StoreSnapshot {
   version: string;
 }
 
-/** A lock older than this is left by a gateway that stopped mid-update. */
-const staleLockAge = 30_000;
-const lockTimeout = 5000;
-const lockRetry = new Int32Array(new SharedArrayBuffer(4));
+/** How long an update waits for another gateway's update before failing. */
+const defaultLockTimeout = 5000;
+/** SQLite's result code for a database another connection has locked. */
+const sqliteBusy = 5;
 
 /**
  * The user-private file that keeps paired devices across restarts. A relative
@@ -185,79 +186,73 @@ function writeStore(path: string, devices: DeviceRecord[]): StoreSnapshot {
   }
 }
 
-/** Whether the gateway that took `lock` stopped without letting go of it. */
-function isStale(lock: string) {
-  let stats: Stats;
-  let owner: number;
+/**
+ * Creates `<store>.lock` once, private like the store, and keeps it: a lock
+ * file that is deleted and created again could let two gateways each lock a
+ * different file. Opened and closed before locking, because closing any
+ * descriptor of a file drops this process's POSIX locks on it.
+ */
+function prepareLock(lock: string) {
+  let descriptor: number;
   try {
-    stats = lstatSync(lock);
-    owner = Number(readFileSync(lock, "utf8").split(" ")[0]);
+    descriptor = openSync(lock, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
   } catch (error) {
-    // Released meanwhile.
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new Error(`The paired device store ${lock} must be a file, not a symlink or other file.`, { cause: error });
+    }
     throw error;
   }
-  if (Date.now() - stats.mtimeMs > staleLockAge) return true;
-  if (!Number.isInteger(owner) || owner <= 0) return false;
   try {
-    process.kill(owner, 0);
-    return false;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ESRCH";
+    checkPrivate(fstatSync(descriptor), lock, "file");
+  } finally {
+    closeSync(descriptor);
   }
 }
 
 /**
- * Reads the store, lets `change` compute the next records, and writes them,
- * while holding `<store>.lock`, so gateways sharing the store never lose each
- * other's updates, such as a revocation. `change` returns null to keep the file.
+ * Runs `step` while holding an exclusive lock on `<store>.lock`. The lock is
+ * an SQLite exclusive transaction, which holds a POSIX record lock on the
+ * file: the kernel releases it when the holder exits or crashes, and no
+ * gateway ever deletes or takes over a lock another one holds. A paused
+ * holder makes the others fail after `timeout` instead.
  */
-function updateFile(path: string, change: (devices: DeviceRecord[]) => DeviceRecord[] | null): StoreSnapshot {
+function withLock<T>(path: string, timeout: number, step: () => T): T {
   const lock = `${path}.lock`;
-  const deadline = Date.now() + lockTimeout;
-  let descriptor: number;
-  for (;;) {
-    try {
-      descriptor = openSync(lock, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    if (isStale(lock)) {
-      try {
-        unlinkSync(lock);
-      } catch {
-        // Another gateway cleared it first.
-      }
-      continue;
-    }
-    if (Date.now() >= deadline) {
-      throw new Error(`The paired device store is locked by another gateway; remove ${lock} if no gateway is running.`);
-    }
-    // Updates take milliseconds; wait without spinning.
-    Atomics.wait(lockRetry, 0, 0, 10);
-  }
+  prepareLock(lock);
+  const database = new DatabaseSync(lock, { timeout });
   try {
     try {
-      writeSync(descriptor, `${process.pid} ${randomBytes(6).toString("hex")}\n`);
-    } finally {
-      closeSync(descriptor);
+      database.exec("BEGIN EXCLUSIVE");
+    } catch (error) {
+      if ((error as { errcode?: number }).errcode === sqliteBusy) {
+        throw new Error(`The paired device store is busy: another gateway held ${lock} for over ${timeout} ms. Try again.`, { cause: error });
+      }
+      throw error;
     }
+    try {
+      return step();
+    } finally {
+      database.exec("ROLLBACK");
+    }
+  } finally {
+    database.close();
+  }
+}
+
+/** Reads the latest records and writes the changed ones under the lock. */
+function updateFile(path: string, change: (devices: DeviceRecord[]) => DeviceRecord[] | null, timeout: number): StoreSnapshot {
+  return withLock(path, timeout, () => {
     const current = readFile(path);
     const next = change(current.devices);
     return next ? writeStore(path, next) : current;
-  } finally {
-    try {
-      unlinkSync(lock);
-    } catch {
-      // Taken as stale by another gateway; nothing of ours is left to release.
-    }
-  }
+  });
 }
 
 export interface StoreOptions {
   /** The real path of the served workspace, which must not contain the store. */
   workspace?: string;
+  /** How long an update waits for another gateway's update, in milliseconds. */
+  lockTimeout?: number;
 }
 
 /**
@@ -266,7 +261,7 @@ export interface StoreOptions {
  * directory that is moved, replaced, or opened to others after startup stops
  * the gateway from trusting the store even while the file looks unchanged.
  */
-export function openStore(path: string, { workspace }: StoreOptions = {}) {
+export function openStore(path: string, { workspace, lockTimeout = defaultLockTimeout }: StoreOptions = {}) {
   function check(create: boolean) {
     if (workspace !== undefined) checkStoreLocation(path, workspace);
     return checkDirectory(path, create);
@@ -285,7 +280,7 @@ export function openStore(path: string, { workspace }: StoreOptions = {}) {
      */
     update(change: (devices: DeviceRecord[]) => DeviceRecord[] | null): StoreSnapshot {
       check(true);
-      return updateFile(path, change);
+      return updateFile(path, change, lockTimeout);
     },
   };
 }
