@@ -68,8 +68,8 @@ function Connection({ client, disconnect }: { client: Client; disconnect: () => 
     <Workspace
       client={client}
       state={status.workspace}
-      error={status.connectionError ?? status.commandError}
-      disabled={status.sending || Boolean(status.connectionError)}
+      error={status.connectionError ?? (status.reconnecting ? "Reconnecting to the Socium host…" : status.commandError)}
+      disabled={status.sending || status.reconnecting || Boolean(status.connectionError)}
       disconnect={disconnect}
     />
   );
