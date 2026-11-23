@@ -402,6 +402,81 @@ test("revoking a device ends its open event streams at once and leaves the other
   assert.equal((await host.state())?.revision, "revision-2");
 });
 
+test("a device revoked on another gateway sharing the store loses its idle streams at once", { timeout: 10_000 }, async (context) => {
+  const token = "host-access-token";
+  const storePath = join(temporaryDirectory(context), "state", "paired-devices.json");
+  // Each gateway with its own bridge and its own view of the store; keepalives stay out of the way.
+  const bridgeA = fakeBridge(workspaceState());
+  const pairingA = createPairing("https://socium.test/", { storePath });
+  let watchers = 0;
+  const { watch } = pairingA;
+  pairingA.watch = (onChange) => {
+    watchers++;
+    const stop = watch(onChange);
+    return () => {
+      watchers--;
+      stop();
+    };
+  };
+  const serverA = createHttpServer(bridgeA, token, tmpdir(), pairingA, { keepaliveInterval: 60_000 });
+  const apiA = await listen(context, serverA);
+  const pairingB = createPairing("https://socium.test/", { storePath });
+  const apiB = await listen(context, createHttpServer(fakeBridge(workspaceState()), token, tmpdir(), pairingB, { keepaliveInterval: 60_000 }));
+  const open = async (authorization: string) => {
+    const controller = new AbortController();
+    context.after(() => controller.abort());
+    const reader = eventReader(await fetch(`${apiA}/events`, { headers: { Authorization: authorization }, signal: controller.signal }));
+    assert.equal((await reader.state())?.revision, "revision-1");
+    return reader;
+  };
+  const revokedToken = `Bearer ${await pairDevice(apiA, token)}`;
+  const keptToken = `Bearer ${await pairDevice(apiA, token)}`;
+  const host = await open(`Bearer ${token}`);
+  // Nothing to watch for the host alone.
+  assert.equal(watchers, 0);
+  const revoked = await open(revokedToken);
+  const kept = await open(keptToken);
+  assert.equal(watchers, 1);
+
+  const device = pairingB.devices()[0];
+  assert(device);
+  const response = await fetch(`${apiB}/devices/${device.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(response.status, 204);
+  // No state from gateway A's bridge and no keepalive: only the store changed.
+  const ended = await Promise.race([revoked.state(), delay(2000).then(() => "still open")]);
+  assert.equal(ended, null, "the revoked device's stream outlived the revocation");
+  await until(() => bridgeA.listeners.size === 2);
+
+  bridgeA.emit(workspaceState({ revision: "revision-2" }));
+  assert.equal((await kept.state())?.revision, "revision-2");
+  assert.equal((await host.state())?.revision, "revision-2");
+
+  // The watcher goes with the last device stream.
+  await new Promise<void>((resolve, reject) => serverA.close((error) => error ? reject(error) : resolve()));
+  assert.equal(await kept.state(), null);
+  assert.equal(watchers, 0);
+});
+
+test("a gateway that cannot watch the pairing store still streams and checks on keepalives", { timeout: 10_000 }, async (context) => {
+  const token = "host-access-token";
+  const bridge = fakeBridge(workspaceState());
+  const pairing = createPairing("https://socium.test/", { storePath: join(temporaryDirectory(context), "paired-devices.json") });
+  pairing.watch = () => {
+    throw Object.assign(new Error("System limit for number of file watchers reached"), { code: "ENOSPC" });
+  };
+  const logged = context.mock.method(console, "error", () => {});
+  const api = await listen(context, createHttpServer(bridge, token, tmpdir(), pairing, { keepaliveInterval: 30 }));
+  const authorization = `Bearer ${await pairDevice(api, token)}`;
+  const events = eventReader(await fetch(`${api}/events`, { headers: { Authorization: authorization } }));
+  assert.equal((await events.state())?.revision, "revision-1");
+  assert(logged.mock.calls.some(({ arguments: [message] }) => /Cannot watch/.test(String(message))));
+
+  const [device] = pairing.devices();
+  assert(device);
+  pairing.revoke(device.id);
+  assert.equal(await events.state(), null);
+});
+
 test("closing the gateway ends open event streams instead of waiting for them", { timeout: 10_000 }, async (context) => {
   const token = "host-access-token";
   const bridge = fakeBridge(workspaceState());

@@ -106,12 +106,39 @@ export function createHttpServer(
   const expected = digest(`Bearer ${token}`);
   const clientState = (state: WorkspaceState) => ({ ...state, mobilePairing: Boolean(pairing) });
 
-  /** Open event streams, each with the paired device it serves; null for the host. */
-  const streams = new Map<() => void, string | null>();
+  /**
+   * Open event streams by their `end`, each with the paired device it serves
+   * (null for the host) and a check that ends it if that device was revoked.
+   */
+  const streams = new Map<() => void, { deviceId: string | null; recheck: () => void }>();
+  /** Stops watching the pairing store; set while a device has a stream open. */
+  let unwatch: (() => void) | undefined;
 
   /** Ends every open event stream of a device, such as one just revoked. */
   function endStreams(deviceId: string) {
-    for (const [end, owner] of streams) if (owner === deviceId) end();
+    for (const [end, stream] of streams) if (stream.deviceId === deviceId) end();
+  }
+
+  /**
+   * Watches the pairing store while device streams are open, so a device
+   * revoked by another gateway sharing the store loses its idle streams at
+   * once rather than at the next state or keepalive.
+   */
+  function watchDevices() {
+    const watching = [...streams.values()].some(({ deviceId }) => deviceId !== null);
+    if (watching && !unwatch && pairing) {
+      try {
+        unwatch = pairing.watch(() => {
+          for (const { recheck } of [...streams.values()]) recheck();
+        });
+      } catch (error) {
+        // Such as when the system runs out of file watchers; keepalives still check.
+        console.error("Cannot watch the paired device store; streams of devices revoked elsewhere end at the next keepalive.", error);
+      }
+    } else if (!watching && unwatch) {
+      unwatch();
+      unwatch = undefined;
+    }
   }
 
   /**
@@ -125,6 +152,7 @@ export function createHttpServer(
     after: string | null,
     deviceId: string | null,
     authorized: () => boolean,
+    paired: () => boolean,
   ) {
     let latest: WorkspaceState | null = bridge.snapshot();
     let sent = after;
@@ -141,6 +169,7 @@ export function createHttpServer(
       if (closed) return;
       closed = true;
       streams.delete(end);
+      watchDevices();
       clearInterval(keepalive);
       clearImmediate(pending);
       pending = undefined;
@@ -185,7 +214,8 @@ export function createHttpServer(
       if (!authorized()) end();
       else if (!response.writableNeedDrain) response.write(": keepalive\n\n");
     }), keepaliveInterval);
-    streams.set(end, deviceId);
+    streams.set(end, { deviceId, recheck: () => guarded(() => paired() || end()) });
+    watchDevices();
     response.on("drain", schedule);
     response.on("close", cleanup);
     guarded(flush);
@@ -243,7 +273,11 @@ export function createHttpServer(
           const lastEventId = request.headers["last-event-id"];
           const after = url.searchParams.get("after") ?? (typeof lastEventId === "string" ? lastEventId : null);
           // A device revoked by another gateway on the same store loses its stream too.
-          streamEvents(request, response, after, deviceId, () => hostAccess || pairing?.authenticate(authorization) === deviceId);
+          streamEvents(
+            request, response, after, deviceId,
+            () => hostAccess || pairing?.authenticate(authorization) === deviceId,
+            () => deviceId === null || Boolean(pairing?.isPaired(deviceId)),
+          );
           return;
         }
         if (request.method === "GET" && url.pathname === "/api/state") {
