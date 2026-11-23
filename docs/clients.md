@@ -15,7 +15,13 @@ SOCIUM_BIN="$PWD/target/debug/socium" nix develop --command npm run start:client
 
 Open `http://127.0.0.1:4173` and enter the access token printed by the gateway. If you already have a Socium binary built from this checkout on your PATH, omit `SOCIUM_BIN`. Configure the provider and its key on the Linux host as you would for the terminal client. For Vite development, run `npm run dev:web` with the gateway running. If you set a custom gateway port, set `SOCIUM_GATEWAY_PORT` to the same port for Vite.
 
-The gateway listens on loopback and serves one workspace. Connected clients share the active conversation and turn. Use the conversation list to start a chat or reopen a saved session. Commands that need approval display the tool details and offer **Allow once** or **Deny**, and **Allow for session** when the request offers it (as the terminal UI does). Warnings that arise during a turn, such as an MCP server that did not start or a renewed token that could not be saved, appear among the turn's notices. You can stop a running turn from any connected client. Close the TUI for this workspace before starting the gateway so the gateway can acquire the workspace lock.
+The gateway listens on loopback and serves one workspace. Connected clients share the active conversation and turn. Use the conversation list to start a chat or reopen a saved session. Commands that need approval display the tool details and offer **Allow once** or **Deny**. When the request supports it, **Allow for session** also allows what the request names, such as `cargo test` commands, until Socium exits. Warnings that arise during a turn, such as an MCP server that did not start or a renewed token that could not be saved, appear among the turn's notices. You can stop a running turn from any connected client. Close the TUI for this workspace before starting the gateway so the gateway can acquire the workspace lock.
+
+The model switcher in the top bar (in **Conversations** on mobile) lists the host's models. Switch between turns; a model the host cannot use now, such as one without a key, is listed with the reason and cannot be selected. While a turn runs, a status line shows what the agent is doing, such as waiting for the provider or running a program. It names only the program, never its arguments. When the agent keeps a plan, a panel above the transcript shows its goal, its progress, and each task.
+
+Assistant replies are shown as Markdown on both clients. Links open only for absolute `http` and `https` URLs; other links show as their text. Tool calls show as their first line and open to the full output. On mobile, a very long reply is shown as Markdown up to a limit and as plain text after it.
+
+The web client receives updates over Server-Sent Events. While the stream reconnects, the client says so and holds the model switcher and commands until it is back. The mobile app polls for updates, because React Native cannot read a streamed response. If the host rejects the token, such as after a revocation, the client stops connecting and asks you to pair again.
 
 ## Connect Android and iOS
 
@@ -30,10 +36,22 @@ tailscale serve --bg 4173
 
 Then pass `--mobile-url https://<host>.<tailnet>.ts.net` to `npm run start:clients`.
 
+If another proxy, such as Traefik, already serves port 443 on the host, serve the gateway on another HTTPS port and include that port in the mobile URL:
+
+```sh
+tailscale serve --bg --https=8443 4173
+```
+
+Then pass `--mobile-url https://<host>.<tailnet>.ts.net:8443`. See the [`tailscale serve` documentation](https://tailscale.com/kb/1242/tailscale-serve).
+
 1. Sign in to Socium in your browser with the host access token. Select **Pair a phone**, then **Generate QR code**.
 2. Open Socium on the phone, select **Scan QR code**, scan the browser's QR code, and confirm the host address.
 
-Each QR code can be used once within five minutes. A new code replaces the previous unused code. The mobile app saves the paired device token in the operating system's secure storage and removes it when you select **Disconnect**. The gateway issues a new device token when you pair and keeps only its SHA-256 hash in `$XDG_STATE_HOME/socium/paired-devices.json` (`~/.local/state/socium/paired-devices.json` by default; pass `--pairing-store` to use another file), so paired devices stay connected across gateway restarts. The gateway refuses to start when the store is inside the workspace, is a symlink, belongs to another user, or when its directory is not mode 700 or the file is not mode 600. With the host access token, `GET /api/devices` lists paired devices and `DELETE /api/devices/<id>` revokes one at once. Use **Enter manually** to connect with the host access token when you cannot scan a QR code.
+Each QR code can be used once within five minutes. A new code replaces the previous unused code. The mobile app saves the paired device token in the operating system's secure storage and removes it when you select **Disconnect** or **Pair again**. If the phone cannot remove it, the app says so and offers **Try again**.
+
+The gateway issues a new device token when you pair and keeps only its SHA-256 hash in `$XDG_STATE_HOME/socium/paired-devices.json` (`~/.local/state/socium/paired-devices.json` by default; pass `--pairing-store` to use another file), so paired devices stay connected across gateway restarts. The store must stay outside the workspace, where the agent's tools could read or change it. The gateway creates its directory with mode 700 and the file with mode 600. It refuses the store when it is inside the workspace, is a symlink, belongs to another user, or has a wider mode, and checks this again on every use, so a store changed while the gateway runs stops authorizing devices. Gateways that share a store take turns with an exclusive lock on `paired-devices.json.lock`, which the operating system releases if a gateway exits.
+
+The **Pair a phone** dialog lists paired devices with when each was paired and last used. Select **Revoke** to remove a device: its token stops working at once, and its open connections close, including those of other gateways that share the store. Only the host access token can list and revoke devices, also through `GET /api/devices` and `DELETE /api/devices/<id>`. Use **Enter manually** to connect with the host access token when you cannot scan a QR code.
 
 For local native development, keep the Android SDK in a persistent directory such as `~/Android/Sdk` (`ANDROID_HOME="$HOME/Android/Sdk"`, `ANDROID_AVD_HOME="$HOME/.android/avd"`) or configure Xcode, then run:
 
@@ -47,6 +65,8 @@ To run the connection smoke test locally on a running Android KVM emulator with 
 ```sh
 bash scripts/android-emulator-smoke.sh
 ```
+
+`apps/mobile/.maestro/validation.yaml` also checks that the manual form refuses an `http` host address, that **Back** clears the error, and that **Scan QR code** opens the scanner. Run it with `maestro test apps/mobile/.maestro/validation.yaml` after the app is installed.
 
 ## Run a smoke test on Expo Simulators
 
