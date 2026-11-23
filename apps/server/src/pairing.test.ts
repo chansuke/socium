@@ -1,7 +1,9 @@
 import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -48,12 +50,33 @@ test("a store in the workspace, or reached through a symlink into it, is refused
     join(workspace, "state", "socium", "paired-devices.json"),
     join(root, "link", "paired-devices.json"),
     workspace,
+    // A name that only starts with two dots is still inside.
+    join(workspace, "..hidden", "paired-devices.json"),
+    join(workspace, "..", "project", "..state", "paired-devices.json"),
   ]) {
     assert.throws(() => createPairing(address, { storePath, workspace }), /outside the workspace/, storePath);
   }
   assert(!existsSync(join(workspace, "state")));
-  const outside = join(root, "project-state", "paired-devices.json");
-  createPairing(address, { storePath: outside, workspace });
+  assert(!existsSync(join(workspace, "..hidden")));
+  for (const outside of [join(root, "project-state", "paired-devices.json"), join(root, "project..state", "paired-devices.json")]) {
+    pair(createPairing(address, { storePath: outside, workspace }));
+  }
+});
+
+test("a store directory moved into the workspace after startup stops authorizing", (context) => {
+  const root = temporaryDirectory(context);
+  const workspace = join(root, "project");
+  mkdirSync(workspace, { mode: 0o700 });
+  const directory = join(root, "state");
+  const pairing = createPairing(address, { storePath: join(directory, "paired-devices.json"), workspace });
+  const device = pair(pairing);
+  assert(pairing.authorizes(device));
+  // The same files, now where the agent's tools can rewrite them.
+  cpSync(directory, join(workspace, "state"), { recursive: true });
+  renameSync(directory, join(root, "moved"));
+  symlinkSync(join(workspace, "state"), directory);
+  assert.throws(() => pairing.authorizes(device), /outside the workspace/);
+  assert.throws(() => pairing.devices(), /outside the workspace/);
 });
 
 test("a store that others can reach, or that is a symlink, is refused", (context) => {
@@ -85,6 +108,40 @@ test("a store that others can reach, or that is a symlink, is refused", (context
   const device = pair(pairing);
   chmodSync(storePath, 0o644);
   assert.throws(() => pairing.authorizes(device), /mode 600/);
+});
+
+test("a store directory opened to others after startup stops authorizing, though the file is unchanged", (context) => {
+  const directory = join(temporaryDirectory(context), "state");
+  const pairing = createPairing(address, { storePath: join(directory, "paired-devices.json") });
+  const device = pair(pairing);
+  // The second check reuses the records the first one wrote.
+  assert(pairing.authorizes(device));
+  assert(pairing.authorizes(device));
+  chmodSync(directory, 0o755);
+  assert.throws(() => pairing.authorizes(device), /mode 700/);
+  assert.throws(() => pairing.devices(), /mode 700/);
+  assert.throws(() => pairing.revoke("device"), /mode 700/);
+  chmodSync(directory, 0o700);
+  assert(pairing.authorizes(device));
+});
+
+test("a store that belongs to another user is refused, at startup and later", (context) => {
+  const storePath = join(temporaryDirectory(context), "state", "paired-devices.json");
+  const pairing = createPairing(address, { storePath });
+  const device = pair(pairing);
+  assert(pairing.authorizes(device));
+  assert(pairing.authorizes(device));
+  const uid = process.getuid?.();
+  if (uid === undefined) {
+    context.skip("This platform has no user ids.");
+    return;
+  }
+  // As if the gateway now ran as another user than the store's owner.
+  const getuid = process.getuid;
+  context.after(() => process.getuid = getuid);
+  process.getuid = () => uid + 1;
+  assert.throws(() => createPairing(address, { storePath }), /belong to the user/);
+  assert.throws(() => pairing.authorizes(device), /belong to the user/);
 });
 
 /** Runs pairing operations in another process, as a second gateway on the same store. */

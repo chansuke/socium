@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mobileEndpoint } from "@socium/client";
 import type { PairedDevice } from "@socium/client/protocol";
-import { checkStoreLocation, defaultPairingStore, readStore, storeVersion, updateStore } from "./deviceStore.ts";
+import { defaultPairingStore, openStore } from "./deviceStore.ts";
 import type { DeviceRecord, StoreSnapshot } from "./deviceStore.ts";
 
 export { defaultPairingStore } from "./deviceStore.ts";
@@ -24,20 +24,20 @@ export interface PairingOptions {
 
 export function createPairing(address: string, { clock = Date.now, storePath = defaultPairingStore(), workspace }: PairingOptions = {}) {
   const origin = mobileEndpoint(address);
-  if (workspace !== undefined) checkStoreLocation(storePath, workspace);
+  const file = openStore(storePath, { workspace });
   /** The records of the file version last read or written here. */
-  let store: StoreSnapshot = readStore(storePath);
+  let store: StoreSnapshot = file.read();
   let pending: { hash: string; expires: number } | undefined;
 
   /** Picks up changes another gateway made, such as a revocation. */
   function load() {
-    if (storeVersion(storePath) !== store.version) store = readStore(storePath);
+    if (file.version() !== store.version) store = file.read();
     return store.devices;
   }
 
   /** Changes the latest records on disk, never the cached ones, under the store lock. */
   function update(change: (devices: DeviceRecord[]) => DeviceRecord[] | null) {
-    store = updateStore(storePath, change);
+    store = file.update(change);
     return store.devices;
   }
 
