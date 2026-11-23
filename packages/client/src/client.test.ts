@@ -163,8 +163,10 @@ test("a state older than a command's reply does not replace it", async (context)
   await until(() => client.getSnapshot().workspace?.revision === "w:6");
   assert(!stream.aborted);
   assert.equal(host.streams.length, 1);
-  // A restarted worker has a new instance, whose counter starts again.
-  stream.send(workspace("restarted:1"));
+  // A restarted gateway has a new instance, whose counter starts again, on a new stream.
+  stream.end();
+  await until(() => host.streams.length === 2);
+  host.streams[1]?.send(workspace("restarted:1"));
   await until(() => client.getSnapshot().workspace?.revision === "restarted:1");
 });
 
@@ -206,6 +208,61 @@ test("across a gateway restart, a late event from the old gateway does not repla
   assert.equal(client.getSnapshot().workspace?.revision, "new:2");
   old.send(workspace("new:3"));
   await until(() => client.getSnapshot().workspace?.revision === "new:3");
+});
+
+test("a late command reply from a gateway the client never saw does not replace a later gateway's state", async (context) => {
+  let reply!: (response: Response) => void;
+  const host = fakeHost((call, path) => {
+    if (path === "/api/events") return host.stream(call);
+    return new Promise<Response>((resolve) => reply = resolve);
+  });
+  const { client } = start(context, host);
+  await until(() => host.streams.length === 1);
+  host.streams[0]?.send(workspace("first:3"));
+  await until(() => client.getSnapshot().workspace?.revision === "first:3");
+
+  // Reaches a second gateway, which stops before replying in time.
+  const sent = client.send({ action: "new" });
+  await until(() => reply !== undefined);
+  host.streams[0]?.end();
+  // The stream reconnects to a third gateway.
+  await until(() => host.streams.length === 2);
+  host.streams[1]?.send(workspace("third:1", { title: "Third gateway" }));
+  await until(() => client.getSnapshot().workspace?.revision === "third:1");
+  reply(json(200, workspace("second:7", { title: "Second gateway" })));
+  assert(await sent);
+  assert.equal(client.getSnapshot().workspace?.revision, "third:1");
+  assert.equal(client.getSnapshot().workspace?.title, "Third gateway");
+  host.streams[1]?.send(workspace("third:2"));
+  await until(() => client.getSnapshot().workspace?.revision === "third:2");
+});
+
+test("a late event from a gateway the client never saw does not replace a later command reply", async (context) => {
+  const host = fakeHost((call, path) =>
+    path === "/api/events" ? host.stream(call) : json(200, workspace("third:1", { title: "After the command" })));
+  const { client } = start(context, host);
+  await until(() => host.streams.length === 1);
+  host.streams[0]?.send(workspace("first:3"));
+  await until(() => client.getSnapshot().workspace?.revision === "first:3");
+
+  // The stream reconnects to a second gateway, which says nothing yet.
+  host.streams[0]?.end();
+  await until(() => host.streams.length === 2);
+  const second = host.streams[1];
+  assert(second);
+  await until(() => client.getSnapshot().transport === "events" && client.getSnapshot().connectionError === null);
+  // The command, sent later, reaches a third gateway.
+  assert(await client.send({ action: "new" }));
+  assert.equal(client.getSnapshot().workspace?.revision, "third:1");
+  second.send(workspace("second:4", { title: "Second gateway" }));
+  await delay(30);
+  assert.equal(client.getSnapshot().workspace?.revision, "third:1");
+  assert.equal(client.getSnapshot().workspace?.title, "After the command");
+
+  second.end();
+  await until(() => host.streams.length === 3);
+  host.streams[2]?.send(workspace("third:2"));
+  await until(() => client.getSnapshot().workspace?.revision === "third:2");
 });
 
 test("a platform that cannot read a streamed response polls instead", async (context) => {
