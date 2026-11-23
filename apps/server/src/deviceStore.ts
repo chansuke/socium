@@ -5,7 +5,7 @@ import {
 } from "node:fs";
 import type { Stats } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { PairedDevice } from "@socium/client/protocol";
 
 export interface DeviceRecord extends PairedDevice {
@@ -51,8 +51,10 @@ function realLocation(path: string): string {
  */
 export function checkStoreLocation(storePath: string, workspace: string) {
   const store = realLocation(resolve(storePath));
-  const inside = relative(workspace, store);
-  if (inside === "" || (!inside.startsWith("..") && !isAbsolute(inside))) {
+  const fromWorkspace = relative(workspace, store);
+  // Only `..` as a whole segment leaves it: `<workspace>/..hidden` is inside.
+  const outside = fromWorkspace === ".." || fromWorkspace.startsWith(`..${sep}`) || isAbsolute(fromWorkspace);
+  if (!outside) {
     throw new Error(`Keep the paired device store outside the workspace: ${store} is inside ${workspace}.`);
   }
 }
@@ -98,13 +100,16 @@ function versionOf(stats: Stats) {
 }
 
 /** The version of the file now, without reading it; "missing" before the first pairing. */
-export function storeVersion(path: string) {
+function fileVersion(path: string) {
+  let stats: Stats;
   try {
-    return versionOf(lstatSync(path));
+    stats = lstatSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
     throw error;
   }
+  checkPrivate(stats, path, "file");
+  return versionOf(stats);
 }
 
 function isRecord(value: unknown): value is DeviceRecord {
@@ -115,8 +120,7 @@ function isRecord(value: unknown): value is DeviceRecord {
 }
 
 /** Reads the store without following a symlink, and checks it before trusting it. */
-export function readStore(path: string): StoreSnapshot {
-  if (!checkDirectory(path, false)) return { devices: [], version: "missing" };
+function readFile(path: string): StoreSnapshot {
   let descriptor: number;
   try {
     descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -208,8 +212,7 @@ function isStale(lock: string) {
  * while holding `<store>.lock`, so gateways sharing the store never lose each
  * other's updates, such as a revocation. `change` returns null to keep the file.
  */
-export function updateStore(path: string, change: (devices: DeviceRecord[]) => DeviceRecord[] | null): StoreSnapshot {
-  checkDirectory(path, true);
+function updateFile(path: string, change: (devices: DeviceRecord[]) => DeviceRecord[] | null): StoreSnapshot {
   const lock = `${path}.lock`;
   const deadline = Date.now() + lockTimeout;
   let descriptor: number;
@@ -240,7 +243,7 @@ export function updateStore(path: string, change: (devices: DeviceRecord[]) => D
     } finally {
       closeSync(descriptor);
     }
-    const current = readStore(path);
+    const current = readFile(path);
     const next = change(current.devices);
     return next ? writeStore(path, next) : current;
   } finally {
@@ -251,3 +254,40 @@ export function updateStore(path: string, change: (devices: DeviceRecord[]) => D
     }
   }
 }
+
+export interface StoreOptions {
+  /** The real path of the served workspace, which must not contain the store. */
+  workspace?: string;
+}
+
+/**
+ * The paired device store at `path`. Every read, version check, and update
+ * first checks the store's real location and its directory again, so a
+ * directory that is moved, replaced, or opened to others after startup stops
+ * the gateway from trusting the store even while the file looks unchanged.
+ */
+export function openStore(path: string, { workspace }: StoreOptions = {}) {
+  function check(create: boolean) {
+    if (workspace !== undefined) checkStoreLocation(path, workspace);
+    return checkDirectory(path, create);
+  }
+  const missing: StoreSnapshot = { devices: [], version: "missing" };
+  return {
+    path,
+    read: (): StoreSnapshot => check(false) ? readFile(path) : missing,
+    /** Changes with the file; compare it with a snapshot's version before reusing that snapshot. */
+    version: () => check(false) ? fileVersion(path) : "missing",
+    /**
+     * Reads the store, lets `change` compute the next records, and writes them
+     * while holding the store lock, so gateways sharing the store never lose
+     * each other's updates, such as a revocation. `change` returns null to
+     * keep the file.
+     */
+    update(change: (devices: DeviceRecord[]) => DeviceRecord[] | null): StoreSnapshot {
+      check(true);
+      return updateFile(path, change);
+    },
+  };
+}
+
+export type DeviceStore = ReturnType<typeof openStore>;
