@@ -37,7 +37,12 @@ export class GatewayError extends Error {
   }
 }
 
-export function createBridge(binary: string, workspace: string) {
+export interface BridgeOptions {
+  /** This gateway's generation, larger than any earlier gateway's; see `nextGeneration`. */
+  generation: number;
+}
+
+export function createBridge(binary: string, workspace: string, { generation }: BridgeOptions) {
   const env = { ...process.env };
   delete env.SOCIUM_CLIENT_TOKEN;
   const worker = spawn(binary, ["--client-bridge"], {
@@ -89,6 +94,7 @@ export function createBridge(binary: string, workspace: string) {
       case "session": {
         const { session, title, model, models, plan, sessions, messages, warnings } = event;
         state = {
+          generation,
           revision: `${instance}:${++revision}`,
           workspace: basename(workspace),
           session, title, model, models, plan, sessions, messages, warnings, notices, turn: null,

@@ -39,7 +39,7 @@ test("the bridge tells subscribers about each change and when the worker stops",
   const binary = join(directory, "socium");
   writeFileSync(binary, worker);
   chmodSync(binary, 0o755);
-  const bridge = createBridge(binary, directory);
+  const bridge = createBridge(binary, directory, { generation: 7 });
   context.after(() => bridge.close());
 
   const seen: (WorkspaceState | null)[] = [];
@@ -52,6 +52,7 @@ test("the bridge tells subscribers about each change and when the worker stops",
   });
   const initial = await next();
   assert.equal(initial?.models[0]?.alias, "local");
+  assert.equal(initial?.generation, 7);
   assert.equal(initial?.plan, null);
 
   const running = await bridge.send({ action: "prompt", text: "Go." });
@@ -69,6 +70,7 @@ test("the bridge tells subscribers about each change and when the worker stops",
   // One call per change, each with a new revision.
   const revisions = seen.map((state) => state?.revision);
   assert.equal(new Set(revisions).size, revisions.length);
+  assert(seen.every((state) => state?.generation === 7));
   assert(seen.length >= 6, `${seen.length} changes`);
   assert.equal(seen.at(-1), finished);
 
