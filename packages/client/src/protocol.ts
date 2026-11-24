@@ -72,6 +72,13 @@ export interface Turn {
 }
 
 export interface WorkspaceState {
+  /**
+   * Orders gateways: each gateway start takes a larger number than every
+   * earlier start, so a state from a smaller generation is from a gateway
+   * that a later one has replaced.
+   */
+  generation: number;
+  /** `<instance>:<counter>`; the counter orders states within one gateway. */
   revision: string;
   mobilePairing?: boolean;
   workspace: string;

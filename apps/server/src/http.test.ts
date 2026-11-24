@@ -118,6 +118,7 @@ async function pairDevice(api: string, hostToken: string) {
 
 function workspaceState(changes: Partial<WorkspaceState> = {}): WorkspaceState {
   return {
+    generation: 1,
     revision: "revision-1",
     workspace: "workspace",
     session: "session-1",

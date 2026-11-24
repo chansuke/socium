@@ -3,6 +3,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createBridge } from "./bridge.ts";
+import { nextGeneration } from "./generation.ts";
 import { createHttpServer } from "./http.ts";
 import { createPairing } from "./pairing.ts";
 
@@ -28,7 +29,7 @@ if (!/^[a-zA-Z0-9_-]{32,}$/.test(token)) {
 const workspace = realpathSync(values.workspace);
 const storePath = values["pairing-store"] ? resolve(values["pairing-store"]) : undefined;
 const pairing = values["mobile-url"] ? createPairing(values["mobile-url"], { storePath, workspace }) : undefined;
-const bridge = createBridge(process.env.SOCIUM_BIN ?? "socium", workspace);
+const bridge = createBridge(process.env.SOCIUM_BIN ?? "socium", workspace, { generation: nextGeneration() });
 const server = createHttpServer(bridge, token, resolve(import.meta.dirname, "../../web/dist"), pairing);
 
 server.on("error", (error) => {

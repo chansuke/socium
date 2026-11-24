@@ -70,29 +70,22 @@ function splitRevision(revision: string) {
   return { instance: revision.slice(0, at), count: Number(revision.slice(at + 1)) };
 }
 
-/** A state and the issue number of the request, stream, or command that brought it. */
-interface Delivered {
-  workspace: WorkspaceState;
-  issue: number;
-}
-
 /**
- * Whether `next` is a later state than `current`. Within one instance, the
- * counter orders states. A different instance is another gateway, such as
- * one restarted, whose state replaces the shown one only if it came from a
- * request issued no earlier than the one that brought the shown state: one
- * gateway never sends two instances on one stream, so a state from an
- * earlier request is a late reply or event from a gateway that is gone, even
- * one this client never saw. `retired` lists instances already replaced.
+ * Whether `next` is a later state than `current`. Gateways number their
+ * generations in the order they start, so a state from an earlier generation
+ * comes from a replaced gateway, such as a late reply or event, whenever the
+ * request that brought it was sent. Within one gateway, the revision counter
+ * orders states.
  */
-function supersedes(next: Delivered, current: Delivered | null, retired: ReadonlySet<string>) {
-  const nextRevision = splitRevision(next.workspace.revision);
-  if (retired.has(nextRevision.instance)) return false;
+function supersedes(next: WorkspaceState, current: WorkspaceState | null) {
   if (!current) return true;
-  const currentRevision = splitRevision(current.workspace.revision);
-  if (nextRevision.instance !== currentRevision.instance) return next.issue >= current.issue;
+  if (next.generation !== current.generation) return next.generation > current.generation;
+  const nextRevision = splitRevision(next.revision);
+  const currentRevision = splitRevision(current.revision);
+  // A generation belongs to one gateway, so another instance in it cannot be ordered.
+  if (nextRevision.instance !== currentRevision.instance) return false;
   if (!Number.isInteger(nextRevision.count) || !Number.isInteger(currentRevision.count)) {
-    return next.workspace.revision !== current.workspace.revision;
+    return next.revision !== current.revision;
   }
   return nextRevision.count > currentRevision.count;
 }
@@ -144,29 +137,16 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
   let poll: AbortController | undefined;
   let stream: AbortController | undefined;
   const listeners = new Set<() => void>();
-  /** Worker instances whose state a later instance has replaced. */
-  const retired = new Set<string>();
-  /** Numbers each stream, poll, and command in the order they are sent. */
-  let issued = 0;
-  /** The latest issue number among the requests whose states were shown. */
-  let shownIssue = 0;
 
   function update(changes: Partial<ClientStatus>) {
     status = { ...status, ...changes };
     for (const listener of listeners) listener();
   }
 
-  /**
-   * Shows `workspace`, brought by the request numbered `issue`, unless a
-   * later state, such as a command's reply, is already shown.
-   */
-  function receive(workspace: WorkspaceState, issue: number) {
+  /** Shows `workspace` unless a later state, such as a command's reply, is already shown. */
+  function receive(workspace: WorkspaceState) {
     if (status.tokenRejected) return;
-    const current = status.workspace;
-    if (supersedes({ workspace, issue }, current && { workspace: current, issue: shownIssue }, retired)) {
-      const previous = current && splitRevision(current.revision).instance;
-      if (previous !== null && previous !== splitRevision(workspace.revision).instance) retired.add(previous);
-      shownIssue = Math.max(shownIssue, issue);
+    if (supersedes(workspace, status.workspace)) {
       update({ workspace, connectionError: null, reconnecting: false });
     } else if (status.connectionError) {
       update({ connectionError: null });
@@ -249,7 +229,6 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     if (stream || poll || listeners.size === 0 || status.tokenRejected) return;
     const controller = new AbortController();
     stream = controller;
-    const issue = ++issued;
     let idle: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     const abortAfter = (milliseconds: number) => {
@@ -284,7 +263,7 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         received = true;
         keepAlive();
       }, (data) => {
-        if (stream === controller) receive(JSON.parse(data), issue);
+        if (stream === controller) receive(JSON.parse(data));
       });
     } catch (error) {
       if (stream !== controller) return;
@@ -319,7 +298,6 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     if (poll || stream || listeners.size === 0 || status.tokenRejected) return;
     const controller = new AbortController();
     poll = controller;
-    const issue = ++issued;
     const timeout = setTimeout(() => controller.abort(), 10_000);
     const revision = status.workspace?.revision ?? "";
     let retry = true;
@@ -327,7 +305,7 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
       const response = await request(`state?after=${encodeURIComponent(revision)}`, { signal: controller.signal });
       if (response.status !== 204) {
         const workspace: WorkspaceState = await response.json();
-        if (poll === controller) receive(workspace, issue);
+        if (poll === controller) receive(workspace);
       } else if (poll === controller && (status.connectionError || status.reconnecting)) {
         update({ connectionError: null, reconnecting: false });
       }
@@ -385,8 +363,7 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
       const workspace = status.workspace;
       if (!workspace || status.sending || status.connectionError || status.reconnecting || status.tokenRejected) return false;
       update({ sending: true, commandError: null });
-      const issue = ++issued;
-      const controller = new AbortController();
+        const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12_000);
       try {
         const response = await request("command", {
@@ -400,11 +377,11 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         if (transport === "polling") {
           // A GET begun before this mutation may carry a superseded workspace.
           disconnect();
-          receive(next, issue);
+          receive(next);
           void refresh();
         } else {
           // The stream stays open; `receive` drops states older than this one.
-          receive(next, issue);
+          receive(next);
         }
         return true;
       } catch (error) {

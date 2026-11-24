@@ -8,6 +8,7 @@ import type { WorkspaceState } from "./protocol.ts";
 
 function workspace(revision: string, changes: Partial<WorkspaceState> = {}): WorkspaceState {
   return {
+    generation: 1,
     revision,
     workspace: "workspace",
     session: "session-1",
@@ -163,10 +164,10 @@ test("a state older than a command's reply does not replace it", async (context)
   await until(() => client.getSnapshot().workspace?.revision === "w:6");
   assert(!stream.aborted);
   assert.equal(host.streams.length, 1);
-  // A restarted gateway has a new instance, whose counter starts again, on a new stream.
+  // A restarted gateway has a later generation and a new instance, whose counter starts again.
   stream.end();
   await until(() => host.streams.length === 2);
-  host.streams[1]?.send(workspace("restarted:1"));
+  host.streams[1]?.send(workspace("restarted:1", { generation: 2 }));
   await until(() => client.getSnapshot().workspace?.revision === "restarted:1");
 });
 
@@ -183,7 +184,7 @@ test("across a gateway restart, a late command reply from the old gateway does n
 
   const sent = client.send({ action: "new" });
   await until(() => reply !== undefined);
-  host.streams[0]?.send(workspace("new:1", { title: "After the restart" }));
+  host.streams[0]?.send(workspace("new:1", { generation: 2, title: "After the restart" }));
   await until(() => client.getSnapshot().workspace?.revision === "new:1");
   reply(json(200, workspace("old:4")));
   assert(await sent);
@@ -193,7 +194,7 @@ test("across a gateway restart, a late command reply from the old gateway does n
 
 test("across a gateway restart, a late event from the old gateway does not replace a command reply from the new one", async (context) => {
   const host = fakeHost((call, path) =>
-    path === "/api/events" ? host.stream(call) : json(200, workspace("new:2", { title: "After the command" })));
+    path === "/api/events" ? host.stream(call) : json(200, workspace("new:2", { generation: 2, title: "After the command" })));
   const { client } = start(context, host);
   await until(() => host.streams.length === 1);
   const [old] = host.streams;
@@ -206,7 +207,7 @@ test("across a gateway restart, a late event from the old gateway does not repla
   old.send(workspace("old:9"));
   await delay(30);
   assert.equal(client.getSnapshot().workspace?.revision, "new:2");
-  old.send(workspace("new:3"));
+  old.send(workspace("new:3", { generation: 2 }));
   await until(() => client.getSnapshot().workspace?.revision === "new:3");
 });
 
@@ -218,7 +219,7 @@ test("a late command reply from a gateway the client never saw does not replace 
   });
   const { client } = start(context, host);
   await until(() => host.streams.length === 1);
-  host.streams[0]?.send(workspace("first:3"));
+  host.streams[0]?.send(workspace("first:3", { generation: 1 }));
   await until(() => client.getSnapshot().workspace?.revision === "first:3");
 
   // Reaches a second gateway, which stops before replying in time.
@@ -227,22 +228,22 @@ test("a late command reply from a gateway the client never saw does not replace 
   host.streams[0]?.end();
   // The stream reconnects to a third gateway.
   await until(() => host.streams.length === 2);
-  host.streams[1]?.send(workspace("third:1", { title: "Third gateway" }));
+  host.streams[1]?.send(workspace("third:1", { generation: 3, title: "Third gateway" }));
   await until(() => client.getSnapshot().workspace?.revision === "third:1");
-  reply(json(200, workspace("second:7", { title: "Second gateway" })));
+  reply(json(200, workspace("second:7", { generation: 2, title: "Second gateway" })));
   assert(await sent);
   assert.equal(client.getSnapshot().workspace?.revision, "third:1");
   assert.equal(client.getSnapshot().workspace?.title, "Third gateway");
-  host.streams[1]?.send(workspace("third:2"));
+  host.streams[1]?.send(workspace("third:2", { generation: 3 }));
   await until(() => client.getSnapshot().workspace?.revision === "third:2");
 });
 
 test("a late event from a gateway the client never saw does not replace a later command reply", async (context) => {
   const host = fakeHost((call, path) =>
-    path === "/api/events" ? host.stream(call) : json(200, workspace("third:1", { title: "After the command" })));
+    path === "/api/events" ? host.stream(call) : json(200, workspace("third:1", { generation: 3, title: "After the command" })));
   const { client } = start(context, host);
   await until(() => host.streams.length === 1);
-  host.streams[0]?.send(workspace("first:3"));
+  host.streams[0]?.send(workspace("first:3", { generation: 1 }));
   await until(() => client.getSnapshot().workspace?.revision === "first:3");
 
   // The stream reconnects to a second gateway, which says nothing yet.
@@ -254,14 +255,63 @@ test("a late event from a gateway the client never saw does not replace a later 
   // The command, sent later, reaches a third gateway.
   assert(await client.send({ action: "new" }));
   assert.equal(client.getSnapshot().workspace?.revision, "third:1");
-  second.send(workspace("second:4", { title: "Second gateway" }));
+  second.send(workspace("second:4", { generation: 2, title: "Second gateway" }));
   await delay(30);
   assert.equal(client.getSnapshot().workspace?.revision, "third:1");
   assert.equal(client.getSnapshot().workspace?.title, "After the command");
 
   second.end();
   await until(() => host.streams.length === 3);
-  host.streams[2]?.send(workspace("third:2"));
+  host.streams[2]?.send(workspace("third:2", { generation: 3 }));
+  await until(() => client.getSnapshot().workspace?.revision === "third:2");
+});
+
+test("a command sent later that reaches an earlier generation's gateway is dropped and keeps the later gateway", async (context) => {
+  let reply!: (response: Response) => void;
+  const host = fakeHost((call, path) => {
+    if (path === "/api/events") return host.stream(call);
+    return new Promise<Response>((resolve) => reply = resolve);
+  });
+  const { client } = start(context, host);
+  await until(() => host.streams.length === 1);
+  // The stream, sent first, already reached generation 3.
+  host.streams[0]?.send(workspace("third:1", { generation: 3, title: "Third gateway" }));
+  await until(() => client.getSnapshot().workspace?.revision === "third:1");
+
+  // The command, sent after the stream, lands on generation 2 while it is being replaced.
+  const sent = client.send({ action: "new" });
+  await until(() => reply !== undefined);
+  reply(json(200, workspace("second:9", { generation: 2, title: "Second gateway" })));
+  assert(await sent);
+  assert.equal(client.getSnapshot().workspace?.revision, "third:1");
+  assert.equal(client.getSnapshot().workspace?.title, "Third gateway");
+  // Generation 3 stays current.
+  host.streams[0]?.send(workspace("third:2", { generation: 3 }));
+  await until(() => client.getSnapshot().workspace?.revision === "third:2");
+});
+
+test("a stream opened later that reaches an earlier generation's gateway is ignored and keeps the later gateway", async (context) => {
+  const host = fakeHost((call, path) =>
+    path === "/api/events" ? host.stream(call) : json(200, workspace("third:1", { generation: 3, title: "After the command" })));
+  const { client } = start(context, host);
+  await until(() => host.streams.length === 1);
+  host.streams[0]?.send(workspace("first:3", { generation: 1 }));
+  await until(() => client.getSnapshot().workspace?.revision === "first:3");
+  // The command, sent first, reaches generation 3.
+  assert(await client.send({ action: "new" }));
+  assert.equal(client.getSnapshot().workspace?.revision, "third:1");
+
+  // The stream reopens after the command and reaches generation 2 while it is being replaced.
+  host.streams[0]?.end();
+  await until(() => host.streams.length === 2);
+  host.streams[1]?.send(workspace("second:9", { generation: 2, title: "Second gateway" }));
+  await delay(30);
+  assert.equal(client.getSnapshot().workspace?.revision, "third:1");
+  assert.equal(client.getSnapshot().workspace?.title, "After the command");
+  // Generation 3 stays current on the next stream.
+  host.streams[1]?.end();
+  await until(() => host.streams.length === 3);
+  host.streams[2]?.send(workspace("third:2", { generation: 3 }));
   await until(() => client.getSnapshot().workspace?.revision === "third:2");
 });
 
