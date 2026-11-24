@@ -139,6 +139,11 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
   let timer: ReturnType<typeof setTimeout> | undefined;
   let poll: AbortController | undefined;
   let stream: AbortController | undefined;
+  /**
+   * Aborted once the host rejects the token, with the 401 as its reason, so
+   * every request still on its way, headers or body, fails with it at once.
+   */
+  const terminal = new AbortController();
   const listeners = new Set<() => void>();
 
   function update(changes: Partial<ClientStatus>) {
@@ -162,7 +167,9 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
   /**
    * Sends a request with the token. Once the host has rejected the token,
    * fails at once without sending anything, and a 401 makes that final as
-   * soon as its headers arrive, without waiting for its body.
+   * soon as its headers arrive, without waiting for its body. Callers stop
+   * the request on a 401 elsewhere: `requestJson` through `terminal`, and the
+   * event stream through `disconnect`.
    */
   async function request(path: string, options?: RequestInit) {
     if (status.tokenRejected) throw new RequestError(401, tokenRejectedMessage);
@@ -188,8 +195,9 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
   /**
    * `request` and its JSON body, or null for a 204, with a deadline, without
    * `AbortSignal.timeout`, which React Native lacks, that also stops when
-   * `signal` aborts. Both cover the body as well as the headers, so a body
-   * that stalls after its headers fails too, and nothing is left to settle.
+   * `signal` aborts or any request gets a 401. All three cover the body as
+   * well as the headers, so a body that stalls after its headers fails too,
+   * and nothing is left to settle.
    */
   async function requestJson<T>(path: string, options: RequestInit, signal?: AbortSignal, milliseconds = 10_000): Promise<T | null> {
     signal?.throwIfAborted();
@@ -201,6 +209,8 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     stopped.catch(() => {});
     const abort = () => controller.abort(signal?.reason);
     signal?.addEventListener("abort", abort);
+    const rejected = () => controller.abort(terminal.signal.reason);
+    terminal.signal.addEventListener("abort", rejected);
     const timeout = setTimeout(() => controller.abort(new DOMException("The host did not answer in time.", "TimeoutError")), milliseconds);
     try {
       const response = await Promise.race([request(path, { ...options, signal: controller.signal }), stopped]);
@@ -209,6 +219,7 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
+      terminal.signal.removeEventListener("abort", rejected);
       // Lets go of a body that is no longer read.
       controller.abort();
     }
@@ -218,6 +229,7 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
   function rejectToken() {
     if (status.tokenRejected) return;
     disconnect();
+    terminal.abort(new RequestError(401, tokenRejectedMessage));
     update({ tokenRejected: true, connectionError: tokenRejectedMessage, reconnecting: false, sending: false });
   }
 
