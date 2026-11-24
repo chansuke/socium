@@ -2,7 +2,7 @@ import { Fragment, memo, useMemo } from "react";
 import type { ReactNode } from "react";
 import { Linking, ScrollView, Text, View } from "react-native";
 import { safeHttpUrl } from "@socium/client/links";
-import { parseMarkdown } from "./markdown";
+import { listMarker, parseMarkdown } from "./markdown";
 import type { Block, Inline } from "./markdown";
 import { markdownStyles as styles } from "./styles";
 
@@ -66,21 +66,22 @@ function MarkdownBlock({ block }: { block: Block }) {
     case "list":
       return (
         <View style={styles.list}>
-          {block.items.map((item, index) => {
-            const marker = item.depth > 0 ? "◦" : item.number !== null ? `${item.number}.` : "•";
-            return (
-              <View key={index} style={[styles.listItem, { paddingLeft: item.depth * 18 }]}>
-                <Text style={styles.listMarker}>{marker}</Text>
-                <Text selectable style={[styles.paragraph, styles.listText]}>{renderInline(item.children)}</Text>
-              </View>
-            );
-          })}
+          {block.items.map((item, index) => (
+            <View key={index} style={[styles.listItem, { paddingLeft: item.depth * 18 }]}>
+              <Text style={styles.listMarker}>{listMarker(item)}</Text>
+              <Text selectable style={[styles.paragraph, styles.listText]}>{renderInline(item.children)}</Text>
+            </View>
+          ))}
         </View>
       );
   }
 }
 
-/** An assistant reply as Markdown; links open in the browser only for http and https. */
+/**
+ * An assistant reply as Markdown; links open in the browser only for http and
+ * https. It shows the text, list markers, and language labels of `blocks` and
+ * nothing else, so it stays within `maxRenderedLength` characters.
+ */
 export const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
   const blocks = useMemo(() => parseMarkdown(text), [text]);
   return (
