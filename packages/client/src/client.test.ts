@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { createClient } from "./client.ts";
+import { createClient, tokenRejectedMessage } from "./client.ts";
 import type { ClientOptions } from "./client.ts";
 import type { WorkspaceState } from "./protocol.ts";
 
@@ -404,7 +404,7 @@ test("a rejected token stops retrying", async (context) => {
     const host = fakeHost(() => json(401, { error: "Enter the access token shown on the Socium host." }));
     const { client } = start(context, host, { ...fast, events });
     await until(() => client.getSnapshot().connectionError !== null);
-    assert.equal(client.getSnapshot().connectionError, "Enter the access token shown on the Socium host.");
+    assert.equal(client.getSnapshot().connectionError, tokenRejectedMessage);
     assert.equal(client.getSnapshot().tokenRejected, true);
     await delay(50);
     assert.equal(host.calls.length, 1, `events: ${events}`);
@@ -489,7 +489,7 @@ test("a rejected token is final: a command reply that arrives later neither clea
     await delay(50);
     const snapshot = client.getSnapshot();
     assert.equal(snapshot.tokenRejected, true);
-    assert.equal(snapshot.connectionError, "Enter the access token shown on the Socium host.");
+    assert.equal(snapshot.connectionError, tokenRejectedMessage);
     assert.equal(snapshot.workspace?.revision, "w:1");
     assert.equal(snapshot.sending, false);
     assert.equal(host.calls.length, calls, "the client sent requests after the token was rejected");
@@ -512,6 +512,44 @@ test("a rejected command token stops the open stream too", async (context) => {
   host.streams[0]?.send(workspace("w:2"));
   await delay(50);
   assert.equal(client.getSnapshot().workspace?.revision, "w:1");
+  assert.equal(host.calls.length, 2);
+});
+
+test("after a 401, no method sends another request", async (context) => {
+  const host = fakeHost(() => json(401, { error: "Enter the access token shown on the Socium host." }));
+  const { client } = start(context, host);
+  await until(() => client.getSnapshot().tokenRejected);
+  assert.equal(host.calls.length, 1);
+
+  for (const call of [
+    () => client.mobilePairingUrl(),
+    () => client.listDevices(),
+    () => client.revokeDevice("device-1"),
+  ]) {
+    await assert.rejects(call(), { status: 401, message: tokenRejectedMessage });
+  }
+  assert.equal(await client.send({ action: "new" }), false);
+  const unsubscribe = client.subscribe(() => {});
+  unsubscribe();
+  context.after(client.subscribe(() => {}));
+  await delay(30);
+  assert.equal(host.calls.length, 1, "a request followed the 401");
+});
+
+test("a 401 is final as soon as its headers arrive, even while its body is still on the way", async (context) => {
+  const host = fakeHost((call, path) => {
+    if (path === "/api/events") return host.stream(call);
+    // A body that never finishes.
+    return new Response(new ReadableStream({}), { status: 401 });
+  });
+  const { client } = start(context, host);
+  await until(() => host.streams.length === 1);
+  host.streams[0]?.send(workspace("w:1"));
+  await until(() => client.getSnapshot().workspace?.revision === "w:1");
+  await assert.rejects(client.listDevices(), { status: 401 });
+  assert.equal(client.getSnapshot().tokenRejected, true);
+  assert(host.streams[0]?.aborted, "the stream stayed open");
+  await delay(30);
   assert.equal(host.calls.length, 2);
 });
 

@@ -9,6 +9,9 @@ class RequestError extends Error {
   }
 }
 
+/** Shown once the host rejects the token, such as for a revoked device. */
+export const tokenRejectedMessage = "The host rejected the access token.";
+
 /** How updates arrive: a Server-Sent Event stream, or polling where streams are unavailable. */
 export type Transport = "events" | "polling";
 
@@ -157,7 +160,13 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     return error instanceof RequestError ? error.message : "Cannot reach the Socium host.";
   }
 
+  /**
+   * Sends a request with the token. Once the host has rejected the token,
+   * fails at once without sending anything, and a 401 makes that final as
+   * soon as its headers arrive, without waiting for its body.
+   */
   async function request(path: string, options?: RequestInit) {
+    if (status.tokenRejected) throw new RequestError(401, tokenRejectedMessage);
     const response = await fetchRequest(`${base}/api/${path}`, {
       ...options,
       headers: {
@@ -166,13 +175,14 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         ...(options?.body ? { "Content-Type": "application/json" } : {}),
       },
     });
+    if (response.status === 401 || status.tokenRejected) {
+      rejectToken();
+      throw new RequestError(401, tokenRejectedMessage);
+    }
     if (!response.ok) {
       const body = await response.json().catch(() => null);
-      const message = typeof body?.error === "string" ? body.error : `Request failed (${response.status}).`;
-      if (response.status === 401) rejectToken(message);
-      throw new RequestError(response.status, message);
+      throw new RequestError(response.status, typeof body?.error === "string" ? body.error : `Request failed (${response.status}).`);
     }
-    if (status.tokenRejected) throw new RequestError(401, status.connectionError ?? "The host rejected the token.");
     return response;
   }
 
@@ -198,10 +208,10 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
   }
 
   /** Stops everything for good: no request with this token can succeed again. */
-  function rejectToken(message: string) {
+  function rejectToken() {
     if (status.tokenRejected) return;
     disconnect();
-    update({ tokenRejected: true, connectionError: message, reconnecting: false, sending: false });
+    update({ tokenRejected: true, connectionError: tokenRejectedMessage, reconnecting: false, sending: false });
   }
 
   function connect() {
