@@ -2,7 +2,9 @@ import { strict as assert } from "node:assert";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
 import { safeHttpUrl as safeLinkUrl } from "@socium/client/links";
-import { maxInlineDepth, maxMarkdownLength, maxMarkdownNodes, parseInline, parseMarkdown } from "./markdown.ts";
+import {
+  maxInlineDepth, maxMarkdownNodes, maxRenderedLength, parseInline, parseMarkdown, truncationMarker,
+} from "./markdown.ts";
 import type { Inline } from "./markdown.ts";
 
 const text = (value: string): Inline => ({ type: "text", text: value });
@@ -233,13 +235,7 @@ test("a long ordered list is numbered once while parsing", () => {
   parseQuickly(Array.from({ length: 5000 }, () => "- item").join("\n\n\n"));
 });
 
-test("a reply past the length or block limits still shows in full, as plain text", () => {
-  const long = `**start** ${"word ".repeat(maxMarkdownLength / 5)}tail **end**`;
-  const blocks = parseQuickly(long);
-  assert.deepEqual(blocks[0]?.type === "paragraph" && blocks[0].children[0], { type: "strong", children: [text("start")] });
-  assert.equal(blocks.at(-1)?.type, "paragraph");
-  assert(allText(blocks).endsWith("tail **end**"));
-
+test("a reply past the block limit still shows in full, as plain text", () => {
   const many = Array.from({ length: maxMarkdownNodes * 2 }, (_, index) => `# heading ${index}`).join("\n");
   const capped = parseQuickly(many);
   assert.equal(capped.length, maxMarkdownNodes + 1);
@@ -250,4 +246,53 @@ test("a reply past the length or block limits still shows in full, as plain text
   assert(list?.type === "list");
   assert.equal(list.items.length, maxMarkdownNodes - 1);
   assert.equal(rest?.type === "paragraph" && rest.children[0]?.type === "text" && rest.children[0].text.split("\n")[0], `- item ${maxMarkdownNodes - 1}`);
+});
+
+test("many blank lines inside a list before a deeply indented item parse in linear time", () => {
+  const indent = " ".repeat(20_000);
+  // Each source stays under the rendered cap, so all of it is parsed.
+  for (const [blank, count] of [["", 20_000], ["   ", 5000]] as const) {
+    const blocks = parseQuickly(`- a\n${`${blank}\n`.repeat(count)}${indent}- b`);
+    const [list] = blocks;
+    assert(list?.type === "list");
+    assert.deepEqual(list.items.map(({ children }) => children), [[text("a")], [text("b")]]);
+  }
+});
+
+test("long delimiter runs parse in linear time and still match", () => {
+  for (const character of ["`", "*", "_"]) {
+    const run = character.repeat(40_000);
+    assert.equal(allText(parseQuickly(`${run}x${run}`)).includes("x"), true, character);
+  }
+  // Many closed spans, each found by moving forward from the last.
+  const spans = parseQuickly("*a* `b` **c** ``d`` ".repeat(2000));
+  const [paragraph] = spans;
+  assert(paragraph?.type === "paragraph");
+  assert.equal(paragraph.children.filter(({ type }) => type === "emphasis").length, 2000);
+  assert.equal(paragraph.children.filter(({ type }) => type === "strong").length, 2000);
+  assert.equal(paragraph.children.filter(({ type }) => type === "code").length, 4000);
+  // A shorter run between two of one length is not taken as their closer.
+  assert.deepEqual(parseInline("``a`b``"), [{ type: "code", text: "a`b" }]);
+  assert.deepEqual(parseInline("`a``b` `c`"), [{ type: "code", text: "a``b" }, text(" "), { type: "code", text: "c" }]);
+});
+
+test("a reply longer than the rendered cap is cut and ends with a marker", () => {
+  for (const source of [
+    "word ".repeat(maxRenderedLength),
+    `**start** ${"word ".repeat(maxRenderedLength / 5)}tail **end**`,
+    `\`\`\`\n${"code\n".repeat(maxRenderedLength)}`,
+    Array.from({ length: maxMarkdownNodes * 30 }, (_, index) => `# heading ${index}`).join("\n"),
+    `${"a".repeat(maxRenderedLength - 1)}${"😀".repeat(10)}`,
+  ]) {
+    const blocks = parseQuickly(source);
+    const shown = allText(blocks);
+    assert(shown.length <= maxRenderedLength + truncationMarker.length, `${shown.length} characters shown`);
+    assert.deepEqual(blocks.at(-1), { type: "paragraph", children: [text(truncationMarker)] });
+    assert(!/[\uD800-\uDBFF]$/.test(shown.slice(0, -truncationMarker.length)), "a surrogate pair was split");
+  }
+  const long = parseQuickly(`**start** ${"word ".repeat(maxRenderedLength / 5)}`);
+  assert.deepEqual(long[0]?.type === "paragraph" && long[0].children[0], { type: "strong", children: [text("start")] });
+  // A reply at the cap shows in full.
+  const exact = "a".repeat(maxRenderedLength);
+  assert.deepEqual(parseMarkdown(exact), [{ type: "paragraph", children: [text(exact)] }]);
 });
