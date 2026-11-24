@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
-  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync,
+  chmodSync, chownSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync,
   utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -142,6 +142,50 @@ test("a store that belongs to another user is refused, at startup and later", (c
   context.after(() => process.getuid = getuid);
   process.getuid = () => uid + 1;
   assert.throws(() => createPairing(address, { storePath }), /belong to the user/);
+  assert.throws(() => pairing.authorizes(device), /belong to the user/);
+});
+
+test("a cached store file that changes type or owner is refused while its directory stays private", (context) => {
+  const directory = join(temporaryDirectory(context), "state");
+  const storePath = join(directory, "paired-devices.json");
+  const pairing = createPairing(address, { storePath });
+  const device = pair(pairing);
+  // Cached: the second check reads nothing new.
+  assert(pairing.authorizes(device));
+  assert(pairing.authorizes(device));
+  const saved = join(directory, "saved.json");
+  const restore = () => {
+    rmSync(storePath, { recursive: true, force: true });
+    cpSync(saved, storePath);
+    chmodSync(storePath, 0o600);
+  };
+  cpSync(storePath, saved);
+  const uid = process.getuid?.();
+  const checkDirectory = () => {
+    const stats = lstatSync(directory);
+    assert.equal(stats.mode & 0o777, 0o700);
+    if (uid !== undefined) assert.equal(stats.uid, uid);
+  };
+
+  for (const [name, change, error] of [
+    ["a symlink to the same records", () => symlinkSync(saved, storePath), /symlink/],
+    ["a directory", () => mkdirSync(storePath, { mode: 0o700 }), /must be a file/],
+  ] as const) {
+    rmSync(storePath, { recursive: true, force: true });
+    change();
+    checkDirectory();
+    assert.throws(() => pairing.authorizes(device), error, name);
+    restore();
+    assert(pairing.authorizes(device), name);
+  }
+
+  // Only root can give the file another owner; the directory keeps this user's.
+  if (uid !== 0) {
+    context.diagnostic("Not root: the file owner change was not tried.");
+    return;
+  }
+  chownSync(storePath, 1, 1);
+  checkDirectory();
   assert.throws(() => pairing.authorizes(device), /belong to the user/);
 });
 
