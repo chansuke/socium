@@ -190,23 +190,75 @@ function writeStore(path: string, devices: DeviceRecord[]): StoreSnapshot {
 }
 
 /**
- * Creates the file at `path` with mode 600 if it is missing, without
- * following a symlink, and checks that it is a private file of this user.
- * Opened and closed before SQLite opens it, because closing any descriptor of
- * a file drops this process's POSIX locks on it.
+ * Checks every directory from `directory` up to `/`: each must belong to this
+ * user or root, and no other user may write to it, so nobody else can rename
+ * or replace a directory on the way to `file` between one check and the next.
+ * A root-owned sticky directory such as `/tmp` may be writable by all, because
+ * others can add entries to it but cannot move or remove ours.
  */
-export function preparePrivateFile(path: string, label = storeLabel) {
+function checkAncestors(directory: string, file: string, label: string) {
+  const uid = currentUser();
+  if (uid === undefined) return;
+  for (let current = directory; ; current = dirname(current)) {
+    const stats = lstatSync(current);
+    const owned = stats.uid === uid || stats.uid === 0;
+    const sharedWrite = (stats.mode & 0o022) !== 0 && !(stats.uid === 0 && (stats.mode & 0o1000) !== 0);
+    if (!stats.isDirectory() || !owned || sharedWrite) {
+      throw new Error(
+        `The ${label} ${file} is under ${current}, which another user could replace; ` +
+          "keep it under directories that only you or root can change.",
+      );
+    }
+    if (dirname(current) === current) return;
+  }
+}
+
+export interface PrivateDatabaseOptions {
+  label?: string;
+  /** How long a statement waits for another connection's lock, in milliseconds. */
+  timeout: number;
+  /** The real path of the served workspace, which must not contain the file. */
+  workspace?: string;
+}
+
+/**
+ * Opens the SQLite file at `path`, creating it with mode 600 if it is
+ * missing. The directory is resolved to its real path and every directory up
+ * to `/` is checked, so the name SQLite opens cannot be redirected by another
+ * user. The file is opened first without following a symlink and checked to
+ * be a private file of this user, and that descriptor stays open until SQLite
+ * has opened the same name and the name is confirmed to still be that file.
+ * It is closed before the caller runs any statement, because closing any
+ * descriptor of a file drops this process's POSIX locks on it.
+ */
+export function openPrivateDatabase(path: string, { label = storeLabel, timeout, workspace }: PrivateDatabaseOptions): DatabaseSync {
+  const directory = realpathSync(dirname(path));
+  const file = join(directory, basename(path));
+  if (workspace !== undefined) checkStoreLocation(file, workspace, label);
+  checkAncestors(directory, file, label);
   let descriptor: number;
   try {
-    descriptor = openSync(path, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+    descriptor = openSync(file, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ELOOP") {
-      throw new Error(`The ${label} ${path} must be a file, not a symlink or other file.`, { cause: error });
+      throw new Error(`The ${label} ${file} must be a file, not a symlink or other file.`, { cause: error });
     }
     throw error;
   }
   try {
-    checkPrivate(fstatSync(descriptor), path, "file", label);
+    const verified = fstatSync(descriptor);
+    checkPrivate(verified, file, "file", label);
+    const database = new DatabaseSync(file, { timeout });
+    try {
+      const named = lstatSync(file);
+      if (named.dev !== verified.dev || named.ino !== verified.ino) {
+        throw new Error(`The ${label} ${file} was replaced while it was being opened. Try again.`);
+      }
+    } catch (error) {
+      database.close();
+      throw error;
+    }
+    return database;
   } finally {
     closeSync(descriptor);
   }
@@ -223,8 +275,7 @@ function withLock<T>(path: string, timeout: number, step: () => T): T {
   const lock = `${path}.lock`;
   // Created once and kept: a lock file that is deleted and created again
   // could let two gateways each lock a different file.
-  preparePrivateFile(lock);
-  const database = new DatabaseSync(lock, { timeout });
+  const database = openPrivateDatabase(lock, { timeout });
   try {
     try {
       database.exec("BEGIN EXCLUSIVE");
