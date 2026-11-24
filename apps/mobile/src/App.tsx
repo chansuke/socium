@@ -345,8 +345,8 @@ function Workspace({ client, state, error, disabled, disconnect }: {
         </ScrollView>
       ) : (
         <>
-          {state.plan && <PlanSummary key={state.session} plan={state.plan} />}
-          <Conversation key={state.session} client={client} state={state} error={error} disabled={disabled} />
+          {state.plan && <PlanSummary key={`plan:${state.session}`} plan={state.plan} />}
+          <Conversation key={`conversation:${state.session}`} client={client} state={state} error={error} disabled={disabled} />
         </>
       )}
     </>
