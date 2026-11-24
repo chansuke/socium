@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "test": "node --test src/*.test.ts",
+    "test": "node --import ./src/testing/registerTsx.ts --test src/*.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
