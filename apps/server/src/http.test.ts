@@ -1,14 +1,16 @@
 import { strict as assert } from "node:assert";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { connect } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
+import { pathToFileURL } from "node:url";
 import { readPairingUrl } from "@socium/client";
 import type { WorkspaceState } from "@socium/client/protocol";
 import { GatewayError } from "./bridge.ts";
@@ -456,6 +458,57 @@ test("a device revoked on another gateway sharing the store loses its idle strea
   await new Promise<void>((resolve, reject) => serverA.close((error) => error ? reject(error) : resolve()));
   assert.equal(await kept.state(), null);
   assert.equal(watchers, 0);
+});
+
+/** Whether this host can start another file watch; desktop apps can use up the inotify limit. */
+function canWatch(directory: string) {
+  try {
+    watch(directory).close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("a device revoked by a gateway in another process loses its idle streams at once", { timeout: 20_000 }, async (context) => {
+  const token = "host-access-token";
+  const directory = join(temporaryDirectory(context), "state");
+  mkdirSync(directory, { mode: 0o700 });
+  const storePath = join(directory, "paired-devices.json");
+  const pairing = createPairing("https://socium.test/", { storePath });
+  if (!canWatch(directory)) {
+    context.skip("This host cannot start another file watch (inotify limit reached).");
+    return;
+  }
+  const api = await listen(context, createHttpServer(fakeBridge(workspaceState()), token, tmpdir(), pairing, { keepaliveInterval: 60_000 }));
+  // The second gateway: its own process, its own server, the same store.
+  const module = (name: string) => JSON.stringify(pathToFileURL(join(import.meta.dirname, name)).href);
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `
+    import { createHttpServer } from ${module("http.ts")};
+    import { createPairing } from ${module("pairing.ts")};
+    const state = ${JSON.stringify(workspaceState())};
+    const bridge = { snapshot: () => state, close() {}, subscribe: () => () => {}, send: async () => state };
+    const pairing = createPairing("https://socium.test/", { storePath: ${JSON.stringify(storePath)} });
+    const server = createHttpServer(bridge, ${JSON.stringify(token)}, ${JSON.stringify(tmpdir())}, pairing, { keepaliveInterval: 60_000 });
+    server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+  `], { stdio: ["ignore", "pipe", "inherit"] });
+  context.after(() => child.kill());
+  const [port] = await once(child.stdout.setEncoding("utf8"), "data") as [string];
+  const apiB = `http://127.0.0.1:${port.trim()}/api`;
+
+  const revokedToken = `Bearer ${await pairDevice(api, token)}`;
+  const controller = new AbortController();
+  context.after(() => controller.abort());
+  const revoked = eventReader(await fetch(`${api}/events`, { headers: { Authorization: revokedToken }, signal: controller.signal }));
+  assert.equal((await revoked.state())?.revision, "revision-1");
+
+  const listed = await fetch(`${apiB}/devices`, { headers: { Authorization: `Bearer ${token}` } });
+  const [device] = (await listed.json()).devices;
+  assert(device);
+  const response = await fetch(`${apiB}/devices/${device.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(response.status, 204);
+  const ended = await Promise.race([revoked.state(), delay(2000).then(() => "still open")]);
+  assert.equal(ended, null, "the revoked device's stream outlived the revocation in another process");
 });
 
 test("a gateway that cannot watch the pairing store still streams and checks on keepalives", { timeout: 10_000 }, async (context) => {
