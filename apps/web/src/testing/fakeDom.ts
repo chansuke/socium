@@ -1,9 +1,9 @@
 /**
  * Just enough of the DOM for react-dom to mount, update, and unmount a
  * component in Node without a browser or a DOM library: nodes, attributes,
- * events that capture and bubble, and the `<dialog>` element with
- * `showModal`, `close`, its later `close` event, and the Close button of a
- * `<form method="dialog">`. Anything else a component touches is missing and
+ * events that capture and bubble, `input` events for `onChange`, inline
+ * styles, and the `<dialog>` element with `showModal`, `close`, its later
+ * `close` event, and the Close button of a `<form method="dialog">`. Anything else a component touches is missing and
  * fails loudly.
  */
 
@@ -169,13 +169,28 @@ export class FakeText extends FakeNode {
   }
 }
 
+/** Inline style: react-dom assigns ordinary properties and sets custom ones such as `--depth` with `setProperty`. */
+export class FakeStyle {
+  readonly custom = new Map<string, string>();
+
+  setProperty(name: string, value: string) {
+    this.custom.set(name, value);
+  }
+
+  removeProperty(name: string) {
+    const value = this.custom.get(name) ?? "";
+    this.custom.delete(name);
+    return value;
+  }
+}
+
 const htmlNamespace = "http://www.w3.org/1999/xhtml";
 
 export class FakeElement extends FakeNode {
   readonly tagName: string;
   readonly namespaceURI: string;
   readonly attributes = new Map<string, string>();
-  readonly style: Record<string, string> = {};
+  readonly style = new FakeStyle();
 
   constructor(tagName: string, ownerDocument: FakeDocument, namespaceURI = htmlNamespace) {
     super(1, namespaceURI === htmlNamespace ? tagName.toUpperCase() : tagName, ownerDocument);
@@ -258,6 +273,8 @@ export class FakeDocument extends FakeNode {
   readonly documentElement: FakeElement;
   readonly body: FakeElement;
   readonly defaultView: typeof globalThis;
+  /** react-dom sends `onChange` from `input` events only if the document has this handler slot. */
+  oninput = null;
 
   constructor(window: typeof globalThis) {
     super(9, "#document", null);
