@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import { test } from "node:test";
 import { safeHttpUrl as safeLinkUrl } from "@socium/client/links";
 import {
-  maxInlineDepth, maxMarkdownNodes, maxRenderedLength, parseInline, parseMarkdown, truncationMarker,
+  listMarker, maxInlineDepth, maxMarkdownNodes, maxRenderedLength, parseInline, parseMarkdown, truncationMarker,
 } from "./markdown.ts";
 import type { Inline } from "./markdown.ts";
 
@@ -161,6 +161,17 @@ function allText(blocks: ReturnType<typeof parseMarkdown>) {
           : inline(block.children)).join("");
 }
 
+/** Every character `blocks` show: text, list markers, and code language labels. */
+function renderedText(blocks: ReturnType<typeof parseMarkdown>) {
+  const inline = (inlines: ReturnType<typeof parseInline>): string =>
+    inlines.map((node) => node.type === "text" || node.type === "code" ? node.text : inline(node.children)).join("");
+  return blocks.map((block) =>
+    block.type === "code" ? block.language + block.text
+      : block.type === "rule" ? ""
+        : block.type === "list" ? block.items.map((item) => listMarker(item) + inline(item.children)).join("")
+          : inline(block.children)).join("");
+}
+
 test("long unclosed delimiters parse in linear time", () => {
   const length = 40_000;
   for (const [name, source] of [
@@ -285,8 +296,8 @@ test("a reply longer than the rendered cap is cut and ends with a marker", () =>
     `${"a".repeat(maxRenderedLength - 1)}${"😀".repeat(10)}`,
   ]) {
     const blocks = parseQuickly(source);
-    const shown = allText(blocks);
-    assert(shown.length <= maxRenderedLength + truncationMarker.length, `${shown.length} characters shown`);
+    const shown = renderedText(blocks);
+    assert(shown.length <= maxRenderedLength, `${shown.length} characters shown`);
     assert.deepEqual(blocks.at(-1), { type: "paragraph", children: [text(truncationMarker)] });
     assert(!/[\uD800-\uDBFF]$/.test(shown.slice(0, -truncationMarker.length)), "a surrogate pair was split");
   }
@@ -295,4 +306,43 @@ test("a reply longer than the rendered cap is cut and ends with a marker", () =>
   // A reply at the cap shows in full.
   const exact = "a".repeat(maxRenderedLength);
   assert.deepEqual(parseMarkdown(exact), [{ type: "paragraph", children: [text(exact)] }]);
+});
+
+test("list markers, language labels, and the cut marker all count toward the rendered cap", () => {
+  /** A list whose markers show longer than they are written: `1.` shows as `1000000000.` and up. */
+  const growing = (length: number) => {
+    let source = "999999999. a";
+    while (source.length < length) source += "\n1. b";
+    return source.slice(0, length);
+  };
+  const fences = (length: number) => {
+    let source = "";
+    while (source.length < length) source += `\`\`\`${"x".repeat(40)}\ncode\n\`\`\`\n`;
+    return source.slice(0, length);
+  };
+  for (const source of [
+    growing(maxRenderedLength),
+    growing(maxRenderedLength + 1),
+    growing(maxRenderedLength * 2),
+    fences(maxRenderedLength),
+    fences(maxRenderedLength + 1),
+    `${"- ".repeat(maxRenderedLength / 2)}`,
+  ]) {
+    const blocks = parseQuickly(source);
+    const shown = renderedText(blocks);
+    assert(shown.length <= maxRenderedLength, `${shown.length} characters shown for ${source.length} written`);
+    if (source.length > maxRenderedLength || shown.length === maxRenderedLength) {
+      assert.deepEqual(blocks.at(-1), { type: "paragraph", children: [text(truncationMarker)] });
+    }
+  }
+
+  const [list] = parseQuickly(growing(maxRenderedLength));
+  assert(list?.type === "list");
+  assert.deepEqual(list.items.slice(0, 2).map(listMarker), ["999999999.", "1000000000."]);
+  const cut = parseQuickly(growing(maxRenderedLength));
+  assert.equal(renderedText(cut).length, maxRenderedLength, "the cut left room unused");
+  // A reply whose markers fit shows in full, without the cut marker.
+  const short = parseQuickly(growing(1000));
+  assert.notDeepEqual(short.at(-1), { type: "paragraph", children: [text(truncationMarker)] });
+  assert(renderedText(short).length > 1000);
 });

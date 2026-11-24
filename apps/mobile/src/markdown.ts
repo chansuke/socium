@@ -35,7 +35,11 @@ export type Block =
   | { type: "quote"; children: Inline[] }
   | { type: "rule" };
 
-/** Characters of a reply that are shown; a longer reply is cut and ends with `truncationMarker`. */
+/**
+ * Characters a reply shows at most, counting list markers, code language
+ * labels, and `truncationMarker` as well as its text. A longer reply is cut
+ * and ends with `truncationMarker`.
+ */
 export const maxRenderedLength = 50_000;
 /** Ends a reply cut at `maxRenderedLength`. */
 export const truncationMarker = "…";
@@ -142,15 +146,121 @@ const startsBlock = (line: string, item: ListMarker) =>
 
 const plainBlock = (text: string): Block => ({ type: "paragraph", children: text ? [{ type: "text", text }] : [] });
 
-/** The first `maxRenderedLength` characters of `source`, without splitting a surrogate pair. */
-function shownPart(source: string) {
-  if (source.length <= maxRenderedLength) return source;
-  const last = source.charCodeAt(maxRenderedLength - 1);
-  return source.slice(0, last >= 0xd800 && last <= 0xdbff ? maxRenderedLength - 1 : maxRenderedLength);
+/** The marker shown before a list item. */
+export function listMarker(item: ListItem) {
+  return item.depth > 0 ? "◦" : item.number !== null ? `${item.number}.` : "•";
+}
+
+/** The first `budget` characters of `text`, without splitting a surrogate pair. */
+function clipText(text: string, budget: number) {
+  if (text.length <= budget) return text;
+  if (budget <= 0) return "";
+  const last = text.charCodeAt(budget - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? budget - 1 : budget);
+}
+
+function inlineLength(inlines: Inline[]): number {
+  let length = 0;
+  for (const inline of inlines) length += inline.type === "text" || inline.type === "code" ? inline.text.length : inlineLength(inline.children);
+  return length;
+}
+
+/** Every character `block` shows: its text, its list markers, and a code block's language label. */
+export function renderedLength(block: Block): number {
+  switch (block.type) {
+    case "rule":
+      return 0;
+    case "code":
+      return block.language.length + block.text.length;
+    case "list": {
+      let length = 0;
+      for (const item of block.items) length += listMarker(item).length + inlineLength(item.children);
+      return length;
+    }
+    default:
+      return inlineLength(block.children);
+  }
+}
+
+/** The start of `inlines` that shows at most `budget` characters. */
+function clipInlines(inlines: Inline[], budget: number): Inline[] {
+  const clipped: Inline[] = [];
+  let left = budget;
+  for (const inline of inlines) {
+    if (left <= 0) break;
+    if (inline.type === "text" || inline.type === "code") {
+      const text = clipText(inline.text, left);
+      if (text) clipped.push({ ...inline, text });
+      if (text.length < inline.text.length) break;
+      left -= text.length;
+    } else {
+      const length = inlineLength(inline.children);
+      const children = length <= left ? inline.children : clipInlines(inline.children, left);
+      if (children.length) clipped.push({ ...inline, children });
+      if (length > left) break;
+      left -= length;
+    }
+  }
+  return clipped;
+}
+
+/** The start of `block` that shows at most `budget` characters, or null if none of it fits. */
+function clipBlock(block: Block, budget: number): Block | null {
+  switch (block.type) {
+    case "rule":
+      return block;
+    case "code": {
+      const language = clipText(block.language, budget);
+      return { ...block, language, text: clipText(block.text, budget - language.length) };
+    }
+    case "list": {
+      const items: ListItem[] = [];
+      let left = budget;
+      for (const item of block.items) {
+        const marker = listMarker(item).length;
+        if (marker >= left) break;
+        const length = inlineLength(item.children);
+        items.push(length <= left - marker ? item : { ...item, children: clipInlines(item.children, left - marker) });
+        left -= marker + length;
+        if (left <= 0) break;
+      }
+      return items.length ? { ...block, items } : null;
+    }
+    default: {
+      const children = clipInlines(block.children, budget);
+      return children.length ? { ...block, children } : null;
+    }
+  }
+}
+
+/**
+ * `blocks` as they are if they show at most `maxRenderedLength` characters
+ * and `cut` is false; otherwise their start that, with `truncationMarker`
+ * after it, shows at most that many.
+ */
+function fitRenderedLength(blocks: Block[], cut: boolean): Block[] {
+  let total = 0;
+  for (const block of blocks) total += renderedLength(block);
+  if (!cut && total <= maxRenderedLength) return blocks;
+  const shown: Block[] = [];
+  let left = maxRenderedLength - truncationMarker.length;
+  for (const block of blocks) {
+    const length = renderedLength(block);
+    if (length > left) {
+      const clipped = clipBlock(block, left);
+      if (clipped) shown.push(clipped);
+      break;
+    }
+    shown.push(block);
+    left -= length;
+  }
+  shown.push(plainBlock(truncationMarker));
+  return shown;
 }
 
 export function parseMarkdown(source: string): Block[] {
-  const read = shownPart(source);
+  // Each character of text comes from one of the source, so text past this point could not show.
+  const read = clipText(source, maxRenderedLength);
   const lines = read.replace(/\r\n?/g, "\n").split("\n");
   /** Each line's list marker, read once: lists look at lines again, such as past blank lines. */
   const markers = lines.map(readListItem);
@@ -222,8 +332,8 @@ export function parseMarkdown(source: string): Block[] {
   // Past the block limit, the shown part still shows in full, as written.
   const rest = lines.slice(index).join("\n");
   if (rest.trim()) blocks.push(plainBlock(rest));
-  if (read.length < source.length) blocks.push(plainBlock(truncationMarker));
-  return blocks;
+  // List markers can show more characters than their source, such as `1000000000.` for `1.`.
+  return fitRenderedLength(blocks, read.length < source.length);
 }
 
 /** Reads at most `budget` items of the list that starts at `start`; `last` is the index of its last line. */
