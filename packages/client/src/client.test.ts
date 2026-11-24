@@ -315,6 +315,50 @@ test("a stream opened later that reaches an earlier generation's gateway is igno
   await until(() => client.getSnapshot().workspace?.revision === "third:2");
 });
 
+test("a reconnected stream that reaches an earlier generation's gateway is ignored after a stream showed a later one", async (context) => {
+  const host = fakeHost((call) => host.stream(call));
+  const { client } = start(context, host);
+  await until(() => host.streams.length === 1);
+  host.streams[0]?.send(workspace("third:1", { generation: 3, title: "Third gateway" }));
+  await until(() => client.getSnapshot().workspace?.revision === "third:1");
+
+  // The stream reconnects to generation 2, which this client never saw, while it is being replaced.
+  host.streams[0]?.end();
+  await until(() => host.streams.length === 2);
+  host.streams[1]?.send(workspace("second:9", { generation: 2, title: "Second gateway" }));
+  await delay(30);
+  assert.equal(client.getSnapshot().workspace?.revision, "third:1");
+  assert.equal(client.getSnapshot().workspace?.title, "Third gateway");
+  host.streams[1]?.end();
+  await until(() => host.streams.length === 3);
+  host.streams[2]?.send(workspace("third:2", { generation: 3 }));
+  await until(() => client.getSnapshot().workspace?.revision === "third:2");
+});
+
+test("a poll that reaches an earlier generation's gateway is ignored after a poll showed a later one", async (context) => {
+  const replies = [
+    workspace("third:1", { generation: 3, title: "Third gateway" }),
+    workspace("second:9", { generation: 2, title: "Second gateway" }),
+    workspace("first:4", { generation: 1, title: "First gateway" }),
+    workspace("third:2", { generation: 3 }),
+  ];
+  let polls = 0;
+  const host = fakeHost((_call, path) => {
+    assert.equal(path, "/api/state");
+    const reply = replies[Math.min(polls, replies.length - 1)];
+    polls++;
+    return json(200, reply);
+  });
+  const { client } = start(context, host, { ...fast, events: false });
+  const shown: string[] = [];
+  context.after(client.subscribe(() => {
+    const revision = client.getSnapshot().workspace?.revision;
+    if (revision && shown.at(-1) !== revision) shown.push(revision);
+  }));
+  await until(() => client.getSnapshot().workspace?.revision === "third:2");
+  assert.deepEqual(shown, ["third:1", "third:2"]);
+});
+
 test("a platform that cannot read a streamed response polls instead", async (context) => {
   let polls = 0;
   const host = fakeHost((_call, path) => {
