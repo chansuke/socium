@@ -611,3 +611,36 @@ test("a command reply that arrives while the stream is reopening leaves commands
   open();
   await until(() => !client.getSnapshot().reconnecting);
 });
+
+/** A reply whose headers arrive at once and whose body never finishes. */
+const stalledBody = () => new Response(new ReadableStream({}), { status: 200, headers: { "Content-Type": "application/json" } });
+
+test("pairing and device requests stop when their signal aborts after the headers, while the body is on the way", async () => {
+  const host = fakeHost(() => stalledBody());
+  const client = createClient("https://socium.test", "secret-token", host.fetchRequest);
+  for (const start of [
+    (signal: AbortSignal) => client.mobilePairingUrl(signal),
+    (signal: AbortSignal) => client.listDevices(signal),
+  ]) {
+    const controller = new AbortController();
+    const pending = start(controller.signal);
+    const calls = host.calls.length;
+    await delay(10);
+    controller.abort(new DOMException("The dialog closed.", "AbortError"));
+    await assert.rejects(pending, { name: "AbortError" });
+    assert(host.calls.at(-1)?.init.signal?.aborted);
+    assert.equal(host.calls.length, calls);
+  }
+});
+
+test("the request deadline covers a body that stalls after its headers", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const host = fakeHost(() => stalledBody());
+  const client = createClient("https://socium.test", "secret-token", host.fetchRequest);
+  const pending = client.listDevices();
+  // Lets the headers arrive and the body read begin.
+  for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+  context.mock.timers.tick(10_000);
+  await assert.rejects(pending, { name: "TimeoutError" });
+  assert(host.calls[0]?.init.signal?.aborted);
+});
