@@ -1,7 +1,9 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { PairedDevice } from "@socium/client/protocol";
-import { createPairingSession } from "./pairingSession.ts";
+import { createClient } from "@socium/client";
+import { createPairingSession, dialogHandlers } from "./pairingSession.ts";
+import type { PairingSession } from "./pairingSession.ts";
 
 const device: PairedDevice = { id: "device-1-abcdef", createdAt: "2026-11-20T00:00:00.000Z", lastUsedAt: null };
 
@@ -107,4 +109,64 @@ test("an open dialog creates a code, then lists devices, and reopening starts fr
   host.calls[3]?.settle();
   await revoking;
   assert.deepEqual(host.methods(), ["mobilePairingUrl", "listDevices", "revokeDevice", "listDevices"]);
+});
+
+/** A client whose host sends each reply's headers at once and never finishes its body. */
+function stalledHost() {
+  const calls: RequestInit[] = [];
+  const fetchRequest = async (_input: string | URL | Request, init: RequestInit = {}) => {
+    calls.push(init);
+    return new Response(new ReadableStream({}), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  return { calls, client: createClient("https://socium.test", "host-token", fetchRequest as typeof fetch) };
+}
+
+for (const [name, start] of [
+  ["creating a QR code", (session: PairingSession) => session.issue()],
+  ["listing devices", (session: PairingSession) => session.loadDevices()],
+  ["revoking a device", (session: PairingSession) => session.revoke(device)],
+] as const) {
+  test(`closing while ${name} has its headers but not its body aborts it and sends nothing more`, async () => {
+    const host = stalledHost();
+    const session = createPairingSession(host.client);
+    let updates = 0;
+    session.subscribe(() => updates++);
+    const pending = start(session);
+    await settled();
+    assert.equal(host.calls.length, 1);
+    const before = updates;
+
+    session.close();
+    assert(host.calls[0]?.signal?.aborted);
+    await pending;
+    await settled();
+    assert.equal(updates, before, "the closed dialog changed");
+    assert.equal(host.calls.length, 1, "a request followed the close");
+  });
+}
+
+test("the dialog's Close button and Escape end the session before its close event", async () => {
+  for (const handler of ["onCloseClick", "onCancel"] as const) {
+    const host = stalledHost();
+    const session = createPairingSession(host.client);
+    let updates = 0;
+    session.subscribe(() => updates++);
+    let closed = 0;
+    const handlers = dialogHandlers(session, () => closed++);
+    const issuing = session.issue();
+    await settled();
+    const before = updates;
+
+    handlers[handler]();
+    assert(session.signal.aborted, `${handler} left the session open`);
+    assert(host.calls[0]?.signal?.aborted);
+    assert.equal(closed, 0);
+    await issuing;
+    await settled();
+    assert.equal(updates, before);
+    assert.equal(host.calls.length, 1);
+    // The dialog's own close event comes later.
+    handlers.onClose();
+    assert.equal(closed, 1);
+  }
 });
