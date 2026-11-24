@@ -581,3 +581,33 @@ test("an event stream that ends says it is reconnecting and holds commands until
   assert(await client.send({ action: "new" }));
   assert.equal(client.getSnapshot().workspace?.revision, "w:2");
 });
+
+test("a command reply that arrives while the stream is reopening leaves commands held until it opens", async (context) => {
+  let open!: () => void;
+  let reply!: (response: Response) => void;
+  let attempts = 0;
+  const host = fakeHost((call, path) => {
+    if (path === "/api/command") return new Promise<Response>((resolve) => reply = resolve);
+    attempts++;
+    if (attempts === 1) return host.stream(call);
+    return new Promise<Response>((resolve) => open = () => resolve(host.stream(call)));
+  });
+  const { client } = start(context, host, { ...fast, connectTimeout: 5000 });
+  await until(() => host.streams.length === 1);
+  host.streams[0]?.send(workspace("w:1"));
+  await until(() => client.getSnapshot().workspace?.revision === "w:1");
+
+  // Sent before the stream ends; answered while the next stream's headers are still pending.
+  const sent = client.send({ action: "new" });
+  await until(() => reply !== undefined);
+  host.streams[0]?.end();
+  await until(() => client.getSnapshot().reconnecting && open !== undefined);
+  reply(json(200, workspace("w:2")));
+  assert(await sent);
+  assert.equal(client.getSnapshot().workspace?.revision, "w:2");
+  assert.equal(client.getSnapshot().reconnecting, true, "the command reply ended reconnecting");
+  assert.equal(await client.send({ action: "new" }), false);
+
+  open();
+  await until(() => !client.getSnapshot().reconnecting);
+});
