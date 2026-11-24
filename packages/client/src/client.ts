@@ -146,14 +146,13 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     for (const listener of listeners) listener();
   }
 
-  /** Shows `workspace` unless a later state, such as a command's reply, is already shown. */
+  /**
+   * Shows `workspace` unless a later state, such as a command's reply, is
+   * already shown. Leaves `connectionError` and `reconnecting` alone: only
+   * the stream or poll that brings every state may say updates resumed.
+   */
   function receive(workspace: WorkspaceState) {
-    if (status.tokenRejected) return;
-    if (supersedes(workspace, status.workspace)) {
-      update({ workspace, connectionError: null, reconnecting: false });
-    } else if (status.connectionError) {
-      update({ connectionError: null });
-    }
+    if (!status.tokenRejected && supersedes(workspace, status.workspace)) update({ workspace });
   }
 
   function connectionError(error: unknown) {
@@ -313,13 +312,13 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     let retry = true;
     try {
       const response = await request(`state?after=${encodeURIComponent(revision)}`, { signal: controller.signal });
-      if (response.status !== 204) {
-        const workspace: WorkspaceState = await response.json();
-        if (poll === controller) receive(workspace);
-      } else if (poll === controller && (status.connectionError || status.reconnecting)) {
-        update({ connectionError: null, reconnecting: false });
+      const workspace: WorkspaceState | null = response.status === 204 ? null : await response.json();
+      if (poll === controller) {
+        if (workspace) receive(workspace);
+        if (status.transport !== "polling" || status.connectionError || status.reconnecting) {
+          update({ transport: "polling", connectionError: null, reconnecting: false });
+        }
       }
-      if (poll === controller && status.transport !== "polling") update({ transport: "polling", reconnecting: false });
     } catch (error) {
       if (poll !== controller) return;
       retry = !(error instanceof RequestError && error.status === 401);
