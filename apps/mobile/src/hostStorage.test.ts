@@ -98,6 +98,41 @@ test("a failed forget offers to try again and finishes only once it succeeds", a
   assert.equal(problems.at(-1), null);
 });
 
+test("a stale retry kept from before a forget, or a later save, writes nothing", async () => {
+  const saved: (PairedHost | null)[] = [];
+  let failValues = true;
+  let failNulls = 1;
+  const problems: (StorageProblem | null)[] = [];
+  const storage = createPairingStorage(async (value) => {
+    if (value && failValues) throw new Error("Full.");
+    if (value === null && failNulls-- > 0) throw new Error("The keychain is locked.");
+    saved.push(value);
+  }, (problem) => problems.push(problem));
+
+  storage.save(host);
+  await until(() => problems.at(-1) != null);
+  const staleSaveRetry = problems.at(-1)!.retry;
+  failNulls = 0;
+  failValues = false;
+  await storage.forget(() => {});
+  assert.deepEqual(saved, [null]);
+  staleSaveRetry();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(saved, [null], "a stale retry saved the forgotten token again");
+  assert.equal(problems.at(-1), null);
+
+  failNulls = 1;
+  let forgotten = 0;
+  await storage.forget(() => forgotten++);
+  const staleForgetRetry = problems.at(-1)!.retry;
+  storage.save(host);
+  await until(() => saved.length === 2);
+  staleForgetRetry();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(saved, [null, host], "a stale retry forgot the newer pairing");
+  assert.equal(forgotten, 0);
+});
+
 async function until(condition: () => boolean) {
   for (let tries = 0; !condition(); tries++) {
     assert(tries < 200, "timed out");
