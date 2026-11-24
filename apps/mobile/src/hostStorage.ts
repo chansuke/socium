@@ -24,8 +24,10 @@ export interface StorageProblem {
 /**
  * Saves and forgets the paired host for the app, and reports the failure of
  * the latest save or forget with a way to try again, or null once a new one
- * starts. Only the latest one may report or finish: a save that fails after a
- * forget began must not offer to save the forgotten token again.
+ * starts. Only the latest one may report, finish, or try again: a save that
+ * fails after a forget began must not offer to save the forgotten token again,
+ * and a retry kept from an older failure does nothing once a newer save or
+ * forget has started.
  */
 export function createPairingStorage(save: (host: PairedHost | null) => Promise<void>, report: (problem: StorageProblem | null) => void) {
   const store = createHostStorage(save);
@@ -39,7 +41,9 @@ export function createPairingStorage(save: (host: PairedHost | null) => Promise<
       if (operation !== latest) return;
       report({
         message: "Paired, but this phone could not save the pairing, so it will ask again after a restart.",
-        retry: () => saveHost(host),
+        retry: () => {
+          if (operation === latest) saveHost(host);
+        },
       });
     });
   }
@@ -52,7 +56,12 @@ export function createPairingStorage(save: (host: PairedHost | null) => Promise<
       await store(null);
     } catch {
       if (operation === latest) {
-        report({ message: "Could not remove the saved pairing from this phone. Try again.", retry: () => void forget(forgotten) });
+        report({
+          message: "Could not remove the saved pairing from this phone. Try again.",
+          retry: () => {
+            if (operation === latest) void forget(forgotten);
+          },
+        });
       }
       return;
     }
