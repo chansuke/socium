@@ -186,23 +186,31 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
   }
 
   /**
-   * `request` with a deadline, without `AbortSignal.timeout`, which React
-   * Native lacks, that also stops when `signal` aborts.
+   * `request` and its JSON body, or null for a 204, with a deadline, without
+   * `AbortSignal.timeout`, which React Native lacks, that also stops when
+   * `signal` aborts. Both cover the body as well as the headers, so a body
+   * that stalls after its headers fails too, and nothing is left to settle.
    */
-  async function requestWithin(path: string, options: RequestInit, signal?: AbortSignal, milliseconds = 10_000) {
+  async function requestJson<T>(path: string, options: RequestInit, signal?: AbortSignal, milliseconds = 10_000): Promise<T | null> {
     signal?.throwIfAborted();
     const controller = new AbortController();
+    const stopped = new Promise<never>((_resolve, reject) => {
+      controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+    });
+    // Also rejects when the finally block below aborts after a success.
+    stopped.catch(() => {});
     const abort = () => controller.abort(signal?.reason);
     signal?.addEventListener("abort", abort);
-    const timeout = setTimeout(() => controller.abort(), milliseconds);
+    const timeout = setTimeout(() => controller.abort(new DOMException("The host did not answer in time.", "TimeoutError")), milliseconds);
     try {
-      const response = await request(path, { ...options, signal: controller.signal });
-      // A body read after an abort would still resolve.
-      controller.signal.throwIfAborted();
-      return response;
+      const response = await Promise.race([request(path, { ...options, signal: controller.signal }), stopped]);
+      if (response.status === 204) return null;
+      return await Promise.race([response.json() as Promise<T>, stopped]);
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
+      // Lets go of a body that is no longer read.
+      controller.abort();
     }
   }
 
@@ -307,12 +315,10 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     if (poll || stream || listeners.size === 0 || status.tokenRejected) return;
     const controller = new AbortController();
     poll = controller;
-    const timeout = setTimeout(() => controller.abort(), 10_000);
     const revision = status.workspace?.revision ?? "";
     let retry = true;
     try {
-      const response = await request(`state?after=${encodeURIComponent(revision)}`, { signal: controller.signal });
-      const workspace: WorkspaceState | null = response.status === 204 ? null : await response.json();
+      const workspace = await requestJson<WorkspaceState>(`state?after=${encodeURIComponent(revision)}`, {}, controller.signal);
       if (poll === controller) {
         if (workspace) receive(workspace);
         if (status.transport !== "polling" || status.connectionError || status.reconnecting) {
@@ -324,7 +330,6 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
       retry = !(error instanceof RequestError && error.status === 401);
       if (retry) update({ connectionError: connectionError(error) });
     } finally {
-      clearTimeout(timeout);
       if (poll === controller) {
         poll = undefined;
         if (retry && listeners.size && !status.tokenRejected) {
@@ -346,19 +351,15 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
     },
     /** A one-time pairing link for a phone. Needs the host access token; stops when `signal` aborts. */
     async mobilePairingUrl(signal?: AbortSignal) {
-      const response = await requestWithin("pairing", { method: "POST" }, signal);
-      const { url } = await response.json();
-      signal?.throwIfAborted();
-      if (typeof url !== "string") throw new Error("The host did not send a pairing link.");
-      return url;
+      const data = await requestJson<{ url?: unknown }>("pairing", { method: "POST" }, signal);
+      if (typeof data?.url !== "string") throw new Error("The host did not send a pairing link.");
+      return data.url;
     },
     /** Devices paired with the host, oldest first. Needs the host access token; stops when `signal` aborts. */
     async listDevices(signal?: AbortSignal): Promise<PairedDevice[]> {
-      const response = await requestWithin("devices", {}, signal);
-      const { devices } = await response.json();
-      signal?.throwIfAborted();
-      if (!Array.isArray(devices)) throw new Error("The host did not send its paired devices.");
-      return devices;
+      const data = await requestJson<{ devices?: unknown }>("devices", {}, signal);
+      if (!Array.isArray(data?.devices)) throw new Error("The host did not send its paired devices.");
+      return data.devices;
     },
     /**
      * Revokes a paired device; its token stops working at once. Needs the
@@ -366,23 +367,20 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
      * already have revoked the device.
      */
     async revokeDevice(id: string, signal?: AbortSignal) {
-      await requestWithin(`devices/${encodeURIComponent(id)}`, { method: "DELETE" }, signal);
+      await requestJson(`devices/${encodeURIComponent(id)}`, { method: "DELETE" }, signal);
     },
     async send(command: Command) {
       const workspace = status.workspace;
       if (!workspace || status.sending || status.connectionError || status.reconnecting || status.tokenRejected) return false;
       update({ sending: true, commandError: null });
-        const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 12_000);
       try {
-        const response = await request("command", {
+        const next = await requestJson<WorkspaceState>("command", {
           method: "POST",
           body: JSON.stringify({ ...command, session: workspace.session }),
-          signal: controller.signal,
-        });
-        const next: WorkspaceState = await response.json();
+        }, undefined, 12_000);
         // The token was rejected while this command was on its way.
         if (status.tokenRejected) return false;
+        if (!next) throw new Error("The host did not confirm the change.");
         if (transport === "polling") {
           // A GET begun before this mutation may carry a superseded workspace.
           disconnect();
@@ -400,7 +398,6 @@ export function createClient(base: string, token: string, fetchRequest = fetch, 
         }
         return false;
       } finally {
-        clearTimeout(timeout);
         update({ sending: false });
       }
     },
