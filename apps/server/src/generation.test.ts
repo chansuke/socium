@@ -82,3 +82,39 @@ test("a counter that others can reach, or that is a symlink, is refused", (conte
   assert.throws(() => nextGeneration(join(root, "linked", "gateway-generation.sqlite")), /must be a directory, not a symlink/);
   assert(!existsSync(join(target, "gateway-generation.sqlite")));
 });
+
+test("a counter under a directory that another user could replace is refused, also when reached through a symlink", (context) => {
+  const root = temporaryDirectory(context);
+  const refused = /gateway generation counter .* is under .*, which another user could replace/;
+  const cases: [string, number][] = [
+    ["world-writable", 0o777],
+    ["group-writable", 0o775],
+    // Sticky only protects entries when root owns the directory.
+    ["sticky and world-writable but not root's", 0o1777],
+  ];
+  for (const [name, mode] of cases) {
+    const ancestor = join(root, name.replaceAll(" ", "-"));
+    mkdirSync(join(ancestor, "state"), { recursive: true, mode: 0o700 });
+    chmodSync(ancestor, mode);
+    const path = join(ancestor, "state", "gateway-generation.sqlite");
+    assert.throws(() => nextGeneration(path), refused, name);
+    assert(!existsSync(path), name);
+  }
+
+  // A symlink to a safe-looking path does not hide the shared directory it leads through.
+  const shared = join(root, "shared");
+  mkdirSync(join(shared, "state"), { recursive: true, mode: 0o700 });
+  chmodSync(shared, 0o777);
+  symlinkSync(shared, join(root, "alias"));
+  assert.throws(() => nextGeneration(join(root, "alias", "state", "gateway-generation.sqlite")), refused);
+  assert(!existsSync(join(shared, "state", "gateway-generation.sqlite")));
+
+  // Directories only this user can write, readable by others or not, are fine,
+  // and a symlinked ancestor opens the counter at its real location.
+  const guarded = join(root, "guarded");
+  mkdirSync(join(guarded, "state"), { recursive: true, mode: 0o700 });
+  chmodSync(guarded, 0o755);
+  symlinkSync(guarded, join(root, "guarded-alias"));
+  assert.equal(nextGeneration(join(guarded, "state", "gateway-generation.sqlite")), 1);
+  assert.equal(nextGeneration(join(root, "guarded-alias", "state", "gateway-generation.sqlite")), 2);
+});
