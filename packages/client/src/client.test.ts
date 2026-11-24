@@ -644,3 +644,46 @@ test("the request deadline covers a body that stalls after its headers", async (
   await assert.rejects(pending, { name: "TimeoutError" });
   assert(host.calls[0]?.init.signal?.aborted);
 });
+
+test("a 401 on one request stops every other request whose body is still on the way", async (context) => {
+  let rejecting = false;
+  const host = fakeHost((call, path) => {
+    if (path === "/api/events") return host.stream(call);
+    return rejecting ? json(401, { error: "Enter the access token shown on the Socium host." }) : stalledBody();
+  });
+  const { client } = start(context, host);
+  await until(() => host.streams.length === 1);
+  host.streams[0]?.send(workspace("w:1"));
+  await until(() => client.getSnapshot().workspace?.revision === "w:1");
+
+  const settled: string[] = [];
+  const track = <T>(name: string, promise: Promise<T>) => promise.then(
+    (value) => (settled.push(`${name} resolved`), value),
+    (error: unknown) => {
+      settled.push(`${name} rejected`);
+      throw error;
+    },
+  );
+  const pairing = track("pairing", client.mobilePairingUrl());
+  const devices = track("devices", client.listDevices());
+  const revoke = track("revoke", client.revokeDevice("device-1"));
+  const sent = track("send", client.send({ action: "new" }));
+  // Each has its 200 headers and waits on its body.
+  await until(() => host.calls.length === 5);
+  await delay(10);
+  assert.deepEqual(settled, []);
+  const pending = host.calls.slice(1).map(({ init }) => init.signal);
+
+  rejecting = true;
+  await assert.rejects(client.listDevices(), { status: 401 });
+  for (const call of [pairing, devices, revoke]) {
+    await assert.rejects(call, { status: 401, message: tokenRejectedMessage });
+  }
+  assert.equal(await sent, false);
+  assert(pending.every((signal) => signal?.aborted), "a body was still being read");
+  assert.equal(client.getSnapshot().tokenRejected, true);
+  assert.equal(client.getSnapshot().commandError, null);
+  assert.equal(client.getSnapshot().sending, false);
+  await delay(30);
+  assert.equal(host.calls.length, 6, "a request followed the 401");
+});
