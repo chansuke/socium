@@ -15,19 +15,34 @@ const { PairingDialog } = await import("./PairingDialog.tsx");
 /** A reply whose 200 headers arrive at once and whose body never finishes. */
 const stalledBody = () => new Response(new ReadableStream({}), { status: 200, headers: { "Content-Type": "application/json" } });
 
-/** A real client on a host whose every reply stalls after its headers. */
+/**
+ * A real client on a host whose every reply stalls after its headers.
+ * `bodiesWaitedOn(count)` settles once `count` replies have their body read
+ * with `response.json()`, which is where a request waits from then on.
+ */
 function stalledHost() {
   const calls: { path: string; signal: AbortSignal }[] = [];
+  let reads = 0;
+  const waiters: { count: number; resolve: () => void }[] = [];
   const fetchRequest = async (input: string | URL | Request, init: RequestInit = {}) => {
     assert(init.signal, "a request was sent without a signal");
     calls.push({ path: new URL(String(input)).pathname, signal: init.signal });
-    return stalledBody();
+    const response = stalledBody();
+    const json = response.json.bind(response);
+    response.json = () => {
+      const body = json();
+      reads++;
+      for (const waiter of waiters) if (reads >= waiter.count) waiter.resolve();
+      return body;
+    };
+    return response;
   };
-  return { calls, client: createClient("https://socium.test", "secret-token", fetchRequest as typeof fetch) };
+  const bodiesWaitedOn = (count: number) => new Promise<void>((resolve) => {
+    if (reads >= count) resolve();
+    else waiters.push({ count, resolve });
+  });
+  return { calls, bodiesWaitedOn, client: createClient("https://socium.test", "secret-token", fetchRequest as typeof fetch) };
 }
-
-/** Lets the replies' headers arrive, so each request waits on its body. */
-const headersArrive = () => act(() => delay(20));
 
 function button(name: string): FakeElement {
   const found = elements(dom.container).find((element) => element.tagName === "BUTTON" && element.textContent.includes(name));
@@ -49,7 +64,7 @@ async function openDialog() {
   const dialog = elements(dom.container).find((element) => element instanceof FakeDialog);
   assert(dialog instanceof FakeDialog && dialog.open, "the dialog did not open as a modal");
   await act(() => button("Generate QR code").click());
-  await headersArrive();
+  await act(() => host.bodiesWaitedOn(2));
   assert.deepEqual(host.calls.map(({ path }) => path), ["/api/devices", "/api/pairing"]);
   assert(host.calls.every(({ signal }) => !signal.aborted));
   assert.match(dom.container.textContent, /Generating…/);
