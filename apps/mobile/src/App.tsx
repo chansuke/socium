@@ -11,7 +11,8 @@ import type { Client } from "@socium/client";
 import { maxPromptLength } from "@socium/client/protocol";
 import type { Message, Plan, PlanTaskStatus, WorkspaceState } from "@socium/client/protocol";
 import { describeActivity, planProgress, planStatusLabels } from "@socium/client/progress";
-import { createHostStorage } from "./hostStorage";
+import { createPairingStorage } from "./hostStorage";
+import type { StorageProblem } from "./hostStorage";
 import { MarkdownText } from "./MarkdownText";
 import { loadPairedHost, savePairedHost } from "./pairedHost";
 import type { PairedHost } from "./pairedHost";
@@ -25,16 +26,10 @@ function connectTo(origin: string, token: string) {
   return createClient(origin, token, fetch, { events: false });
 }
 
-/** A pairing this phone failed to save or forget, with the way to try again. */
-interface StorageProblem {
-  message: string;
-  retry: () => void;
-}
-
 export function App() {
   const [client, setClient] = useState<Client | null | undefined>(undefined);
-  const [storeHost] = useState(() => createHostStorage(savePairedHost));
   const [storageProblem, setStorageProblem] = useState<StorageProblem | null>(null);
+  const [storage] = useState(() => createPairingStorage(savePairedHost, setStorageProblem));
 
   useEffect(() => {
     let mounted = true;
@@ -44,29 +39,14 @@ export function App() {
     return () => { mounted = false; };
   }, []);
 
-  function saveHost(host: PairedHost) {
-    setStorageProblem(null);
-    storeHost(host).catch(() => setStorageProblem({
-      message: "Paired, but this phone could not save the pairing, so it will ask again after a restart.",
-      retry: () => saveHost(host),
-    }));
-  }
-
   function connectPaired(host: PairedHost) {
-    saveHost(host);
+    storage.save(host);
     setClient(connectTo(host.origin, host.token));
   }
 
   /** Forgets the saved token before leaving, and stays put if the phone could not forget it. */
-  async function disconnect() {
-    setStorageProblem(null);
-    try {
-      await storeHost(null);
-    } catch {
-      setStorageProblem({ message: "Could not remove the saved pairing from this phone. Try again.", retry: () => void disconnect() });
-      return;
-    }
-    setClient(null);
+  function disconnect() {
+    void storage.forget(() => setClient(null));
   }
 
   return (
