@@ -73,8 +73,8 @@ export function Workspace({
           <span className="current-title">{currentTitle}</span>
           <ModelSwitcher client={client} state={state} disabled={locked} />
         </header>
-        {state.plan && <PlanPanel key={state.session} plan={state.plan} />}
-        <Conversation key={state.session} client={client} state={state} error={error} disabled={disabled} />
+        {state.plan && <PlanPanel key={`plan:${state.session}`} plan={state.plan} />}
+        <Conversation key={`conversation:${state.session}`} client={client} state={state} error={error} disabled={disabled} />
       </main>
     </div>
   );
