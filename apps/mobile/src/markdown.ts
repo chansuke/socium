@@ -4,9 +4,10 @@
  * images stay plain text, and links keep only http and https targets.
  *
  * A reply comes from the model, so the parser must stay fast on any input:
- * each line is read once, delimiters are matched from tables built in one
- * pass, no regular expression can backtrack over a long run of one
- * character, and nesting, length, and block count are capped.
+ * each line is classified once, delimiters are matched from tables built in
+ * one pass and read with cursors that only move forward, no regular
+ * expression can backtrack over a long run of one character, and nesting,
+ * length, and block count are capped.
  */
 import { safeHttpUrl } from "@socium/client/links";
 
@@ -34,8 +35,10 @@ export type Block =
   | { type: "quote"; children: Inline[] }
   | { type: "rule" };
 
-/** Characters read as Markdown; the rest of a longer reply shows as plain text. */
-export const maxMarkdownLength = 50_000;
+/** Characters of a reply that are shown; a longer reply is cut and ends with `truncationMarker`. */
+export const maxRenderedLength = 50_000;
+/** Ends a reply cut at `maxRenderedLength`. */
+export const truncationMarker = "…";
 /** Blocks and list items read as Markdown; the lines after them show as plain text. */
 export const maxMarkdownNodes = 1000;
 /** How deep emphasis and links nest; text deeper than this shows as written. */
@@ -131,14 +134,26 @@ function readListItem(line: string) {
   return { indent, ordered, number: ordered ? Number.parseInt(line.slice(at, markerEnd - 1), 10) : null, text: line.slice(textStart) };
 }
 
-const startsBlock = (line: string) =>
-  readFence(line) !== null || readHeading(line) !== null || isRule(line) || readListItem(line) !== null || readQuote(line) !== null;
+type ListMarker = ReturnType<typeof readListItem>;
+
+/** Whether `line`, whose list marker is `item`, starts a block. */
+const startsBlock = (line: string, item: ListMarker) =>
+  item !== null || readFence(line) !== null || readHeading(line) !== null || isRule(line) || readQuote(line) !== null;
 
 const plainBlock = (text: string): Block => ({ type: "paragraph", children: text ? [{ type: "text", text }] : [] });
 
+/** The first `maxRenderedLength` characters of `source`, without splitting a surrogate pair. */
+function shownPart(source: string) {
+  if (source.length <= maxRenderedLength) return source;
+  const last = source.charCodeAt(maxRenderedLength - 1);
+  return source.slice(0, last >= 0xd800 && last <= 0xdbff ? maxRenderedLength - 1 : maxRenderedLength);
+}
+
 export function parseMarkdown(source: string): Block[] {
-  const read = source.slice(0, maxMarkdownLength);
+  const read = shownPart(source);
   const lines = read.replace(/\r\n?/g, "\n").split("\n");
+  /** Each line's list marker, read once: lists look at lines again, such as past blank lines. */
+  const markers = lines.map(readListItem);
   /** The index of the first line after each line that is not blank, or `lines.length`. */
   const nextFilled = new Int32Array(lines.length + 1).fill(lines.length);
   for (let index = lines.length - 2; index >= 0; index--) {
@@ -191,11 +206,11 @@ export function parseMarkdown(source: string): Block[] {
       push({ type: "quote", children: parseInline(joinLines(quoted)) });
       continue;
     }
-    if (readListItem(line)) {
+    if (markers[index]) {
       endParagraph();
       // No room for the list and one item.
       if (nodes + 2 > maxMarkdownNodes) break;
-      const list = parseList(lines, index, nextFilled, maxMarkdownNodes - nodes - 1);
+      const list = parseList(lines, markers, index, nextFilled, maxMarkdownNodes - nodes - 1);
       push(list.block);
       nodes += list.block.items.length;
       index = list.last;
@@ -204,15 +219,16 @@ export function parseMarkdown(source: string): Block[] {
     paragraph.push(line);
   }
   endParagraph();
-  // Past the limits, the reply still shows in full, as written.
-  const rest = [lines.slice(index).join("\n"), source.slice(read.length)].filter(Boolean).join("");
+  // Past the block limit, the shown part still shows in full, as written.
+  const rest = lines.slice(index).join("\n");
   if (rest.trim()) blocks.push(plainBlock(rest));
+  if (read.length < source.length) blocks.push(plainBlock(truncationMarker));
   return blocks;
 }
 
 /** Reads at most `budget` items of the list that starts at `start`; `last` is the index of its last line. */
-function parseList(lines: string[], start: number, nextFilled: Int32Array, budget: number) {
-  const first = readListItem(lines[start] ?? "");
+function parseList(lines: string[], markers: ListMarker[], start: number, nextFilled: Int32Array, budget: number) {
+  const first = markers[start];
   const ordered = first?.ordered ?? false;
   const block: Block & { type: "list" } = { type: "list", ordered, start: first?.number ?? 1, items: [] };
   const baseIndent = indentOf(first?.indent ?? "");
@@ -230,7 +246,7 @@ function parseList(lines: string[], start: number, nextFilled: Int32Array, budge
   let index = start;
   for (; index < lines.length; index++) {
     const line = lines[index] ?? "";
-    const item = readListItem(line);
+    const item = markers[index] ?? null;
     if (item) {
       const nested = indentOf(item.indent) > baseIndent;
       // A top-level marker of the other kind starts a new list.
@@ -244,10 +260,10 @@ function parseList(lines: string[], start: number, nextFilled: Int32Array, budge
     if (isBlank(line)) {
       // A blank line ends the list unless another item follows it.
       const next = nextFilled[index] ?? lines.length;
-      if (next < lines.length && readListItem(lines[next] ?? "")) continue;
+      if (markers[next]) continue;
       break;
     }
-    if (startsBlock(line)) break;
+    if (startsBlock(line, item)) break;
     text.push(line.trim());
   }
   if (block.items.length < budget) endItem();
@@ -275,18 +291,20 @@ const isSpace = (character: string | undefined) => character === undefined || /\
 const autolinkPattern = /<(https?:\/\/[^\s<>]+)>/iy;
 const bareUrlPattern = /https?:\/\/[^\s<>]+/iy;
 
-/** The first value in sorted `values` at or after `from`, or -1. */
-function firstFrom(values: number[] | undefined, from: number) {
-  if (!values) return -1;
-  let low = 0;
-  let high = values.length;
-  while (low < high) {
-    const middle = (low + high) >> 1;
-    if ((values[middle] ?? 0) < from) low = middle + 1;
-    else high = middle;
-  }
-  return values[low] ?? -1;
+/**
+ * Reads sorted `positions` from front to back: each call returns the first
+ * one at or after its argument, or -1, and the argument must never decrease
+ * between calls, so all calls together step over each position once.
+ */
+function cursor(positions: number[]) {
+  let at = 0;
+  return (from: number) => {
+    while (at < positions.length && (positions[at] ?? 0) < from) at++;
+    return positions[at] ?? -1;
+  };
 }
+
+type Cursor = ReturnType<typeof cursor>;
 
 /**
  * Where each delimiter of `text` closes, found in one pass: the `]` for each
@@ -298,6 +316,7 @@ function scanDelimiters(text: string) {
   const paren = new Int32Array(text.length).fill(-1);
   const backticks = new Map<number, number[]>();
   const closers = new Map<string, number[]>();
+  const cursors = new Map<string | number, Cursor>();
   const brackets: number[] = [];
   const parens: number[] = [];
   for (let index = 0; index < text.length; index++) {
@@ -342,12 +361,16 @@ function scanDelimiters(text: string) {
     }
     index = end;
   }
-  return { bracket, paren, backticks, closers };
+  // Backtick runs by length; emphasis closers by character and length.
+  for (const [length, starts] of backticks) cursors.set(length, cursor(starts));
+  for (const [key, starts] of closers) cursors.set(key, cursor(starts));
+  return { bracket, paren, cursors };
 }
 
 export function parseInline(text: string, depth = 0): Inline[] {
   if (depth >= maxInlineDepth) return text ? [{ type: "text", text }] : [];
-  const { bracket, paren, backticks, closers } = scanDelimiters(text);
+  // `index` only moves forward, so each lookup starts no earlier than the last one for its key.
+  const { bracket, paren, cursors } = scanDelimiters(text);
   const result: Inline[] = [];
   let plain = "";
   const pushText = () => {
@@ -371,7 +394,7 @@ export function parseInline(text: string, depth = 0): Inline[] {
 
     if (character === "`") {
       const length = runEnd(text, "`", index) - index;
-      const close = firstFrom(backticks.get(length), index + length);
+      const close = cursors.get(length)?.(index + length) ?? -1;
       if (close >= 0) {
         let code = text.slice(index + length, close).replace(/\n/g, " ");
         if (code.length > 2 && code.startsWith(" ") && code.endsWith(" ") && code.trim() !== "") code = code.slice(1, -1);
@@ -422,7 +445,7 @@ export function parseInline(text: string, depth = 0): Inline[] {
       const length = end - index;
       // An opening run is followed by text; `_` inside a word, as in snake_case, is literal.
       const opens = length <= 3 && !isSpace(text[end]) && !(character === "_" && isWordCharacter(text[index - 1]));
-      const close = opens ? firstFrom(closers.get(`${character}${length}`), end) : -1;
+      const close = opens ? cursors.get(`${character}${length}`)?.(end) ?? -1 : -1;
       if (close >= 0) {
         const children = parseInline(text.slice(end, close), depth + 1);
         push(length === 1 ? { type: "emphasis", children }
