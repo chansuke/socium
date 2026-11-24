@@ -42,7 +42,7 @@ If another proxy, such as Traefik, already serves port 443 on the host, serve th
 tailscale serve --bg --https=8443 4173
 ```
 
-Then pass `--mobile-url https://<host>.<tailnet>.ts.net:8443`. See the [`tailscale serve` documentation](https://tailscale.com/kb/1242/tailscale-serve).
+Then pass `--mobile-url https://<host>.<tailnet>.ts.net:8443`. See the [`tailscale serve` documentation](https://tailscale.com/docs/reference/tailscale-cli/serve).
 
 1. Sign in to Socium in your browser with the host access token. Select **Pair a phone**, then **Generate QR code**.
 2. Open Socium on the phone, select **Scan QR code**, scan the browser's QR code, and confirm the host address.
