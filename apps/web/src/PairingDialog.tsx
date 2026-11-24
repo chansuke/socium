@@ -2,7 +2,7 @@ import { useCallback, useState, useSyncExternalStore } from "react";
 import { toCanvas } from "qrcode";
 import { RefreshCw, Smartphone } from "lucide-react";
 import type { Client } from "@socium/client";
-import { createPairingSession, shortId } from "./pairingSession";
+import { createPairingSession, dialogHandlers, shortId } from "./pairingSession";
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
@@ -14,6 +14,7 @@ function formatTime(value: string | null) {
 
 export function PairingDialog({ client, close }: { client: Client; close: () => void }) {
   const [session] = useState(() => createPairingSession(client));
+  const { onCloseClick, onCancel, onClose } = dialogHandlers(session, close);
   const { url, error, loading, devices, devicesError, revoking, feedback } = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const drawCode = useCallback((canvas: HTMLCanvasElement | null) => {
     const { signal } = session;
@@ -31,10 +32,7 @@ export function PairingDialog({ client, close }: { client: Client; close: () => 
   }, [session]);
 
   return (
-    <dialog className="pairing-dialog" aria-labelledby="pairing-heading" ref={attach} onClose={() => {
-      session.close();
-      close();
-    }}>
+    <dialog className="pairing-dialog" aria-labelledby="pairing-heading" ref={attach} onCancel={onCancel} onClose={onClose}>
       <h2 id="pairing-heading">Pair a phone</h2>
       <p>Open Socium on your phone and choose <strong>Scan QR code</strong>.</p>
       {url && <canvas ref={drawCode} role="img" aria-label="Socium mobile pairing QR code" />}
@@ -78,7 +76,7 @@ export function PairingDialog({ client, close }: { client: Client; close: () => 
           </ul>
         )}
       </section>
-      <form method="dialog" className="dialog-close"><button className="quiet">Close</button></form>
+      <form method="dialog" className="dialog-close"><button className="quiet" onClick={onCloseClick}>Close</button></form>
     </dialog>
   );
 }

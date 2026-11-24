@@ -110,3 +110,22 @@ export function createPairingSession(client: PairingClient) {
 }
 
 export type PairingSession = ReturnType<typeof createPairingSession>;
+
+/**
+ * Handlers for the dialog element. Closing with the button or Escape ends the
+ * session at once, in the same event: the dialog's `close` event comes in a
+ * later task, when a reply may already have changed the state. `closed`
+ * runs on that `close` event.
+ */
+export function dialogHandlers(session: Pick<PairingSession, "close">, closed: () => void) {
+  return {
+    /** For the Close button, which submits the dialog's form. */
+    onCloseClick: () => session.close(),
+    /** For Escape. */
+    onCancel: () => session.close(),
+    onClose: () => {
+      session.close();
+      closed();
+    },
+  };
+}
