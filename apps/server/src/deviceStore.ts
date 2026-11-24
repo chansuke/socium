@@ -46,38 +46,41 @@ function realLocation(path: string): string {
   }
 }
 
+/** Names the private file in error messages. */
+const storeLabel = "paired device store";
+
 /**
  * Rejects a store inside the workspace, where the agent's tools can read and
  * write it. `workspace` must already be a real path.
  */
-export function checkStoreLocation(storePath: string, workspace: string) {
+export function checkStoreLocation(storePath: string, workspace: string, label = storeLabel) {
   const store = realLocation(resolve(storePath));
   const fromWorkspace = relative(workspace, store);
   // Only `..` as a whole segment leaves it: `<workspace>/..hidden` is inside.
   const outside = fromWorkspace === ".." || fromWorkspace.startsWith(`..${sep}`) || isAbsolute(fromWorkspace);
   if (!outside) {
-    throw new Error(`Keep the paired device store outside the workspace: ${store} is inside ${workspace}.`);
+    throw new Error(`Keep the ${label} outside the workspace: ${store} is inside ${workspace}.`);
   }
 }
 
 const currentUser = () => process.getuid?.();
 
-function checkPrivate(stats: Stats, path: string, kind: "directory" | "file") {
+function checkPrivate(stats: Stats, path: string, kind: "directory" | "file", label = storeLabel) {
   const mode = kind === "directory" ? 0o700 : 0o600;
   const uid = currentUser();
   if (kind === "directory" ? !stats.isDirectory() : !stats.isFile()) {
-    throw new Error(`The paired device store ${path} must be a ${kind}, not a symlink or other file.`);
+    throw new Error(`The ${label} ${path} must be a ${kind}, not a symlink or other file.`);
   }
   if (uid !== undefined && stats.uid !== uid) {
-    throw new Error(`The paired device store ${path} must belong to the user running the gateway.`);
+    throw new Error(`The ${label} ${path} must belong to the user running the gateway.`);
   }
   if ((stats.mode & 0o777) !== mode) {
-    throw new Error(`The paired device store ${path} must have mode ${mode.toString(8)}; run chmod ${mode.toString(8)} ${path}.`);
+    throw new Error(`The ${label} ${path} must have mode ${mode.toString(8)}; run chmod ${mode.toString(8)} ${path}.`);
   }
 }
 
 /** Creates the store directory if needed and checks that only this user can use it. */
-function checkDirectory(path: string, create: boolean) {
+export function checkDirectory(path: string, create: boolean, label = storeLabel) {
   const directory = dirname(path);
   if (create) mkdirSync(directory, { recursive: true, mode: 0o700 });
   let stats: Stats;
@@ -87,7 +90,7 @@ function checkDirectory(path: string, create: boolean) {
     if (!create && (error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
-  checkPrivate(stats, directory, "directory");
+  checkPrivate(stats, directory, "directory", label);
   return true;
 }
 
@@ -187,23 +190,23 @@ function writeStore(path: string, devices: DeviceRecord[]): StoreSnapshot {
 }
 
 /**
- * Creates `<store>.lock` once, private like the store, and keeps it: a lock
- * file that is deleted and created again could let two gateways each lock a
- * different file. Opened and closed before locking, because closing any
- * descriptor of a file drops this process's POSIX locks on it.
+ * Creates the file at `path` with mode 600 if it is missing, without
+ * following a symlink, and checks that it is a private file of this user.
+ * Opened and closed before SQLite opens it, because closing any descriptor of
+ * a file drops this process's POSIX locks on it.
  */
-function prepareLock(lock: string) {
+export function preparePrivateFile(path: string, label = storeLabel) {
   let descriptor: number;
   try {
-    descriptor = openSync(lock, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+    descriptor = openSync(path, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ELOOP") {
-      throw new Error(`The paired device store ${lock} must be a file, not a symlink or other file.`, { cause: error });
+      throw new Error(`The ${label} ${path} must be a file, not a symlink or other file.`, { cause: error });
     }
     throw error;
   }
   try {
-    checkPrivate(fstatSync(descriptor), lock, "file");
+    checkPrivate(fstatSync(descriptor), path, "file", label);
   } finally {
     closeSync(descriptor);
   }
@@ -218,7 +221,9 @@ function prepareLock(lock: string) {
  */
 function withLock<T>(path: string, timeout: number, step: () => T): T {
   const lock = `${path}.lock`;
-  prepareLock(lock);
+  // Created once and kept: a lock file that is deleted and created again
+  // could let two gateways each lock a different file.
+  preparePrivateFile(lock);
   const database = new DatabaseSync(lock, { timeout });
   try {
     try {
