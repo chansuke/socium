@@ -210,16 +210,72 @@ function checkAncestors(directory: string, file: string, label: string) {
   }
 }
 
-/** The real path of the deepest ancestor of `directory` that exists. */
-function existingAncestor(directory: string): string {
+/**
+ * The real path of the deepest ancestor of `directory` that exists, and the
+ * names of the missing directories below it, from the top down.
+ */
+function existingAncestor(directory: string): { ancestor: string; missing: string[] } {
+  const missing: string[] = [];
   for (let current = directory; ; current = dirname(current)) {
     try {
       lstatSync(current);
-      return realpathSync(current);
+      return { ancestor: realpathSync(current), missing };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(current) === current) throw error;
+      missing.unshift(basename(current));
     }
   }
+}
+
+/**
+ * Creates the `missing` directories below the real, checked `ancestor` one at
+ * a time, each with mode 700, and checks each one before going into it: it
+ * must be a directory of this user, not a symlink, that no other user can
+ * change. A name that appeared in the meantime is used only if it passes the
+ * same checks, and the last directory must be a private one. Nothing is ever
+ * created through a path that was not checked first. Returns the real path of
+ * the last directory.
+ */
+function createPrivateDirectories(ancestor: string, missing: string[], file: string, label: string): string {
+  const uid = currentUser();
+  let current = ancestor;
+  for (const [index, name] of missing.entries()) {
+    const next = join(current, name);
+    let created = true;
+    try {
+      mkdirSync(next, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      created = false;
+    }
+    let descriptor: number;
+    try {
+      descriptor = openSync(next, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ELOOP" || code === "ENOTDIR") {
+        throw new Error(`The ${label} ${next} must be a directory, not a symlink or other file.`, { cause: error });
+      }
+      throw error;
+    }
+    try {
+      // The umask may have taken bits away, and a setgid parent adds one.
+      if (created) fchmodSync(descriptor, 0o700);
+      const stats = fstatSync(descriptor);
+      if (index === missing.length - 1) {
+        checkPrivate(stats, next, "directory", label);
+      } else if (uid !== undefined && (stats.uid !== uid || othersCanReplace(stats, uid))) {
+        throw new Error(
+          `The ${label} ${file} is under ${next}, which another user could replace; ` +
+            "keep it under directories that only you can change.",
+        );
+      }
+    } finally {
+      closeSync(descriptor);
+    }
+    current = next;
+  }
+  return current;
 }
 
 function isMissing(path: string) {
@@ -246,8 +302,9 @@ export interface PrivateLocationOptions {
  * false. The file must be outside the workspace, its directory must be a
  * private directory of this user and not a symlink, and no directory from
  * there up to `/` may be one that another user could replace. A missing
- * directory is created only after the ancestors that exist pass, so a refused
- * path leaves nothing behind.
+ * directory is created only after the ancestors that exist pass, one level at a
+ * time from the real path of the deepest one, so a refused path leaves
+ * nothing behind.
  */
 export function privateLocation(path: string, options: PrivateLocationOptions & { create: true }): string;
 export function privateLocation(path: string, options: PrivateLocationOptions): string | null;
@@ -255,13 +312,16 @@ export function privateLocation(path: string, { create, label = storeLabel, work
   const requested = resolve(path);
   const directory = dirname(requested);
   if (workspace !== undefined) checkStoreLocation(requested, workspace, label);
+  let canonicalDir: string;
   if (isMissing(directory)) {
-    checkAncestors(existingAncestor(directory), requested, label);
+    const { ancestor, missing } = existingAncestor(directory);
+    checkAncestors(ancestor, requested, label);
     if (!create) return null;
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    canonicalDir = createPrivateDirectories(ancestor, missing, requested, label);
+  } else {
+    checkPrivate(lstatSync(directory), directory, "directory", label);
+    canonicalDir = realpathSync(directory);
   }
-  checkPrivate(lstatSync(directory), directory, "directory", label);
-  const canonicalDir = realpathSync(directory);
   checkPrivate(lstatSync(canonicalDir), canonicalDir, "directory", label);
   const file = join(canonicalDir, basename(requested));
   if (workspace !== undefined) checkStoreLocation(file, workspace, label);

@@ -149,6 +149,26 @@ test("a store with a setuid, setgid, or sticky bit is refused", (context) => {
   }
 });
 
+test("missing store directories are made one at a time with mode 700, even under a setgid directory", (context) => {
+  const root = join(temporaryDirectory(context), "shared-group");
+  mkdirSync(root, { mode: 0o700 });
+  chmodSync(root, 0o2700);
+  const storePath = join(root, "state", "socium", "paired-devices.json");
+  pair(createPairing(address, { storePath }));
+  for (const directory of [join(root, "state"), join(root, "state", "socium")]) {
+    assert.equal(lstatSync(directory).mode & 0o7777, 0o700, directory);
+  }
+});
+
+test("a missing store directory is never made through a symlink on the way", (context) => {
+  const root = temporaryDirectory(context);
+  // A dangling symlink where a missing directory would go.
+  symlinkSync(join(root, "elsewhere"), join(root, "state"));
+  const storePath = join(root, "state", "socium", "paired-devices.json");
+  assert.throws(() => openStore(storePath).update(() => []), /symlink/);
+  assert(!existsSync(join(root, "elsewhere")));
+});
+
 test("a store under a directory that another user could replace is refused at startup, before any write", (context) => {
   const ancestor = join(temporaryDirectory(context), "shared");
   mkdirSync(join(ancestor, "state"), { recursive: true, mode: 0o700 });
