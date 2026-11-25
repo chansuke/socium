@@ -190,20 +190,28 @@ function writeStore(path: string, devices: DeviceRecord[]): StoreSnapshot {
 }
 
 /**
- * Checks every directory from `directory` up to `/`: each must belong to this
- * user or root, and no other user may write to it, so nobody else can rename
- * or replace a directory on the way to `file` between one check and the next.
- * A root-owned sticky directory such as `/tmp` may be writable by all, because
- * others can add entries to it but cannot move or remove ours.
+ * Whether another user could rename or replace entries in the directory
+ * `stats` describes, when the gateway runs as `uid`. It must belong to this
+ * user or root, and no other user may write to it. A root-owned sticky
+ * directory such as `/tmp` may be writable by all, because others can add
+ * entries to it but cannot move or remove ours.
+ */
+export function othersCanReplace(stats: Pick<Stats, "isDirectory" | "mode" | "uid">, uid: number) {
+  const owned = stats.uid === uid || stats.uid === 0;
+  const sharedWrite = (stats.mode & 0o022) !== 0 && !(stats.uid === 0 && (stats.mode & 0o1000) !== 0);
+  return !stats.isDirectory() || !owned || sharedWrite;
+}
+
+/**
+ * Checks every directory from `directory` up to `/` with `othersCanReplace`,
+ * so nobody else can rename or replace a directory on the way to `file`
+ * between one check and the next. `directory` must already be a real path.
  */
 function checkAncestors(directory: string, file: string, label: string) {
   const uid = currentUser();
   if (uid === undefined) return;
   for (let current = directory; ; current = dirname(current)) {
-    const stats = lstatSync(current);
-    const owned = stats.uid === uid || stats.uid === 0;
-    const sharedWrite = (stats.mode & 0o022) !== 0 && !(stats.uid === 0 && (stats.mode & 0o1000) !== 0);
-    if (!stats.isDirectory() || !owned || sharedWrite) {
+    if (othersCanReplace(lstatSync(current), uid)) {
       throw new Error(
         `The ${label} ${file} is under ${current}, which another user could replace; ` +
           "keep it under directories that only you or root can change.",
@@ -211,6 +219,65 @@ function checkAncestors(directory: string, file: string, label: string) {
     }
     if (dirname(current) === current) return;
   }
+}
+
+/** The real path of the deepest ancestor of `directory` that exists. */
+function existingAncestor(directory: string): string {
+  for (let current = directory; ; current = dirname(current)) {
+    try {
+      lstatSync(current);
+      return realpathSync(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(current) === current) throw error;
+    }
+  }
+}
+
+function isMissing(path: string) {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
+}
+
+export interface PrivateLocationOptions {
+  /** Whether to create the directory with mode 700 when it is missing. */
+  create: boolean;
+  label?: string;
+  /** The real path of the served workspace, which must not contain the file. */
+  workspace?: string;
+}
+
+/**
+ * Checks where the private file at `path` lives and returns its path in the
+ * real directory, or null when the directory is missing and `create` is
+ * false. The file must be outside the workspace, its directory must be a
+ * private directory of this user and not a symlink, and no directory from
+ * there up to `/` may be one that another user could replace. A missing
+ * directory is created only after the ancestors that exist pass, so a refused
+ * path leaves nothing behind.
+ */
+export function privateLocation(path: string, options: PrivateLocationOptions & { create: true }): string;
+export function privateLocation(path: string, options: PrivateLocationOptions): string | null;
+export function privateLocation(path: string, { create, label = storeLabel, workspace }: PrivateLocationOptions): string | null {
+  const requested = resolve(path);
+  const directory = dirname(requested);
+  if (workspace !== undefined) checkStoreLocation(requested, workspace, label);
+  if (isMissing(directory)) {
+    checkAncestors(existingAncestor(directory), requested, label);
+    if (!create) return null;
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+  }
+  checkPrivate(lstatSync(directory), directory, "directory", label);
+  const canonicalDir = realpathSync(directory);
+  checkPrivate(lstatSync(canonicalDir), canonicalDir, "directory", label);
+  const file = join(canonicalDir, basename(requested));
+  if (workspace !== undefined) checkStoreLocation(file, workspace, label);
+  checkAncestors(canonicalDir, file, label);
+  return file;
 }
 
 export interface PrivateDatabaseOptions {
@@ -222,20 +289,16 @@ export interface PrivateDatabaseOptions {
 }
 
 /**
- * Opens the SQLite file at `path`, creating it with mode 600 if it is
- * missing. The directory is resolved to its real path and every directory up
- * to `/` is checked, so the name SQLite opens cannot be redirected by another
- * user. The file is opened first without following a symlink and checked to
+ * Opens the SQLite file at `path`, creating it and its directory if they are
+ * missing. `privateLocation` checks the directory and resolves it to its real
+ * path, so the name SQLite opens cannot be redirected by another user. The file is opened first without following a symlink and checked to
  * be a private file of this user, and that descriptor stays open until SQLite
  * has opened the same name and the name is confirmed to still be that file.
  * It is closed before the caller runs any statement, because closing any
  * descriptor of a file drops this process's POSIX locks on it.
  */
 export function openPrivateDatabase(path: string, { label = storeLabel, timeout, workspace }: PrivateDatabaseOptions): DatabaseSync {
-  const directory = realpathSync(dirname(path));
-  const file = join(directory, basename(path));
-  if (workspace !== undefined) checkStoreLocation(file, workspace, label);
-  checkAncestors(directory, file, label);
+  const file = privateLocation(path, { create: true, label, workspace });
   let descriptor: number;
   try {
     descriptor = openSync(file, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);

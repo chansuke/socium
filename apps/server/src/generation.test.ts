@@ -118,3 +118,12 @@ test("a counter under a directory that another user could replace is refused, al
   assert.equal(nextGeneration(join(guarded, "state", "gateway-generation.sqlite")), 1);
   assert.equal(nextGeneration(join(root, "guarded-alias", "state", "gateway-generation.sqlite")), 2);
 });
+
+test("a counter under a refused ancestor creates none of the missing directories", (context) => {
+  const ancestor = join(temporaryDirectory(context), "shared");
+  mkdirSync(ancestor, { mode: 0o700 });
+  chmodSync(ancestor, 0o775);
+  const path = join(ancestor, "missing", "state", "gateway-generation.sqlite");
+  assert.throws(() => nextGeneration(path), /gateway generation counter .* is under .*shared, which another user could replace/);
+  assert.deepEqual(readdirSync(ancestor), []);
+});

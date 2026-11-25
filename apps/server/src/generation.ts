@@ -1,5 +1,5 @@
 import { dirname, join } from "node:path";
-import { checkDirectory, checkStoreLocation, defaultPairingStore, openPrivateDatabase } from "./deviceStore.ts";
+import { defaultPairingStore, openPrivateDatabase } from "./deviceStore.ts";
 
 const label = "gateway generation counter";
 
@@ -25,8 +25,6 @@ export interface GenerationOptions {
  * journal beside the file only during a write and gives it the file's mode.
  */
 export function nextGeneration(path = defaultGenerationStore(), { workspace }: GenerationOptions = {}): number {
-  if (workspace !== undefined) checkStoreLocation(path, workspace, label);
-  checkDirectory(path, true, label);
   const database = openPrivateDatabase(path, { label, timeout: 5000, workspace });
   try {
     // No write-ahead log, so no -wal or -shm files stay beside the counter.
