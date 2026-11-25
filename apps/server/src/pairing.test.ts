@@ -111,6 +111,27 @@ test("a store that others can reach, or that is a symlink, is refused", (context
   assert.throws(() => pairing.authorizes(device), /mode 600/);
 });
 
+test("a store with a setuid, setgid, or sticky bit is refused", (context) => {
+  const root = temporaryDirectory(context);
+  for (const [name, mode, kind] of [
+    ["sticky directory", 0o1700, "directory"],
+    ["setgid directory", 0o2700, "directory"],
+    ["setuid file", 0o4600, "file"],
+    ["setgid file", 0o2600, "file"],
+  ] as const) {
+    const directory = join(root, name.replaceAll(" ", "-"));
+    mkdirSync(directory, { mode: 0o700 });
+    const storePath = join(directory, "paired-devices.json");
+    writeFileSync(storePath, "{\"devices\":[]}", { mode: 0o600 });
+    chmodSync(kind === "directory" ? directory : storePath, mode);
+    if ((lstatSync(kind === "directory" ? directory : storePath).mode & 0o7777) !== mode) {
+      context.diagnostic(`The system did not keep mode ${mode.toString(8)} for the ${name}; not tried.`);
+      continue;
+    }
+    assert.throws(() => createPairing(address, { storePath }), kind === "directory" ? /mode 700/ : /mode 600/, name);
+  }
+});
+
 test("a store under a directory that another user could replace is refused at startup, before any write", (context) => {
   const ancestor = join(temporaryDirectory(context), "shared");
   mkdirSync(join(ancestor, "state"), { recursive: true, mode: 0o700 });

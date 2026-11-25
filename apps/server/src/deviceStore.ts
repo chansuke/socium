@@ -74,7 +74,8 @@ function checkPrivate(stats: Stats, path: string, kind: "directory" | "file", la
   if (uid !== undefined && stats.uid !== uid) {
     throw new Error(`The ${label} ${path} must belong to the user running the gateway.`);
   }
-  if ((stats.mode & 0o777) !== mode) {
+  // Setuid, setgid, and sticky bits count too: the mode must be exactly this.
+  if ((stats.mode & 0o7777) !== mode) {
     throw new Error(`The ${label} ${path} must have mode ${mode.toString(8)}; run chmod ${mode.toString(8)} ${path}.`);
   }
 }
