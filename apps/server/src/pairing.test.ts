@@ -64,6 +64,18 @@ test("a store in the workspace, or reached through a symlink into it, is refused
   }
 });
 
+test("missing store directories under a symlink into the workspace are refused before any is made", (context) => {
+  const root = temporaryDirectory(context);
+  const workspace = join(root, "project");
+  mkdirSync(join(workspace, "data"), { recursive: true, mode: 0o700 });
+  symlinkSync(join(workspace, "data"), join(root, "state"));
+  const storePath = join(root, "state", "socium", "devices", "paired-devices.json");
+  assert.throws(() => createPairing(address, { storePath, workspace }), /outside the workspace/);
+  assert.throws(() => openStore(storePath, { workspace }).update(() => []), /outside the workspace/);
+  assert.throws(() => openStore(storePath, { workspace }).read(), /outside the workspace/);
+  assert.deepEqual(readdirSync(join(workspace, "data")), []);
+});
+
 test("a store file name that is a symlink out of the workspace is refused before the lock is made", (context) => {
   const root = temporaryDirectory(context);
   const workspace = join(root, "project");

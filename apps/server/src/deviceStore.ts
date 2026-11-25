@@ -35,34 +35,24 @@ export function defaultPairingStore() {
   return join(root, "socium", "paired-devices.json");
 }
 
-/** `path` with its existing ancestors resolved through symlinks. */
-function realLocation(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    const parent = dirname(path);
-    return parent === path ? path : join(realLocation(parent), basename(path));
-  }
-}
-
 /** Names the private file in error messages. */
 const storeLabel = "paired device store";
 
 /**
- * Rejects a store inside the workspace, where the agent's tools can read and
- * write it. `workspace` must already be a real path. Only the directory is
- * resolved: a symlink at the file name itself never moves the store out of
- * the workspace, because the lock and temporary files sit beside that name.
+ * Rejects a file named `fileName` in `canonicalDir` when that is inside the
+ * workspace, where the agent's tools can read and write it. Both
+ * `canonicalDir` and `workspace` must already be real paths, and nothing is
+ * resolved again here, so the answer is about the very directory the caller
+ * goes on to use. A symlink at the file name itself never moves the file out
+ * of the workspace, because the lock and temporary files sit beside that name.
  */
-function checkStoreLocation(storePath: string, workspace: string, label = storeLabel) {
-  const requested = resolve(storePath);
-  const store = join(realLocation(dirname(requested)), basename(requested));
-  const fromWorkspace = relative(workspace, store);
+function assertCanonicalOutsideWorkspace(canonicalDir: string, fileName: string, workspace: string, label = storeLabel) {
+  const file = join(canonicalDir, fileName);
+  const fromWorkspace = relative(workspace, file);
   // Only `..` as a whole segment leaves it: `<workspace>/..hidden` is inside.
   const outside = fromWorkspace === ".." || fromWorkspace.startsWith(`..${sep}`) || isAbsolute(fromWorkspace);
   if (!outside) {
-    throw new Error(`Keep the ${label} outside the workspace: ${store} is inside ${workspace}.`);
+    throw new Error(`Keep the ${label} outside the workspace: ${file} is inside ${workspace}.`);
   }
 }
 
@@ -311,20 +301,25 @@ export function privateLocation(path: string, options: PrivateLocationOptions): 
 export function privateLocation(path: string, { create, label = storeLabel, workspace }: PrivateLocationOptions): string | null {
   const requested = resolve(path);
   const directory = dirname(requested);
-  if (workspace !== undefined) checkStoreLocation(requested, workspace, label);
+  const fileName = basename(requested);
   let canonicalDir: string;
   if (isMissing(directory)) {
     const { ancestor, missing } = existingAncestor(directory);
     checkAncestors(ancestor, requested, label);
+    // The planned path is built from the checked real ancestor, the same
+    // one the directories are made under, so nothing in the workspace is
+    // made even when a symlink on the way changed since the last look.
+    if (workspace !== undefined) assertCanonicalOutsideWorkspace(join(ancestor, ...missing), fileName, workspace, label);
     if (!create) return null;
     canonicalDir = createPrivateDirectories(ancestor, missing, requested, label);
+    if (workspace !== undefined) assertCanonicalOutsideWorkspace(canonicalDir, fileName, workspace, label);
   } else {
-    checkPrivate(lstatSync(directory), directory, "directory", label);
     canonicalDir = realpathSync(directory);
+    if (workspace !== undefined) assertCanonicalOutsideWorkspace(canonicalDir, fileName, workspace, label);
+    checkPrivate(lstatSync(directory), directory, "directory", label);
   }
   checkPrivate(lstatSync(canonicalDir), canonicalDir, "directory", label);
-  const file = join(canonicalDir, basename(requested));
-  if (workspace !== undefined) checkStoreLocation(file, workspace, label);
+  const file = join(canonicalDir, fileName);
   checkAncestors(canonicalDir, file, label);
   return file;
 }

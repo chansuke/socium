@@ -54,6 +54,16 @@ test("a counter in the workspace, or reached through a symlink into it, is refus
   assert.equal(nextGeneration(join(root, "project..state", "gateway-generation.sqlite"), { workspace }), 1);
 });
 
+test("missing counter directories under a symlink into the workspace are refused before any is made", (context) => {
+  const root = temporaryDirectory(context);
+  const workspace = join(root, "project");
+  mkdirSync(join(workspace, "data"), { recursive: true, mode: 0o700 });
+  symlinkSync(join(workspace, "data"), join(root, "state"));
+  const path = join(root, "state", "socium", "counter", "gateway-generation.sqlite");
+  assert.throws(() => nextGeneration(path, { workspace }), /Keep the gateway generation counter outside the workspace/);
+  assert.deepEqual(readdirSync(join(workspace, "data")), []);
+});
+
 test("a counter that others can reach, or that is a symlink, is refused", (context) => {
   const root = temporaryDirectory(context);
   const cases: [string, (directory: string, path: string) => void, RegExp][] = [
