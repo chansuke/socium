@@ -197,6 +197,21 @@ test("a store directory opened to others after startup stops authorizing, though
   assert(pairing.authorizes(device));
 });
 
+test("a higher store directory opened to others after startup stops authorizing, though the store directory stays private", (context) => {
+  const ancestor = join(temporaryDirectory(context), "home");
+  const directory = join(ancestor, "state");
+  mkdirSync(ancestor, { mode: 0o700 });
+  const pairing = createPairing(address, { storePath: join(directory, "paired-devices.json") });
+  const device = pair(pairing);
+  assert(pairing.authorizes(device));
+  assert(pairing.authorizes(device));
+  chmodSync(ancestor, 0o775);
+  assert.equal(lstatSync(directory).mode & 0o7777, 0o700);
+  assert.throws(() => pairing.authorizes(device), /is under .*home, which another user could replace/);
+  chmodSync(ancestor, 0o700);
+  assert(pairing.authorizes(device));
+});
+
 test("a store that belongs to another user is refused, at startup and later", (context) => {
   const storePath = join(temporaryDirectory(context), "state", "paired-devices.json");
   const pairing = createPairing(address, { storePath });
