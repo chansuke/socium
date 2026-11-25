@@ -50,6 +50,24 @@ test("the bridge tells subscribers about each change and when the worker stops",
       resolve(state);
     });
   });
+  /** The first state, current or coming, that `ready` accepts; fails after 5 s. */
+  const until = (ready: (state: WorkspaceState | null) => boolean) => new Promise<WorkspaceState | null>((resolve, reject) => {
+    const current = bridge.snapshot();
+    if (ready(current)) {
+      resolve(current);
+      return;
+    }
+    const timer = setTimeout(() => {
+      stop();
+      reject(new Error("The bridge state never became ready."));
+    }, 5000);
+    const stop = bridge.subscribe((state) => {
+      if (!ready(state)) return;
+      clearTimeout(timer);
+      stop();
+      resolve(state);
+    });
+  });
   const initial = await next();
   assert.equal(initial?.models[0]?.alias, "local");
   assert.equal(initial?.generation, 7);
@@ -57,8 +75,9 @@ test("the bridge tells subscribers about each change and when the worker stops",
 
   const running = await bridge.send({ action: "prompt", text: "Go." });
   assert.deepEqual(running.turn?.messages, [{ role: "user", text: "Go." }]);
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const waiting = bridge.snapshot();
+  // The worker sends the rest of the turn after the response; wait for its approval request.
+  const waiting = await until((state) => state?.turn?.approval !== null && state?.turn?.approval !== undefined);
+  assert(waiting);
   assert.deepEqual(waiting.turn?.activity, { phase: "tool", detail: "run_command" });
   assert.equal(waiting.plan?.tasks[0]?.status, "active");
   assert.equal(waiting.turn?.approval?.sessionOption, "`cargo test` commands");
