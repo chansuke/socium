@@ -79,21 +79,6 @@ function checkPrivate(stats: Stats, path: string, kind: "directory" | "file", la
   }
 }
 
-/** Creates the store directory if needed and checks that only this user can use it. */
-export function checkDirectory(path: string, create: boolean, label = storeLabel) {
-  const directory = dirname(path);
-  if (create) mkdirSync(directory, { recursive: true, mode: 0o700 });
-  let stats: Stats;
-  try {
-    stats = lstatSync(directory);
-  } catch (error) {
-    if (!create && (error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
-  checkPrivate(stats, directory, "directory", label);
-  return true;
-}
-
 /**
  * Changes with the contents, a replacement, or a change of owner or mode.
  * The owner and mode are part of it because file times can stay the same
@@ -376,21 +361,27 @@ export interface StoreOptions {
 
 /**
  * The paired device store at `path`. Every read, version check, and update
- * first checks the store's real location and its directory again, so a
- * directory that is moved, replaced, or opened to others after startup stops
- * the gateway from trusting the store even while the file looks unchanged.
+ * first runs `privateLocation` again, the same checks as the lock and the
+ * generation counter get, and uses the file in the real directory it returns.
+ * A directory that is moved, replaced, or opened to others after startup
+ * stops the gateway from trusting the store even while the file looks
+ * unchanged, and a store under a directory another user could replace fails
+ * at startup instead of on the first write.
  */
 export function openStore(path: string, { workspace, lockTimeout = defaultLockTimeout }: StoreOptions = {}) {
-  function check(create: boolean) {
-    if (workspace !== undefined) checkStoreLocation(path, workspace);
-    return checkDirectory(path, create);
-  }
   const missing: StoreSnapshot = { devices: [], version: "missing" };
+  const existing = () => privateLocation(path, { create: false, workspace });
   return {
     path,
-    read: (): StoreSnapshot => check(false) ? readFile(path) : missing,
+    read(): StoreSnapshot {
+      const file = existing();
+      return file ? readFile(file) : missing;
+    },
     /** Changes with the file; compare it with a snapshot's version before reusing that snapshot. */
-    version: () => check(false) ? fileVersion(path) : "missing",
+    version() {
+      const file = existing();
+      return file ? fileVersion(file) : "missing";
+    },
     /**
      * Reads the store, lets `change` compute the next records, and writes them
      * while holding the store lock, so gateways sharing the store never lose
@@ -398,8 +389,7 @@ export function openStore(path: string, { workspace, lockTimeout = defaultLockTi
      * keep the file.
      */
     update(change: (devices: DeviceRecord[]) => DeviceRecord[] | null): StoreSnapshot {
-      check(true);
-      return updateFile(path, change, lockTimeout);
+      return updateFile(privateLocation(path, { create: true, workspace }), change, lockTimeout);
     },
   };
 }
