@@ -11,7 +11,7 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import { readPairingUrl } from "@socium/client";
-import { defaultPairingStore } from "./deviceStore.ts";
+import { defaultPairingStore, openStore } from "./deviceStore.ts";
 import { createPairing } from "./pairing.ts";
 
 function temporaryDirectory(context: TestContext) {
@@ -62,6 +62,23 @@ test("a store in the workspace, or reached through a symlink into it, is refused
   for (const outside of [join(root, "project-state", "paired-devices.json"), join(root, "project..state", "paired-devices.json")]) {
     pair(createPairing(address, { storePath: outside, workspace }));
   }
+});
+
+test("a store file name that is a symlink out of the workspace is refused before the lock is made", (context) => {
+  const root = temporaryDirectory(context);
+  const workspace = join(root, "project");
+  const directory = join(workspace, "state");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(workspace, 0o700);
+  const outside = join(root, "outside");
+  mkdirSync(outside, { mode: 0o700 });
+  writeFileSync(join(outside, "paired-devices.json"), "{\"devices\":[]}", { mode: 0o600 });
+  const storePath = join(directory, "paired-devices.json");
+  symlinkSync(join(outside, "paired-devices.json"), storePath);
+  assert.throws(() => createPairing(address, { storePath, workspace }), /outside the workspace/);
+  assert.throws(() => openStore(storePath, { workspace }).update(() => []), /outside the workspace/);
+  assert.deepEqual(readdirSync(directory), ["paired-devices.json"]);
+  assert.deepEqual(readdirSync(outside), ["paired-devices.json"]);
 });
 
 test("a store directory moved into the workspace after startup stops authorizing", (context) => {
