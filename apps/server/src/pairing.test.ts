@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
-  chmodSync, chownSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync,
+  chmodSync, chownSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync,
   utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -109,6 +109,19 @@ test("a store that others can reach, or that is a symlink, is refused", (context
   const device = pair(pairing);
   chmodSync(storePath, 0o644);
   assert.throws(() => pairing.authorizes(device), /mode 600/);
+});
+
+test("a store under a directory that another user could replace is refused at startup, before any write", (context) => {
+  const ancestor = join(temporaryDirectory(context), "shared");
+  mkdirSync(join(ancestor, "state"), { recursive: true, mode: 0o700 });
+  chmodSync(ancestor, 0o775);
+  const refused = /paired device store .* is under .*shared, which another user could replace/;
+  // Reading an existing store directory, and reading where the directory is still missing.
+  for (const storePath of [join(ancestor, "state", "paired-devices.json"), join(ancestor, "missing", "state", "paired-devices.json")]) {
+    assert.throws(() => createPairing(address, { storePath }), refused, storePath);
+  }
+  assert.deepEqual(readdirSync(ancestor), ["state"]);
+  assert.deepEqual(readdirSync(join(ancestor, "state")), []);
 });
 
 test("a store directory opened to others after startup stops authorizing, though the file is unchanged", (context) => {
