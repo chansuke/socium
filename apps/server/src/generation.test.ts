@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
+import { othersCanReplace } from "./deviceStore.ts";
 import { defaultGenerationStore, nextGeneration } from "./generation.ts";
 
 function temporaryDirectory(context: TestContext) {
@@ -89,8 +90,6 @@ test("a counter under a directory that another user could replace is refused, al
   const cases: [string, number][] = [
     ["world-writable", 0o777],
     ["group-writable", 0o775],
-    // Sticky only protects entries when root owns the directory.
-    ["sticky and world-writable but not root's", 0o1777],
   ];
   for (const [name, mode] of cases) {
     const ancestor = join(root, name.replaceAll(" ", "-"));
@@ -100,6 +99,15 @@ test("a counter under a directory that another user could replace is refused, al
     assert.throws(() => nextGeneration(path), refused, name);
     assert(!existsSync(path), name);
   }
+
+  // Sticky only protects entries when root owns the directory, and the test
+  // owns this one, which is root only when the tests run as root.
+  const sticky = join(root, "sticky");
+  mkdirSync(join(sticky, "state"), { recursive: true, mode: 0o700 });
+  chmodSync(sticky, 0o1777);
+  const underSticky = join(sticky, "state", "gateway-generation.sqlite");
+  if (process.getuid?.() === 0) assert.equal(nextGeneration(underSticky), 1);
+  else assert.throws(() => nextGeneration(underSticky), refused);
 
   // A symlink to a safe-looking path does not hide the shared directory it leads through.
   const shared = join(root, "shared");
@@ -117,6 +125,20 @@ test("a counter under a directory that another user could replace is refused, al
   symlinkSync(guarded, join(root, "guarded-alias"));
   assert.equal(nextGeneration(join(guarded, "state", "gateway-generation.sqlite")), 1);
   assert.equal(nextGeneration(join(root, "guarded-alias", "state", "gateway-generation.sqlite")), 2);
+});
+
+test("a sticky world-writable ancestor is allowed only when root owns it, whoever runs the gateway", () => {
+  const directory = (uid: number, mode: number) => ({ uid, mode: 0o40000 | mode, isDirectory: () => true });
+  for (const gateway of [0, 1000]) {
+    // Such as /tmp.
+    assert(!othersCanReplace(directory(0, 0o1777), gateway), `root's sticky directory, gateway uid ${gateway}`);
+    assert(othersCanReplace(directory(1001, 0o1777), gateway), `another user's sticky directory, gateway uid ${gateway}`);
+    assert(othersCanReplace(directory(0, 0o777), gateway), `root's world-writable directory, gateway uid ${gateway}`);
+    assert(!othersCanReplace(directory(gateway, 0o755), gateway), `own directory, gateway uid ${gateway}`);
+  }
+  assert(othersCanReplace(directory(1000, 0o1777), 1000), "own sticky world-writable directory");
+  assert(othersCanReplace(directory(1001, 0o755), 1000), "another user's directory");
+  assert(othersCanReplace({ uid: 1000, mode: 0o120777, isDirectory: () => false }, 1000), "a symlink");
 });
 
 test("a counter under a refused ancestor creates none of the missing directories", (context) => {
