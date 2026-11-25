@@ -51,10 +51,13 @@ const storeLabel = "paired device store";
 
 /**
  * Rejects a store inside the workspace, where the agent's tools can read and
- * write it. `workspace` must already be a real path.
+ * write it. `workspace` must already be a real path. Only the directory is
+ * resolved: a symlink at the file name itself never moves the store out of
+ * the workspace, because the lock and temporary files sit beside that name.
  */
-export function checkStoreLocation(storePath: string, workspace: string, label = storeLabel) {
-  const store = realLocation(resolve(storePath));
+function checkStoreLocation(storePath: string, workspace: string, label = storeLabel) {
+  const requested = resolve(storePath);
+  const store = join(realLocation(dirname(requested)), basename(requested));
   const fromWorkspace = relative(workspace, store);
   // Only `..` as a whole segment leaves it: `<workspace>/..hidden` is inside.
   const outside = fromWorkspace === ".." || fromWorkspace.startsWith(`..${sep}`) || isAbsolute(fromWorkspace);
