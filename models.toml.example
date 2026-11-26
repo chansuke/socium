@@ -47,6 +47,15 @@ api_key_env = "OPENAI_API_KEY"
 # base_url = "https://ollama.com/v1"
 # api_key_env = "OLLAMA_API_KEY"
 
+# OpenCode Go: https://opencode.ai/docs/go. `socium models import opencode-go`
+# writes every Go model to models.d/. Go refuses requests without a session
+# ID, so each of its providers sets session_header, for example:
+# [providers.opencode-go]
+# wire = "openai-chat"
+# base_url = "https://opencode.ai/inference/go/openai/v1"
+# api_key_env = "OPENCODE_API_KEY"
+# session_header = "x-opencode-session"
+
 # OpenRouter: https://openrouter.ai (Keys).
 # [providers.openrouter]
 # wire = "openai-chat"
@@ -56,7 +65,7 @@ api_key_env = "OPENAI_API_KEY"
 # Gemini API: https://aistudio.google.com/apikey (Google AI Studio).
 # base_url includes the API version. The key goes in x-goog-api-key;
 # OpenCode Zen serves the same wire at
-# https://opencode.ai/inference/google/v1beta with auth = "bearer".
+# https://opencode.ai/inference/google/v1beta and takes either header.
 # [providers.gemini]
 # wire = "google"
 # base_url = "https://generativelanguage.googleapis.com/v1beta"

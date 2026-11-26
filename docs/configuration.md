@@ -111,6 +111,14 @@ max_output_tokens = 32000
 against the DeepSeek and Z.ai documentation on 2026-11-13; DeepSeek rejects
 unknown non-Claude names with 400.
 
+`session_header = "x-..."` on a provider sends a random ID for the
+conversation in that header with every request, for endpoints that group
+requests by conversation. The ID is saved with the conversation, kept when you
+resume it, and new after `/new`; it does not reveal when the conversation
+started. OpenCode Go refuses requests without `x-opencode-session`, and
+`socium models import opencode-go` sets it. Every request names Socium in
+`User-Agent` (`socium/<version>`).
+
 Gemini models use the Gemini API with a key from Google AI Studio
 (https://aistudio.google.com/apikey). `base_url` includes the API version:
 
@@ -132,7 +140,8 @@ max_output_tokens = 65536
 
 The model ID and limits were checked against https://aistudio.google.com/docs/models
 on 2026-11-20. OpenCode Zen serves Gemini models on the same wire at
-`https://opencode.ai/inference/google/v1beta`; set `auth = "bearer"` for it.
+`https://opencode.ai/inference/google/v1beta`, and reads the key from either
+header.
 
 `compact_at_tokens` sets the prompt size at which a model's history is
 compacted (default 200000, or 80% of the input budget if that is lower), and
@@ -190,7 +199,8 @@ the same provider.
 Aliases look like `opencode/claude-haiku-5-5`. A provider whose models use
 several API formats, such as OpenCode Zen, becomes one provider per wire
 (`opencode`, `opencode-anthropic`, `opencode-openai-responses`, and so on),
-all with the same key. Deprecated models, models that do not answer in text,
+all with the same key. OpenCode Go (`opencode-go`) imports the same way and
+also gets `session_header`. Deprecated models, models that do not answer in text,
 and providers that need OAuth, cloud credentials, or an unsupported SDK are
 skipped, and the command says why.
 
