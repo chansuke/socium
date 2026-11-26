@@ -12,6 +12,10 @@ pub(crate) struct AgentMessageRequest<'a> {
     #[serde(serialize_with = "wire_messages")]
     pub messages: &'a [Message],
     pub tools: &'a [ToolDefinition],
+    /// The conversation's request session ID, sent in the provider's
+    /// `session_header`; never part of the body.
+    #[serde(skip)]
+    pub session: Option<&'a str>,
 }
 
 /// Messages as the API takes them: role and content, never Socium's own
@@ -54,6 +58,15 @@ impl<'a> AgentMessageRequest<'a> {
             system,
             messages,
             tools,
+            session: None,
+        }
+    }
+
+    /// The same request, sent as part of the conversation `session` names.
+    pub fn in_session(self, session: &'a str) -> Self {
+        Self {
+            session: Some(session),
+            ..self
         }
     }
 }

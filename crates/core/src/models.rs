@@ -86,6 +86,9 @@ pub(crate) struct ProviderConfig {
     /// machine that takes none, which then gets no key header.
     pub(crate) api_key_env: Option<String>,
     pub(crate) auth: AuthScheme,
+    /// Header that carries the conversation's request session ID, for an
+    /// endpoint that groups requests by conversation; `None` sends none.
+    pub(crate) session_header: Option<reqwest::header::HeaderName>,
 }
 
 impl ProviderConfig {
@@ -223,6 +226,7 @@ struct RawProvider {
     #[serde(default)]
     api_key_env: Option<String>,
     auth: Option<String>,
+    session_header: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -259,6 +263,7 @@ impl ModelRegistry {
             base_url: ANTHROPIC_BASE_URL.to_string(),
             api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
             auth: AuthScheme::ApiKeyHeader,
+            session_header: None,
         };
         let claude =
             |alias: &str, id: &str, description: &str, compact_model: Option<&str>| ModelConfig {
@@ -576,13 +581,35 @@ fn parse_provider(name: &str, raw: RawProvider) -> Result<ProviderConfig, String
             ));
         }
     };
+    let session_header = raw
+        .session_header
+        .as_deref()
+        .map(parse_session_header)
+        .transpose()?;
     Ok(ProviderConfig {
         name: name.to_string(),
         wire,
         base_url,
         api_key_env: raw.api_key_env,
         auth,
+        session_header,
     })
+}
+
+/// A header of the endpoint's own (`x-…`), so it can never replace the key
+/// or a header the wire sets.
+fn parse_session_header(raw: &str) -> Result<reqwest::header::HeaderName, String> {
+    let lower = raw.to_ascii_lowercase();
+    let name = reqwest::header::HeaderName::from_bytes(lower.as_bytes())
+        .ok()
+        .filter(|_| lower.len() > 2 && lower.starts_with("x-"))
+        .ok_or_else(|| {
+            format!("session_header must be a header name that starts with x-; got '{raw}'")
+        })?;
+    if ["x-api-key", "x-goog-api-key"].contains(&name.as_str()) {
+        return Err(format!("session_header must not be the key header {name}"));
+    }
+    Ok(name)
 }
 
 fn check_key_variable(variable: &str) -> Result<(), String> {
@@ -890,6 +917,36 @@ context_window = 1000000
         }
         let err = ModelRegistry::from_toml(cases[4].0).unwrap_err();
         assert!(!err.contains("sk-live-123"), "{err}");
+    }
+
+    #[test]
+    fn a_session_header_is_an_x_header_that_is_not_a_key_header() {
+        let provider = |header: &str| {
+            ModelRegistry::from_toml(&format!(
+                "[providers.x]\nwire = \"openai-chat\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"\nsession_header = \"{header}\""
+            ))
+            .map(|registry| registry.provider("x").unwrap().session_header.clone())
+        };
+        assert_eq!(
+            provider("X-OpenCode-Session").unwrap().unwrap().as_str(),
+            "x-opencode-session"
+        );
+        for bad in [
+            "authorization",
+            "x-",
+            "x-a b",
+            "",
+            "x-api-key",
+            "X-Goog-Api-Key",
+        ] {
+            let err = provider(bad).unwrap_err();
+            assert!(err.contains("session_header"), "{bad}: {err}");
+        }
+        let unset = ModelRegistry::from_toml(
+            "[providers.x]\nwire = \"openai-chat\"\nbase_url = \"https://a.example\"\napi_key_env = \"K\"",
+        )
+        .unwrap();
+        assert_eq!(unset.provider("x").unwrap().session_header, None);
     }
 
     #[test]

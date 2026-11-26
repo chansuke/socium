@@ -38,6 +38,8 @@ pub(crate) struct GoogleProvider {
     stream_url: String,
     /// `None` for a local endpoint that takes no key.
     api_key: Option<String>,
+    /// `session_header` in models.toml.
+    session_header: Option<reqwest::header::HeaderName>,
     auth: AuthScheme,
     features: ModelFeatures,
     options: RequestOptions,
@@ -64,6 +66,7 @@ impl GoogleProvider {
                 provider.base_url, model.id
             ),
             api_key,
+            session_header: provider.session_header.clone(),
             auth: provider.auth,
             features: model.features,
             options,
@@ -91,6 +94,8 @@ impl GoogleProvider {
                 }
             };
         }
+        let http_request =
+            crate::providers::with_session(http_request, self.session_header.as_ref(), request);
         Ok(http_request.json(&body))
     }
 }

@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct ScriptedProvider {
     responses: Mutex<VecDeque<Result<ProviderResponse, ProviderError>>>,
     pub(crate) recorded_requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// The request session of each recorded request, which the body leaves
+    /// out.
+    pub(crate) recorded_sessions: Arc<Mutex<Vec<Option<String>>>>,
     pub(crate) supports_tools: bool,
 }
 
@@ -21,6 +24,7 @@ impl ScriptedProvider {
         Self {
             responses: Mutex::new(responses.into()),
             recorded_requests: Arc::default(),
+            recorded_sessions: Arc::default(),
             supports_tools: true,
         }
     }
@@ -68,6 +72,10 @@ impl Provider for ScriptedProvider {
             panic!("ScriptedProvider got a request no provider would accept: {problem}\n{value:#}");
         }
         self.recorded_requests.lock().unwrap().push(value);
+        self.recorded_sessions
+            .lock()
+            .unwrap()
+            .push(request.session.map(str::to_string));
         self.responses
             .lock()
             .unwrap()

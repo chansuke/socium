@@ -24,6 +24,8 @@ pub(crate) struct AnthropicProvider {
     auth: AuthScheme,
     /// `None` for a local endpoint that takes no key.
     api_key: Option<String>,
+    /// `session_header` in models.toml.
+    session_header: Option<reqwest::header::HeaderName>,
     anthropic_version: String,
     features: ModelFeatures,
     options: RequestOptions,
@@ -51,6 +53,7 @@ impl AnthropicProvider {
             messages_url: format!("{}/v1/messages", provider.base_url),
             auth: provider.auth,
             api_key,
+            session_header: provider.session_header.clone(),
             anthropic_version,
             features: model.features,
             options,
@@ -70,6 +73,7 @@ impl AnthropicProvider {
             messages_url: "https://api.anthropic.com/v1/messages".into(),
             auth: AuthScheme::ApiKeyHeader,
             api_key: Some(api_key.into()),
+            session_header: None,
             anthropic_version: anthropic_version.into(),
             features: ModelFeatures::ALL,
             options: RequestOptions::default(),
@@ -108,6 +112,8 @@ impl AnthropicProvider {
         if let Some(beta) = self.options.beta_header(self.features) {
             http_request = http_request.header("anthropic-beta", beta);
         }
+        let http_request =
+            crate::providers::with_session(http_request, self.session_header.as_ref(), request);
         Ok(http_request.json(&body))
     }
 }

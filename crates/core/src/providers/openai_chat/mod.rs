@@ -21,6 +21,8 @@ pub(crate) struct OpenAiChatProvider {
     completions_url: String,
     /// `None` for a local endpoint that takes no key.
     api_key: Option<String>,
+    /// `session_header` in models.toml.
+    session_header: Option<reqwest::header::HeaderName>,
     features: ModelFeatures,
     options: RequestOptions,
     /// `tools = false` in models.toml.
@@ -42,6 +44,7 @@ impl OpenAiChatProvider {
             name: provider.name.clone(),
             completions_url: format!("{}/chat/completions", provider.base_url),
             api_key,
+            session_header: provider.session_header.clone(),
             features: model.features,
             options,
             supports_tools: model.tools,
@@ -58,6 +61,8 @@ impl OpenAiChatProvider {
         if let Some(api_key) = &self.api_key {
             http_request = http_request.header(reqwest::header::AUTHORIZATION, bearer(api_key)?);
         }
+        let http_request =
+            crate::providers::with_session(http_request, self.session_header.as_ref(), request);
         Ok(http_request.json(&body))
     }
 }

@@ -1762,3 +1762,66 @@ fn a_protected_file_that_changes_during_approval_is_not_edited() {
         "fn main() { other(); }\n// one\n"
     );
 }
+
+#[test]
+fn the_request_session_is_random_kept_on_resume_and_new_after_clear() {
+    let root = tempfile::tempdir().unwrap();
+    let mut agent = open_session(root.path(), SessionStart::New).unwrap();
+    let first = agent.request_session.clone();
+    assert!(crate::session::is_request_session(&first), "{first}");
+    assert!(!first.contains(&agent.session_id()[..8]), "{first}");
+    agent.messages = vec![Message::user_text("first".into())];
+    agent.persist_state().unwrap();
+    let id = agent.session_id().to_string();
+    agent.clear().unwrap();
+    assert_ne!(agent.request_session, first);
+    drop(agent);
+
+    let agent = open_session(root.path(), SessionStart::Resume(id.clone())).unwrap();
+    assert_eq!(agent.request_session, first);
+    drop(agent);
+
+    // State saved before the field existed, or edited by hand, gets a new one.
+    let path = crate::session::session_file(root.path(), &id, CONVERSATION_STATE_FILE_NAME);
+    for saved in [None, Some("x\r\nInjected: 1")] {
+        let mut state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        match saved {
+            Some(text) => state["request_session"] = text.into(),
+            None => {
+                state.as_object_mut().unwrap().remove("request_session");
+            }
+        }
+        crate::state::save_json_file(&path, &state).unwrap();
+        let agent = open_session(root.path(), SessionStart::Resume(id.clone())).unwrap();
+        assert!(
+            crate::session::is_request_session(&agent.request_session),
+            "{saved:?}"
+        );
+        assert_ne!(agent.request_session, first);
+    }
+}
+
+#[tokio::test]
+async fn every_model_call_of_a_turn_carries_the_request_session() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("notes.txt"), "line\n").unwrap();
+    let provider = ScriptedProvider::new(vec![
+        Ok(response(&[("read_file", json!({"path":"notes.txt"}))])),
+        Ok(text_provider_response("done", None)),
+    ]);
+    let sessions = provider.recorded_sessions.clone();
+    let mut agent = AgentService::with_provider(
+        root.path().into(),
+        Box::new(provider),
+        "test".into(),
+        1000,
+        crate::test_support::http_client(),
+    );
+    agent
+        .submit_with_progress("read it".into(), |_| {})
+        .await
+        .unwrap();
+    let expected = Some(agent.request_session.clone());
+    assert_eq!(*sessions.lock().unwrap(), [expected.clone(), expected]);
+}

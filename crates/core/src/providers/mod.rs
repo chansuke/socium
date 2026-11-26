@@ -202,3 +202,76 @@ pub(crate) fn bearer(api_key: &str) -> Result<reqwest::header::HeaderValue, Prov
     value.set_sensitive(true);
     Ok(value)
 }
+
+/// `http_request` with the conversation's session ID in `header`, when the
+/// provider names one and the request belongs to a conversation.
+pub(crate) fn with_session(
+    http_request: reqwest::RequestBuilder,
+    header: Option<&reqwest::header::HeaderName>,
+    request: &AgentMessageRequest<'_>,
+) -> reqwest::RequestBuilder {
+    match (header, request.session) {
+        (Some(header), Some(session)) => http_request.header(header, session),
+        _ => http_request,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conversation::Message;
+    use crate::models::ModelRegistry;
+    use crate::providers::test_server::serve_once;
+
+    /// The request every wire sends to a loopback server, as received.
+    async fn received(wire: &str, session_header: Option<&str>, session: Option<&str>) -> String {
+        let (base_url, server) = serve_once("500 Internal Server Error", String::new()).await;
+        let header = session_header
+            .map(|name| format!("session_header = \"{name}\"\n"))
+            .unwrap_or_default();
+        let registry = ModelRegistry::from_toml(&format!(
+            "[providers.local]\nwire = \"{wire}\"\nbase_url = \"{base_url}\"\n{header}[[models]]\nalias = \"m\"\nprovider = \"local\"\nid = \"local-model\""
+        ))
+        .unwrap();
+        let provider = build_provider(
+            registry.provider("local").unwrap(),
+            registry.find("m").unwrap(),
+            &|_| None,
+        )
+        .unwrap();
+        let messages = [Message::user_text("hi".into())];
+        let request = AgentMessageRequest::new("local-model", 10, &messages, &[]);
+        let request = match session {
+            Some(session) => request.in_session(session),
+            None => request,
+        };
+        let _ = provider
+            .send_message(
+                &crate::provider_http_client().unwrap(),
+                &request,
+                &mut |_| {},
+            )
+            .await;
+        server.await.unwrap().to_ascii_lowercase()
+    }
+
+    #[tokio::test]
+    async fn every_wire_names_socium_and_sends_the_session_only_where_configured() {
+        for wire in ["anthropic", "openai-chat", "openai-responses", "google"] {
+            let sent = received(wire, Some("X-OpenCode-Session"), Some("abc_DEF-123")).await;
+            assert!(
+                sent.contains("\r\nx-opencode-session: abc_def-123\r\n"),
+                "{wire}: {sent}"
+            );
+            let agent = format!("\r\nuser-agent: socium/{}\r\n", env!("CARGO_PKG_VERSION"));
+            assert!(sent.contains(&agent), "{wire}: {sent}");
+            // Never in the body.
+            assert_eq!(sent.matches("abc_def-123").count(), 1, "{wire}: {sent}");
+
+            let unset = received(wire, None, Some("abc_DEF-123")).await;
+            assert!(!unset.contains("x-opencode-session"), "{wire}: {unset}");
+            let outside = received(wire, Some("x-opencode-session"), None).await;
+            assert!(!outside.contains("x-opencode-session"), "{wire}: {outside}");
+        }
+    }
+}

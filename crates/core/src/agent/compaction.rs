@@ -106,6 +106,7 @@ pub(crate) async fn compact_history(
     summarizer: (&dyn Provider, &str),
     client: &reqwest::Client,
     control: &crate::TaskControl,
+    session: Option<&str>,
     model: &str,
     messages: &[Message],
     summary_state: &ConversationSummaryState,
@@ -126,6 +127,7 @@ pub(crate) async fn compact_history(
     let request = CompactionRequest {
         previous_summary,
         messages: &messages[covered..boundary],
+        session,
     };
     let (provider, summary_model) = summarizer;
     let (summary_result, answered) = tokio::select! {
@@ -183,6 +185,9 @@ pub(crate) struct CompactionRequest<'a> {
     pub previous_summary: Option<&'a str>,
     /// Only the messages newly covered by this compaction.
     pub messages: &'a [Message],
+    /// The conversation the summary is for; see
+    /// [`AgentMessageRequest::session`].
+    pub session: Option<&'a str>,
 }
 
 /// Summarize conversation history with a dedicated (cheap) model. Returns
@@ -215,6 +220,10 @@ pub(crate) async fn summarize_with_llm(
         &messages,
         &[],
     );
+    let message_request = match request.session {
+        Some(session) => message_request.in_session(session),
+        None => message_request,
+    };
     let mut discard_deltas = |_event: ProviderEvent| {};
     let response = match provider
         .send_message(client, &message_request, &mut discard_deltas)
@@ -491,6 +500,7 @@ mod tests {
         let request = CompactionRequest {
             previous_summary: Some("earlier summary text"),
             messages: &messages,
+            session: None,
         };
 
         let (summary, answered) =
@@ -515,6 +525,7 @@ mod tests {
         let request = CompactionRequest {
             previous_summary: None,
             messages: &messages,
+            session: None,
         };
 
         let (result, answered) =
@@ -535,6 +546,7 @@ mod tests {
         let request = CompactionRequest {
             previous_summary: None,
             messages: &messages,
+            session: None,
         };
 
         let (result, answered) =
@@ -560,6 +572,7 @@ mod tests {
             (&failing, DEFAULT_COMPACTION_MODEL),
             &client,
             &control,
+            None,
             DEFAULT_COMPACTION_MODEL,
             &messages[..40],
             &super::ConversationSummaryState::default(),
@@ -571,6 +584,7 @@ mod tests {
             (&failing, DEFAULT_COMPACTION_MODEL),
             &client,
             &control,
+            None,
             DEFAULT_COMPACTION_MODEL,
             &messages,
             &first.summary_state,
