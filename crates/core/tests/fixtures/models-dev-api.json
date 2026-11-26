@@ -948,5 +948,304 @@
     "canonical_model_id": "google/gemini-2.5-flash"
    }
   }
+ },
+ "opencode-go": {
+  "id": "opencode-go",
+  "env": [
+   "OPENCODE_API_KEY"
+  ],
+  "npm": "@ai-sdk/openai-compatible",
+  "api": "https://opencode.ai/inference/go/openai/v1",
+  "name": "OpenCode Go",
+  "doc": "https://opencode.ai/v2/docs/console/go/",
+  "models": {
+   "glm-5.3": {
+    "id": "glm-5.3",
+    "name": "GLM-5.3",
+    "description": "Flagship GLM model for long-horizon coding, agents, and complex project delivery",
+    "family": "glm",
+    "attachment": false,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "effort",
+      "values": [
+       "low",
+       "high",
+       "max"
+      ]
+     }
+    ],
+    "tool_call": true,
+    "interleaved": {
+     "field": "reasoning_content"
+    },
+    "structured_output": true,
+    "temperature": true,
+    "release_date": "2026-08-14",
+    "last_updated": "2026-08-14",
+    "modalities": {
+     "input": [
+      "text"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": true,
+    "limit": {
+     "context": 1000000,
+     "output": 131072
+    },
+    "provider": {
+     "api": "https://opencode.ai/inference/go/openai/v1"
+    },
+    "cost": {
+     "input": 1.4,
+     "output": 4.4,
+     "cache_read": 0.26
+    },
+    "canonical_model_id": "zhipuai/glm-5.3"
+   },
+   "claude-haiku-5-5": {
+    "id": "claude-haiku-5-5",
+    "name": "Claude Haiku 5.5",
+    "description": "Fast Claude model for responsive assistance, classification, and lightweight agents",
+    "family": "claude-haiku",
+    "attachment": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "toggle"
+     },
+     {
+      "type": "effort",
+      "values": [
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ]
+     }
+    ],
+    "tool_call": true,
+    "structured_output": true,
+    "temperature": false,
+    "knowledge": "2026-06",
+    "release_date": "2026-10-07",
+    "last_updated": "2026-10-07",
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": false,
+    "limit": {
+     "context": 1000000,
+     "output": 128000
+    },
+    "provider": {
+     "npm": "@ai-sdk/anthropic",
+     "api": "https://opencode.ai/inference/go/anthropic/v1"
+    },
+    "cost": {
+     "input": 0.1,
+     "output": 0.5,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "tiers": [
+      {
+       "input": 0.5,
+       "output": 2.5,
+       "cache_read": 0.05,
+       "cache_write": 0.625,
+       "tier": {
+        "type": "context",
+        "size": 100000
+       }
+      }
+     ]
+    },
+    "canonical_model_id": "anthropic/claude-haiku-5-5"
+   },
+   "gemini-4-argon": {
+    "id": "gemini-4-argon",
+    "name": "Gemini 4 Argon",
+    "description": "Google's flagship reasoning model for complex software engineering, deep math and science, and long-horizon autonomous agents",
+    "family": "gemini",
+    "attachment": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "effort",
+      "values": [
+       "low",
+       "medium",
+       "high"
+      ]
+     }
+    ],
+    "tool_call": true,
+    "structured_output": true,
+    "temperature": false,
+    "knowledge": "2026-03",
+    "release_date": "2026-10-13",
+    "last_updated": "2026-10-13",
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": false,
+    "limit": {
+     "context": 1048576,
+     "output": 65536
+    },
+    "provider": {
+     "npm": "@ai-sdk/google",
+     "api": "https://opencode.ai/inference/go/google/v1beta"
+    },
+    "cost": {
+     "input": 2,
+     "output": 10,
+     "cache_read": 0.1,
+     "input_audio": 2
+    },
+    "canonical_model_id": "google/gemini-4-argon"
+   },
+   "gpt-6-luna": {
+    "id": "gpt-6-luna",
+    "name": "GPT-6 Luna",
+    "description": "OpenAI's most efficient model for focused, high-volume tasks",
+    "family": "gpt-luna",
+    "attachment": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "effort",
+      "values": [
+       "none",
+       "low",
+       "medium",
+       "high",
+       "xhigh",
+       "max"
+      ]
+     }
+    ],
+    "tool_call": true,
+    "structured_output": true,
+    "temperature": true,
+    "knowledge": "2026-05-18",
+    "release_date": "2026-09-22",
+    "last_updated": "2026-09-22",
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": false,
+    "limit": {
+     "context": 1050000,
+     "input": 922000,
+     "output": 128000
+    },
+    "provider": {
+     "npm": "@ai-sdk/openai",
+     "api": "https://opencode.ai/inference/go/openai/v1"
+    },
+    "cost": {
+     "input": 0.1,
+     "output": 0.5,
+     "cache_read": 0.01,
+     "cache_write": 0.125,
+     "tiers": [
+      {
+       "input": 0.2,
+       "output": 0.75,
+       "cache_read": 0.02,
+       "cache_write": 0.25,
+       "tier": {
+        "type": "context",
+        "size": 272000
+       }
+      }
+     ],
+     "context_over_200k": {
+      "input": 0.2,
+      "output": 0.75,
+      "cache_read": 0.02,
+      "cache_write": 0.25
+     }
+    },
+    "canonical_model_id": "openai/gpt-6-luna"
+   },
+   "glm-5.2": {
+    "id": "glm-5.2",
+    "name": "GLM-5.2",
+    "description": "Open flagship GLM for long-horizon coding agents and million-token context work",
+    "family": "glm",
+    "attachment": false,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "effort",
+      "values": [
+       "high",
+       "max"
+      ]
+     }
+    ],
+    "tool_call": true,
+    "interleaved": {
+     "field": "reasoning_content"
+    },
+    "structured_output": true,
+    "temperature": true,
+    "release_date": "2026-06-13",
+    "last_updated": "2026-06-13",
+    "modalities": {
+     "input": [
+      "text"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": true,
+    "limit": {
+     "context": 1000000,
+     "output": 131072
+    },
+    "status": "deprecated",
+    "provider": {
+     "api": "https://opencode.ai/inference/go/openai/v1"
+    },
+    "cost": {
+     "input": 1.4,
+     "output": 4.4,
+     "cache_read": 0.26
+    },
+    "canonical_model_id": "zhipuai/glm-5.2"
+   }
+  }
  }
 }
