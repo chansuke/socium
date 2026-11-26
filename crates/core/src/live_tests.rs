@@ -415,6 +415,7 @@ async fn live_repeated_compaction_keeps_the_latest_correction_and_unverified_che
         let request = CompactionRequest {
             previous_summary: summary.as_deref(),
             messages: segment,
+            session: None,
         };
         let (text, _) = summarize_with_llm(provider.as_ref(), &model.id, &client, &request).await;
         summary = Some(text.unwrap_or_else(|err| panic!("{}: {err}", model.alias)));

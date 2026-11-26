@@ -161,6 +161,10 @@ pub(crate) struct ConversationState {
     /// Name given with `/rename`.
     #[serde(default)]
     pub name: Option<String>,
+    /// Random ID sent to providers with a `session_header`; `None` in state
+    /// saved before the field existed, and loading makes one.
+    #[serde(default)]
+    pub request_session: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
@@ -215,6 +219,8 @@ pub(crate) struct ConversationStateRef<'a> {
     pub active_model: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_session: Option<&'a str>,
 }
 
 pub fn load_json_file<T>(path: &Path) -> io::Result<T>
@@ -697,6 +703,7 @@ mod tests {
                     summary_state: &summary_state,
                     active_model: active_model.as_deref(),
                     name: name.as_deref(),
+                    request_session: None,
                 };
                 save_json_file(&path, &saved).unwrap();
                 let loaded = load_json_file::<ConversationState>(&path).unwrap();

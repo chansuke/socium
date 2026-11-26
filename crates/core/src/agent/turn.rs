@@ -53,6 +53,9 @@ pub(crate) struct TurnContext<'a> {
     /// The session whose subagent records the `agent` tool saves and
     /// resumes.
     pub(crate) session_id: &'a str,
+    /// The conversation's request session ID, which providers with a
+    /// `session_header` send; subagents share the main conversation's.
+    pub(crate) request_session: &'a str,
     pub(crate) clock: ActivityClock,
     /// The search endpoint and key, when `web_search` is offered.
     pub(crate) web_search: Option<&'a crate::tools::web_search::WebSearch>,
@@ -178,7 +181,8 @@ where
             readable.as_deref().unwrap_or(messages),
             // A model that rejects tool definitions is sent none.
             if supports_tools { ctx.tools } else { &[] },
-        );
+        )
+        .in_session(ctx.request_session);
         let mut attempt = 0;
         let result = loop {
             let mut round_activity = RoundActivity::start();
@@ -945,6 +949,7 @@ mod tests {
             workspace_root: workspace.path(),
             edit_origin: None,
             session_id: "20261101-000000-0000",
+            request_session: "test-request-session",
             clock: ActivityClock::start(0),
             web_search: None,
             mcp: None,

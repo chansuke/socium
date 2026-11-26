@@ -186,6 +186,26 @@ pub(crate) fn session_file(root: &Path, id: &str, file: &str) -> PathBuf {
     sessions_dir(root).join(id).join(file)
 }
 
+/// Request session IDs are 128 random bits, base64url without padding.
+const REQUEST_SESSION_LEN: usize = 22;
+
+/// A new random request session ID.
+pub(crate) fn new_request_session() -> String {
+    use base64::Engine as _;
+    let mut random = [0u8; 16];
+    aws_lc_rs::rand::fill(&mut random).expect("the system random source works");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random)
+}
+
+/// Whether `id` has the shape `new_request_session` gives, so a hand-edited
+/// state file cannot put arbitrary text into a request header.
+pub(crate) fn is_request_session(id: &str) -> bool {
+    id.len() == REQUEST_SESSION_LEN
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// A fresh ID whose directory does not exist yet and that is not `avoid`.
 pub(crate) fn new_session_id(root: &Path, avoid: Option<&str>) -> String {
     let mut time = SystemTime::now();
@@ -792,6 +812,7 @@ mod tests {
                 summary_state: &Default::default(),
                 active_model: Some("sonnet"),
                 name: Some("named"),
+                request_session: None,
             },
         )
         .unwrap();

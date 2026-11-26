@@ -248,6 +248,10 @@ pub struct AgentService {
     session_id: String,
     /// Name given with `/rename`.
     session_name: Option<String>,
+    /// Sent to providers with a `session_header` so they can tell this
+    /// conversation's requests apart; random, unlike `session_id`, which
+    /// would tell them when the conversation started.
+    request_session: String,
     messages: Vec<Message>,
     events: Vec<serde_json::Value>,
     summary_state: ConversationSummaryState,
@@ -479,12 +483,17 @@ impl HttpClient {
     }
 }
 
+/// How socium names itself to providers.
+pub(crate) const USER_AGENT: &str = concat!("socium/", env!("CARGO_PKG_VERSION"));
+
 #[expect(
     clippy::disallowed_methods,
     reason = "the one place that builds a provider client"
 )]
 fn http_client(connect: Duration, idle: Duration) -> Result<reqwest::Client, ProviderError> {
     reqwest::Client::builder()
+        // Endpoints such as OpenCode Go ask clients to name themselves.
+        .user_agent(USER_AGENT)
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(connect)
         .read_timeout(idle)
@@ -542,6 +551,7 @@ impl AgentService {
             workspace_root,
             session_id,
             session_name: None,
+            request_session: session::new_request_session(),
             messages: Vec::new(),
             events: Vec::new(),
             summary_state: ConversationSummaryState::default(),
@@ -1447,6 +1457,10 @@ impl AgentService {
         self.messages = state.messages;
         self.events = state.events;
         self.session_name = state.name;
+        self.request_session = state
+            .request_session
+            .filter(|id| session::is_request_session(id))
+            .unwrap_or_else(session::new_request_session);
         let mut repaired = crate::agent::turn::repair_incomplete_tools(&mut self.messages);
         if self
             .summary_state
@@ -1476,6 +1490,7 @@ impl AgentService {
         self.ensure_state_lock()?;
         self.session_id = session::new_session_id(&self.workspace_root, Some(&self.session_id));
         self.session_name = None;
+        self.request_session = session::new_request_session();
         self.messages.clear();
         self.events.clear();
         self.summary_state = ConversationSummaryState::default();
@@ -1545,6 +1560,7 @@ impl AgentService {
         let previous_summary = std::mem::take(&mut self.summary_state);
         let previous_selection = self.selected_model.take();
         let previous_name = self.session_name.take();
+        let previous_request_session = self.request_session.clone();
         let previous_usage = self.last_measured_usage.take();
         let mut previous_model = None;
         let mut warnings = Vec::new();
@@ -1586,6 +1602,7 @@ impl AgentService {
             self.summary_state = previous_summary;
             self.selected_model = previous_selection;
             self.session_name = previous_name;
+            self.request_session = previous_request_session;
             self.last_measured_usage = previous_usage;
             return Err(err.into());
         }
@@ -1828,6 +1845,7 @@ impl AgentService {
             workspace_root: &self.workspace_root,
             edit_origin: Some(&edit_origin),
             session_id: &self.session_id,
+            request_session: &self.request_session,
             control: &self.control,
             settings: &self.settings,
             clock,
@@ -1837,6 +1855,7 @@ impl AgentService {
         let raw_len = self.messages.len();
         let active_model = self.selected_model.clone();
         let session_name = self.session_name.clone();
+        let request_session = self.request_session.clone();
         self.summary_state = prepared_context.summary_state;
         let path = &self.conversation_path();
         let raw_messages = &mut self.messages;
@@ -1857,6 +1876,7 @@ impl AgentService {
                     summary_state: summary,
                     active_model: active_model.as_deref(),
                     name: session_name.as_deref(),
+                    request_session: Some(&request_session),
                 },
             )
         };
@@ -1976,6 +1996,7 @@ impl AgentService {
             ),
             &self.client.get()?,
             &self.control,
+            Some(&self.request_session),
             &self.active_model.id,
             &self.messages,
             &self.summary_state,
@@ -2009,6 +2030,7 @@ impl AgentService {
                 summary_state: &self.summary_state,
                 active_model: self.selected_model.as_deref(),
                 name: self.session_name.as_deref(),
+                request_session: Some(&self.request_session),
             },
         )
     }

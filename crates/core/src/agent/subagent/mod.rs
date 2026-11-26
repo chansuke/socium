@@ -358,6 +358,7 @@ async fn compact_record(
         ctx.compaction,
         ctx.client,
         ctx.control,
+        Some(ctx.request_session),
         ctx.model,
         &record.messages,
         &record.summary_state,
