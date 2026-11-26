@@ -8,6 +8,8 @@ links:
   kind: amends
 - target: 22
   kind: relates-to
+- target: 34
+  kind: amendedby
 ---
 
 # models.devのカタログを利用者が実行するコマンドでmodels.dに書き出す

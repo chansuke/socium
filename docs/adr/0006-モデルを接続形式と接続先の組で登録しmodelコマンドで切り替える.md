@@ -8,6 +8,8 @@ links:
   kind: amendedby
 - target: 23
   kind: amendedby
+- target: 34
+  kind: amendedby
 ---
 
 # モデルを接続形式と接続先の組で登録し/modelコマンドで切り替える
