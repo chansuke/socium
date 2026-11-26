@@ -116,6 +116,11 @@ const PACKAGES: &[Package] = &[
 /// user can put in an environment variable.
 const OAUTH_ONLY: &[&str] = &["github-copilot"];
 
+/// Providers that take requests only with a per-conversation session ID
+/// in a header, and that header. OpenCode Go refuses clients that send
+/// none (https://opencode.ai/docs/go, read on 2026-11-26).
+const SESSION_HEADERS: &[(&str, &str)] = &[("opencode-go", "x-opencode-session")];
+
 /// The features socium's built-in Claude models have.
 const CLAUDE_FEATURES: &[&str] = &[
     "adaptive_thinking",
@@ -374,6 +379,9 @@ pub fn import(
             string(&endpoint.base_url),
             string(&api_key_env),
         );
+        if let Some((_, header)) = SESSION_HEADERS.iter().find(|(id, _)| *id == provider_id) {
+            let _ = writeln!(text, "session_header = {}", string(header));
+        }
     }
     for item in &mapped {
         write_model(&mut text, item, &names[&item.key]);
@@ -808,10 +816,12 @@ mod tests {
             assert!(err.contains(reason), "{id}: {err}");
         }
         let summary = summarize(&catalog);
-        assert_eq!(summary.len(), 8);
+        assert_eq!(summary.len(), 9);
         let line = |id: &str| summary.iter().find(|line| line.id == id).unwrap();
         assert_eq!(line("opencode").importable, Ok(5));
         assert_eq!(line("opencode").catalog_models, 6);
+        assert_eq!(line("opencode-go").importable, Ok(4));
+        assert_eq!(line("opencode-go").catalog_models, 5);
         assert!(line("azure").importable.is_err());
     }
 
@@ -834,6 +844,50 @@ mod tests {
         ] {
             assert!(registry.find(alias).is_some(), "{alias}");
         }
+    }
+
+    #[test]
+    fn opencode_go_providers_send_the_session_header_and_zen_ones_do_not() {
+        let go = imported("opencode-go");
+        let registry = ModelRegistry::from_toml(&go.toml).unwrap();
+        let mut wires = registry
+            .providers
+            .values()
+            .filter(|provider| provider.name.starts_with("opencode-go"))
+            .map(|provider| {
+                assert_eq!(
+                    provider.session_header.as_ref().map(|name| name.as_str()),
+                    Some("x-opencode-session"),
+                    "{}",
+                    provider.name
+                );
+                assert_eq!(provider.api_key_env.as_deref(), Some("OPENCODE_API_KEY"));
+                provider.wire.name()
+            })
+            .collect::<Vec<_>>();
+        wires.sort_unstable();
+        assert_eq!(
+            wires,
+            ["anthropic", "google", "openai-chat", "openai-responses"]
+        );
+        assert_eq!(go.models, 4);
+        assert!(
+            go.skipped
+                .iter()
+                .any(|reason| reason == "opencode-go/glm-5.2: deprecated")
+        );
+        let haiku = registry.find("opencode-go/claude-haiku-5-5").unwrap();
+        assert_eq!(
+            registry.provider(&haiku.provider).unwrap().base_url,
+            "https://opencode.ai/inference/go/anthropic"
+        );
+
+        let zen = ModelRegistry::from_toml(&imported("opencode").toml).unwrap();
+        assert!(
+            zen.providers
+                .values()
+                .all(|provider| provider.session_header.is_none())
+        );
     }
 
     #[test]
