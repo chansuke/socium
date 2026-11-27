@@ -206,7 +206,10 @@ token at the server; revoke it there if it may have leaked. See
 reply text on standard output, without control characters other than tabs
 and line breaks, so a reply cannot drive the terminal. Text piped into it comes before the prompt,
 separated by a blank line, so `git diff | socium -p "review this"` works; the
-piped text alone is also a prompt. Errors, notices, and diagnostics go to
+piped text alone is also a prompt. Standard input that sends nothing for 3
+seconds is skipped with a warning, because an agent's shell or a CI runner may
+hand over one that never closes; once its first bytes arrive it is read to the
+end. Use `< /dev/null` to skip the wait. Errors, notices, and diagnostics go to
 standard error.
 
 `--output-format` picks what standard output carries: `text` (the default),

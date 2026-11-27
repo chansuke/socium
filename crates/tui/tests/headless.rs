@@ -423,6 +423,63 @@ fn piped_stdin_alone_is_the_prompt() {
 }
 
 #[test]
+fn stdin_that_stays_open_without_data_is_skipped_with_a_warning() {
+    // An agent's shell or a CI runner can hand over a socket or pipe that
+    // never closes; the turn must not wait for its end.
+    let (port, bodies) = serve(vec![text_reply("done")]);
+    let fixture = fixture(port);
+    let mut child = command(&fixture, &["-p", "say done"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let open_stdin = child.stdin.take();
+    let pid = child.id();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || sender.send(child.wait_with_output().unwrap()));
+    let output = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .unwrap_or_else(|_| {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+            panic!("socium -p kept waiting for stdin to close");
+        });
+    drop(open_stdin);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "done\n");
+    assert_eq!(
+        bodies.lock().unwrap()[0]["messages"][0]["content"],
+        "say done"
+    );
+    assert!(stderr.contains("< /dev/null"), "{stderr}");
+}
+
+#[test]
+fn stdin_is_read_to_its_end_once_its_first_bytes_arrive() {
+    // The wait covers only silence before any input: a writer that pauses
+    // longer than it between chunks still has all of its text read.
+    let (port, bodies) = serve(vec![text_reply("ok")]);
+    let fixture = fixture(port);
+    let mut child = command(&fixture, &["-p"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"first part").unwrap();
+    stdin.flush().unwrap();
+    thread::sleep(std::time::Duration::from_secs(4));
+    stdin.write_all(b", second part\n").unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        bodies.lock().unwrap()[0]["messages"][0]["content"],
+        "first part, second part"
+    );
+    assert!(!stderr.contains("/dev/null"), "{stderr}");
+}
+
+#[test]
 fn no_prompt_and_empty_stdin_is_a_usage_error() {
     let fixture = fixture(1);
     let output = command(&fixture, &["-p"]).output().unwrap();
