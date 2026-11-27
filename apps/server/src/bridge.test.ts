@@ -82,7 +82,9 @@ test("the bridge tells subscribers about each change and when the worker stops",
   assert.equal(waiting.plan?.tasks[0]?.status, "active");
   assert.equal(waiting.turn?.approval?.sessionOption, "`cargo test` commands");
 
-  const finished = await bridge.send({ action: "approve", request: 3, allow: true, scope: "session" });
+  await bridge.send({ action: "approve", request: 3, allow: true, scope: "session" });
+  const finished = await until((state) => state?.turn === null);
+  assert(finished);
   assert.equal(finished.turn, null);
   assert.equal(finished.plan?.goal, "Fix");
   assert.deepEqual(finished.notices, ["Done."]);
