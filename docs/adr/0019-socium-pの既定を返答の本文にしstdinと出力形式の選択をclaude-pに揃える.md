@@ -6,6 +6,8 @@ date: 2026-11-19
 links:
 - target: 17
   kind: amends
+- target: 35
+  kind: amendedby
 ---
 
 # socium -pの既定を返答の本文にしstdinと出力形式の選択をclaude -pに揃える

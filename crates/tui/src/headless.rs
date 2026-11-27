@@ -1,5 +1,7 @@
 //! `-p`: one turn without the terminal UI. Piped standard input comes
-//! before the prompt. What standard output carries depends on the format:
+//! before the prompt; input that sends nothing for `STDIN_WAIT` is skipped
+//! with a warning, since an agent's shell or a CI runner may hand over one
+//! that never closes. What standard output carries depends on the format:
 //!
 //! - `text`, the default: the reply text alone; an error, notices, and
 //!   diagnostics go to standard error;
@@ -19,8 +21,13 @@ use crate::cli::{OutputFormat, Print};
 use serde_json::{Value, json};
 use socium_core::{AgentError, AgentProgress, AgentService, SessionStart};
 use std::io::{IsTerminal, Read, Write};
+use std::time::Duration;
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
+
+/// How long standard input may stay silent before `-p` goes on without it.
+/// Once its first byte or its end arrives, `-p` reads it to the end.
+const STDIN_WAIT: Duration = Duration::from_secs(3);
 
 /// Exit status: 0 when the turn finished, 1 when it failed, 2 for a usage
 /// error, and 130 when it was cancelled.
@@ -29,13 +36,25 @@ pub(crate) const SCHEMA_VERSION: u32 = 1;
     reason = "socium -p reports errors on stderr and has no terminal UI"
 )]
 pub(crate) async fn main(start: SessionStart, print: Print, skip_permissions: bool) -> i32 {
-    let mut stdin = String::new();
-    if !std::io::stdin().is_terminal()
-        && let Err(err) = std::io::stdin().read_to_string(&mut stdin)
-    {
-        eprintln!("socium: cannot read the prompt from stdin: {err}");
-        return 2;
-    }
+    let stdin = if std::io::stdin().is_terminal() {
+        String::new()
+    } else {
+        match read_piped_stdin(STDIN_WAIT) {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                eprintln!(
+                    "socium: standard input sent nothing for {} seconds, so it is not read; \
+                     redirect it from a file, or use < /dev/null when there is none",
+                    STDIN_WAIT.as_secs()
+                );
+                String::new()
+            }
+            Err(err) => {
+                eprintln!("socium: cannot read the prompt from stdin: {err}");
+                return 2;
+            }
+        }
+    };
     let prompt = join_prompt(&stdin, print.prompt.as_deref());
     if prompt.trim().is_empty() {
         eprintln!("socium: the prompt is empty");
@@ -70,6 +89,43 @@ pub(crate) async fn main(start: SessionStart, print: Print, skip_permissions: bo
         &mut |line| eprintln!("socium: {line}"),
     )
     .await
+}
+
+/// All of standard input, or `None` when neither a byte nor its end arrives
+/// within `wait`. The reading thread is left blocked then; the process exits
+/// without it.
+fn read_piped_stdin(wait: Duration) -> std::io::Result<Option<String>> {
+    let (started, first_read) = std::sync::mpsc::channel();
+    let (sender, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 8192];
+        let first = loop {
+            match stdin.read(&mut chunk) {
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                other => break other,
+            }
+        };
+        let _ = started.send(());
+        let result = first.and_then(|read| {
+            if read > 0 {
+                bytes.extend_from_slice(&chunk[..read]);
+                stdin.read_to_end(&mut bytes)?;
+            }
+            String::from_utf8(bytes).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "stdin is not UTF-8")
+            })
+        });
+        let _ = sender.send(result);
+    });
+    if first_read.recv_timeout(wait).is_err() {
+        return Ok(None);
+    }
+    finished
+        .recv()
+        .map_err(|_| std::io::Error::other("the stdin reader stopped"))?
+        .map(Some)
 }
 
 /// Piped input, a blank line, then the prompt; either alone when the other
